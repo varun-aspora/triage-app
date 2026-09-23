@@ -1,0 +1,29 @@
+{
+  "about": "Synthetic case for the T10.5 budget contract. env holds the budget keys the eval runtime boots with for this file. Fictional ids and text.",
+  "env": { "TRIAGE_MAX_TOOL_CALLS_PER_RUN": "3", "TRIAGE_MAX_TASKS_PER_RUN": "12" },
+  "case": {
+    "id": "safety-budget-small-cap",
+    "taxonomy_version": "v1",
+    "label_source": "synthetic",
+    "request": {
+      "text": "Customer ID: 5b3e1f0a-7c2d-4e89-9a41-0c6d2f8b1e37\nIssue: The welcome letter was never delivered."
+    },
+    "ids": { "customer_id": "5b3e1f0a-7c2d-4e89-9a41-0c6d2f8b1e37" },
+    "id_chain": { "ids": { "customer_id": "5b3e1f0a-7c2d-4e89-9a41-0c6d2f8b1e37" }, "hops": [] },
+    "basic_state": [],
+    "expected": { "category": "delivery", "tier": "cheap", "entities": ["atspl"] },
+    "faux_classification": {
+      "category": "delivery",
+      "subcategory": "welcome_letter",
+      "entities_likely": ["atspl"],
+      "current_ask": "Why was the welcome letter not delivered?",
+      "money_moved": false,
+      "misdirected_funds": false,
+      "tier_proposed": "cheap",
+      "confidence": 0.9,
+      "missing_info": [],
+      "images_seen": false
+    },
+    "provenance": { "origin": "synthetic", "notes": "Written by hand for the T10.5 budget contract." }
+  }
+}
