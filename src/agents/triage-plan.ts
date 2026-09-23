@@ -1,0 +1,459 @@
+// The choices and run wiring behind the Triage root agent (HLD 02 §1.1,
+// LLD 04 §2.4, §3; D3, D10, D22, D23, D42, D45).
+//
+// The first half is pure, so it can be unit tested under bun:
+// - triagePlan(init, config, registry): the tier model and its thinking
+//   level, the enabled entities (TRIAGE_ENTITIES narrowed by
+//   request.hints.entities, never widened) and the delegate and skill names
+//   the root mounts for them.
+// - finishDecision(retries, calledFinish): what useAgentFinish does when a
+//   response would stop. Signal once, then fail.
+// - durabilityFor(config) and the persistent state mirrors.
+//
+// The second half wires one run:
+// - triageRuntime() loads config, registry and knowledge once per process,
+//   builds the connectors (real mode only), the sandbox factory and a run
+//   store handle, and installs the tripwire so token usage is metered.
+//   configureTriageRuntime() replaces any of these (tests, eval driver).
+// - runDepsFor(runId, init) builds the run's ToolDeps once and returns the
+//   same object on every render. Keeping one object matters: widenIdChain
+//   finds the chain by deps identity, and the delegates share it, so an id
+//   resolve_identity adds is seen by later investigator calls.
+// - watchFinishReport() wraps finish_report so the root knows whether the
+//   report was actually written. Flue's tool call record says only whether a
+//   call threw, and a redaction refusal is a normal (refused) result.
+// - settleRun(runId) drops the per-run state when a response settles.
+
+import type { AgentResponseToolCall, SandboxFactory, ThinkingLevel } from '@flue/runtime';
+import type { ToolDefinition } from '@flue/runtime/tool';
+import { type Config, loadConfig } from '../config/env.ts';
+import { KEY_BY_NAME } from '../config/keys.ts';
+import { loadRegistry, type Registry } from '../config/registry.ts';
+import { createCodegraphConnector } from '../connectors/codegraph.ts';
+import { createExecRunner } from '../connectors/exec.ts';
+import { createHttpConnector } from '../connectors/http/client.ts';
+import { createQuickwitConnector } from '../connectors/quickwit/client.ts';
+import { createSqlConnector } from '../connectors/sql/pg-client.ts';
+import { type AuditSink, createJsonlAuditSink } from '../gate/audit-sink.ts';
+import { modelForTier, thinkingForTier } from '../models.ts';
+import { getRunStore } from '../runstore/index.ts';
+import type { RunStore } from '../runstore/types.ts';
+import { createToolDeps, type ToolConnectors } from '../tools/_lib/context.ts';
+import {
+  type CommitReader,
+  commitReaderFor,
+  FINISH_REPORT,
+  releaseFinishReport,
+  type UsageReader,
+} from '../tools/finish-report.tool.ts';
+import type { ToolContext, ToolDeps } from '../tools/types.ts';
+import type { TriageInit } from '../types/classification.ts';
+import { ENTITIES, type Entity, type Interface, type RunId, type Tier } from '../types/core.ts';
+import { CODE_WALKER_NAME } from './delegates/code-walker.ts';
+import { investigatorName } from './delegates/investigator.ts';
+import { type Escalation, type EscalationSnapshot, escalationFor, releaseEscalation } from './escalation.ts';
+import { sandboxFactory } from './sandbox.ts';
+import { currentKnowledge, type Knowledge, loadKnowledge } from './skills.ts';
+import { installedTripwire, installTripwire, runUsage, tripwireOptionsFor } from './tripwire.ts';
+
+/** The pinned Flue identity of the root agent. */
+export const TRIAGE_AGENT_NAME = 'triage';
+
+/** The signal useAgentFinish appends when the report was not written. */
+export const FINISH_REQUIRED_SIGNAL = 'triage.finish_required';
+export const FINISH_REQUIRED_BODY =
+  'You stopped without a written report. Call finish_report with the report draft before you finish. ' +
+  'If it refused, fix what it listed and call it again.';
+
+/** How many finish_required signals a response gets before it fails. */
+export const MAX_FINISH_SIGNALS = 1;
+
+export const PATTERNS_SKILL = 'patterns';
+
+export function overviewSkillName(entity: Entity): string {
+  return `${entity}-overview`;
+}
+
+// ------------------------------------------------------------------ plan
+
+export type TriagePlan = {
+  readonly tier: Tier;
+  /** modelForTier(tier_final), a 'provider/model' spec. */
+  readonly model: string;
+  readonly thinkingLevel: ThinkingLevel;
+  /** TRIAGE_ENTITIES narrowed by request.hints.entities, in ENTITIES order. */
+  readonly entities: readonly Entity[];
+  /** investigate_<e> and investigate_<e>_deep per entity, then code_walker. */
+  readonly delegates: readonly string[];
+  /** <e>-overview per entity, then patterns. */
+  readonly skills: readonly string[];
+};
+
+/**
+ * The run's entities. Hints only narrow: a hinted entity outside
+ * TRIAGE_ENTITIES adds nothing, and no hints (or an empty list) means every
+ * enabled entity. When every hint is outside the enabled set the result is
+ * empty; the root then has only code_walker.
+ */
+export function enabledEntitiesFor(
+  init: Pick<TriageInit, 'request'>,
+  config: Pick<Config, 'entities'>,
+  registry: Pick<Registry, 'enabledEntities' | 'isEnabled'>,
+): readonly Entity[] {
+  const narrowed = new Set<string>(registry.enabledEntities(init.request.hints.entities ?? []));
+  return Object.freeze(
+    ENTITIES.filter((e) => narrowed.has(e) && config.entities.includes(e) && registry.isEnabled(e)),
+  );
+}
+
+export function triagePlan(init: TriageInit, config: Config, registry: Registry): TriagePlan {
+  const tier = init.classification.tier_final;
+  const entities = enabledEntitiesFor(init, config, registry);
+  const delegates = [
+    ...entities.flatMap((e) => [investigatorName(e), investigatorName(e, true)]),
+    CODE_WALKER_NAME,
+  ];
+  const skills = [...entities.map(overviewSkillName), PATTERNS_SKILL];
+  return Object.freeze({
+    tier,
+    model: modelForTier(tier, config),
+    thinkingLevel: thinkingForTier(tier, config),
+    entities,
+    delegates: Object.freeze(delegates),
+    skills: Object.freeze(skills),
+  });
+}
+
+/** The plan as it goes into persistent state (JSON only). */
+export type PlanState = {
+  readonly tier: Tier;
+  readonly model: string;
+  readonly thinking_level: ThinkingLevel;
+  readonly entities: Entity[];
+  readonly delegates: string[];
+  readonly skills: string[];
+};
+
+export function planState(plan: TriagePlan): PlanState {
+  return {
+    tier: plan.tier,
+    model: plan.model,
+    thinking_level: plan.thinkingLevel,
+    entities: [...plan.entities],
+    delegates: [...plan.delegates],
+    skills: [...plan.skills],
+  };
+}
+
+// ------------------------------------------------------------------ finish
+
+export type FinishStep =
+  | { readonly kind: 'done'; readonly retries: number }
+  | { readonly kind: 'signal'; readonly retries: number }
+  | { readonly kind: 'fail'; readonly retries: number };
+
+/**
+ * What to do at a would-stop point. retries is the persisted finish_retries.
+ * A written report ends the response and resets the count, so a follow-up
+ * submission on the same run gets its own signal. The first miss signals
+ * once; the next miss fails.
+ */
+export function finishDecision(retries: number, calledFinish: boolean): FinishStep {
+  const used = Number.isInteger(retries) && retries > 0 ? retries : 0;
+  if (calledFinish) return { kind: 'done', retries: 0 };
+  if (used < MAX_FINISH_SIGNALS) return { kind: 'signal', retries: used + 1 };
+  return { kind: 'fail', retries: used };
+}
+
+/** Thrown by useAgentFinish on the second miss. The submission settles failed; evidence stays. */
+export class FinishRequiredError extends Error {
+  override readonly name = 'FinishRequiredError';
+  constructor() {
+    super('finish_report was not called with a report that could be written, after one reminder');
+  }
+}
+
+/**
+ * True when this response has a finish_report call that did not throw and
+ * the watched tool saw it write the report.
+ */
+export function calledFinish(toolCalls: readonly AgentResponseToolCall[], reportWritten: boolean): boolean {
+  return reportWritten && toolCalls.some((c) => c.tool === FINISH_REPORT && !c.isError);
+}
+
+const reportsWritten = new Set<RunId>();
+
+export function reportWrittenFor(runId: RunId): boolean {
+  return reportsWritten.has(runId);
+}
+
+function isOkEnvelope(result: unknown): boolean {
+  const output = (result as { output?: { status?: unknown } } | null | undefined)?.output;
+  return output?.status === 'ok';
+}
+
+/** Wraps finish_report so an ok result marks the run's report as written. Other tools pass through. */
+export function watchFinishReport(runId: RunId, tool: ToolDefinition): ToolDefinition {
+  if (tool.name !== FINISH_REPORT) return tool;
+  const run = tool.run.bind(tool) as (context: never) => unknown;
+  return {
+    ...tool,
+    async run(context: never) {
+      const result = await run(context);
+      if (isOkEnvelope(result)) reportsWritten.add(runId);
+      return result;
+    },
+  } as ToolDefinition;
+}
+
+// ------------------------------------------------------------------ state mirrors
+
+export type EvidenceIndexEntry = {
+  readonly key: Entity | 'code';
+  /** note_evidence calls recorded for the key in this process. */
+  readonly notes: number;
+  /** Confidence of the latest one. */
+  readonly confidence: 'high' | 'medium' | 'low';
+};
+
+export type StateMirror = {
+  readonly escalation: Escalation;
+  readonly evidence_index: EvidenceIndexEntry[];
+};
+
+/** What the root copies from escalationFor(runId).snapshot() into persistent state. */
+export function mirrorOf(snapshot: Pick<EscalationSnapshot, 'triggered' | 'reasons' | 'findings'>): StateMirror {
+  const byKey = new Map<Entity | 'code', { notes: number; confidence: EvidenceIndexEntry['confidence'] }>();
+  for (const record of snapshot.findings) {
+    const prev = byKey.get(record.entity);
+    byKey.set(record.entity, { notes: (prev?.notes ?? 0) + 1, confidence: record.findings.confidence });
+  }
+  const order: readonly (Entity | 'code')[] = [...ENTITIES, 'code'];
+  const evidence_index = order.flatMap((key) => {
+    const entry = byKey.get(key);
+    return entry === undefined ? [] : [{ key, ...entry }];
+  });
+  return { escalation: { triggered: snapshot.triggered, reasons: [...snapshot.reasons] }, evidence_index };
+}
+
+export function mirrorFor(runId: RunId, init: TriageInit): StateMirror {
+  const snapshot = escalationFor(runId).snapshot({
+    classification: { money_moved: init.classification.proposed.money_moved },
+    tierFinal: init.classification.tier_final,
+  });
+  return mirrorOf(snapshot);
+}
+
+export function sameMirror(a: StateMirror, b: StateMirror): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+// ------------------------------------------------------------------ durability
+
+export type TriageDurability = { readonly timeoutMs: number; readonly maxAttempts: number };
+
+export function durabilityFor(config: Pick<Config, 'budgets'>): TriageDurability {
+  return { timeoutMs: config.budgets.runTimeoutMs, maxAttempts: config.budgets.runMaxAttempts };
+}
+
+/** The keys.ts defaults of TRIAGE_RUN_TIMEOUT_MS and TRIAGE_RUN_MAX_ATTEMPTS. */
+export function defaultDurability(): TriageDurability {
+  const num = (key: string): number => Number(KEY_BY_NAME.get(key)?.default);
+  return { timeoutMs: num('TRIAGE_RUN_TIMEOUT_MS'), maxAttempts: num('TRIAGE_RUN_MAX_ATTEMPTS') };
+}
+
+/**
+ * The durability static, computed when the agent module loads. Flue reads it
+ * while the agent is not running, so it cannot wait for a render. Without a
+ * usable home (vite build, --help) the defaults apply; a broken home still
+ * fails loudly at the first render.
+ */
+export function durabilityAtImport(load: () => Config = () => loadConfig()): TriageDurability {
+  try {
+    return durabilityFor(load());
+  } catch {
+    return defaultDurability();
+  }
+}
+
+// ------------------------------------------------------------------ runtime
+
+export type TriageRuntime = {
+  readonly config: Config;
+  readonly registry: Registry;
+  readonly knowledge: Knowledge;
+  readonly runStore: RunStore;
+  readonly connectors: ToolConnectors;
+  readonly sandbox: SandboxFactory;
+  readonly usage: UsageReader;
+  /** Missing means finish_report records a gap per repo instead of a commit. */
+  readonly repoCommit?: CommitReader;
+  /** Audit sink for tool deps. Defaults to the JSONL sink createToolDeps builds. */
+  readonly audit?: AuditSink;
+  /** Fixtures under cases/<caseId>/ are checked first (evals). */
+  readonly caseId?: string;
+  readonly now?: () => Date;
+};
+
+export type TriageRuntimeOptions = Partial<TriageRuntime> & {
+  /** Install the process-wide tripwire on first use. Default true. */
+  readonly installTripwire?: boolean;
+};
+
+let options: TriageRuntimeOptions = {};
+let runtime: TriageRuntime | undefined;
+const runDeps = new Map<RunId, ToolDeps>();
+const runInterfaces = new Map<RunId, Interface>();
+
+/**
+ * Replaces parts of the runtime before the first render (tests, the eval
+ * driver). Drops the cached runtime and every cached run's deps.
+ */
+export function configureTriageRuntime(next: TriageRuntimeOptions = {}): void {
+  options = { ...next };
+  runtime = undefined;
+  runDeps.clear();
+  runInterfaces.clear();
+}
+
+/** The runtime, built on the first render and cached for the process. */
+export function triageRuntime(): TriageRuntime {
+  runtime ??= buildRuntime(options);
+  return runtime;
+}
+
+function buildRuntime(o: TriageRuntimeOptions): TriageRuntime {
+  const config = o.config ?? loadConfig();
+  const registry = o.registry ?? loadRegistry(config);
+  const knowledge = o.knowledge ?? knowledgeFor(config);
+  const real = !config.mock.enabled;
+  if (o.installTripwire !== false) {
+    const audit = createJsonlAuditSink({ auditLogPath: config.paths.auditLog, runsDir: config.paths.runsDir });
+    installTripwire(
+      tripwireOptionsFor(config, registry, audit, { interfaceOf: (runId) => runInterfaces.get(runId) ?? 'cli' }),
+    );
+  }
+  const repoCommit = o.repoCommit ?? (real ? commitReaderFor({ config, runner: createExecRunner() }) : undefined);
+  return Object.freeze({
+    config,
+    registry,
+    knowledge,
+    runStore: o.runStore ?? lazyRunStore(config, getRunStore),
+    connectors: o.connectors ?? (real ? realConnectors(config, registry) : {}),
+    sandbox: o.sandbox ?? sandboxFactory(config),
+    usage: o.usage ?? runUsage,
+    ...(repoCommit !== undefined ? { repoCommit } : {}),
+    ...(o.audit !== undefined ? { audit: o.audit } : {}),
+    ...(o.caseId !== undefined ? { caseId: o.caseId } : {}),
+    ...(o.now !== undefined ? { now: o.now } : {}),
+  });
+}
+
+// The knowledge loaded at boot, or loaded now from TRIAGE_KNOWLEDGE_DIR.
+function knowledgeFor(config: Config): Knowledge {
+  try {
+    return currentKnowledge();
+  } catch {
+    return loadKnowledge(config.paths.knowledgeDir);
+  }
+}
+
+/**
+ * The real connectors. Built only when mock mode is off; none of them
+ * connects or spawns until a tool calls it. cbs_call builds its own per run.
+ */
+export function realConnectors(config: Config, registry: Registry): ToolConnectors {
+  return Object.freeze({
+    sql: createSqlConnector({ registry, config }),
+    http: createHttpConnector({ registry, config }),
+    quickwit: createQuickwitConnector({ registry, config }),
+    codegraph: createCodegraphConnector({ config, runner: createExecRunner() }),
+  });
+}
+
+/**
+ * A RunStore whose methods wait for the real store. The render is synchronous
+ * and building the postgres store is not, so the deps hold this handle.
+ */
+export function lazyRunStore(config: Pick<Config, 'db'>, load: () => Promise<RunStore>): RunStore {
+  let pending: Promise<RunStore> | undefined;
+  const store = (): Promise<RunStore> => {
+    if (pending === undefined) {
+      const p = load();
+      pending = p;
+      p.catch(() => {
+        if (pending === p) pending = undefined;
+      });
+    }
+    return pending;
+  };
+  return Object.freeze({
+    provider: config.db.provider === 'postgres' ? 'postgres' : 'folder',
+    createRun: async (...a) => (await store()).createRun(...a),
+    addSubmission: async (...a) => (await store()).addSubmission(...a),
+    setPhase: async (...a) => (await store()).setPhase(...a),
+    putClassification: async (...a) => (await store()).putClassification(...a),
+    putEvidence: async (...a) => (await store()).putEvidence(...a),
+    putReport: async (...a) => (await store()).putReport(...a),
+    putFeedback: async (...a) => (await store()).putFeedback(...a),
+    claimIdempotencyKey: async (...a) => (await store()).claimIdempotencyKey(...a),
+    clearExpiredIdempotencyKeys: async () => (await store()).clearExpiredIdempotencyKeys(),
+    getRun: async (...a) => (await store()).getRun(...a),
+    listRuns: async (...a) => (await store()).listRuns(...a),
+    putEmbedding: async (...a) => (await store()).putEmbedding(...a),
+    findSimilar: async (...a) => (await store()).findSimilar(...a),
+    deleteRun: async (...a) => (await store()).deleteRun(...a),
+    listExpired: async (...a) => (await store()).listExpired(...a),
+  } satisfies RunStore);
+}
+
+/**
+ * The run's ToolDeps, built on the first render of the run and returned
+ * as the same object afterwards. The triage mount's extra fields are set
+ * here: initialData, the UsageReader over runUsage and the CommitReader.
+ */
+export function runDepsFor(runId: RunId, init: TriageInit, rt: TriageRuntime = triageRuntime()): ToolDeps {
+  const cached = runDeps.get(runId);
+  if (cached !== undefined) return cached;
+  runInterfaces.set(runId, init.request.interface);
+  const deps = createToolDeps({
+    runId,
+    config: rt.config,
+    registry: rt.registry,
+    interface: init.request.interface,
+    idChain: init.id_chain,
+    connectors: rt.connectors,
+    runStore: rt.runStore,
+    redactionNames: init.redaction_names ?? [],
+    requestWindow: init.request.window,
+    ...(rt.caseId !== undefined ? { caseId: rt.caseId } : {}),
+    ...(rt.audit !== undefined ? { audit: rt.audit } : {}),
+    ...(rt.now !== undefined ? { now: rt.now } : {}),
+    extra: {
+      initialData: init,
+      usage: rt.usage,
+      ...(rt.repoCommit !== undefined ? { repoCommit: rt.repoCommit } : {}),
+    },
+  });
+  runDeps.set(runId, deps);
+  return deps;
+}
+
+/** The ToolContext of the triage mount: no entity, the run id by closure. */
+export function triageToolContext(runId: RunId, deps: ToolDeps, rt: TriageRuntime = triageRuntime()): ToolContext {
+  return Object.freeze({ runId, entity: null, config: rt.config, registry: rt.registry, deps });
+}
+
+/**
+ * Drops the run's in-process state once a response settles: its deps, the
+ * escalation store, the synthesis count, the written-report mark and the
+ * metered usage. Persistent state and the run store keep what matters.
+ */
+export function settleRun(runId: RunId): void {
+  runDeps.delete(runId);
+  runInterfaces.delete(runId);
+  reportsWritten.delete(runId);
+  releaseEscalation(runId);
+  releaseFinishReport(runId);
+  installedTripwire()?.forgetRun(runId);
+}

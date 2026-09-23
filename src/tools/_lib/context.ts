@@ -73,6 +73,12 @@ export type CreateToolDepsOptions = {
   readonly requestWindow?: TimeWindow;
   /** Fixtures under cases/<caseId>/ are checked first (evals). */
   readonly caseId?: string;
+  /**
+   * Optional fields other areas declare on ToolDeps, such as finish_report's
+   * initialData and usage (T06.9), set by the Triage root (T06.8). They sit on
+   * the same deps object, so widenIdChain still finds it. Core fields win.
+   */
+  readonly extra?: Partial<ToolDeps>;
   // Overrides, mostly for tests. Each defaults to the real thing.
   readonly budget?: RunBudget;
   readonly audit?: AuditSink;
@@ -143,6 +149,7 @@ export function createToolDeps(opts: CreateToolDepsOptions): ToolDeps {
     opts.audit ?? createJsonlAuditSink({ auditLogPath: opts.config.paths.auditLog, runsDir: opts.config.paths.runsDir });
 
   const deps: ToolDeps = Object.freeze({
+    ...opts.extra,
     budget: budgetFor(opts),
     audit,
     fixtures,
