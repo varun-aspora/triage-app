@@ -320,9 +320,12 @@ describe('bin/triage.mjs smoke', () => {
     expect(r.stderr).toBe('');
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('Usage: triage');
+    // The internal __worker command (T07.5, path ['worker']) is hidden from help.
     for (const cmd of generatedCommands as readonly CliCommand[]) {
+      if (cmd.path[0] === 'worker') continue;
       expect(r.stdout).toContain(cmd.path[0] as string);
     }
+    expect(r.stdout).not.toContain('__worker');
   });
 
   test('node bin/triage.mjs --json with an unknown command prints the JSON error and exits 2', () => {
