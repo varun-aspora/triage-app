@@ -64,9 +64,8 @@ Unit tests are colocated *.test.ts files next to the source and run by `bun run 
 
 ## Commit format
 
-Conventional commits, one commit per sub-ticket, subject '<type>(<sub-ticket id>): <summary>' in the imperative, under 72 characters, for example 'feat(T02.1): SQL parser refuses non-SELECT'. Types are feat, fix, test, chore, docs and refactor. The body says what changed and names any declared shared-file edit. Every commit message ends with exactly these two trailer lines, whatever model wrote it:
+Conventional commits, one commit per sub-ticket, subject '<type>(<sub-ticket id>): <summary>' in the imperative, under 72 characters, for example 'feat(T02.1): SQL parser refuses non-SELECT'. Types are feat, fix, test, chore, docs and refactor. The body says what changed and names any declared shared-file edit. Every commit message ends with exactly this trailer line, whatever model wrote it:
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_018uHvmvk4Wwc2pmxFNTG1yZ
 
 ## Toolchain and runtime
 
