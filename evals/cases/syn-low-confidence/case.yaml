@@ -1,0 +1,46 @@
+# Synthetic case. Fictional people, ids and text. Tier-policy branch: rule 3,
+# confidence below 0.6 forces strong. Uses the plain-text request form.
+id: syn-low-confidence
+taxonomy_version: v1
+label_source: synthetic
+request:
+  text: |-
+    User a56cca56-7830-4bbb-8b5d-f2cb803b852d says the app shows something odd on the home screen
+    since yesterday. No screenshot. Not sure if it is the balance or the account list.
+ids:
+  user_id: a56cca56-7830-4bbb-8b5d-f2cb803b852d
+id_chain:
+  ids:
+    user_id: a56cca56-7830-4bbb-8b5d-f2cb803b852d
+    horus_customer_id: 75535af3-8dd6-4cba-95ec-ea861ace211f
+  hops:
+    - from: user_id
+      to: horus_customer_id
+      source: ssfb:harbor.account_forms
+      status: resolved
+      taken_at: "2026-09-09T08:00:00.000Z"
+basic_state:
+  - item: customer.state
+    value: ACTIVE
+    taken_at: "2026-09-09T08:00:00.000Z"
+    source: ssfb:harbor.customer
+expected:
+  category: account_view
+  tier: strong
+  money_moved: false
+  entities: [ssfb]
+faux_classification:
+  category: account_view
+  subcategory: account_list
+  entities_likely: [ssfb]
+  current_ask: Work out what the user sees on the home screen.
+  money_moved: false
+  misdirected_funds: false
+  tier_proposed: cheap
+  confidence: 0.45
+  missing_info: [screenshot of the home screen]
+  images_seen: false
+provenance:
+  origin: synthetic
+  created_at: "2026-09-23T00:00:00.000Z"
+  notes: Written by hand for the tier-policy branches. Not taken from any real thread.

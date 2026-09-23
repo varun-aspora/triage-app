@@ -1,0 +1,67 @@
+# Synthetic case. Fictional people, ids and text. Tier-policy branch: rule 4,
+# money moved lifts a cheap proposal to mid.
+id: syn-money-moved
+taxonomy_version: v1
+label_source: synthetic
+request:
+  messages:
+    - ts: "1788775200.000100"
+      author: triage-bot
+      is_parent: true
+      text: |-
+        Horus Customer ID: e9c25d35-3c60-4d72-b29a-a864de0072c4
+        Issue: Outward IMPS debited from 939904632237335 but the beneficiary has not received it.
+    - ts: "1788775500.000200"
+      author: cx-agent
+      is_parent: false
+      text: Customer shared UTR 695988287795. Debited two days ago. Can someone check where it is stuck?
+ids:
+  horus_customer_id: e9c25d35-3c60-4d72-b29a-a864de0072c4
+  account_number: "939904632237335"
+  utr: "695988287795"
+id_chain:
+  ids:
+    horus_customer_id: e9c25d35-3c60-4d72-b29a-a864de0072c4
+    user_id: 5b25e092-7cc7-4fdd-a415-56b886c61845
+    account_number: "939904632237335"
+    utr: "695988287795"
+  hops:
+    - from: horus_customer_id
+      to: user_id
+      source: ssfb:harbor.customer
+      status: resolved
+      taken_at: "2026-09-08T10:05:00.000Z"
+    - from: utr
+      source: ssfb:rhythm.transfers
+      status: resolved
+      taken_at: "2026-09-08T10:05:01.000Z"
+basic_state:
+  - item: transfer.status
+    value: DEBITED
+    taken_at: "2026-09-08T10:05:01.000Z"
+    source: ssfb:rhythm.transfers
+  - item: transfer.mode
+    value: IMPS
+    taken_at: "2026-09-08T10:05:01.000Z"
+    source: ssfb:rhythm.transfers
+expected:
+  category: transfer_out
+  tier: mid
+  money_moved: true
+  entities: [ssfb]
+  current_ask: Find where the debited IMPS transfer is stuck.
+faux_classification:
+  category: transfer_out
+  subcategory: imps
+  entities_likely: [ssfb]
+  current_ask: Find where the debited IMPS transfer is stuck.
+  money_moved: true
+  misdirected_funds: false
+  tier_proposed: cheap
+  confidence: 0.85
+  missing_info: []
+  images_seen: false
+provenance:
+  origin: synthetic
+  created_at: "2026-09-23T00:00:00.000Z"
+  notes: Written by hand for the tier-policy branches. Not taken from any real thread.

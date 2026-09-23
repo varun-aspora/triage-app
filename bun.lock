@@ -23,6 +23,7 @@
         "pgvector": "^0.3.0",
         "ulidx": "^2.4.1",
         "valibot": "^1.5.0",
+        "yaml": "^2.9.1",
       },
       "devDependencies": {
         "@types/bun": "^1.4.2",

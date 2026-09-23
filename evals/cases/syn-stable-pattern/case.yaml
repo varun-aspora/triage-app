@@ -1,0 +1,68 @@
+# Synthetic case. Fictional people, ids and text. Tier-policy branch: rule 5,
+# a stable matched pattern lowers a mid proposal to cheap. The pattern is
+# fictional too and lives only in this case's policy block.
+id: syn-stable-pattern
+taxonomy_version: v1
+label_source: synthetic
+request:
+  messages:
+    - ts: "1789034400.000100"
+      author: triage-bot
+      is_parent: true
+      text: |-
+        Account Form ID: f81d36e8-9320-4c35-a534-c1e5d39dab58
+        Issue: Notary video call drops with "session expired" every time.
+    - ts: "1789034700.000200"
+      author: ops-oncall
+      is_parent: false
+      text: Looks like the usual notary session expiry. Please confirm from the form status.
+ids:
+  account_form_id: f81d36e8-9320-4c35-a534-c1e5d39dab58
+id_chain:
+  ids:
+    account_form_id: f81d36e8-9320-4c35-a534-c1e5d39dab58
+    alphadesk_user_id: eb220f5d-5c28-4b4d-b73a-cdb9ced42f4d
+  hops:
+    - from: account_form_id
+      to: alphadesk_user_id
+      source: ssfb:harbor.account_forms
+      status: resolved
+      taken_at: "2026-09-11T11:00:00.000Z"
+basic_state:
+  - item: account_form.status_v2
+    value: NOTARY_PENDING
+    taken_at: "2026-09-11T11:00:00.000Z"
+    source: ssfb:harbor.account_forms
+expected:
+  category: onboarding
+  tier: cheap
+  money_moved: false
+  entities: [ssfb]
+faux_classification:
+  category: onboarding
+  subcategory: notary
+  entities_likely: [ssfb]
+  current_ask: Confirm the notary session expiry from the form status.
+  money_moved: false
+  misdirected_funds: false
+  tier_proposed: mid
+  confidence: 0.9
+  matched_pattern_id: syn-notary-session-expired
+  missing_info: []
+  images_seen: false
+policy:
+  patterns:
+    - id: syn-notary-session-expired
+      category: onboarding
+      signature:
+        regex: ["session expired"]
+        services: []
+      entities: [ssfb]
+      query_recipe: sql_select on the account form status by form id
+      tier_hint: cheap
+      stable: true
+      source_ref: "synthetic: eval case syn-stable-pattern"
+provenance:
+  origin: synthetic
+  created_at: "2026-09-23T00:00:00.000Z"
+  notes: Written by hand for the tier-policy branches. Not taken from any real thread.

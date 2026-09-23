@@ -1,0 +1,57 @@
+# Synthetic case. Fictional people, ids and text. Tier-policy branch: rule 6,
+# the thread has a screenshot and only the strong tier takes images, so a
+# cheap proposal is raised to strong.
+id: syn-image-raise
+taxonomy_version: v1
+label_source: synthetic
+request:
+  messages:
+    - ts: "1789120800.000100"
+      author: triage-bot
+      is_parent: true
+      text: |-
+        Horus Customer ID: 01559281-c86e-41ee-a977-49f24db33bdd
+        Issue: Card screen shows an error. Screenshot attached.
+  attachments:
+    - name: screenshot-1.png
+      mime: image/png
+      bytes_ref: attachments/screenshot-1.png
+ids:
+  horus_customer_id: 01559281-c86e-41ee-a977-49f24db33bdd
+id_chain:
+  ids:
+    horus_customer_id: 01559281-c86e-41ee-a977-49f24db33bdd
+    user_id: 0f2a5d7f-01fe-4474-8bc5-a26c8845ae46
+  hops:
+    - from: horus_customer_id
+      to: user_id
+      source: ssfb:harbor.customer
+      status: resolved
+      taken_at: "2026-09-12T07:30:00.000Z"
+basic_state:
+  - item: card.status
+    value: ACTIVE
+    taken_at: "2026-09-12T07:30:01.000Z"
+    source: ssfb:harbor.cards
+expected:
+  category: card
+  tier: strong
+  money_moved: false
+  entities: [ssfb]
+faux_classification:
+  category: card
+  subcategory: card_view
+  entities_likely: [ssfb]
+  current_ask: Explain the error on the card screen.
+  money_moved: false
+  misdirected_funds: false
+  tier_proposed: cheap
+  confidence: 0.8
+  missing_info: []
+  images_seen: true
+policy:
+  image_capable_tiers: [strong]
+provenance:
+  origin: synthetic
+  created_at: "2026-09-23T00:00:00.000Z"
+  notes: Written by hand for the tier-policy branches. Not taken from any real thread.

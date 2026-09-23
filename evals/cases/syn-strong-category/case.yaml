@@ -1,0 +1,61 @@
+# Synthetic case. Fictional people, ids and text. Tier-policy branch: rule 2,
+# a beneficiary case always runs on strong.
+id: syn-strong-category
+taxonomy_version: v1
+label_source: synthetic
+request:
+  messages:
+    - ts: "1788948000.000100"
+      author: triage-bot
+      is_parent: true
+      text: |-
+        Horus Customer ID: bcd13fd4-330b-4374-92da-e797470596a0
+        Issue: Added a beneficiary yesterday, still cannot send money to it.
+    - ts: "1788948300.000200"
+      author: cx-agent
+      is_parent: false
+      text: Customer asks how long the cooling period lasts and whether it can be skipped.
+ids:
+  horus_customer_id: bcd13fd4-330b-4374-92da-e797470596a0
+id_chain:
+  ids:
+    horus_customer_id: bcd13fd4-330b-4374-92da-e797470596a0
+    user_id: 488dc269-e74b-445e-a755-556d4ad4d324
+    account_number: "730016900121845"
+  hops:
+    - from: horus_customer_id
+      to: user_id
+      source: ssfb:harbor.customer
+      status: resolved
+      taken_at: "2026-09-10T09:00:00.000Z"
+    - from: user_id
+      to: account_number
+      source: ssfb:harbor.accounts
+      status: resolved
+      taken_at: "2026-09-10T09:00:01.000Z"
+basic_state:
+  - item: beneficiary.count
+    value: "1"
+    taken_at: "2026-09-10T09:00:02.000Z"
+    source: ssfb:harbor.beneficiaries
+expected:
+  category: beneficiary
+  tier: strong
+  money_moved: false
+  entities: [ssfb]
+  current_ask: Explain the beneficiary cooling period and whether it can be skipped.
+faux_classification:
+  category: beneficiary
+  subcategory: cool_off
+  entities_likely: [ssfb]
+  current_ask: Explain the beneficiary cooling period and whether it can be skipped.
+  money_moved: false
+  misdirected_funds: false
+  tier_proposed: cheap
+  confidence: 0.9
+  missing_info: []
+  images_seen: false
+provenance:
+  origin: synthetic
+  created_at: "2026-09-23T00:00:00.000Z"
+  notes: Written by hand for the tier-policy branches. Not taken from any real thread.

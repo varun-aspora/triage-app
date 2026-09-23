@@ -1,0 +1,41 @@
+# Synthetic case. Fictional people, ids and text. Tier-policy branch: rule 1,
+# category unknown forces strong.
+id: syn-unknown
+taxonomy_version: v1
+label_source: synthetic
+request:
+  messages:
+    - ts: "1789207200.000100"
+      author: cx-agent
+      is_parent: true
+      text: |-
+        User 3a1f9d3b-cccd-41c5-a991-b48b6d58eb00 says "it is not working". No other detail yet.
+ids:
+  user_id: 3a1f9d3b-cccd-41c5-a991-b48b6d58eb00
+id_chain:
+  ids:
+    user_id: 3a1f9d3b-cccd-41c5-a991-b48b6d58eb00
+  hops:
+    - from: user_id
+      source: ssfb:harbor.account_forms
+      status: not_found
+      taken_at: "2026-09-13T06:00:00.000Z"
+basic_state: []
+expected:
+  category: unknown
+  tier: strong
+faux_classification:
+  category: unknown
+  subcategory: ""
+  entities_likely: []
+  current_ask: Find out what is not working.
+  money_moved: false
+  misdirected_funds: false
+  tier_proposed: cheap
+  confidence: 0.7
+  missing_info: [what the user was trying to do, a screenshot]
+  images_seen: false
+provenance:
+  origin: synthetic
+  created_at: "2026-09-23T00:00:00.000Z"
+  notes: Written by hand for the tier-policy branches. Not taken from any real thread.
