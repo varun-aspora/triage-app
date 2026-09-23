@@ -11,6 +11,8 @@ import { fileURLToPath } from 'node:url';
 import type { PersistenceAdapter } from '@flue/runtime/adapter';
 import { parse } from 'dotenv';
 import { configFromRecord } from './config/env.ts';
+import { ConfigError } from './config/errors.ts';
+import type { PgPoolOptions, PoolFactory } from './db/pg.ts';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const EXAMPLE = parse(readFileSync(join(REPO, '.env.example'), 'utf8'));
@@ -61,23 +63,87 @@ describe('createPersistence', () => {
     await adapter.close?.();
   });
 
-  test('postgres throws the named not-built error with the key name and no DSN', () => {
-    const config = configFromRecord({ ...EXAMPLE, TRIAGE_DB_PROVIDER: 'postgres', TRIAGE_DB_URL: FAKE_DSN }, home);
-    let caught: unknown;
+  test('sqlite relative path resolves under TRIAGE_HOME when cwd differs', async () => {
+    const elsewhere = mkdtempSync(join(tmpdir(), 'triage-db-cwd-'));
+    const savedCwd = process.cwd();
+    const rel = './.data/relative.sqlite';
     try {
-      db.createPersistence(config);
-    } catch (err) {
-      caught = err;
+      process.chdir(elsewhere);
+      const adapter = db.createPersistence({ home, db: { provider: 'sqlite', url: rel } });
+      await adapter.migrate?.();
+      await adapter.connect();
+      await adapter.close?.();
+      expect(existsSync(join(home, rel))).toBe(true);
+      expect(existsSync(join(elsewhere, rel))).toBe(false);
+    } finally {
+      process.chdir(savedCwd);
+      rmSync(elsewhere, { recursive: true, force: true });
     }
-    expect(caught).toBeInstanceOf(db.PersistenceNotBuiltError);
-    const err = caught as Error;
-    expect(err.name).toBe('PersistenceNotBuiltError');
-    expect(err.message).toContain('postgres adapter not built (T09)');
-    expect(err.message).toContain('TRIAGE_DB_PROVIDER');
-    for (const part of [FAKE_DSN, 'not-a-real-password', 'db.invalid', 'triage_ro']) {
-      expect(err.message).not.toContain(part);
-      expect(String(err.stack)).not.toContain(part);
+  });
+
+  test("sqlite(':memory:') is accepted and writes no file", async () => {
+    const adapter = db.createPersistence({ home, db: { provider: 'sqlite', url: ':memory:' } });
+    await adapter.migrate?.();
+    const stores = await adapter.connect();
+    expect(stores.submissionStore).toBeDefined();
+    await adapter.close?.();
+    expect(existsSync(join(home, ':memory:'))).toBe(false);
+    expect(existsSync(join(process.cwd(), ':memory:'))).toBe(false);
+  });
+
+  test('sqlite with a DSN-shaped url fails naming TRIAGE_DB_URL only', () => {
+    const err = catchError(() => db.createPersistence({ home, db: { provider: 'sqlite', url: FAKE_DSN } }));
+    expectKeyOnly(err, 'TRIAGE_DB_URL', [FAKE_DSN, 'not-a-real-password', 'db.invalid', 'triage_ro']);
+  });
+
+  test('unknown provider fails naming TRIAGE_DB_PROVIDER only', () => {
+    const secretish = 'postgresql://admin:hunter2-SECRET@prod.invalid:5432/core';
+    const config = { home, db: { provider: secretish as 'sqlite', url: FAKE_DSN } };
+    const err = catchError(() => db.createPersistence(config));
+    expectKeyOnly(err, 'TRIAGE_DB_PROVIDER', [secretish, 'hunter2-SECRET', 'prod.invalid', FAKE_DSN, 'not-a-real-password']);
+  });
+
+  test('postgres without a postgresql:// DSN fails naming TRIAGE_DB_URL only', () => {
+    const bad = 'mysql://root:hunter2-SECRET@db.invalid:3306/core';
+    const factory = recordingFactory();
+    for (const url of [bad, './.data/triage.sqlite', '']) {
+      const err = catchError(() =>
+        db.createPersistence({ home, db: { provider: 'postgres', url } }, { poolFactory: factory.fn }),
+      );
+      expectKeyOnly(err, 'TRIAGE_DB_URL', url === '' ? [] : [url, 'hunter2-SECRET', 'db.invalid']);
+      expect(err.message).not.toContain('TRIAGE_DB_PROVIDER');
     }
+    expect(factory.options).toHaveLength(0);
+  });
+
+  test('postgres returns an @flue/postgres adapter on the injected pool, with no connection opened', async () => {
+    const factory = recordingFactory();
+    const config = configFromRecord({ ...EXAMPLE, TRIAGE_DB_PROVIDER: 'postgres', TRIAGE_DB_URL: FAKE_DSN }, home);
+    const adapter = db.createPersistence(config, { poolFactory: factory.fn });
+    expect(isAdapter(adapter)).toBe(true);
+    expect(typeof adapter.migrate).toBe('function');
+    expect(factory.options).toHaveLength(1);
+    expect(factory.options[0]?.connectionString).toBe(FAKE_DSN);
+    const stores = await adapter.connect();
+    expect(stores.submissionStore).toBeDefined();
+    expect(stores.conversationStreamStore).toBeDefined();
+    expect(stores.attachmentStore).toBeDefined();
+    expect(factory.connects()).toBe(0);
+    expect(factory.queries()).toBe(0);
+    await adapter.close?.();
+    expect(factory.ended()).toBe(1);
+  });
+
+  test('postgres adapter and the shared runner use one pool', async () => {
+    const { getSharedPgRunner } = await import('./db/pg.ts');
+    const factory = recordingFactory();
+    const config = { home, db: { provider: 'postgres' as const, url: FAKE_DSN } };
+    const adapter = db.createPersistence(config, { poolFactory: factory.fn });
+    const runner = getSharedPgRunner(config, { poolFactory: factory.fn });
+    expect(factory.options).toHaveLength(1);
+    await runner.close();
+    await adapter.close?.();
+    expect(factory.ended()).toBe(1);
   });
 });
 
@@ -105,8 +171,68 @@ describe('default export', () => {
 });
 
 describe('source rules', () => {
-  test('db.ts never logs, so TRIAGE_DB_URL cannot reach output', () => {
-    const source = readFileSync(join(REPO, 'src/db.ts'), 'utf8');
-    expect(source).not.toMatch(/console\.|process\.(stdout|stderr)|\bdebug\(/);
+  const sources = ['src/db.ts', 'src/db/pg.ts'].map((path) => ({ path, text: readFileSync(join(REPO, path), 'utf8') }));
+
+  test('db.ts and db/pg.ts never log, so TRIAGE_DB_URL cannot reach output', () => {
+    for (const { text } of sources) {
+      expect(text).not.toMatch(/console\.|process\.(stdout|stderr)|\bdebug\(/);
+    }
+  });
+
+  test("db.ts and db/pg.ts contain no 'flue_' table names", () => {
+    for (const { text } of sources) expect(text).not.toContain('flue_');
+  });
+
+  test('db.ts has a default export and does not branch on deploy mode or env label', () => {
+    const text = sources[0]?.text ?? '';
+    expect(text).toMatch(/^export default /m);
+    for (const { text: src } of sources) {
+      expect(src).not.toMatch(/TRIAGE_DEPLOY_MODE|TRIAGE_ENV_LABEL|deployModeForPreflight|envLabel|process\.env/);
+    }
   });
 });
+
+function catchError(fn: () => unknown): ConfigError {
+  let caught: unknown;
+  try {
+    fn();
+  } catch (err) {
+    caught = err;
+  }
+  expect(caught).toBeInstanceOf(ConfigError);
+  return caught as ConfigError;
+}
+
+function expectKeyOnly(err: ConfigError, key: string, absent: readonly string[]): void {
+  expect(err.keys).toEqual([key]);
+  expect(err.message).toContain(key);
+  for (const part of absent) {
+    expect(err.message).not.toContain(part);
+    expect(String(err.stack)).not.toContain(part);
+  }
+}
+
+// A pool factory whose pool never connects: every call is counted.
+function recordingFactory() {
+  const options: PgPoolOptions[] = [];
+  let connects = 0;
+  let queries = 0;
+  let ended = 0;
+  const fn: PoolFactory = (o) => {
+    options.push(o);
+    return {
+      async query() {
+        queries += 1;
+        return { rows: [] };
+      },
+      async connect() {
+        connects += 1;
+        throw new Error('fake pool: connect not expected');
+      },
+      async end() {
+        ended += 1;
+      },
+    };
+  };
+  return { fn, options, connects: () => connects, queries: () => queries, ended: () => ended };
+}
