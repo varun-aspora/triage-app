@@ -66,6 +66,11 @@ const SAME: readonly AnyCase[] = [
     a: { op: 'encrypt', kind: 'phone', values: ['+919000000001'] },
     b: { values: ['+919000000001'], kind: 'phone', op: 'encrypt' },
   },
+  {
+    kind: 'code_query',
+    a: { repo: 'harbor', command: 'callers', query: 'ReverseTransfer' },
+    b: { query: ' ReverseTransfer ', command: 'callers', repo: 'harbor' },
+  },
 ];
 
 function build<K extends FixtureKind>(kind: K, facts: SemanticKeyFacts[K]) {

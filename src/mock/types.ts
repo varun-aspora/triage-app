@@ -17,6 +17,7 @@ export const FIXTURE_KINDS = [
   'slack_read',
   'doctor_probe',
   'field_crypto',
+  'code_query',
 ] as const;
 export const FixtureKindSchema = v.picklist(FIXTURE_KINDS);
 export type FixtureKind = v.InferOutput<typeof FixtureKindSchema>;
@@ -128,6 +129,19 @@ export const FieldCryptoKeySchema = v.strictObject({
 });
 export type FieldCryptoKey = v.InferOutput<typeof FieldCryptoKeySchema>;
 
+// One CodeGraph query (T05.10). Code is not per entity, so these fixtures sit
+// under the 'global' entity folder.
+export const CODE_QUERY_COMMANDS = ['explore', 'node', 'callers', 'impact'] as const;
+export const CodeQueryCommandSchema = v.picklist(CODE_QUERY_COMMANDS);
+export type CodeQueryCommand = v.InferOutput<typeof CodeQueryCommandSchema>;
+
+export const CodeQueryKeySchema = v.strictObject({
+  repo: Text,
+  command: CodeQueryCommandSchema,
+  query: Text,
+});
+export type CodeQueryKey = v.InferOutput<typeof CodeQueryKeySchema>;
+
 export const SEMANTIC_KEY_SCHEMAS = {
   sql_select: SqlSelectKeySchema,
   http_call: HttpCallKeySchema,
@@ -139,6 +153,7 @@ export const SEMANTIC_KEY_SCHEMAS = {
   slack_read: SlackReadKeySchema,
   doctor_probe: DoctorProbeKeySchema,
   field_crypto: FieldCryptoKeySchema,
+  code_query: CodeQueryKeySchema,
 } as const satisfies Record<FixtureKind, v.GenericSchema>;
 
 export type SemanticKeyMap = {
@@ -185,5 +200,6 @@ export const FixtureSchema = v.variant('kind', [
   fixtureVariant('slack_read'),
   fixtureVariant('doctor_probe'),
   fixtureVariant('field_crypto'),
+  fixtureVariant('code_query'),
 ]);
 export type Fixture = v.InferOutput<typeof FixtureSchema>;

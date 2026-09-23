@@ -10,6 +10,7 @@ import * as v from 'valibot';
 import type { Entity } from '../types/core.ts';
 import {
   SEMANTIC_KEY_SCHEMAS,
+  type CodeQueryCommand,
   type FixtureEntity,
   type FixtureKind,
   type LogsMode,
@@ -82,6 +83,8 @@ export type FieldCryptoFacts = {
   readonly values: readonly string[];
 };
 
+export type CodeQueryFacts = { readonly repo: string; readonly command: CodeQueryCommand; readonly query: string };
+
 export type SemanticKeyFacts = {
   sql_select: SqlSelectFacts;
   http_call: HttpCallFacts;
@@ -93,6 +96,7 @@ export type SemanticKeyFacts = {
   slack_read: SlackReadFacts;
   doctor_probe: DoctorProbeFacts;
   field_crypto: FieldCryptoFacts;
+  code_query: CodeQueryFacts;
 };
 
 /** Thrown when facts cannot form a valid key. The message names fields, never values. */
@@ -157,6 +161,8 @@ const BUILDERS: { [K in FixtureKind]: (facts: SemanticKeyFacts[K]) => unknown } 
   doctor_probe: (f) => ({ entity: f.entity, probe: trim(f.probe) }),
   // The caller has already normalised the values; their order is kept.
   field_crypto: (f) => ({ op: f.op, kind: f.kind, values: [...f.values] }),
+  // Symbols are case-sensitive, so the query is trimmed and nothing more.
+  code_query: (f) => ({ repo: trim(f.repo), command: f.command, query: trim(f.query) }),
 };
 
 /**
