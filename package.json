@@ -6,9 +6,18 @@
     "node": ">=22.19"
   },
   "scripts": {
+    "gen": "bun scripts/gen-indexes.ts",
+    "postinstall": "bun run gen",
+    "test": "bun test ./src ./test ./scripts",
+    "test:contract": "bun run gen && vitest run",
+    "typecheck": "bun run gen && bun run typecheck:raw",
     "typecheck:raw": "tsc --noEmit -p .",
+    "build": "bun run gen && bun run build:raw",
     "build:raw": "vite build",
-    "triage": "node bin/triage.mjs"
+    "triage": "node bin/triage.mjs",
+    "serve": "node bin/triage-server.mjs",
+    "evals:classifier": "node bin/triage.mjs evals classifier",
+    "ci": "bun scripts/ci.ts"
   },
   "dependencies": {
     "@daytonaio/sdk": "^0.216.1",

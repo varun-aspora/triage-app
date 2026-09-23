@@ -1,0 +1,7 @@
+# Bun must not load .env files by itself. Config is read from TRIAGE_HOME
+# through src/config, never from a .env in the cwd.
+env = false
+
+[test]
+# Regenerates the *.gen.ts import lists and installs the no-io guard.
+preload = ["./test/support/bun-preload.ts"]
