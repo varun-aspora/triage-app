@@ -244,7 +244,7 @@ function scope(r: Report): string {
   const s = r.scope;
   return [
     `- Kind: ${s.kind}`,
-    `- Affected count: ${s.affected_count === undefined ? 'not counted' : String(s.affected_count)}`,
+    `- Affected count: ${s.affected_count === undefined ? 'not counted' : formatInt(s.affected_count)}`,
     `- How measured: ${s.how_measured === undefined || s.how_measured.trim() === '' ? 'not stated' : inline(s.how_measured)}`,
   ].join('\n');
 }
