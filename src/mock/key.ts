@@ -76,6 +76,12 @@ export type SlackReadFacts = { readonly channel: string; readonly thread_ts: str
 
 export type DoctorProbeFacts = { readonly entity: FixtureEntity; readonly probe: string };
 
+export type FieldCryptoFacts = {
+  readonly op: 'encrypt' | 'decrypt';
+  readonly kind?: 'phone' | 'email' | 'cif';
+  readonly values: readonly string[];
+};
+
 export type SemanticKeyFacts = {
   sql_select: SqlSelectFacts;
   http_call: HttpCallFacts;
@@ -86,6 +92,7 @@ export type SemanticKeyFacts = {
   cbs_call: CbsCallFacts;
   slack_read: SlackReadFacts;
   doctor_probe: DoctorProbeFacts;
+  field_crypto: FieldCryptoFacts;
 };
 
 /** Thrown when facts cannot form a valid key. The message names fields, never values. */
@@ -148,6 +155,8 @@ const BUILDERS: { [K in FixtureKind]: (facts: SemanticKeyFacts[K]) => unknown } 
   }),
   slack_read: (f) => ({ channel: trim(f.channel), thread_ts: trim(f.thread_ts) }),
   doctor_probe: (f) => ({ entity: f.entity, probe: trim(f.probe) }),
+  // The caller has already normalised the values; their order is kept.
+  field_crypto: (f) => ({ op: f.op, kind: f.kind, values: [...f.values] }),
 };
 
 /**

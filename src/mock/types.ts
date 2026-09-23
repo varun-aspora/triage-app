@@ -16,6 +16,7 @@ export const FIXTURE_KINDS = [
   'cbs_call',
   'slack_read',
   'doctor_probe',
+  'field_crypto',
 ] as const;
 export const FixtureKindSchema = v.picklist(FIXTURE_KINDS);
 export type FixtureKind = v.InferOutput<typeof FixtureKindSchema>;
@@ -116,6 +117,17 @@ export const DoctorProbeKeySchema = v.strictObject({
 });
 export type DoctorProbeKey = v.InferOutput<typeof DoctorProbeKeySchema>;
 
+// Harbor field encryption in mock mode (T04.7). Values keep their order,
+// because decrypt answers per position. kind is set for encrypt only.
+export const FIELD_CRYPTO_OPS = ['encrypt', 'decrypt'] as const;
+export const FIELD_VALUE_KINDS = ['phone', 'email', 'cif'] as const;
+export const FieldCryptoKeySchema = v.strictObject({
+  op: v.picklist(FIELD_CRYPTO_OPS),
+  kind: v.optional(v.picklist(FIELD_VALUE_KINDS)),
+  values: v.pipe(v.array(v.string()), v.minLength(1)),
+});
+export type FieldCryptoKey = v.InferOutput<typeof FieldCryptoKeySchema>;
+
 export const SEMANTIC_KEY_SCHEMAS = {
   sql_select: SqlSelectKeySchema,
   http_call: HttpCallKeySchema,
@@ -126,6 +138,7 @@ export const SEMANTIC_KEY_SCHEMAS = {
   cbs_call: CbsCallKeySchema,
   slack_read: SlackReadKeySchema,
   doctor_probe: DoctorProbeKeySchema,
+  field_crypto: FieldCryptoKeySchema,
 } as const satisfies Record<FixtureKind, v.GenericSchema>;
 
 export type SemanticKeyMap = {
@@ -171,5 +184,6 @@ export const FixtureSchema = v.variant('kind', [
   fixtureVariant('cbs_call'),
   fixtureVariant('slack_read'),
   fixtureVariant('doctor_probe'),
+  fixtureVariant('field_crypto'),
 ]);
 export type Fixture = v.InferOutput<typeof FixtureSchema>;

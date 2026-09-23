@@ -61,6 +61,11 @@ const SAME: readonly AnyCase[] = [
     a: { entity: 'ssfb', probe: 'db:harbor' },
     b: { probe: 'db:harbor', entity: 'ssfb' },
   },
+  {
+    kind: 'field_crypto',
+    a: { op: 'encrypt', kind: 'phone', values: ['+919000000001'] },
+    b: { values: ['+919000000001'], kind: 'phone', op: 'encrypt' },
+  },
 ];
 
 function build<K extends FixtureKind>(kind: K, facts: SemanticKeyFacts[K]) {
