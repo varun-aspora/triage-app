@@ -8,5 +8,10 @@
   },
   "peerDependencies": {
     "typescript": "^7"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.83.0",
+    "@flue/cli": "^2.0.8",
+    "@flue/runtime": "^2.0.8"
   }
 }
