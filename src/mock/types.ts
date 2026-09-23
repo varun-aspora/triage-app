@@ -15,6 +15,7 @@ export const FIXTURE_KINDS = [
   'detect_silent_reversals',
   'cbs_call',
   'slack_read',
+  'slack_user',
   'doctor_probe',
   'field_crypto',
   'code_query',
@@ -112,6 +113,13 @@ export const SlackReadKeySchema = v.strictObject({
 });
 export type SlackReadKey = v.InferOutput<typeof SlackReadKeySchema>;
 
+// The reviewer lookup before a Slack post (users.lookupByEmail, T08.7). The
+// email is lowercased and trimmed by the key builder.
+export const SlackUserKeySchema = v.strictObject({
+  email: Text,
+});
+export type SlackUserKey = v.InferOutput<typeof SlackUserKeySchema>;
+
 export const DoctorProbeKeySchema = v.strictObject({
   entity: FixtureEntitySchema,
   probe: Text,
@@ -151,6 +159,7 @@ export const SEMANTIC_KEY_SCHEMAS = {
   detect_silent_reversals: DetectSilentReversalsKeySchema,
   cbs_call: CbsCallKeySchema,
   slack_read: SlackReadKeySchema,
+  slack_user: SlackUserKeySchema,
   doctor_probe: DoctorProbeKeySchema,
   field_crypto: FieldCryptoKeySchema,
   code_query: CodeQueryKeySchema,
@@ -198,6 +207,7 @@ export const FixtureSchema = v.variant('kind', [
   fixtureVariant('detect_silent_reversals'),
   fixtureVariant('cbs_call'),
   fixtureVariant('slack_read'),
+  fixtureVariant('slack_user'),
   fixtureVariant('doctor_probe'),
   fixtureVariant('field_crypto'),
   fixtureVariant('code_query'),

@@ -75,6 +75,8 @@ export type CbsCallFacts = {
 
 export type SlackReadFacts = { readonly channel: string; readonly thread_ts: string };
 
+export type SlackUserFacts = { readonly email: string };
+
 export type DoctorProbeFacts = { readonly entity: FixtureEntity; readonly probe: string };
 
 export type FieldCryptoFacts = {
@@ -94,6 +96,7 @@ export type SemanticKeyFacts = {
   detect_silent_reversals: DetectSilentReversalsFacts;
   cbs_call: CbsCallFacts;
   slack_read: SlackReadFacts;
+  slack_user: SlackUserFacts;
   doctor_probe: DoctorProbeFacts;
   field_crypto: FieldCryptoFacts;
   code_query: CodeQueryFacts;
@@ -158,6 +161,7 @@ const BUILDERS: { [K in FixtureKind]: (facts: SemanticKeyFacts[K]) => unknown } 
     body: f.body,
   }),
   slack_read: (f) => ({ channel: trim(f.channel), thread_ts: trim(f.thread_ts) }),
+  slack_user: (f) => ({ email: trim(f.email).toLowerCase() }),
   doctor_probe: (f) => ({ entity: f.entity, probe: trim(f.probe) }),
   // The caller has already normalised the values; their order is kept.
   field_crypto: (f) => ({ op: f.op, kind: f.kind, values: [...f.values] }),

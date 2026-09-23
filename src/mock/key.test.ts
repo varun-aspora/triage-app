@@ -57,6 +57,11 @@ const SAME: readonly AnyCase[] = [
     b: { thread_ts: '1726000000.000100 ', channel: 'C0TEST' },
   },
   {
+    kind: 'slack_user',
+    a: { email: 'reviewer@example.test' },
+    b: { email: ' Reviewer@Example.TEST ' },
+  },
+  {
     kind: 'doctor_probe',
     a: { entity: 'ssfb', probe: 'db:harbor' },
     b: { probe: 'db:harbor', entity: 'ssfb' },
