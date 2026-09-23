@@ -1,0 +1,130 @@
+[
+  {
+    "id": "onboarding",
+    "label": "Onboarding",
+    "description": "Account opening that is stuck or failing: notary, AOF and e-sign, PAN name mismatch, RFI or NSTP review, CBS customer creation, and RTL Part-1.",
+    "signals": [
+      "notary will not connect or is stuck",
+      "AOF or e-sign loop",
+      "PAN name mismatch",
+      "RFI or document re-upload",
+      "NSTP or manual review stuck",
+      "CBS customer creation failed",
+      "RTL Part-1 stuck"
+    ],
+    "typical_entities": ["ssfb", "rtl"],
+    "typical_services": ["ssfb:harbor", "ssfb:workflow", "rtl:workflow", "rtl:kyc"],
+    "subcategories": ["notary", "aof_esign", "pan_mismatch", "rfi_nstp", "cbs_creation", "rtl_part1"],
+    "notes": "The largest group. Mostly multi-hop, and many cases match a known pattern. RTL is involved for Part-1 only. The Slack Tag often says Onboarding when the issue is elsewhere, so expect to re-route after the first lookup."
+  },
+  {
+    "id": "auth",
+    "label": "Auth: MPIN, session, device",
+    "description": "The user cannot set, reset or use the MPIN, loses the session, or is blocked by a device check.",
+    "signals": ["MPIN setup stuck", "MPIN reset or forgot MPIN fails", "wrong MPIN or lockout", "session expired or logged out", "device binding or device security block"],
+    "typical_entities": ["ssfb"],
+    "typical_services": ["ssfb:harbor", "ssfb:guardian"],
+    "subcategories": ["mpin", "session", "device"],
+    "notes": "Hard. The root cause is often in the mobile client or in another onboarding stage, which only code reading or a closer look at the account state shows."
+  },
+  {
+    "id": "delivery",
+    "label": "Welcome letter, delivery and address",
+    "description": "The welcome letter or other physical delivery was not sent, failed, or went to the wrong address.",
+    "signals": ["welcome letter not received", "delivery failed", "delivery not triggered", "wrong or outdated address"],
+    "typical_entities": ["ssfb", "atspl"],
+    "typical_services": ["ssfb:harbor", "atspl:package"],
+    "subcategories": ["welcome_letter", "delivery_failed", "address"],
+    "notes": "Usually a single lookup from SSFB harbor into ATSPL package, plus a vendor-wide scope check. Often ends in a request for a write such as a re-trigger, which triage recommends and never runs."
+  },
+  {
+    "id": "transfer_out",
+    "label": "Outward transfers",
+    "description": "An outward IMPS or NEFT transfer is stuck, failed, reversed or delayed.",
+    "signals": ["IMPS or NEFT transfer stuck in processing", "transfer failed", "transfer reversed", "money debited but not received"],
+    "typical_entities": ["ssfb"],
+    "typical_services": ["ssfb:rhythm", "ssfb:finacle"],
+    "subcategories": ["imps", "neft"],
+    "notes": "Medium. Two known rhythm bugs cover most cases. Money moved, so the reply must say whether the money is safe."
+  },
+  {
+    "id": "funding_in",
+    "label": "Inward funding and remittance",
+    "description": "Money sent into the account, by remittance or add money, is missing, late or credited wrongly.",
+    "signals": ["inward credit not visible", "remittance not received", "add money failed", "balance not updated after funding"],
+    "typical_entities": ["ssfb", "rtl"],
+    "typical_services": ["ssfb:rhythm", "ssfb:finacle", "rtl:banking"],
+    "subcategories": ["inward_credit", "remittance", "add_money"],
+    "notes": "Hard, because the answer often lives in another system: the remittance backend is not mapped to any entity. RTL is involved for UAE funding."
+  },
+  {
+    "id": "card",
+    "label": "Cards",
+    "description": "The debit card is not visible, inactive, or fails for a payment.",
+    "signals": ["debit card not visible", "card inactive", "card payment failed", "virtual card issue failed"],
+    "typical_entities": ["ssfb"],
+    "typical_services": ["ssfb:rhythm", "ssfb:finacle"],
+    "subcategories": ["card_view", "card_status", "card_payment"],
+    "notes": "Medium to hard."
+  },
+  {
+    "id": "beneficiary",
+    "label": "Beneficiary",
+    "description": "Adding, saving or paying a beneficiary fails, or money went to the wrong beneficiary.",
+    "signals": ["cannot add beneficiary", "beneficiary save fails", "beneficiary cool-off", "money sent to the wrong person"],
+    "typical_entities": ["ssfb"],
+    "typical_services": ["ssfb:rhythm"],
+    "subcategories": ["add_beneficiary", "cool_off", "misdirected_funds"],
+    "notes": "Hard. One past case turned out to be misdirected money, so check for it and set misdirected_funds when it applies."
+  },
+  {
+    "id": "account_view",
+    "label": "Account and balance view",
+    "description": "Accounts, account details or the balance do not show correctly in the app.",
+    "signals": ["account missing in the app", "bank details blank", "balance stale or wrong", "banner stuck"],
+    "typical_entities": ["ssfb"],
+    "typical_services": ["ssfb:rhythm"],
+    "subcategories": ["account_list", "account_details", "balance"],
+    "notes": "Medium. A balance is a point-in-time read and needs its taken_at."
+  },
+  {
+    "id": "upi_third_party",
+    "label": "UPI and third-party linking",
+    "description": "UPI or a third-party app fails to link the account or does not deliver its OTP.",
+    "signals": ["UPI OTP not received", "UPI linking fails", "third-party app OTP not received"],
+    "typical_entities": [],
+    "typical_services": [],
+    "subcategories": ["upi_otp", "upi_link", "third_party_otp"],
+    "notes": "Easy, with a known answer: the failing step is outside Aspora. Check the account state only, for example that the account is not frozen."
+  },
+  {
+    "id": "fd_td",
+    "label": "Fixed and term deposits",
+    "description": "Booking a fixed or term deposit fails, or a booked deposit is not visible.",
+    "signals": ["FD booking failed", "FD created but not visible", "term deposit issue"],
+    "typical_entities": ["ssfb"],
+    "typical_services": ["ssfb:rhythm", "ssfb:finacle"],
+    "subcategories": ["fd_booking", "fd_view"],
+    "notes": "Hard. Money may have moved, so check whether the deposit exists in CBS before answering."
+  },
+  {
+    "id": "systemic",
+    "label": "Systemic or outage",
+    "description": "Many users are affected at once by an outage, a bank-side change or a vendor failure.",
+    "signals": ["many users report the same error", "outage or alert", "bank escalation", "vendor down"],
+    "typical_entities": ["ssfb", "atspl", "rtl"],
+    "typical_services": [],
+    "subcategories": ["cbs_outage", "bank_change", "vendor_outage"],
+    "notes": "Hard and analytical: the work is aggregate counts across the fleet, not one customer's records."
+  },
+  {
+    "id": "unknown",
+    "label": "Unknown",
+    "description": "No other category fits, or the thread does not say enough to pick one.",
+    "signals": ["no other category fits", "thread too vague to classify", "classifier output was invalid"],
+    "typical_entities": [],
+    "typical_services": [],
+    "subcategories": [],
+    "notes": "Use it rather than forcing a wrong category. Record what is missing in missing_info."
+  }
+]
