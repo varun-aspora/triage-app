@@ -1,0 +1,167 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`renderReportMarkdown sample report matches the committed snapshot 1`] = `
+"# Triage report \`01J8ZQ7XK3PSEUDRUN00000001\`
+
+- Run: \`01J8ZQ7XK3PSEUDRUN00000001\`
+- Environment: local
+- Generated at: 2026-09-20T10:15:00.000Z
+- Requested by: cx-oncall
+- Current ask: Why is the debit card still not dispatched for this customer?
+
+## TL;DR
+
+Status: **Root cause confirmed** (\`root_cause_confirmed\`)
+
+The vendor rejected the dispatch because the address had no pincode, and no retry is scheduled after an address rejection.
+
+## Customer answer
+
+- Action owner: backend
+- Money safe: yes
+- Should retry: wait
+- Escalate to: banking-oncall
+
+Reply to send:
+
+\`\`\`text
+The card was not dispatched because the delivery address was incomplete. We are fixing the address and will dispatch it again; no action is needed from the customer.
+\`\`\`
+
+## Current state
+
+- **card dispatch request**: ADDRESS_REJECTED (as of 2026-09-20T10:04:00.000Z, may have changed since; source: db ssfb/rhythm \`/data/call-0001.json\`)
+- **vendor callback count**: 1 (as of 2026-09-20T10:06:00.000Z, may have changed since; source: logs ssfb/rhythm \`/data/call-0002.json\`)
+
+## Timeline
+
+- 2026-09-18T08:30:00.000Z [ssfb] dispatch request created (source: db ssfb/rhythm)
+- 2026-09-18T09:10:00.000Z [ssfb] vendor rejected the address: pincode missing (source: logs ssfb/rhythm)
+
+## Findings by entity
+
+### ssfb
+
+Timeline:
+
+- 2026-09-18T08:30:00.000Z dispatch request created (source: db ssfb/rhythm)
+- 2026-09-18T09:10:00.000Z vendor rejected the address: pincode missing (source: logs ssfb/rhythm)
+
+Gaps:
+
+No gaps named for this entity.
+
+## Root cause
+
+The vendor rejected the dispatch because the address had no pincode, and no retry is scheduled after an address rejection.
+
+Matched known pattern: \`card-dispatch-address-rejected\`
+
+Code references:
+
+- \`rhythm-service\` \`src/dispatch/vendor-callback.ts\` lines 40-72
+
+Repo commits read:
+
+- \`rhythm-service\` at \`abc1234def\` on branch \`main\`
+
+## Scope
+
+- Kind: single
+- Affected count: 1
+- How measured: count of dispatch requests in ADDRESS_REJECTED for this form
+
+## Actions
+
+> These are recommendations only. Triage has not carried out any of them.
+
+### CX (recommended)
+
+- Tell the customer the card will be dispatched again after the address fix.
+
+### Engineering (recommended)
+
+- Add the pincode to the stored address, then trigger dispatch again.
+
+### Ops and bank (recommended)
+
+None.
+
+## Suggested fixes
+
+> Triage never runs these commands. A human runs them, and only after checking the preconditions.
+
+### 1. Trigger card dispatch again (curl)
+
+\`\`\`bash
+curl -sS -X POST "$SSFB_RHYTHM_API_URL/v1/cards/dispatch/retry" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"form_id": "8c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e02"}'
+\`\`\`
+
+Preconditions:
+
+- The stored address has a pincode.
+
+Verify with:
+
+\`\`\`sql
+SELECT status FROM card_dispatch_requests WHERE form_id = '8c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e02' ORDER BY created_at DESC LIMIT 1
+\`\`\`
+
+### 2. Check the stored address (sql)
+
+\`\`\`sql
+psql "$SSFB_RHYTHM_DB_URL" -c "SELECT pincode IS NOT NULL AS has_pincode FROM card_addresses WHERE form_id = '8c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e02'"
+\`\`\`
+
+Preconditions:
+
+None listed.
+
+Verify with: nothing given.
+
+### 3. Confirm the address with the customer (manual)
+
+\`\`\`text
+Ask the customer to confirm the pincode in the app before the retry.
+\`\`\`
+
+Preconditions:
+
+None listed.
+
+Verify with:
+
+\`\`\`text
+The address screen shows a pincode.
+\`\`\`
+
+## Escalation record
+
+- Escalated: yes
+- Reasons:
+  - a write is needed to fix the address
+- Final tier: mid
+- Rule fired: \`category-default\`
+- Tier override by: nobody
+- Images seen: no
+
+## Evidence ladder and confidence
+
+Evidence ladder: Code (rungs used in order: DB, Logs, Code)
+
+Confidence: High — the vendor rejection is in both the dispatch table and the service logs, and the code shows no retry after it
+
+## Gaps
+
+No gaps recorded.
+
+## Cost
+
+- Wall time: 45.0 s
+- USD total: not known
+
+| Model | Calls | Input tokens | Output tokens |
+| --- | ---: | ---: | ---: |
+| \`fake/mid\` | 6 | 12,000 | 1,800 |
+"
+`;
