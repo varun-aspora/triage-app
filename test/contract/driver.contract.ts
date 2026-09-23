@@ -172,3 +172,30 @@ describe('runCase with the identity step on fixtures', () => {
     expect(run?.classification?.preflight_warnings?.map((w) => w.step)).toContain('identity');
   });
 });
+
+describe('runCase with a run id that holds six digits in a row', () => {
+  test('the report comes back with the real run id and validates, although the stored copy masks it', async () => {
+    await bootEvalRuntime({ faux: fake, start: startSpy });
+    const cases = await loadCases(join(REPO_ROOT, 'evals/cases'));
+    const loaded = cases.find((c) => c.case.id === 'syn-strong-category');
+    if (loaded === undefined) throw new Error('syn-strong-category is missing');
+    const c = loaded.case;
+
+    // Synthetic ULID. The persisted profile masks '386475' (digits6) in the stored report.json.
+    const runId = '01M386475GGQXX3EXBJPNGKW78';
+    const result = await runCase(c, {
+      caseDir: loaded.dir,
+      runId,
+      turns: {
+        root: [toolCall('task', { agent: 'investigate_ssfb', prompt: brief('ssfb') }), finish(reportDraft(c.expected.tier)), text('report written')],
+        investigate_ssfb: [toolCall('note_evidence', findings('medium')), text('recorded')],
+      },
+    });
+
+    expect(result.status).toBe('completed');
+    const stored = await evalRuntime()?.store.getRun(runId);
+    expect(stored?.report?.run_id).not.toBe(runId);
+    expect(result.report?.run_id).toBe(runId);
+    expect(v.is(ReportSchema, result.report)).toBe(true);
+  });
+});

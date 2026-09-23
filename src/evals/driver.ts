@@ -19,7 +19,8 @@
 //   case's faux_classification unless the script gives the classifier turns.
 // It does not go through the CLI commands.
 //
-// The result holds the report from the run store, the tool calls from the
+// The result holds the report from the run store (with the real run id put
+// back, since the persisted profile can mask digits in it), the tool calls from the
 // read() onEvent 'tool-input' chunks (the root conversation's calls), the
 // audit lines from the run folder mirror (<runs>/<run_id>/audit.jsonl),
 // fixture_misses (audit lines with exit fixture_miss, plus strict misses in
@@ -223,7 +224,10 @@ async function runOne(caseSpec: EvalCase, options: RunCaseOptions): Promise<Case
   const wall_ms = Math.round(performance.now() - began);
 
   const run = await rt.store.getRun(prepared.run_id);
-  const report = run?.report ?? null;
+  // The stored report went through the persisted profile, which masks a run of
+  // six digits inside a ULID, so its run_id may not match RunIdSchema. Put the
+  // real run id back, as slack-post does.
+  const report = run?.report ? { ...run.report, run_id: prepared.run_id } : null;
   const audit = readRunAudit(rt.config, prepared.run_id);
   const auditMisses = audit.filter((l) => l.exit === 'fixture_miss').length;
 
