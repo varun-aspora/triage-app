@@ -20,11 +20,25 @@ export const BranchNameSchema = v.pipe(
   v.check((b) => !b.endsWith('/') && !b.endsWith('.lock'), 'must be a plain branch name'),
 );
 
+// Clone URL for `triage repos sync`. scp-style ssh (git@host:org/repo.git),
+// ssh:// or https:// only, with no user info other than 'git@', so no
+// credentials or other git transports (ext::, file://) can be pinned.
+export const RemoteUrlSchema = v.pipe(
+  v.string(),
+  v.regex(
+    /^(?:git@[A-Za-z0-9.-]+:|ssh:\/\/git@[A-Za-z0-9.-]+(?::[0-9]+)?\/|https:\/\/[A-Za-z0-9.-]+(?::[0-9]+)?\/)[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/,
+    'must be a git@host:org/repo, ssh://git@host/ or https://host/ URL without credentials',
+  ),
+  v.check((u) => !u.includes('..'), 'must be a git@host:org/repo, ssh://git@host/ or https://host/ URL without credentials'),
+);
+
 export const RepoPinSchema = v.strictObject({
   repo: RepoNameSchema,
   entities: v.pipe(v.array(v.string()), v.minLength(1, 'must list at least one entity')),
   /** Absent means the repo's default branch. */
   branch: v.optional(BranchNameSchema),
+  /** Where `triage repos sync` clones a missing repo from. Absent means it is never cloned. */
+  remote: v.optional(RemoteUrlSchema),
 });
 
 export type RepoPin = {
@@ -32,6 +46,8 @@ export type RepoPin = {
   readonly entities: readonly Entity[];
   /** undefined means the repo's default branch. */
   readonly branch?: string;
+  /** undefined means sync never clones this repo. */
+  readonly remote?: string;
 };
 
 export const ReposFileSchema = v.array(RepoPinSchema);
@@ -82,6 +98,7 @@ export function parseRepos(doc: unknown, registry: Registry): readonly RepoPin[]
         repo: pin.repo,
         entities: Object.freeze(entities),
         ...(pin.branch === undefined ? {} : { branch: pin.branch }),
+        ...(pin.remote === undefined ? {} : { remote: pin.remote }),
       }),
     );
   });

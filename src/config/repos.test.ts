@@ -93,7 +93,7 @@ describe('parseRepos', () => {
     const r = registry();
     expect(() => parseRepos([{ repo: 'harbor', entities: [] }], r)).toThrow(RegistryError);
     expect(() => parseRepos([{ repo: 'harbor', entities: ['ssfb'] }, { repo: 'harbor', entities: ['rtl'] }], r)).toThrow(/repeats repo/);
-    expect(() => parseRepos([{ repo: 'harbor', entities: ['ssfb'], remote: 'git@x:y' }], r)).toThrow(RegistryError);
+    expect(() => parseRepos([{ repo: 'harbor', entities: ['ssfb'], url: 'git@x:y' }], r)).toThrow(RegistryError);
     expect(() => parseRepos({ repos: [] }, r)).toThrow(RegistryError);
   });
 
