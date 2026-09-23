@@ -230,7 +230,7 @@ One ordered list of rules per entity. It replaces both the earlier allowlist and
 
 **Evaluation** (`gate/rules.ts`, pure, unit-tested):
 
-1. The tool builds the URL from `<ENTITY>_<SERVICE>_API_URL` (or the CBS gateway for `finacle`) and canonicalises the pathname (§3 `http.ts`). Matching runs on that pathname, never on the model's string. Query strings are not part of matching.
+1. The tool builds the URL from `<ENTITY>_<SERVICE>_API_URL` (or the CBS gateway for `finacle`) and canonicalises the pathname (§3 `http.ts`). Matching runs on that pathname, never on the model's string. Query strings are not part of matching. `api` templates are relative to the service base: the base URL's path prefix (`/harbor` for a base ending in `/harbor`) is stripped before matching, as in the examples above. http_call refuses every call to a service whose rules include a template that starts with that prefix, so a rule written for the full pathname fails closed instead of silently missing.
 2. Rules are evaluated **top to bottom; the first rule whose `service`, `method` and `api` all match decides** (`allow` or `block`).
 3. **No match → GET and HEAD are allowed, every other method is blocked.** That is the whole default policy; the file only lists exceptions in either direction.
 4. `method`: an upper-case verb or `*`. `service`: a registry service name or `*`.

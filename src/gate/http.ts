@@ -307,6 +307,10 @@ export const CBS_SERVICE = 'finacle';
  * method check, cbs path check, URL build, then evaluateRule on the built
  * pathname. cbs_call is always evaluated as service 'finacle' and takes no
  * query.
+ *
+ * Rules are matched on the full built pathname here. HLD §4.4 templates are
+ * relative to the service base, so this is only right for a base with no
+ * path prefix; http_call strips the prefix and does its own matching.
  */
 export function decideHttp(input: HttpDecisionInput): HttpDecision {
   const { tool, service } = input;
