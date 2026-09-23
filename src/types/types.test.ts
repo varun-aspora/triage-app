@@ -151,7 +151,7 @@ describe('valid samples parse', () => {
     ['IdChain', IdChainSchema, idChain()],
     ['Classification', ClassificationSchema, classification()],
     ['TierDecision', TierDecisionSchema, tierDecision()],
-    ['PriorCase', PriorCaseSchema, { run_id: 'run-old-1', category: 'delivery', status: 'resolved' }],
+    ['PriorCase', PriorCaseSchema, { category: 'delivery', report_status: 'resolved', age_days: 12, similarity: 0.81 }],
     ['PreflightWarning', PreflightWarningSchema, { step: 'tunnel', message: 'ssfb tunnel is down' }],
     ['TriageInit', TriageInitSchema, triageInit()],
     ['EvidenceRef', EvidenceRefSchema, evidenceRef()],

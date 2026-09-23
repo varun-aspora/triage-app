@@ -5,7 +5,6 @@ import {
   EntitySchema,
   NonEmptyStringSchema,
   ReportStatusSchema,
-  RunIdSchema,
   TierSchema,
 } from './core.ts';
 import { IdChainSchema } from './id-chain.ts';
@@ -59,15 +58,18 @@ export const TierDecisionSchema = v.object({
 });
 export type TierDecision = v.InferOutput<typeof TierDecisionSchema>;
 
-// A structured projection of an earlier case: ids stripped, no free text (D43).
-export const PriorCaseSchema = v.object({
-  run_id: RunIdSchema,
+// A structured projection of an earlier case, in the shape priorCasesFor
+// (src/runstore/prior-cases.ts) builds: no run id, no ids and no free text
+// (D43). strictObject, so an extra field such as a run id is refused.
+export const PriorCaseSchema = v.strictObject({
   category: CategorySchema,
   subcategory: v.optional(v.string()),
-  status: v.optional(ReportStatusSchema),
+  report_status: v.optional(ReportStatusSchema),
   matched_pattern_id: v.optional(NonEmptyStringSchema),
-  entities: v.optional(v.array(EntitySchema)),
-  similarity: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1))),
+  escalated: v.optional(v.boolean()),
+  feedback_verdict: v.optional(v.picklist(['correct', 'partial', 'pending'])),
+  age_days: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  similarity: v.pipe(v.number(), v.minValue(0), v.maxValue(1)),
 });
 export type PriorCase = v.InferOutput<typeof PriorCaseSchema>;
 
