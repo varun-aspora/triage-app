@@ -1,9 +1,10 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import app, { AUTH_NOT_CONFIGURED, buildApp, HttpModuleError, orderModules } from './app.ts';
 import { makeTestConfig } from '../test/support/fake-tool-context.ts';
 import { BEARER_AUTH_ID, type HttpContext, type HttpModule } from './http/types.ts';
+import { httpModules } from './http/http-modules.gen.ts';
 
 const ctx: HttpContext = { config: () => makeTestConfig(), deps: {} };
 
@@ -36,19 +37,44 @@ function route(id: string, order: number, log: string[] = []): HttpModule {
 
 const auth = { headers: { authorization: `Bearer ${TOKEN}` } };
 
+const PATHS = [
+  ['GET', '/triage'],
+  ['POST', '/triage'],
+  ['GET', '/triage/run_1'],
+  ['GET', '/'],
+  ['DELETE', '/anything/else'],
+] as const;
+
 describe('default app', () => {
-  test('answers 503 on every route with no generated modules', async () => {
-    for (const [method, path] of [
-      ['GET', '/triage'],
-      ['POST', '/triage'],
-      ['GET', '/triage/run_1'],
-      ['GET', '/'],
-      ['DELETE', '/anything/else'],
-    ] as const) {
-      const res = await app.request(path, { method });
+  // The default app's context loads the shell's TRIAGE_HOME, so these build the
+  // same generated module list against a test config instead of calling it.
+  test('answers 503 on every route with no modules', async () => {
+    const empty = buildApp([], ctx);
+    for (const [method, path] of PATHS) {
+      const res = await empty.request(path, { method });
       expect(res.status).toBe(503);
       expect(await res.json()).toEqual({ error: AUTH_NOT_CONFIGURED });
     }
+  });
+
+  test('with the generated modules, answers 401 without a token instead of 503', async () => {
+    const tokenCtx: HttpContext = { config: () => makeTestConfig({ TRIAGE_HTTP_AUTH_TOKEN: TOKEN }), deps: {} };
+    const built = buildApp(httpModules as readonly HttpModule[], tokenCtx);
+    for (const [method, path] of PATHS) {
+      expect((await built.request(path, { method })).status).toBe(401);
+    }
+  });
+
+  test('with the generated modules and a blank token, still answers 503', async () => {
+    const blankCtx: HttpContext = { config: () => makeTestConfig({ TRIAGE_HTTP_AUTH_TOKEN: '' }), deps: {} };
+    const built = buildApp(httpModules as readonly HttpModule[], blankCtx);
+    const quiet = spyOn(console, 'error').mockImplementation(() => undefined);
+    for (const [method, path] of PATHS) {
+      const res = await built.request(path, { method, headers: { authorization: 'Bearer ' } });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: AUTH_NOT_CONFIGURED });
+    }
+    quiet.mockRestore();
   });
 
   test('is a fetch handler', () => {
