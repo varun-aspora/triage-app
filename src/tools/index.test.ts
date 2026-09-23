@@ -166,7 +166,7 @@ describe('toolsFor', () => {
   test('create() that touches ctx.deps throws in the fake context', () => {
     const eager = fake('sql_select', {
       create: (c) => {
-        void (c.deps as Record<string, unknown>).audit;
+        void c.deps.audit;
         return tool('sql_select');
       },
     });
