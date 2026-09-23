@@ -1,0 +1,54 @@
+[
+  {
+    "id": "sim-binding-phone-mismatch",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["PHONE_NUMBER_MISMATCH", "sim[ -]?binding failed"],
+      "services": ["ssfb:harbor"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "logs_search on ssfb:harbor for the form id, then sql_select on the form status",
+    "tier_hint": "cheap",
+    "stable": true,
+    "source_ref": "fixture: synthetic test entry"
+  },
+  {
+    "id": "neft-return-credited",
+    "category": "transfer_out",
+    "signature": {
+      "regex": ["NEFT return(ed)?"],
+      "services": ["ssfb:rhythm", "ssfb:harbor"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "sql_select on the transfer by utr",
+    "tier_hint": "mid",
+    "stable": true,
+    "source_ref": "fixture: synthetic test entry"
+  },
+  {
+    "id": "welcome-letter-vendor-fail",
+    "category": "delivery",
+    "signature": {
+      "regex": ["welcome letter.*vendor"],
+      "services": []
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "logs_search for the vendor call on the form id",
+    "tier_hint": "mid",
+    "stable": false,
+    "source_ref": "fixture: synthetic test entry"
+  },
+  {
+    "id": "remittance-order-out-of-reach",
+    "category": "transfer_out",
+    "signature": {
+      "regex": ["/appserver/v3/order"],
+      "services": []
+    },
+    "entities": ["atspl"],
+    "query_recipe": "out of reach, escalate",
+    "tier_hint": "strong",
+    "stable": false,
+    "source_ref": "fixture: synthetic test entry"
+  }
+]
