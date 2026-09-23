@@ -2,6 +2,9 @@
   "name": "triage-app",
   "type": "module",
   "private": true,
+  "bin": {
+    "triage": "bin/triage.mjs"
+  },
   "engines": {
     "node": ">=22.19"
   },
