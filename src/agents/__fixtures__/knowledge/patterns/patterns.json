@@ -1,0 +1,12 @@
+[
+  {
+    "id": "fixture-pattern",
+    "category": "unknown",
+    "signature": { "regex": ["EXAMPLE_ERROR"], "services": ["harbor"] },
+    "entities": ["ssfb"],
+    "query_recipe": "fixture",
+    "tier_hint": "cheap",
+    "stable": true,
+    "source_ref": "fixture"
+  }
+]
