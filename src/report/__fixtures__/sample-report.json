@@ -1,0 +1,142 @@
+{
+  "run_id": "01J8ZQ7XK3PSEUDRUN00000001",
+  "env_label": "local",
+  "generated_at": "2026-09-20T10:15:00.000Z",
+  "request": {
+    "current_ask": "Why is the debit card still not dispatched for this customer?",
+    "requested_by": "cx-oncall"
+  },
+  "classification": {
+    "proposed": {
+      "category": "delivery",
+      "subcategory": "debit card dispatch",
+      "entities_likely": ["ssfb"],
+      "current_ask": "Why is the debit card still not dispatched for this customer?",
+      "money_moved": false,
+      "misdirected_funds": false,
+      "tier_proposed": "mid",
+      "confidence": 0.82,
+      "missing_info": [],
+      "images_seen": false
+    },
+    "tier_final": "mid",
+    "rule_fired": "category-default"
+  },
+  "id_chain": {
+    "ids": {
+      "horus_customer_id": "4b2f0c1e-7a3d-4e9b-9c10-5d6e7f8a9b01",
+      "form_id": "8c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e02",
+      "user_id": "a0b1c2d3-e4f5-4a6b-8c7d-8e9f0a1b2c03"
+    },
+    "hops": [
+      {
+        "from": "horus_customer_id",
+        "to": "form_id",
+        "source": "ssfb:harbor.account_forms",
+        "status": "resolved",
+        "taken_at": "2026-09-20T10:01:00.000Z"
+      },
+      {
+        "from": "form_id",
+        "to": "user_id",
+        "source": "ssfb:harbor.account_forms",
+        "status": "resolved",
+        "taken_at": "2026-09-20T10:01:05.000Z"
+      }
+    ],
+    "basic_state": [
+      {
+        "item": "account form status",
+        "value": "APPROVED",
+        "taken_at": "2026-09-20T10:01:05.000Z",
+        "source": "ssfb:harbor.account_forms",
+        "status": "read"
+      }
+    ]
+  },
+  "current_state": [
+    {
+      "item": "card dispatch request",
+      "value": "ADDRESS_REJECTED",
+      "taken_at": "2026-09-20T10:04:00.000Z",
+      "source": { "source": "db", "entity": "ssfb", "service": "rhythm", "raw_ref": "/data/call-0001.json" }
+    },
+    {
+      "item": "vendor callback count",
+      "value": "1",
+      "taken_at": "2026-09-20T10:06:00.000Z",
+      "source": { "source": "logs", "entity": "ssfb", "service": "rhythm", "raw_ref": "/data/call-0002.json" }
+    }
+  ],
+  "timeline": [
+    {
+      "at": "2026-09-18T08:30:00.000Z",
+      "entity": "ssfb",
+      "what": "dispatch request created",
+      "source": { "source": "db", "entity": "ssfb", "service": "rhythm" }
+    },
+    {
+      "at": "2026-09-18T09:10:00.000Z",
+      "entity": "ssfb",
+      "what": "vendor rejected the address: pincode missing",
+      "source": { "source": "logs", "entity": "ssfb", "service": "rhythm" }
+    }
+  ],
+  "root_cause": {
+    "statement": "The vendor rejected the dispatch because the address had no pincode, and no retry is scheduled after an address rejection.",
+    "code_refs": [
+      { "repo": "rhythm-service", "file": "src/dispatch/vendor-callback.ts", "lines": "40-72" }
+    ],
+    "matched_pattern_id": "card-dispatch-address-rejected"
+  },
+  "scope": { "kind": "single", "affected_count": 1, "how_measured": "count of dispatch requests in ADDRESS_REJECTED for this form" },
+  "status": "root_cause_confirmed",
+  "cx_answer": {
+    "action_owner": "backend",
+    "money_safe": "yes",
+    "should_retry": "wait",
+    "reply_text": "The card was not dispatched because the delivery address was incomplete. We are fixing the address and will dispatch it again; no action is needed from the customer.",
+    "escalate_to": "banking-oncall"
+  },
+  "actions": {
+    "cx": ["Tell the customer the card will be dispatched again after the address fix."],
+    "eng": ["Add the pincode to the stored address, then trigger dispatch again."],
+    "ops_bank": []
+  },
+  "suggested_fix": [
+    {
+      "title": "Trigger card dispatch again",
+      "kind": "curl",
+      "command": "curl -sS -X POST \"$SSFB_RHYTHM_API_URL/v1/cards/dispatch/retry\" -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"form_id\": \"8c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e02\"}'",
+      "preconditions": ["The stored address has a pincode."],
+      "verify_with": "SELECT status FROM card_dispatch_requests WHERE form_id = '8c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e02' ORDER BY created_at DESC LIMIT 1"
+    },
+    {
+      "title": "Check the stored address",
+      "kind": "sql",
+      "command": "psql \"$SSFB_RHYTHM_DB_URL\" -c \"SELECT pincode IS NOT NULL AS has_pincode FROM card_addresses WHERE form_id = '8c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e02'\"",
+      "preconditions": [],
+      "verify_with": ""
+    },
+    {
+      "title": "Confirm the address with the customer",
+      "kind": "manual",
+      "command": "Ask the customer to confirm the pincode in the app before the retry.",
+      "preconditions": [],
+      "verify_with": "The address screen shows a pincode."
+    }
+  ],
+  "confidence": "high",
+  "confidence_reason": "the vendor rejection is in both the dispatch table and the service logs, and the code shows no retry after it",
+  "evidence_ladder": ["db", "logs", "code"],
+  "entities_consulted": ["ssfb"],
+  "gaps": [],
+  "escalated": true,
+  "escalation_reasons": ["a write is needed to fix the address"],
+  "images_seen": false,
+  "repo_commits": [{ "repo": "rhythm-service", "commit": "abc1234def", "branch": "main" }],
+  "cost": {
+    "models": { "fake/mid": { "calls": 6, "input_tokens": 12000, "output_tokens": 1800 } },
+    "wall_ms": 45000
+  }
+}
