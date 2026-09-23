@@ -1,0 +1,3 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`mock mode a strict miss throws FixtureMissError naming the kind and the key_string 1`] = `"fixture miss (strict mock): no sql_select fixture for key {"entity":"atspl","params":["cust-404"],"service":"package","tables":["delivery_requests"]} (file 819379b7a9ed24c9.json)"`;
