@@ -262,6 +262,20 @@ export function deployModeForPreflight(config: Config): string {
   return hiddenOf(config).deployMode;
 }
 
+export type RawKeyState = 'missing' | 'empty' | 'set';
+
+/**
+ * Whether a key had any characters in the parsed .env, before trimming or
+ * defaults. Works for every key and never returns the value. The eval home
+ * guard uses it, because there a whitespace-only credential still counts as
+ * set (D42).
+ */
+export function rawKeyState(config: Config, name: string): RawKeyState {
+  const value = hiddenOf(config).record[name];
+  if (value === undefined) return 'missing';
+  return value === '' ? 'empty' : 'set';
+}
+
 /** Non-blank provider credentials, by the env names pi-ai reads. */
 export function providerEnv(config: Config): Readonly<Record<string, string>> {
   const values: Record<(typeof PROVIDER_KEYS)[number], string | undefined> = {
