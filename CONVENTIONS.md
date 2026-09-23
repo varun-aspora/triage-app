@@ -97,7 +97,7 @@ Claude-Session: https://claude.ai/code/session_018uHvmvk4Wwc2pmxFNTG1yZ
 - No `import 'dotenv/config'`: config is loaded explicitly from `TRIAGE_HOME`
   by `src/config/env.ts`, never from the process working directory. `dotenv`
   is a dependency only for its parser.
-- `libpg-query` and `pgsql-ast-parser` are both installed for the T02 SQL
-  parser spike; T02 keeps one and removes the other.
+- No `pgsql-ast-parser`: the SQL gate (T02.1) uses `libpg-query`, the real
+  Postgres grammar, and the other parser was removed.
 - `hono` is pinned to the version `@flue/runtime` depends on, so the app and
   Flue share one Hono.
