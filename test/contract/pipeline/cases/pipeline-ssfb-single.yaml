@@ -1,0 +1,66 @@
+# Pipeline contract case (T10.9). Fictional people, ids and text, written by
+# hand. One entity: SSFB alone is consulted and the run ends in finish_report.
+# The identity step runs on fixtures/contract/pipeline/pipeline-ssfb-single.json,
+# so id_chain and basic_state below are what those fixtures resolve to.
+id: pipeline-ssfb-single
+taxonomy_version: v1
+label_source: synthetic
+request:
+  messages:
+    - ts: "1790208000.000100"
+      author: triage-bot
+      is_parent: true
+      text: |-
+        Horus Customer ID: 5e1a7c2b-8d4f-4b6a-9c3e-2f7d1a0b4c5e
+        Issue: Account shows as active but the home screen balance stays blank.
+    - ts: "1790208300.000200"
+      author: cx-agent
+      is_parent: false
+      text: Customer asks whether the account can be used and when the balance will show.
+ids:
+  horus_customer_id: 5e1a7c2b-8d4f-4b6a-9c3e-2f7d1a0b4c5e
+id_chain:
+  ids:
+    horus_customer_id: 5e1a7c2b-8d4f-4b6a-9c3e-2f7d1a0b4c5e
+    customer_id: 5e1a7c2b-8d4f-4b6a-9c3e-2f7d1a0b4c5e
+    account_form_id: 9b3d5f7a-1c2e-4a6b-8d0f-3e5a7c9b1d2f
+    user_id: 2c4e6a8b-0d1f-4e3a-9b5c-7d9f1b3d5e7a
+    form_id: 9b3d5f7a-1c2e-4a6b-8d0f-3e5a7c9b1d2f
+    account_id: 7f1b3d5e-9a2c-4e6b-8d0a-4c6e8a0b2d4f
+    account_number: "730021904418263"
+  hops:
+    - { from: horus_customer_id, to: customer_id, source: "ssfb:harbor.customer", status: resolved, taken_at: "2026-09-24T00:00:00.000Z" }
+    - { from: account_form_id, to: user_id, source: "ssfb:harbor.account_forms", status: resolved, taken_at: "2026-09-24T00:00:00.000Z" }
+    - { from: form_id, source: "ssfb:workflow.workflow_executions", status: resolved, taken_at: "2026-09-24T00:00:00.000Z" }
+    - { from: form_id, source: "rtl:workflow.workflow_executions", status: skipped, taken_at: "2026-09-24T00:00:00.000Z" }
+    - { from: customer_id, to: account_id, source: "ssfb:rhythm.customer_account_mappings", status: resolved, taken_at: "2026-09-24T00:00:00.000Z" }
+basic_state:
+  - { item: workflow_identifier, value: ssfb_onboarding_v3, taken_at: "2026-09-24T00:00:00.000Z", source: "ssfb:workflow.workflow_executions", status: read }
+  - { item: workflow_status, value: IN_PROGRESS, taken_at: "2026-09-24T00:00:00.000Z", source: "ssfb:workflow.workflow_executions", status: read }
+  - { item: workflow_current_step, value: ACCOUNT_ACTIVATION, taken_at: "2026-09-24T00:00:00.000Z", source: "ssfb:workflow.workflow_executions", status: read }
+  - { item: harbor_customer_state, value: ONBOARDED, taken_at: "2026-09-24T00:00:00.000Z", source: "ssfb:harbor.customer", status: read }
+  - { item: harbor_customer_sub_state, value: NONE, taken_at: "2026-09-24T00:00:00.000Z", source: "ssfb:harbor.customer", status: read }
+  - { item: account_form_status_v2, value: APPROVED, taken_at: "2026-09-24T00:00:00.000Z", source: "ssfb:harbor.account_forms", status: read }
+  - { item: rhythm_account_status, value: ACTIVE, taken_at: "2026-09-24T00:00:00.000Z", source: "ssfb:rhythm.customer_account_mappings", status: read }
+  - { item: rhythm_debit_allowed, value: "true", taken_at: "2026-09-24T00:00:00.000Z", source: "ssfb:rhythm.customer_account_mappings", status: read }
+expected:
+  category: account_view
+  tier: mid
+  money_moved: false
+  entities: [ssfb]
+  current_ask: Explain why the balance stays blank on an active account and when it will show.
+faux_classification:
+  category: account_view
+  subcategory: balance_not_shown
+  entities_likely: [ssfb]
+  current_ask: Explain why the balance stays blank on an active account and when it will show.
+  money_moved: false
+  misdirected_funds: false
+  tier_proposed: mid
+  confidence: 0.85
+  missing_info: []
+  images_seen: false
+provenance:
+  origin: synthetic
+  created_at: "2026-09-24T00:00:00.000Z"
+  notes: Written by hand for the T10.9 pipeline contract. Not taken from any real thread.

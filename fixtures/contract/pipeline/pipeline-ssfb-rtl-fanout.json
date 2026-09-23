@@ -1,0 +1,222 @@
+{
+  "case_id": "pipeline-ssfb-rtl-fanout",
+  "notes": "The ID chain for pipeline-ssfb-rtl-fanout: the SSFB workflow copy has no row and the RTL copy has the form (LLD 04 §2.2, §2.7).",
+  "fixtures": [
+    {
+      "schema": 1,
+      "kind": "resolve_identity",
+      "entity": "global",
+      "key": {
+        "hop": "horus_customer_id",
+        "ids": [
+          [
+            "horus_customer_id",
+            "3a5c7e9b-2d4f-4a6c-8e0b-5d7f9b1c3e5a"
+          ]
+        ]
+      },
+      "key_string": "{\"hop\":\"horus_customer_id\",\"ids\":[[\"horus_customer_id\",\"3a5c7e9b-2d4f-4a6c-8e0b-5d7f9b1c3e5a\"]]}",
+      "result": {
+        "rows": [
+          {
+            "customer_id": "3a5c7e9b-2d4f-4a6c-8e0b-5d7f9b1c3e5a",
+            "account_form_id": "6d8f0b2c-4e6a-4c8e-9a1d-8f0b2d4e6a8c",
+            "cif_exists": true
+          }
+        ]
+      },
+      "meta": {
+        "source": "hand",
+        "recorded_at": "2026-09-24T00:00:00.000Z"
+      }
+    },
+    {
+      "schema": 1,
+      "kind": "resolve_identity",
+      "entity": "global",
+      "key": {
+        "hop": "account_form_id",
+        "ids": [
+          [
+            "account_form_id",
+            "6d8f0b2c-4e6a-4c8e-9a1d-8f0b2d4e6a8c"
+          ]
+        ]
+      },
+      "key_string": "{\"hop\":\"account_form_id\",\"ids\":[[\"account_form_id\",\"6d8f0b2c-4e6a-4c8e-9a1d-8f0b2d4e6a8c\"]]}",
+      "result": {
+        "rows": [
+          {
+            "form_id": "6d8f0b2c-4e6a-4c8e-9a1d-8f0b2d4e6a8c",
+            "external_user_ref": "8e0a2c4d-6f8b-4d0f-8b2e-0a2c4e6f8b0d",
+            "session_id": "sess-contract-01"
+          }
+        ]
+      },
+      "meta": {
+        "source": "hand",
+        "recorded_at": "2026-09-24T00:00:00.000Z"
+      }
+    },
+    {
+      "schema": 1,
+      "kind": "resolve_identity",
+      "entity": "global",
+      "key": {
+        "hop": "form_id.ssfb_workflow",
+        "ids": [
+          [
+            "form_id",
+            "6d8f0b2c-4e6a-4c8e-9a1d-8f0b2d4e6a8c"
+          ]
+        ]
+      },
+      "key_string": "{\"hop\":\"form_id.ssfb_workflow\",\"ids\":[[\"form_id\",\"6d8f0b2c-4e6a-4c8e-9a1d-8f0b2d4e6a8c\"]]}",
+      "result": {
+        "rows": []
+      },
+      "meta": {
+        "source": "hand",
+        "recorded_at": "2026-09-24T00:00:00.000Z"
+      }
+    },
+    {
+      "schema": 1,
+      "kind": "resolve_identity",
+      "entity": "global",
+      "key": {
+        "hop": "form_id.rtl_workflow",
+        "ids": [
+          [
+            "form_id",
+            "6d8f0b2c-4e6a-4c8e-9a1d-8f0b2d4e6a8c"
+          ]
+        ]
+      },
+      "key_string": "{\"hop\":\"form_id.rtl_workflow\",\"ids\":[[\"form_id\",\"6d8f0b2c-4e6a-4c8e-9a1d-8f0b2d4e6a8c\"]]}",
+      "result": {
+        "rows": [
+          {
+            "workflow_identifier": "rtl_onboarding_v2",
+            "status": "IN_PROGRESS",
+            "current_step_identifier": "KYC_REVIEW"
+          }
+        ]
+      },
+      "meta": {
+        "source": "hand",
+        "recorded_at": "2026-09-24T00:00:00.000Z"
+      }
+    },
+    {
+      "schema": 1,
+      "kind": "resolve_identity",
+      "entity": "global",
+      "key": {
+        "hop": "customer_id",
+        "ids": [
+          [
+            "customer_id",
+            "3a5c7e9b-2d4f-4a6c-8e0b-5d7f9b1c3e5a"
+          ]
+        ]
+      },
+      "key_string": "{\"hop\":\"customer_id\",\"ids\":[[\"customer_id\",\"3a5c7e9b-2d4f-4a6c-8e0b-5d7f9b1c3e5a\"]]}",
+      "result": {
+        "rows": [
+          {
+            "account_id": "1b3d5f7a-9c1e-4b3d-9f5a-6c8e0a2b4d6f",
+            "account_number": "730021907751930",
+            "account_type": "NRE",
+            "scheme_code": "NRE01"
+          }
+        ]
+      },
+      "meta": {
+        "source": "hand",
+        "recorded_at": "2026-09-24T00:00:00.000Z"
+      }
+    },
+    {
+      "schema": 1,
+      "kind": "resolve_identity",
+      "entity": "global",
+      "key": {
+        "hop": "state.harbor_customer",
+        "ids": [
+          [
+            "customer_id",
+            "3a5c7e9b-2d4f-4a6c-8e0b-5d7f9b1c3e5a"
+          ]
+        ]
+      },
+      "key_string": "{\"hop\":\"state.harbor_customer\",\"ids\":[[\"customer_id\",\"3a5c7e9b-2d4f-4a6c-8e0b-5d7f9b1c3e5a\"]]}",
+      "result": {
+        "rows": [
+          {
+            "state": "KYC_PENDING",
+            "sub_state": "NONE"
+          }
+        ]
+      },
+      "meta": {
+        "source": "hand",
+        "recorded_at": "2026-09-24T00:00:00.000Z"
+      }
+    },
+    {
+      "schema": 1,
+      "kind": "resolve_identity",
+      "entity": "global",
+      "key": {
+        "hop": "state.account_form",
+        "ids": [
+          [
+            "account_form_id",
+            "6d8f0b2c-4e6a-4c8e-9a1d-8f0b2d4e6a8c"
+          ]
+        ]
+      },
+      "key_string": "{\"hop\":\"state.account_form\",\"ids\":[[\"account_form_id\",\"6d8f0b2c-4e6a-4c8e-9a1d-8f0b2d4e6a8c\"]]}",
+      "result": {
+        "rows": [
+          {
+            "status_v2": "SUBMITTED"
+          }
+        ]
+      },
+      "meta": {
+        "source": "hand",
+        "recorded_at": "2026-09-24T00:00:00.000Z"
+      }
+    },
+    {
+      "schema": 1,
+      "kind": "resolve_identity",
+      "entity": "global",
+      "key": {
+        "hop": "state.rhythm_account",
+        "ids": [
+          [
+            "customer_id",
+            "3a5c7e9b-2d4f-4a6c-8e0b-5d7f9b1c3e5a"
+          ]
+        ]
+      },
+      "key_string": "{\"hop\":\"state.rhythm_account\",\"ids\":[[\"customer_id\",\"3a5c7e9b-2d4f-4a6c-8e0b-5d7f9b1c3e5a\"]]}",
+      "result": {
+        "rows": [
+          {
+            "account_status": "PENDING_ACTIVATION",
+            "debit_allowed": false,
+            "account_type": "NRE"
+          }
+        ]
+      },
+      "meta": {
+        "source": "hand",
+        "recorded_at": "2026-09-24T00:00:00.000Z"
+      }
+    }
+  ]
+}

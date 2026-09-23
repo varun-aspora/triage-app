@@ -1,0 +1,36 @@
+# Pipeline contract case (T10.9). Fictional people, ids and text, written by
+# hand. The classifier's answer is scripted as invalid output in the contract
+# file, so the case has no faux_classification. The run must still dispatch,
+# on strong, with classifier_error recorded (LLD 04 §2.3, D9).
+id: pipeline-classifier-failure
+taxonomy_version: v1
+label_source: synthetic
+request:
+  messages:
+    - ts: "1790209200.000100"
+      author: triage-bot
+      is_parent: true
+      text: |-
+        Horus Customer ID: 4c6e8a0b-3d5f-4b7d-9f1a-7e9b1d3f5a7c
+        Issue: Customer says the app is not working for them and gave no other detail.
+ids:
+  horus_customer_id: 4c6e8a0b-3d5f-4b7d-9f1a-7e9b1d3f5a7c
+id_chain:
+  ids:
+    horus_customer_id: 4c6e8a0b-3d5f-4b7d-9f1a-7e9b1d3f5a7c
+    customer_id: 4c6e8a0b-3d5f-4b7d-9f1a-7e9b1d3f5a7c
+    account_form_id: b5d7f9a1-3c5e-4d7f-8b9d-2c4e6a8b0d2f
+    user_id: 0d2f4b6c-8e0a-4f2b-8d4f-1b3d5f7a9c1e
+  hops:
+    - { from: horus_customer_id, to: customer_id, source: "ssfb:harbor.customer", status: resolved, taken_at: "2026-09-24T00:00:00.000Z" }
+    - { from: account_form_id, to: user_id, source: "ssfb:harbor.account_forms", status: resolved, taken_at: "2026-09-24T00:00:00.000Z" }
+basic_state:
+  - { item: harbor_customer_state, value: ONBOARDED, taken_at: "2026-09-24T00:00:00.000Z", source: "ssfb:harbor.customer", status: read }
+expected:
+  category: unknown
+  tier: strong
+  money_moved: false
+provenance:
+  origin: synthetic
+  created_at: "2026-09-24T00:00:00.000Z"
+  notes: Written by hand for the T10.9 pipeline contract. Not taken from any real thread.
