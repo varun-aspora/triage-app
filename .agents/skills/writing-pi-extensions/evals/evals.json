@@ -1,0 +1,56 @@
+{
+  "skill_name": "writing-pi-extensions",
+  "evals": [
+    {
+      "id": 0,
+      "name": "kubeconfig-permission-gate",
+      "prompt": "We keep having close calls where the agent runs kubectl against our prod cluster. I want a pi extension that blocks any bash command referencing our prod kubeconfig (~/.kube/prod-config) or a `--context prod-*` flag, asks me to confirm instead of hard-blocking when it's a read-only verb like get/describe/logs, and appends every attempt (allowed or blocked) to ~/.pi/agent/kubectl-audit.log. It needs to still work when I run pi with -p in CI, where nobody is there to confirm. Write it.",
+      "expected_output": "A single-file pi extension using pi.on(\"tool_call\"), isToolCallEventType(\"bash\", event), returning { block: true, reason }, guarded on ctx.hasUI for the confirm path, with append-based audit logging.",
+      "files": [],
+      "assertions": [
+        "Gates the command using pi.on(\"tool_call\", ...) rather than a tool override or a later event",
+        "Narrows the bash event with isToolCallEventType(\"bash\", event) so event.input is typed",
+        "Blocks by returning { block: true, reason } from the tool_call handler",
+        "Guards the interactive confirm behind ctx.hasUI so a -p / CI run cannot hang",
+        "Defines an explicit non-interactive fallback (deny, not silently allow) when there is no UI",
+        "Appends an audit line for both allowed and blocked attempts",
+        "Uses the correct extension shape: default-exported factory receiving ExtensionAPI",
+        "Invents no APIs that do not exist in pi's extension surface"
+      ]
+    },
+    {
+      "id": 1,
+      "name": "dynamic-tool-loading-advice",
+      "prompt": "I'm wrapping our internal platform API for pi - about 30 operations (deploys, rollbacks, log queries, feature flags, incident stuff). If I register all 30 as tools the system prompt gets huge and the model picks wrong ones. What's the right way to structure this in a pi extension? Show me the shape of the code.",
+      "expected_output": "Recommends registering all tools then narrowing with pi.setActiveTools() in session_start, plus a loader/search tool that activates matches. Must merge with getActiveTools() rather than replacing, keep the loader active, and mention the prompt-cache tradeoff.",
+      "files": [],
+      "assertions": [
+        "Recommends registering all tools up front and narrowing the active set with pi.setActiveTools()",
+        "Includes a loader/search tool the model calls to activate the tools it needs",
+        "Merges with pi.getActiveTools() instead of replacing the whole active set",
+        "Keeps the loader tool itself in the initial active set (no self-lockout)",
+        "Sets the initial narrowed active set in a session_start handler",
+        "Mentions the prompt-cache invalidation cost of changing the tool set",
+        "Invents no APIs that do not exist in pi's extension surface"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "fork-state-desync-fix",
+      "prompt": "This pi extension tracks a todo list but the state is wrong after I fork a session - I fork back to an earlier point and the todos from the abandoned branch are still there. Also happens with /tree. Can you fix it? File is at inputs/todo-extension.ts",
+      "expected_output": "Identifies that state is closure-only / rebuilt from getEntries() instead of getBranch(), rebuilds in session_start with a reset, also handles session_tree, and stores full snapshots in tool result details.",
+      "files": [
+        "inputs/todo-extension.ts"
+      ],
+      "assertions": [
+        "Diagnoses the root cause as state living only in a closure variable, never rebuilt from the session",
+        "Rebuilds the state in a session_start handler",
+        "Walks ctx.sessionManager.getBranch() rather than getEntries(), so abandoned branches are excluded",
+        "Resets the in-memory state before rebuilding it",
+        "Also rebuilds on session_tree, since /tree changes the branch without firing session_start",
+        "Persists a full state snapshot in the tool result details rather than a delta",
+        "Invents no APIs that do not exist in pi's extension surface"
+      ]
+    }
+  ]
+}

@@ -1,5 +1,8 @@
 tmp
 
+# Skill eval workspaces — fixtures, run outputs, gradings, benchmarks.
+# Regenerable, noisy in diffs, and not part of the skill itself.
+.agents/*-workspace/
 
 # dependencies (bun install)
 node_modules

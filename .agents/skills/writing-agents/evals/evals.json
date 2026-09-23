@@ -1,0 +1,72 @@
+{
+  "skill_name": "writing-agents",
+  "evals": [
+    {
+      "id": 0,
+      "name": "overengineering-pushback",
+      "prompt": "we've got a nightly job that pulls ~400 support tickets out of zendesk. for each one it needs to tag a product area (we have 6), pull out any refund amount mentioned, and flag angry customers for a human to look at. right now it's one claude call per ticket with a big prompt and it's getting maybe 15% of them wrong. i was thinking of turning it into a proper multi-agent setup - a router agent that picks a specialist agent per product area, and each specialist does the extraction. does that make sense? how should i structure it",
+      "expected_output": "Pushes back on the multi-agent plan. Recommends a code-driven pipeline with structured output classification, a cheap model, and building evals before restructuring. Notes the 15% error rate is a prompt/schema/eval problem, not a topology problem.",
+      "files": [],
+      "assertions": [
+        "Recommends against the proposed router + per-product-area specialist multi-agent design",
+        "Attributes the 15% error rate to prompt/schema/eval quality rather than to the topology",
+        "Recommends structured output (a validated schema) for the classification and extraction",
+        "Recommends building a labelled eval set on real tickets before restructuring",
+        "Names a concrete cost or latency consequence of the multi-agent plan (tokens, per-ticket calls, or run time)",
+        "Keeps the per-ticket fan-out in application code rather than making it a model routing decision"
+      ]
+    },
+    {
+      "id": 1,
+      "name": "build-research-orchestrator",
+      "prompt": "I'm building a competitor research agent with the openai agents sdk (typescript). User gives a company name, and it should come back with a short brief covering pricing, market positioning, and recent funding. Write me the orchestrator instructions and the subagent setup - I want the actual prompt text, not just a description of the architecture.",
+      "expected_output": "Concrete orchestrator instructions with an effort budget, three non-overlapping subagent briefs (objective / output format / sources / boundaries / budget), parallel spawn, explicit synthesis instruction, and a model split between lead and children. Uses asTool or handoffs correctly for the SDK.",
+      "files": [],
+      "assertions": [
+        "Delivers literal, usable prompt text for the orchestrator, not only an architecture description",
+        "Defines three distinct subagents covering pricing, positioning, and funding",
+        "Each subagent's instructions state the output format the parent will consume",
+        "Each subagent's instructions state explicit scope boundaries against its siblings",
+        "States an effort budget somewhere (tool-call count, source count, or equivalent)",
+        "Instructs the orchestrator to run the subagents in parallel rather than one at a time",
+        "Explicitly instructs synthesis of findings rather than concatenating subagent outputs",
+        "Assigns a different model to the orchestrator than to the subagents, or argues the tradeoff",
+        "Uses an OpenAI Agents SDK mechanism (asTool, handoffs, or Promise.all) consistent with the orchestrator owning the final answer",
+        "Tells the subagents what to do when a source is missing or a tool fails"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "debug-duplicate-subagents",
+      "prompt": "our research agent spawns 5 subagents per query and honestly like 3 of them come back with basically the same paragraph. there's nothing in the prompt telling them to overlap. the whole run also takes ~4 min and costs way more than we budgeted for. what do we actually change here",
+      "expected_output": "Diagnoses fuzzy task boundaries in the delegation briefs. Recommends decomposing by question not topic, explicit out-of-scope/sibling notes, effort budgets scaled to query complexity, parallel rather than serial spawning, pass-by-reference for large outputs, cheaper models for children, and measuring tokens/latency alongside quality.",
+      "files": [],
+      "assertions": [
+        "Identifies fuzzy or overlapping task boundaries in the delegation briefs as the root cause of duplication",
+        "Recommends decomposing the work by question rather than by topic",
+        "Recommends stating explicit out-of-scope boundaries in each brief, naming what a sibling covers",
+        "Recommends scaling the number of subagents to query complexity instead of a fixed 5",
+        "Addresses the 4-minute latency as a separate issue from the duplication (e.g. serial vs parallel spawning)",
+        "Recommends a concrete cost lever such as a cheaper model for subagents or a tool-call ceiling",
+        "Recommends measuring tokens, latency, or tool calls alongside output quality",
+        "Gives a diagnosis before a fix rather than listing generic optimisations"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "flue-missing-context",
+      "prompt": "in our flue agent the summarizer subagent keeps telling us it doesn't have the case details - stuff like \"I don't have access to the customer's conversation\". but the parent agent definitely has all of that in its context, it just read the whole case. why is this happening and what's the fix?",
+      "expected_output": "Explains that a Flue delegate runs in a fresh frame and does not inherit the parent's conversation, instructions, tools, skills, or state - only the task prompt reaches it. Fix: put standing role/method/output contract in the delegate's agent function, per-call facts in the task prompt, and pass large artifacts through the shared sandbox by path.",
+      "files": [],
+      "assertions": [
+        "States that a Flue delegate runs in a fresh context and does not inherit the parent's conversation",
+        "Identifies the task prompt as the delegate's complete briefing",
+        "Distinguishes the delegate's agent function (standing instructions) from the per-call task prompt, and says what belongs in each",
+        "Mentions the shared sandbox / files as the way to pass large case content by reference",
+        "Recommends changing the parent's instructions so it includes the needed facts when delegating",
+        "Uses only real Flue primitives (useSubagent, defineSubagent, the task tool, useSkill, useTool) without inventing APIs",
+        "Correctly states what a delegate does inherit (sandbox, harness tools, workspace, model/effort) when it discusses inheritance"
+      ]
+    }
+  ]
+}
