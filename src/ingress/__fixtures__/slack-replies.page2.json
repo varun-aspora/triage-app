@@ -1,0 +1,31 @@
+{
+  "ok": true,
+  "has_more": false,
+  "messages": [
+    {
+      "type": "message",
+      "subtype": "bot_message",
+      "ts": "1695460000.123456",
+      "thread_ts": "1695460000.123456",
+      "bot_id": "B0SYNTHBOT",
+      "username": "CX Issue Bot",
+      "bot_profile": { "name": "CX Issue Bot" },
+      "text": "*New CX Issue Raised*\n*Priority:* P2\n*Raised by:* Synth Raiser\n*Owner:* <@U0SYNTHB>\n*Customer Name:* Synth Customer\n*Tag:* account-opening\n*Summary:* synthetic user stuck on form step"
+    },
+    {
+      "type": "message",
+      "ts": "1695460300.000300",
+      "thread_ts": "1695460000.123456",
+      "user": "U0SYNTHA",
+      "text": "any update on this?"
+    },
+    {
+      "type": "message",
+      "ts": "1695460200.000200",
+      "thread_ts": "1695460000.123456",
+      "user": "U0SYNTHB",
+      "text": "looking into it"
+    }
+  ],
+  "response_metadata": { "next_cursor": "" }
+}

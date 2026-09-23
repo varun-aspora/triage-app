@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "kind": "slack_read",
+  "entity": "global",
+  "key": { "channel": "C0SYNTH01", "thread_ts": "1695460000.123456" },
+  "key_string": "{\"channel\":\"C0SYNTH01\",\"thread_ts\":\"1695460000.123456\"}",
+  "result": {
+    "messages": [
+      {
+        "ts": "1695460000.123456",
+        "author": "CX Issue Bot",
+        "text": "*New CX Issue Raised*\n*Priority:* P2\n*Raised by:* Synth Raiser\n*Owner:* <@U0SYNTHB>\n*Customer Name:* Synth Customer\n*Tag:* account-opening\n*Summary:* synthetic user stuck on form step",
+        "is_parent": true
+      },
+      { "ts": "1695460010.000100", "author": "synth.ops.one", "text": "screenshots attached", "is_parent": false },
+      { "ts": "1695460200.000200", "author": "Synth Ops Two", "text": "looking into it", "is_parent": false }
+    ],
+    "files": [
+      { "name": "screen-1.png", "mime": "image/png", "size": 8 },
+      { "name": "statement.pdf", "mime": "application/pdf", "size": 2048 }
+    ],
+    "names": ["synth.ops.one", "Synth Ops One", "Synth Ops Two", "Synth Raiser", "Synth Customer"]
+  },
+  "meta": { "source": "hand", "recorded_at": "2026-09-23T00:00:00.000Z" }
+}

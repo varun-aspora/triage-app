@@ -1,0 +1,54 @@
+{
+  "ok": true,
+  "has_more": true,
+  "messages": [
+    {
+      "type": "message",
+      "subtype": "bot_message",
+      "ts": "1695460000.123456",
+      "thread_ts": "1695460000.123456",
+      "bot_id": "B0SYNTHBOT",
+      "username": "CX Issue Bot",
+      "bot_profile": { "name": "CX Issue Bot" },
+      "text": "*New CX Issue Raised*\n*Priority:* P2\n*Raised by:* Synth Raiser\n*Owner:* <@U0SYNTHB>\n*Customer Name:* Synth Customer\n*Tag:* account-opening\n*Summary:* synthetic user stuck on form step"
+    },
+    {
+      "type": "message",
+      "ts": "1695460010.000100",
+      "thread_ts": "1695460000.123456",
+      "user": "U0SYNTHA",
+      "text": "screenshots attached",
+      "files": [
+        {
+          "id": "F0SYNTH1",
+          "name": "screen-1.png",
+          "mimetype": "image/png",
+          "size": 8,
+          "url_private": "https://files.slack.com/files-pri/T0SYNTH-F0SYNTH1/screen-1.png"
+        },
+        {
+          "id": "F0SYNTH2",
+          "name": "statement.pdf",
+          "mimetype": "application/pdf",
+          "size": 2048,
+          "url_private": "https://files.slack.com/files-pri/T0SYNTH-F0SYNTH2/statement.pdf"
+        },
+        {
+          "id": "F0SYNTH3",
+          "name": "huge.jpg",
+          "mimetype": "image/jpeg",
+          "size": 10485760,
+          "url_private": "https://files.slack.com/files-pri/T0SYNTH-F0SYNTH3/huge.jpg"
+        },
+        {
+          "id": "F0SYNTH4",
+          "name": "elsewhere.png",
+          "mimetype": "image/png",
+          "size": 8,
+          "url_private": "https://files.example.invalid/elsewhere.png"
+        }
+      ]
+    }
+  ],
+  "response_metadata": { "next_cursor": "c3ludGgtY3Vyc29yLTI=" }
+}
