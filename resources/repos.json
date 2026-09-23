@@ -1,0 +1,23 @@
+[
+  { "repo": "harbor", "entities": ["ssfb"] },
+  { "repo": "rhythm", "entities": ["ssfb"] },
+  { "repo": "guardian", "entities": ["ssfb"] },
+  { "repo": "comms-svc", "entities": ["ssfb"] },
+  { "repo": "cohort-service", "entities": ["ssfb"] },
+  { "repo": "pdf-generator", "entities": ["ssfb"] },
+  { "repo": "reminder-service", "entities": ["ssfb"] },
+  { "repo": "bro", "entities": ["ssfb"] },
+  { "repo": "eventbus", "entities": ["ssfb"] },
+  { "repo": "audit", "entities": ["ssfb"] },
+  { "repo": "shivalik-cbs-go", "entities": ["ssfb"] },
+  { "repo": "prod-ssfb-aspora-argo", "entities": ["ssfb"] },
+  { "repo": "workflow-op", "entities": ["ssfb", "rtl"] },
+  { "repo": "package-svc", "entities": ["atspl"] },
+  { "repo": "pulse-backend", "entities": ["atspl"] },
+  { "repo": "banking-service", "entities": ["rtl"] },
+  { "repo": "kyc-service", "entities": ["rtl"] },
+  { "repo": "go-commons", "entities": ["ssfb", "atspl", "rtl"] },
+  { "repo": "java-commons", "entities": ["ssfb", "atspl", "rtl"] },
+  { "repo": "vance-android", "entities": ["ssfb", "atspl", "rtl"] },
+  { "repo": "vance-ios", "entities": ["ssfb", "atspl", "rtl"] }
+]

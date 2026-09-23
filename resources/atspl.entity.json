@@ -1,0 +1,31 @@
+{
+  "entity": "atspl",
+  "aliases": [],
+  "services": {
+    "package": {
+      "db": "ATSPL_PACKAGE_DB_URL",
+      "api": "ATSPL_PACKAGE_API_URL",
+      "quickwit_service": "package",
+      "repo": "package-svc",
+      "note": "workers log as package-worker-sync and package-worker-queue"
+    },
+    "pulse": {
+      "db": "ATSPL_PULSE_DB_URL",
+      "api": "ATSPL_PULSE_API_URL",
+      "quickwit_service": "pulse-backend",
+      "repo": "pulse-backend",
+      "note": "service:pulse returns no hits; the log service is pulse-backend"
+    }
+  },
+  "quickwit_fields": ["service", "level", "message", "error", "raw_message", "timestamp", "x-req-id", "x-txn-id"],
+  "quickwit": {
+    "transport": "ATSPL_QUICKWIT_TRANSPORT",
+    "index": "ATSPL_QUICKWIT_INDEX",
+    "max_concurrency": "ATSPL_QUICKWIT_MAX_CONCURRENCY",
+    "max_hits": "ATSPL_QUICKWIT_MAX_HITS",
+    "http": { "url": "ATSPL_QUICKWIT_URL", "auth": "ATSPL_QUICKWIT_AUTH", "token": "ATSPL_QUICKWIT_TOKEN" },
+    "qw": { "context": "ATSPL_QW_CONTEXT" }
+  },
+  "kube": { "context_env": "ATSPL_KUBE_CONTEXT", "aws_profile_env": "ATSPL_AWS_PROFILE" },
+  "repos_extra": ["go-commons", "java-commons"]
+}

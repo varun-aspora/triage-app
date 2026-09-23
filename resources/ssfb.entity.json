@@ -1,0 +1,90 @@
+{
+  "entity": "ssfb",
+  "aliases": ["shivalik"],
+  "services": {
+    "harbor": {
+      "db": "SSFB_HARBOR_DB_URL",
+      "api": "SSFB_HARBOR_API_URL",
+      "quickwit_service": "harbor",
+      "repo": "harbor",
+      "customer_header": "x-customer-id",
+      "field_encryption": { "algorithm": "aes-siv", "key_env": "SSFB_HARBOR_FIELD_ENC_KEY" }
+    },
+    "rhythm": {
+      "db": "SSFB_RHYTHM_DB_URL",
+      "api": "SSFB_RHYTHM_API_URL",
+      "quickwit_service": "rhythm",
+      "repo": "rhythm",
+      "customer_header": "x-customer-id"
+    },
+    "guardian": {
+      "db": "SSFB_GUARDIAN_DB_URL",
+      "api": "SSFB_GUARDIAN_API_URL",
+      "quickwit_service": "guardian",
+      "repo": "guardian"
+    },
+    "comms": {
+      "db": "SSFB_COMMS_DB_URL",
+      "quickwit_service": "comms",
+      "repo": "comms-svc",
+      "note": "log service name is unconfirmed"
+    },
+    "workflow": {
+      "db": "SSFB_WORKFLOW_DB_URL",
+      "quickwit_service": "workflow-op",
+      "repo": "workflow-op",
+      "note": "Shivalik copy; RTL copy is rtl:workflow"
+    },
+    "cohort": {
+      "db": "SSFB_COHORT_DB_URL",
+      "api": "SSFB_COHORT_API_URL",
+      "quickwit_service": "cohort-service",
+      "repo": "cohort-service"
+    },
+    "pdfgen": {
+      "db": "SSFB_PDFGEN_DB_URL",
+      "quickwit_service": "pdf-generator",
+      "repo": "pdf-generator"
+    },
+    "reminder": {
+      "db": "SSFB_REMINDER_DB_URL",
+      "quickwit_service": "reminder-service",
+      "repo": "reminder-service",
+      "note": "the worker deployment logs under a name not yet confirmed"
+    },
+    "bro": {
+      "db": "SSFB_BRO_DB_URL",
+      "api": "SSFB_BRO_API_URL",
+      "auth": { "header": "Authorization", "scheme": "Bearer", "token_env": "SSFB_BRO_ADMIN_TOKEN" },
+      "quickwit_service": "bro",
+      "repo": "bro"
+    },
+    "eventbus": {
+      "quickwit_service": "eventbus",
+      "repo": "eventbus",
+      "note": "no known database; its pod is the in-cluster hop for cbs_call"
+    },
+    "audit": {
+      "quickwit_service": "audit-svc",
+      "repo": "audit",
+      "note": "logs and code only; no database key yet"
+    },
+    "finacle": {
+      "api": "SSFB_CBS_GATEWAY_URL",
+      "transport": "cbs",
+      "note": "reachable only through cbs_call; same rules file applies"
+    }
+  },
+  "quickwit_fields": ["service", "level", "message", "error", "raw_message", "timestamp", "x_req_id", "x_txn_id", "form_id", "x-customer-id"],
+  "quickwit": {
+    "transport": "SSFB_QUICKWIT_TRANSPORT",
+    "index": "SSFB_QUICKWIT_INDEX",
+    "max_concurrency": "SSFB_QUICKWIT_MAX_CONCURRENCY",
+    "max_hits": "SSFB_QUICKWIT_MAX_HITS",
+    "http": { "url": "SSFB_QUICKWIT_URL", "auth": "SSFB_QUICKWIT_AUTH", "token": "SSFB_QUICKWIT_TOKEN" },
+    "qw": { "context": "SSFB_QW_CONTEXT" }
+  },
+  "cbs": { "enabled_flag": "SSFB_CBS_VIA_KUBECTL_ENABLED" },
+  "kube": { "context_env": "SSFB_KUBE_CONTEXT", "aws_profile_env": "SSFB_AWS_PROFILE" },
+  "repos_extra": ["shivalik-cbs-go", "go-commons", "java-commons", "prod-ssfb-aspora-argo"]
+}
