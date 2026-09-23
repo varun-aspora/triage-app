@@ -1,0 +1,14 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`runDoctor table has stable columns and row order (snapshot) 1`] = `
+"check      entity  status    detail
+env        ssfb    ok        db harbor: set
+env        atspl   disabled  api package: ATSPL_PACKAGE_API_URL is blank, so api package is off
+sandbox    -       fail      TRIAGE_SANDBOX_PROVIDER is local, which is refused
+models     -       fail      threw Error
+fixtures   -       warn      3 unreviewed fixture file(s)
+embedding  -       skipped   probe skipped in mock mode
+
+1 ok, 1 warn, 2 fail, 1 disabled, 1 skipped
+"
+`;
