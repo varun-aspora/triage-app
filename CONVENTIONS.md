@@ -60,7 +60,7 @@ Add a file that matches the glob (*.tool.ts, *.command.ts, *.http.ts, src/agents
 
 ## Test placement
 
-Unit tests are colocated *.test.ts files next to the source and run by `bun run test` (bun test ./src ./test ./scripts, with preload running gen and installing the no-io guard). Contract tests are test/contract/**/*.contract.ts (never *.contract.test.ts) and eval files are *.eval.ts, both run by Vitest on Node (`bun run test:contract`) with the same no-io guard. promptfoo suites live under evals/promptfoo/ (`bun run evals:classifier`). No test reads a real .env: use makeTestHome() from test/support/home.ts and makeToolContext() from test/support/fake-tool-context.ts. Model calls in tests go only through the fake provider T03 provides. Only *.test.ts files may import bun:test; src/ never imports bun:* or uses Bun.*.
+Unit tests are colocated *.test.ts files next to the source and run by `bun run test` (bun test ./src ./test ./scripts ./integrations, with preload running gen and installing the no-io guard). Contract tests are test/contract/**/*.contract.ts (never *.contract.test.ts) and eval files are *.eval.ts, both run by Vitest on Node (`bun run test:contract`) with the same no-io guard. promptfoo suites live under evals/promptfoo/ (`bun run evals:classifier`). No test reads a real .env: use makeTestHome() from test/support/home.ts and makeToolContext() from test/support/fake-tool-context.ts. Model calls in tests go only through the fake provider T03 provides. Only *.test.ts files may import bun:test; src/ never imports bun:* or uses Bun.*.
 
 ## Commit format
 
