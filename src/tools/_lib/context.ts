@@ -19,7 +19,7 @@ import { createRunBudget, type EntityLimits, getRunBudget, type RunBudget } from
 import { createScopeSet, extendScopeSet, type ScopeSet } from '../../gate/scope.ts';
 import { createMockLayer, type MockLayer } from '../../mock/index.ts';
 import type { RunStore } from '../../runstore/types.ts';
-import type { Entity, Interface, RunId } from '../../types/core.ts';
+import type { Entity, Interface, RunId, TimeWindow } from '../../types/core.ts';
 import { type IdChain, IdChainSchema } from '../../types/id-chain.ts';
 import type { ToolDeps } from '../types.ts';
 
@@ -37,6 +37,8 @@ export type ToolRunInfo = {
   readonly interface: Interface;
   /** Names collected by ingress, for the persisted profile (D24). */
   readonly redactionNames: readonly string[];
+  /** The request window from ingress. logs_search uses it when the model gives no from/to. */
+  readonly window?: TimeWindow;
 };
 
 declare module '../types.ts' {
@@ -67,6 +69,8 @@ export type CreateToolDepsOptions = {
   /** Used for the per-entity Quickwit hit caps of a budget built here. */
   readonly registry?: Registry;
   readonly redactionNames?: readonly string[];
+  /** TriageRequest.window. Without it logs_search falls back to the lookback days up to now. */
+  readonly requestWindow?: TimeWindow;
   /** Fixtures under cases/<caseId>/ are checked first (evals). */
   readonly caseId?: string;
   // Overrides, mostly for tests. Each defaults to the real thing.
@@ -145,7 +149,11 @@ export function createToolDeps(opts: CreateToolDepsOptions): ToolDeps {
     connectors: opts.connectors,
     runStore: opts.runStore,
     escalation: opts.escalation ?? escalationFor(opts.runId),
-    run: Object.freeze({ interface: opts.interface, redactionNames: Object.freeze([...(opts.redactionNames ?? [])]) }),
+    run: Object.freeze({
+      interface: opts.interface,
+      redactionNames: Object.freeze([...(opts.redactionNames ?? [])]),
+      ...(opts.requestWindow !== undefined ? { window: Object.freeze({ ...opts.requestWindow }) } : {}),
+    }),
     now: opts.now ?? (() => new Date()),
     idChain: () => holder.chain,
   });
