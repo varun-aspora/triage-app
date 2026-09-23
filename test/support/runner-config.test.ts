@@ -77,8 +77,8 @@ describe('.env loading', () => {
 });
 
 describe('bun run test file selection', () => {
-  test('the test script is bun test over src, test and scripts', () => {
-    expect(pkg.scripts.test).toBe('bun test ./src ./test ./scripts');
+  test('the test script is bun test over src, test, scripts and integrations', () => {
+    expect(pkg.scripts.test).toBe('bun test ./src ./test ./scripts ./integrations');
   });
 
   test('contract and eval files are not picked up', () => {

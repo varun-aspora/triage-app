@@ -34,6 +34,7 @@
     "test/**/*.ts",
     "scripts/**/*.ts",
     "evals/**/*.ts",
+    "integrations/**/*.ts",
     "bin/**/*.mjs"
   ],
   "exclude": ["node_modules", "dist", ".data", "tmp"]

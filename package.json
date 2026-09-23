@@ -11,7 +11,7 @@
   "scripts": {
     "gen": "bun scripts/gen-indexes.ts",
     "postinstall": "bun run gen",
-    "test": "bun test ./src ./test ./scripts",
+    "test": "bun test ./src ./test ./scripts ./integrations",
     "test:contract": "bun run gen && vitest run",
     "typecheck": "bun run gen && bun run typecheck:raw",
     "typecheck:raw": "tsc --noEmit -p .",
