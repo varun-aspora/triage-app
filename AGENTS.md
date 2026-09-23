@@ -1,3 +1,7 @@
 ## Runtime Environment
 
-- Use Bun instead of Node.js, npm, pnpm, or vite. Check @.agents/rules/use-bun-instead-of-node-vite-npm-pnpm.md
+- Flue 2.0.8 app on Node >= 22.19. Use Bun for installs, scripts and unit tests; Vite and Vitest only where Flue needs them; no `Bun.*` or `bun:*` in `src/`. Check @.agents/rules/use-bun-instead-of-node-vite-npm-pnpm.md
+
+## Conventions
+
+- Directory layout, naming, tool, CLI, HTTP and agent file shapes, registration rules, test placement and commit format: @CONVENTIONS.md

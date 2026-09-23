@@ -1,5 +1,14 @@
 tmp
 
+# triage-app local state and generated files
+# Flue sqlite, run store folder provider and audit logs
+.data/
+# recorded fixtures and eval cases that no human has reviewed yet
+fixtures/_unreviewed/
+evals/_unreviewed/
+# import lists written by bun run gen
+*.gen.ts
+
 # Skill eval workspaces — fixtures, run outputs, gradings, benchmarks.
 # Regenerable, noisy in diffs, and not part of the skill itself.
 .agents/*-workspace/

@@ -1,111 +1,51 @@
 ---
-description: Use Bun instead of Node.js, npm, pnpm, or vite.
-globs: "*.ts, *.tsx, *.html, *.css, *.js, *.jsx, package.json"
+description: Bun for installs, scripts and unit tests; Vite and Vitest where Flue needs them; Node is the runtime, so no Bun APIs in src/.
+globs: "*.ts, *.tsx, *.js, *.jsx, *.mjs, package.json"
 alwaysApply: false
 ---
 
-Default to using Bun instead of Node.js.
+This project is a Flue 2.0.8 app. Flue builds with Vite, its evals run on
+Vitest, and the service runs on Node >= 22.19. Bun is the package manager, the
+script runner and the unit test runner. See docs/05-decisions.md D1 and D18.
 
-- Use `bun <file>` instead of `node <file>` or `ts-node <file>`
-- Use `bun test` instead of `jest` or `vitest`
-- Use `bun build <file.html|file.ts|file.css>` instead of `webpack` or `esbuild`
-- Use `bun install` instead of `npm install` or `yarn install` or `pnpm install`
-- Use `bun run <script>` instead of `npm run <script>` or `yarn run <script>` or `pnpm run <script>`
-- Use `bunx <package> <command>` instead of `npx <package> <command>`
-- Bun automatically loads .env, so don't use dotenv.
+## Use Bun for
 
-## APIs
+- Installing: `bun install`, `bun add`, `bun add -d`. Not npm, yarn or pnpm.
+- Running scripts: `bun run <script>`. Not `npm run`.
+- One-off package binaries: `bunx <package> <command>`. Not `npx`.
+- Unit tests: `bun test` (through `bun run test`). Unit tests are colocated
+  `*.test.ts` files.
+- Repo scripts under `scripts/`, which may use Bun APIs.
 
-- `Bun.serve()` supports WebSockets, HTTPS, and routes. Don't use `express`.
-- `bun:sqlite` for SQLite. Don't use `better-sqlite3`.
-- `Bun.redis` for Redis. Don't use `ioredis`.
-- `Bun.sql` for Postgres. Don't use `pg` or `postgres.js`.
-- `WebSocket` is built-in. Don't use `ws`.
-- Prefer `Bun.file` over `node:fs`'s readFile/writeFile
-- Bun.$`ls` instead of execa.
+## Vite, Vitest and Node are allowed where Flue needs them
 
-## Testing
+- `vite build` (through `bun run build`) builds the Flue app with the `flue()`
+  plugin from `@flue/vite`. Do not replace it with `bun build`.
+- Vitest runs contract tests (`test/contract/**/*.contract.ts`) and eval files
+  (`*.eval.ts`), because Flue's eval harness is Vitest-based.
+- `node` runs the CLI shim (`bin/triage.mjs`) and the built server
+  (`dist/server.mjs`).
 
-Use `bun test` to run tests.
+## No Bun APIs in src/
 
-```ts#index.test.ts
-import { test, expect } from "bun:test";
+The runtime is Node, so code under `src/` must run on Node without Bun:
 
-test("hello world", () => {
-  expect(1).toBe(1);
-});
-```
+- Do not use `Bun.*` (`Bun.serve`, `Bun.file`, `Bun.sql`, `Bun.$`, `Bun.env`
+  and so on) in `src/`.
+- Do not import `bun:*` modules (`bun:sqlite`, `bun:test`, `bun:ffi`) in `src/`.
+- Use Node and web APIs instead: `node:fs`, `node:path`, `fetch`, and the
+  packages already in `package.json` (`hono`, `@hono/node-server`, `pg`,
+  Flue's built-in `node:sqlite` adapter). Child processes go only through the
+  one exec runner in `src/connectors/`.
+- Do not use `better-sqlite3` or `libsql`: Flue's `sqlite()` adapter from
+  `@flue/runtime/node` covers sqlite.
+- Do not import `dotenv/config`. Config is loaded from `TRIAGE_HOME` by
+  `src/config/env.ts`, and Bun's automatic `.env` loading is turned off.
+- `src/` is erasable-only TypeScript (`erasableSyntaxOnly`) with explicit
+  `.ts` import extensions, so Node type stripping can run it: no enums, no
+  namespaces, no parameter properties.
 
-## Frontend
-
-Use HTML imports with `Bun.serve()`. Don't use `vite`. HTML imports fully support React, CSS, Tailwind.
-
-Server:
-
-```ts#index.ts
-import index from "./index.html"
-
-Bun.serve({
-  routes: {
-    "/": index,
-    "/api/users/:id": {
-      GET: (req) => {
-        return new Response(JSON.stringify({ id: req.params.id }));
-      },
-    },
-  },
-  // optional websocket support
-  websocket: {
-    open: (ws) => {
-      ws.send("Hello, world!");
-    },
-    message: (ws, message) => {
-      ws.send(message);
-    },
-    close: (ws) => {
-      // handle close
-    }
-  },
-  development: {
-    hmr: true,
-    console: true,
-  }
-})
-```
-
-HTML files can import .tsx, .jsx or .js files directly and Bun's bundler will transpile & bundle automatically. `<link>` tags can point to stylesheets and Bun's CSS bundler will bundle.
-
-```html#index.html
-<html>
-  <body>
-    <h1>Hello, world!</h1>
-    <script type="module" src="./frontend.tsx"></script>
-  </body>
-</html>
-```
-
-With the following `frontend.tsx`:
-
-```tsx#frontend.tsx
-import React from "react";
-import { createRoot } from "react-dom/client";
-
-// import .css files directly and it works
-import './index.css';
-
-const root = createRoot(document.body);
-
-export default function Frontend() {
-  return <h1>Hello, world!</h1>;
-}
-
-root.render(<Frontend />);
-```
-
-Then, run index.ts
-
-```sh
-bun --hot ./index.ts
-```
-
-For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
+Tests are exempt: `*.test.ts` files may import `bun:test`, and helpers under
+`test/support/` may use Bun APIs when only `bun test` loads them. Files that
+Vitest loads (`*.contract.ts`, `*.eval.ts` and the helpers they import) run on
+Node and follow the `src/` rule.

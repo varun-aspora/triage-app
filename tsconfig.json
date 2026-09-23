@@ -1,18 +1,19 @@
 {
   "compilerOptions": {
-    // Environment setup & latest features
+    // Environment. The runtime is Node >= 22.19; Bun runs installs, scripts and unit tests.
     "lib": ["ESNext"],
     "target": "ESNext",
     "module": "Preserve",
     "moduleDetection": "force",
-    "jsx": "react-jsx",
     "allowJs": true,
-    "types": ["bun"],
+    "types": ["bun", "node"],
 
-    // Bundler mode
+    // Bundler mode with explicit .ts import extensions, so Node type stripping
+    // can run src/ directly (bin/triage.mjs) and Vite can bundle it.
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
     "noEmit": true,
 
     // Best practices
@@ -26,5 +27,14 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
-  }
+  },
+  "include": [
+    "*.ts",
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "scripts/**/*.ts",
+    "evals/**/*.ts",
+    "bin/**/*.mjs"
+  ],
+  "exclude": ["node_modules", "dist", ".data", "tmp"]
 }

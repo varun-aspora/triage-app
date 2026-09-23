@@ -1,17 +1,43 @@
 {
   "name": "triage-app",
-  "module": "index.ts",
   "type": "module",
   "private": true,
-  "devDependencies": {
-    "@types/bun": "latest"
+  "engines": {
+    "node": ">=22.19"
   },
-  "peerDependencies": {
-    "typescript": "^7"
+  "scripts": {
+    "typecheck:raw": "tsc --noEmit -p .",
+    "build:raw": "vite build",
+    "triage": "node bin/triage.mjs"
   },
   "dependencies": {
+    "@daytonaio/sdk": "^0.216.1",
     "@earendil-works/pi-ai": "0.83.0",
-    "@flue/cli": "^2.0.8",
-    "@flue/runtime": "^2.0.8"
+    "@flue/cli": "2.0.8",
+    "@flue/postgres": "2.0.8",
+    "@flue/runtime": "2.0.8",
+    "@flue/vite": "2.0.8",
+    "@hono/node-server": "^2.1.1",
+    "commander": "^15.0.0",
+    "dotenv": "^18.0.3",
+    "e2b": "^2.51.0",
+    "hono": "4.12.32",
+    "just-bash": "^3.4.2",
+    "libpg-query": "^18.1.5",
+    "miscreant": "^0.3.2",
+    "pg": "^8.23.0",
+    "pgsql-ast-parser": "^12.0.2",
+    "pgvector": "^0.3.0",
+    "ulidx": "^2.4.1",
+    "valibot": "^1.5.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "@types/node": "^22.19",
+    "@types/pg": "^8.23.1",
+    "promptfoo": "^0.123.1",
+    "typescript": "7.0.2",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.1"
   }
 }
