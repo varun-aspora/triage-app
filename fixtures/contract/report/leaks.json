@@ -1,0 +1,13 @@
+{
+  "phone": {
+    "value": "+91 98765 43210",
+    "reply_text": "Please call the customer back on +91 98765 43210 and tell them onboarding will resume shortly.",
+    "pattern": "phone"
+  },
+  "base64_email": {
+    "value": "cmVhY2ggb3BzLmNvbnRyYWN0QGV4YW1wbGUudGVzdCBmb3IgdGhlIHJldHJ5",
+    "decoded": "ops.contract@example.test",
+    "command": "curl -sS -X POST \"$SSFB_RHYTHM_API_URL/v1/cards/dispatch/retry\" -H \"Authorization: Bearer $TOKEN\" -d '{\"note\": \"cmVhY2ggb3BzLmNvbnRyYWN0QGV4YW1wbGUudGVzdCBmb3IgdGhlIHJldHJ5\"}'",
+    "pattern": "email"
+  }
+}

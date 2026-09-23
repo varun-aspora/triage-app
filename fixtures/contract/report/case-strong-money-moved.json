@@ -1,0 +1,23 @@
+{
+  "id": "contract-report-strong-money-moved",
+  "taxonomy_version": "v1",
+  "label_source": "synthetic",
+  "request": { "text": "An outward transfer was debited two days ago and the beneficiary says it has not arrived." },
+  "ids": {},
+  "id_chain": { "ids": {}, "hops": [] },
+  "basic_state": [],
+  "expected": { "category": "transfer_out", "tier": "strong", "money_moved": true },
+  "faux_classification": {
+    "category": "transfer_out",
+    "subcategory": "imps",
+    "entities_likely": ["ssfb"],
+    "current_ask": "Find where the debited transfer is stuck.",
+    "money_moved": true,
+    "misdirected_funds": false,
+    "tier_proposed": "strong",
+    "confidence": 0.9,
+    "missing_info": [],
+    "images_seen": false
+  },
+  "provenance": { "origin": "synthetic", "notes": "Written by hand for the T10.6 report-path contract tests." }
+}

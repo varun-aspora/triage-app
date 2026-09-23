@@ -1,0 +1,30 @@
+{
+  "low": {
+    "evidence": [{ "source": "db", "at": "2026-09-20T10:00:00.000Z", "query_or_path": "contract", "summary": "the onboarding form row was not found" }],
+    "timeline": [],
+    "hypotheses": ["the onboarding step may have timed out"],
+    "confidence": "low",
+    "gaps": ["no log lines for the onboarding call"]
+  },
+  "medium": {
+    "evidence": [{ "source": "db", "at": "2026-09-20T10:00:00.000Z", "query_or_path": "contract", "summary": "nothing unusual found" }],
+    "timeline": [],
+    "hypotheses": ["the contract case has no fault"],
+    "confidence": "medium",
+    "gaps": []
+  },
+  "ssfb_blames_itself": {
+    "evidence": [{ "source": "logs", "at": "2026-09-20T10:01:00.000Z", "query_or_path": "contract", "summary": "the ssfb onboarding job logged a retry loop" }],
+    "timeline": [],
+    "hypotheses": ["the ssfb onboarding job is stuck in a retry loop"],
+    "confidence": "medium",
+    "gaps": []
+  },
+  "rtl_blames_itself": {
+    "evidence": [{ "source": "logs", "at": "2026-09-20T10:02:00.000Z", "query_or_path": "contract", "summary": "the rtl kyc callback failed with a timeout" }],
+    "timeline": [],
+    "hypotheses": ["the rtl kyc callback timed out and onboarding waits on it"],
+    "confidence": "high",
+    "gaps": []
+  }
+}

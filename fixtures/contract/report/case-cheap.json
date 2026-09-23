@@ -1,0 +1,23 @@
+{
+  "id": "contract-report-cheap",
+  "taxonomy_version": "v1",
+  "label_source": "synthetic",
+  "request": { "text": "The app shows a spinner on the onboarding screen and never moves on." },
+  "ids": {},
+  "id_chain": { "ids": {}, "hops": [] },
+  "basic_state": [],
+  "expected": { "category": "onboarding", "tier": "cheap", "money_moved": false },
+  "faux_classification": {
+    "category": "onboarding",
+    "subcategory": "",
+    "entities_likely": [],
+    "current_ask": "Why does onboarding not move on?",
+    "money_moved": false,
+    "misdirected_funds": false,
+    "tier_proposed": "cheap",
+    "confidence": 0.9,
+    "missing_info": [],
+    "images_seen": false
+  },
+  "provenance": { "origin": "synthetic", "notes": "Written by hand for the T10.6 report-path contract tests." }
+}
