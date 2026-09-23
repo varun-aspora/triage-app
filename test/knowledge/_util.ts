@@ -297,8 +297,15 @@ type LintRule = {
   readonly skip?: (match: RegExpExecArray) => boolean;
 };
 
-/** The one allowed text that contains an environment word. */
-export const ALLOWED_TEXT = ['prod-ssfb-aspora-argo'] as const;
+/**
+ * Exact texts that would trip a rule but are allowed: the argo repo name
+ * (environment word) and the sim-binding skill path that patterns.json cites
+ * as a source_ref (.claude/ directory).
+ */
+export const ALLOWED_TEXT = [
+  'prod-ssfb-aspora-argo',
+  'triage-shivalik .claude/skills/aspora-harbor-shivalik-sim-binding-issue/SKILL.md',
+] as const;
 
 const TLDS = [
   'com', 'net', 'org', 'io', 'in', 'co', 'uk', 'ae', 'ai', 'app', 'dev', 'cloud', 'local',

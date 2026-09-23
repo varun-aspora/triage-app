@@ -1,0 +1,463 @@
+[
+  {
+    "id": "welcome-letter-vendor-fail",
+    "category": "delivery",
+    "signature": {
+      "regex": [
+        "welcome[ _-]?letter[^\\n]{0,120}(vendor|carrier|courier)",
+        "(vendor|carrier|courier)[^\\n]{0,120}welcome[ _-]?letter"
+      ],
+      "services": ["atspl:package", "ssfb:harbor"]
+    },
+    "entities": ["atspl", "ssfb"],
+    "query_recipe": "On atspl: sql_select on package delivery_requests where external_ref_id = <customer_id>, then delivery_events for that request to read the vendor's last status. A vendor failure is a carrier problem: quote the vendor text and count other customers with the same failure in the window. No row at all: on ssfb, sql_select on harbor customer state and logs_search on harbor for WelcomeLetterDeliveryRequested to see whether the customer reached KYC_VERIFIED and the delivery was requested. A DELIVERED row with an inactive address points at the harbor callback side.",
+    "tier_hint": "mid",
+    "stable": false,
+    "source_ref": "knowledge/atspl-package/SKILL.md#Known issues"
+  },
+  {
+    "id": "remittance-order-out-of-reach",
+    "category": "funding_in",
+    "signature": {
+      "regex": ["/appserver/v3/order", "appserver[^\\n]{0,40}\\border\\b"],
+      "services": []
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "Out of reach: the remittance order backend is not mapped to any entity, so no tool can read the order. Do not retry or look for another way in. At most, get_account_statement on the receiving account for the window to show whether a credit arrived, record the order backend as a gap with note_evidence, and escalate.",
+    "tier_hint": "strong",
+    "stable": false,
+    "source_ref": "knowledge/patterns/SKILL.md#Out of reach: remittance orders"
+  },
+  {
+    "id": "harbor-pan-passport-name-mismatch",
+    "category": "onboarding",
+    "signature": {
+      "regex": [
+        "pan name (&|and) passport name (doesn'?t|does not) match",
+        "document verification handler failed"
+      ],
+      "services": ["ssfb:harbor"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "logs_search on harbor, level error, message 'document verification handler failed', error 'Pan name passport name match support', fields form_id = <form_id>, over the window. The line carries the form_id, so no correlation is needed.",
+    "tier_hint": "cheap",
+    "stable": true,
+    "source_ref": "knowledge/ssfb-harbor/SKILL.md#PAN and passport name mismatch at harbor's own check"
+  },
+  {
+    "id": "cbs-fuzzy-check-review",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["FZYCHCKREVIEW", "fuzzy ratios are lesser than minimum fuzzy check ratio"],
+      "services": ["ssfb:harbor", "ssfb:finacle"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "logs_search on harbor, message 'calling CBS API to create customer', fields form_id = <form_id>, to get the anchor line and its x_txn_id. Then logs_search on harbor, fields x_txn_id = <x_txn_id>, and take the lines nearest in time to the anchor, because x_txn_id is reused. Each CBS failure writes two error lines; count failures, not lines.",
+    "tier_hint": "mid",
+    "stable": true,
+    "source_ref": "knowledge/ssfb-harbor/SKILL.md#CBS rejects the customer with FZYCHCKREVIEW"
+  },
+  {
+    "id": "cbs-cif-already-exists",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["CIF already exists"],
+      "services": ["ssfb:harbor", "ssfb:finacle"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "logs_search on harbor, message 'HTTP Response', terms RetCustAdd, over the window, and read ESBStatus. 'CIF already exists' with MINKYC and a CIF present is a retry of a call that already worked; harbor recovers the CIF itself. Look at the earlier attempt for the real outcome.",
+    "tier_hint": "cheap",
+    "stable": true,
+    "source_ref": "knowledge/ssfb-harbor/SKILL.md#The CBS customer response: read ESBStatus, not AML Status"
+  },
+  {
+    "id": "cbs-customer-create-in-progress",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["last request still in progress,? please wait"],
+      "services": ["ssfb:harbor", "ssfb:finacle"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "logs_search on harbor, message 'HTTP Response', terms RetCustAdd, over the window. ESBStatus Code INPROGRESS means a duplicate submit was in flight; find the other attempt and report its outcome.",
+    "tier_hint": "cheap",
+    "stable": true,
+    "source_ref": "knowledge/ssfb-harbor/SKILL.md#The CBS customer response: read ESBStatus, not AML Status"
+  },
+  {
+    "id": "cbs-expired-document",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["Expiry Date has to be greater than or equal to Today'?s Date"],
+      "services": ["ssfb:harbor", "ssfb:finacle"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "logs_search on harbor, message 'HTTP Response', terms RetCustAdd, over the window. An ESBStatus Description with CRMEJB code 0306 means an expired document in the customer-create payload; name the document type from the harbor form.",
+    "tier_hint": "cheap",
+    "stable": true,
+    "source_ref": "knowledge/ssfb-harbor/SKILL.md#The CBS customer response: read ESBStatus, not AML Status"
+  },
+  {
+    "id": "cbs-email-length",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["PhoneEmail\\.Email"],
+      "services": ["ssfb:harbor", "ssfb:finacle"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "logs_search on harbor, message 'HTTP Response', terms RetCustAdd, over the window. An ESBStatus Description with CRMEJB code 0024 on attribute PhoneEmail.Email means the email is too long or too short for Finacle.",
+    "tier_hint": "cheap",
+    "stable": true,
+    "source_ref": "knowledge/ssfb-harbor/SKILL.md#The CBS customer response: read ESBStatus, not AML Status"
+  },
+  {
+    "id": "cbs-nsdl-pan-name-mismatch",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["PAN Name does not match with NSDL records"],
+      "services": ["ssfb:harbor", "ssfb:finacle"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "logs_search on harbor, message 'HTTP Response', terms RetCustAdd, over the window, and read RetCustDetails.Status. 'PAN Name does not match with NSDL records' is an NSDL name mismatch, separate from harbor's own PAN and passport check.",
+    "tier_hint": "cheap",
+    "stable": true,
+    "source_ref": "knowledge/ssfb-harbor/SKILL.md#The CBS customer response: read ESBStatus, not AML Status"
+  },
+  {
+    "id": "harbor-pan-verification-hides-error",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["PAN verification failed,? please try again"],
+      "services": ["ssfb:harbor"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "logs_search on harbor, error 'PAN verification failed', fields form_id = <form_id>, then logs_search on harbor, message 'HTTP Response', fields x_txn_id = <x_txn_id>, and read the response body in raw_message. A 500 naming a CBS-internal upstream is bank-side: escalate with the request_uuid. A following 'Request UUID Already Submitted' is harbor reusing the UUID on retry; report the 500. An 'error in fuzzy check' line means the fuzzy-check call itself failed.",
+    "tier_hint": "mid",
+    "stable": false,
+    "source_ref": "knowledge/ssfb-harbor/SKILL.md#\"PAN verification failed, please try again\" hides the real error"
+  },
+  {
+    "id": "harbor-document-verification-rate-limit",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["Too many attempts[^\\n]{0,20}please contact customer support"],
+      "services": ["ssfb:harbor"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "logs_search on harbor, error 'Too many attempts', fields form_id = <form_id>, over the window. The limit is 3 attempts per form in a sliding window, and concurrent double submits each use a slot. Do not quote a window length from the repo defaults; the observed window differs.",
+    "tier_hint": "cheap",
+    "stable": true,
+    "source_ref": "knowledge/ssfb-harbor/SKILL.md#Document verification rate limit"
+  },
+  {
+    "id": "harbor-rfi-draft-specialist-reviewing",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["specialist is (now )?reviewing"],
+      "services": ["ssfb:harbor"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "sql_select on harbor rfi_requests_v3 joined to rfi_items_v3 where reference_id = <form_id>, then audit_logs for the form, RFI and item ids, then logs_search on harbor, message 'NSTP_INTERNAL_REVIEW pulse ticket created', fields form_id = <form_id>. state DRAFT with published_at null is the designed first NSTP review screen; a DRAFT older than a few minutes is a review waiting in a queue.",
+    "tier_hint": "cheap",
+    "stable": true,
+    "source_ref": "knowledge/ssfb-harbor/SKILL.md#\"A specialist is reviewing\" never clears: RFI still in DRAFT"
+  },
+  {
+    "id": "harbor-digital-form-never-signed",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["DocumentSigningProcessRequested", "digital[ _]form[^\\n]{0,40}(not|never) signed"],
+      "services": ["ssfb:harbor"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "sql_select on harbor digital_forms where form_id = <form_id> for status and provider. If status never reached signed, customer creation never started and nothing logs an error.",
+    "tier_hint": "cheap",
+    "stable": false,
+    "source_ref": "knowledge/ssfb-harbor/SKILL.md#Digital form never signed, so customer creation never starts"
+  },
+  {
+    "id": "harbor-workflow-doc-fetch-failed",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["failed to pull form submission data from workflow", "empty error from workflow"],
+      "services": ["ssfb:harbor", "rtl:banking", "rtl:workflow"]
+    },
+    "entities": ["ssfb", "rtl"],
+    "query_recipe": "On ssfb: logs_search on harbor, level error, with the form_id tokens as terms (form ids split on hyphens in the index), over the window, grouped by message. On rtl: logs_search on banking and workflow for the same form to see why the form-submission-data pull failed. An empty error body from the workflow side is its own group.",
+    "tier_hint": "mid",
+    "stable": false,
+    "source_ref": "triage-shivalik .claude/skills/aspora-harbor-shivalik-sim-binding-issue/SKILL.md"
+  },
+  {
+    "id": "harbor-form-country-code-null",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["country[ _]?code (was |is )?(null|nil|missing|empty)"],
+      "services": ["ssfb:harbor"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "logs_search on harbor, level error, with the form_id tokens as terms, over the window, grouped by message. Count hits per form so the report shows which forms are stuck on the null country code.",
+    "tier_hint": "mid",
+    "stable": false,
+    "source_ref": "triage-shivalik .claude/skills/aspora-harbor-shivalik-sim-binding-issue/SKILL.md"
+  },
+  {
+    "id": "harbor-form-account-types-empty",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["account[ _]?types[^\\n]{0,20}(was |is )?empty"],
+      "services": ["ssfb:harbor", "rtl:banking"]
+    },
+    "entities": ["ssfb", "rtl"],
+    "query_recipe": "On ssfb: logs_search on harbor, level error, with the form_id tokens as terms, over the window. On rtl: account types in the form-submission-data response default to NRE and NRO, so logs_search on banking for the same form to see what it returned.",
+    "tier_hint": "mid",
+    "stable": false,
+    "source_ref": "triage-shivalik .claude/skills/aspora-harbor-shivalik-sim-binding-issue/SKILL.md"
+  },
+  {
+    "id": "form-submission-phone-mismatch",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["PHONE_NUMBER_MISMATCH"],
+      "services": ["ssfb:harbor", "rtl:banking"]
+    },
+    "entities": ["rtl", "ssfb"],
+    "query_recipe": "On rtl: logs_search on banking for PHONE_NUMBER_MISMATCH on the form over the window; banking checks the phone on every form-submission-data pull. On ssfb: logs_search on harbor, level error, with the form_id tokens as terms, to confirm harbor saw the mismatch. Compare the two phone numbers only as masked values.",
+    "tier_hint": "mid",
+    "stable": false,
+    "source_ref": "knowledge/rtl-banking/SKILL.md#Known issues"
+  },
+  {
+    "id": "form-submission-execution-not-found",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["WORKFLOW_EXECUTION_NOT_FOUND"],
+      "services": ["rtl:banking", "rtl:workflow", "ssfb:harbor"]
+    },
+    "entities": ["rtl", "ssfb"],
+    "query_recipe": "On rtl: sql_select on workflow workflow_executions for the user to see whether an NRI_ONBOARDING, NRI_ONBOARDING_V3 or NRI_ONBOARDING_UAE execution exists, and logs_search on banking for WORKFLOW_EXECUTION_NOT_FOUND over the window. Check this handoff before blaming harbor.",
+    "tier_hint": "mid",
+    "stable": false,
+    "source_ref": "knowledge/rtl-banking/SKILL.md#Known issues"
+  },
+  {
+    "id": "workflow-template-control-char",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["Illegal unquoted character", "JsonTemplateHandler"],
+      "services": ["ssfb:workflow", "rtl:workflow"]
+    },
+    "entities": ["ssfb", "rtl"],
+    "query_recipe": "logs_search on workflow, fields raw_message JsonTemplateHandler, terms Illegal and unquoted, over the window. The error line has no form_id, so sql_select on workflow workflow_executions to check whether the user's execution is stuck on that step. The cause is a raw tab or newline in user data placed bare in a JSON string by a template; retrying never helps.",
+    "tier_hint": "mid",
+    "stable": true,
+    "source_ref": "knowledge/ssfb-workflow/SKILL.md#Known issues"
+  },
+  {
+    "id": "workflow-landing-cohort-filter",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["landing (screen|variant|page)[^\\n]{0,60}(not|never) (shown|shows|visible)", "filter_values"],
+      "services": ["ssfb:workflow", "rtl:workflow"]
+    },
+    "entities": ["ssfb", "rtl"],
+    "query_recipe": "sql_select on workflow for the user's workflow definition and read the cohort_data filter_values. A landing branch that never shows for a user in the cohort usually means the cohort name is missing from filter_values.",
+    "tier_hint": "mid",
+    "stable": false,
+    "source_ref": "knowledge/ssfb-workflow/SKILL.md#Known issues"
+  },
+  {
+    "id": "rtl-workflow-revert-stuck",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["(revert|go[ -]?back)[^\\n]{0,40}stuck", "workflow_execution_actions"],
+      "services": ["rtl:workflow"]
+    },
+    "entities": ["rtl"],
+    "query_recipe": "sql_select on workflow workflow_execution_actions for the execution; a row left in STARTED or STUCK is the blocker.",
+    "tier_hint": "cheap",
+    "stable": false,
+    "source_ref": "knowledge/rtl-workflow/SKILL.md#Known issues"
+  },
+  {
+    "id": "rtl-persona-verdict-not-landing",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["PERSONA_(INQUIRY|VERIFICATION)_COMPLETED", "persona[^\\n]{0,40}(verdict|result)[^\\n]{0,40}(not|never|missing)"],
+      "services": ["rtl:kyc"]
+    },
+    "entities": ["rtl"],
+    "query_recipe": "sql_select on kyc kyc_inquiries for the status, then kyc_verifications for the failing attempt, then kyc_sync_audit to see whether Persona was reached. Verdicts arrive by SQS on the critical webhook events queue, not HTTP, so logs_search on kyc for the critical event consumer over the window. Suspect the consumer, which can be switched off by configuration.",
+    "tier_hint": "mid",
+    "stable": false,
+    "source_ref": "knowledge/rtl-kyc/SKILL.md#Known issues"
+  },
+  {
+    "id": "rtl-evisa-inquiry-id-alias",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["visa_inquiry_id", "partner_inquiry_id"],
+      "services": ["rtl:kyc", "rtl:banking"]
+    },
+    "entities": ["rtl"],
+    "query_recipe": "sql_select on kyc visa_inquiries and visa_attempts for the user. banking returns kyc's partner_inquiry_id as visa_inquiry_id: the same value under two names, not a mismatch.",
+    "tier_hint": "cheap",
+    "stable": false,
+    "source_ref": "knowledge/rtl-kyc/SKILL.md#Known issues"
+  },
+  {
+    "id": "rtl-exit-nudge-missing",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["exit nudge"],
+      "services": ["rtl:banking"]
+    },
+    "entities": ["rtl"],
+    "query_recipe": "logs_search on banking for the exit nudge over the window. The RTL reminder-service it schedules is out of scope for v1, so a missing RTL reminder is recorded with note_evidence as out of reach.",
+    "tier_hint": "mid",
+    "stable": false,
+    "source_ref": "knowledge/rtl-banking/SKILL.md#Known issues"
+  },
+  {
+    "id": "bro-stp-check-failed",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["form_stp_checks", "STP check[^\\n]{0,40}(fail|pending)"],
+      "services": ["ssfb:bro", "ssfb:harbor"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "sql_select on bro form_stp_checks for the form, then bre_evaluation_runs for the failing check's rule. A form harbor has not moved on, with no harbor error, usually has a failing or pending check. Report the check id and the rule; do not suggest editing the rule.",
+    "tier_hint": "mid",
+    "stable": false,
+    "source_ref": "knowledge/ssfb-bro/SKILL.md#Known issues"
+  },
+  {
+    "id": "pulse-staff-cannot-action-review",
+    "category": "onboarding",
+    "signature": {
+      "regex": ["(cannot|can'?t|unable to) (action|approve|reject)[^\\n]{0,60}(console|pulse)"],
+      "services": ["atspl:pulse", "ssfb:harbor"]
+    },
+    "entities": ["ssfb", "atspl"],
+    "query_recipe": "On ssfb: sql_select on harbor for the form and RFI state first, since pulse proxies harbor admin. On atspl: logs_search on pulse error logs over the window for pulse to harbor connectivity. Pulse tickets are keyed by the harbor form_id.",
+    "tier_hint": "mid",
+    "stable": false,
+    "source_ref": "knowledge/atspl-pulse/SKILL.md#Known issues"
+  },
+  {
+    "id": "sim-binding-no-vendor-callback",
+    "category": "auth",
+    "signature": {
+      "regex": ["sim_country_code\\W{0,5}0\\b", "sim[ _-]?binding[^\\n]{0,80}(sms|otp)[^\\n]{0,40}(never|not) (arrived|received|came)"],
+      "services": ["ssfb:guardian"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "sql_select on guardian for the user's SIM binding attempts; sim_country_code = 0 means no vendor callback came. Check the SIM's country against the supported ones, then logs_search on guardian with the <verification_id> as a term for the vendor webhook handling. sim_card_number has no country code; add the dial code before comparing it to the registered phone.",
+    "tier_hint": "mid",
+    "stable": false,
+    "source_ref": "knowledge/ssfb-guardian/SKILL.md#Known issues"
+  },
+  {
+    "id": "rhythm-utc-ist-inquiry-date",
+    "category": "transfer_out",
+    "signature": {
+      "regex": ["bank_identifier still empty after max retries", "Transaction doesn'?t exist\\."],
+      "services": ["ssfb:rhythm"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "logs_search on rhythm, terms bank_identifier, empty, retries, dropping, over the window, then logs_search on rhythm with terms <account_number> and bank_identifier. Confirm that every dropped event falls between 00:00 and 05:30 IST and spans many customers, and that the payment ErrorDesc1 date and the inquiry tran_date are one day apart.",
+    "tier_hint": "mid",
+    "stable": true,
+    "source_ref": "knowledge/ssfb-rhythm/SKILL.md#UTC/IST date bug breaks IMPS, NEFT and RTGS confirmation (00:00 to 05:30 IST)"
+  },
+  {
+    "id": "rhythm-imps-reversed-invalid-beneficiary",
+    "category": "transfer_out",
+    "signature": {
+      "regex": ["REVERSED\\s*:\\s*IMPS", "ResponseCode\\W{0,5}U31", "Processing_001"],
+      "services": ["ssfb:rhythm"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "detect_silent_reversals on the account since the window start, and get_account_statement for the window: the reversal shows only in the statement. Then sql_select on rhythm beneficiaries for the customer and logs_search on rhythm, terms BenefBankIFSC, <ifsc_prefix> and IMPS, to compare the beneficiary's digit count with other payees at the same bank. An internal transfer succeeding while external IMPS reverses points at the beneficiary.",
+    "tier_hint": "mid",
+    "stable": false,
+    "source_ref": "knowledge/ssfb-rhythm/SKILL.md#IMPS debited then reversed: invalid beneficiary account number"
+  },
+  {
+    "id": "rhythm-account-frozen-gspm",
+    "category": "transfer_out",
+    "signature": {
+      "regex": ["ACCOUNT FROZEN-\\s*GSPM"],
+      "services": ["ssfb:rhythm", "ssfb:finacle"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "logs_search on rhythm, message 'CBS transaction processing failed', terms <txn_ref_id>, over the window; the DB row has no reason. Then http_call on rhythm GET /admin/v1/accounts/<account_id> and re-read account_flags.debit.allowed before reporting the freeze as current, because freezes can clear bank-side.",
+    "tier_hint": "cheap",
+    "stable": true,
+    "source_ref": "knowledge/ssfb-rhythm/SKILL.md#ACCOUNT FROZEN- GSPM -(G) on an outward transfer"
+  },
+  {
+    "id": "rhythm-user-disabled-transfers",
+    "category": "transfer_out",
+    "signature": {
+      "regex": ["USER_DISABLED_TRANSFERS", "transfers disabled"],
+      "services": ["ssfb:rhythm"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "sql_select on rhythm user_limit_transaction_settings for the customer: a real row with type transfer and enabled false is the user's own setting. Re-read it live and check version and updated_at before concluding, since the user can re-enable at any time.",
+    "tier_hint": "cheap",
+    "stable": true,
+    "source_ref": "knowledge/ssfb-rhythm/SKILL.md#\"Transfers disabled\" banner: the user turned transfers off"
+  },
+  {
+    "id": "rhythm-upi-link-bank-side",
+    "category": "upi_third_party",
+    "signature": {
+      "regex": ["UPI PIN[^\\n]{0,20}(set|setup|registration)?[^\\n]{0,20}fail", "(can'?t|cannot|unable to) link[^\\n]{0,20}(paytm|phonepe)"],
+      "services": []
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "http_call on rhythm GET /admin/v1/accounts/<account_id> to prove the account is healthy, then escalate as a bank ticket. No Aspora service is in the UPI PIN path. Work out which OTP the user means: only the issuer OTP for UPI PIN set is a bank matter.",
+    "tier_hint": "cheap",
+    "stable": true,
+    "source_ref": "knowledge/ssfb-rhythm/SKILL.md#UPI and Paytm linking: rhythm is not in the path"
+  },
+  {
+    "id": "rhythm-card-status-inactive",
+    "category": "card",
+    "signature": {
+      "regex": ["card[^\\n]{0,40}\\binactive\\b", "pin_status"],
+      "services": ["ssfb:rhythm"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "http_call on rhythm GET /admin/v1/cards/customer/<customer_id>, then the same for another customer: INACTIVE is the norm for virtual cards and unknown CBS statuses map to INACTIVE. Ignore pin_status, which is hardcoded.",
+    "tier_hint": "cheap",
+    "stable": true,
+    "source_ref": "knowledge/ssfb-rhythm/SKILL.md#Card status INACTIVE is normal; pin_status is a mock"
+  },
+  {
+    "id": "rhythm-debit-card-client-cancel",
+    "category": "card",
+    "signature": {
+      "regex": ["context canceled"],
+      "services": ["ssfb:rhythm"]
+    },
+    "entities": ["ssfb"],
+    "query_recipe": "logs_search on rhythm, message 'Api ended with Error', terms cards and debit, over the window. A 500 with context canceled after one to two seconds is the app disconnecting before the slow CBS card inquiry returns. Count affected customers to show it is systemic.",
+    "tier_hint": "cheap",
+    "stable": true,
+    "source_ref": "knowledge/ssfb-rhythm/SKILL.md#Debit card 500s are the client cancelling, not a card problem"
+  },
+  {
+    "id": "part2-wrong-auth-mode",
+    "category": "auth",
+    "signature": {
+      "regex": ["\\b40[13]\\b[^\\n]{0,80}part ?2", "part ?2[^\\n]{0,80}\\b40[13]\\b"],
+      "services": ["ssfb:workflow", "rtl:workflow"]
+    },
+    "entities": ["ssfb", "rtl"],
+    "query_recipe": "logs_search on workflow for the 401 or 403 on the Part 2 call over the window, and check which token the call carried: the onboarding session token after onboarding, or the banking access token mid-onboarding or during RFI, is the usual cause.",
+    "tier_hint": "mid",
+    "stable": false,
+    "source_ref": "knowledge/frontend-routing/SKILL.md#Known issues"
+  }
+]
