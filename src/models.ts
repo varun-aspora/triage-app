@@ -139,7 +139,7 @@ function ollamaModelIds(config: Config): string[] {
 // Ollama's OpenAI-compatible endpoint, keyless. Models are declared text-only:
 // Ollama does not report vision support up front, so the tier policy treats them
 // as unable to take images. Context and output sizes follow the Flue guide example.
-function ollamaProvider(baseUrl: string, ids: readonly string[]) {
+export function ollamaProvider(baseUrl: string, ids: readonly string[]) {
   return createProvider({
     id: OLLAMA,
     name: 'Ollama (local)',
