@@ -87,15 +87,34 @@ describe('methodText', () => {
     expect(text).toContain('Entity: <one enabled entity per brief>');
   });
 
-  test('falls back to the narrowed hints when no entities are passed', () => {
-    const text = methodText(init(), { knowledge });
-    expect(text).toContain('- Enabled entities: atspl (');
+  test('names the hinted entities as the place to start, not a limit', () => {
+    const text = methodText(init(), { knowledge, entities: ['ssfb', 'atspl', 'rtl'], focus: ['atspl'] });
+    expect(text).toContain('- Enabled entities: ssfb, atspl, rtl (');
+    expect(text).toContain('- Named in the request: atspl. Start there, and brief any other enabled entity');
     expect(text).toContain('Entity: atspl');
   });
 
-  test('with no entity named anywhere, says so instead of inventing one', () => {
-    const text = methodText(init({ hints: {} }), { knowledge });
-    expect(text).toContain('- Enabled entities: none were named for this run');
+  test('defaults to every entity and to the hints for the focus', () => {
+    const text = methodText(init(), { knowledge });
+    expect(text).toContain('- Enabled entities: ssfb, atspl, rtl (');
+    expect(text).toContain('- Named in the request: atspl.');
+  });
+
+  test('a focus entity that is not enabled is dropped', () => {
+    const text = methodText(init(), { knowledge, entities: ['ssfb'], focus: ['atspl'] });
+    expect(text).toContain('- Named in the request: none.');
+    expect(text).toContain('Entity: ssfb');
+  });
+
+  test('with no entity named, says so and leaves the choice to the root', () => {
+    const text = methodText(init({ hints: {} }), { knowledge, entities: ['ssfb', 'rtl'] });
+    expect(text).toContain('- Named in the request: none. Pick the entities from the category');
+    expect(text).toContain('Entity: <one enabled entity per brief>');
+  });
+
+  test('with no enabled entity, says only code_walker is there', () => {
+    const text = methodText(init({ hints: {} }), { knowledge, entities: [] });
+    expect(text).toContain('- Enabled entities: none; you have only code_walker');
   });
 
   test('shows known ids with resolved ids winning over hints, in key order', () => {

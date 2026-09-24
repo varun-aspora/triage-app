@@ -12,7 +12,7 @@ import { defineSubagent, type SkillDefinition, type SubagentDefinition } from '@
 import { codeWalkerModel } from '../../models.ts';
 import { toolsFor } from '../../tools/index.ts';
 import type { RunId } from '../../types/core.ts';
-import { codegraphLimitsSkill, currentKnowledge, methodDoc, repoMapSkill } from '../skills.ts';
+import { codegraphLimitsSkill, currentKnowledge, frontendRoutingSkill, methodDoc, repoMapSkill } from '../skills.ts';
 import {
   checkRunId,
   delegateContext,
@@ -25,7 +25,6 @@ import {
 
 export const CODE_WALKER_NAME = 'code_walker';
 export const CODE_WALKER_DOC = 'code-walker.md';
-const FRONTEND_ROUTING = 'frontend-routing';
 
 export type CodeWalkerOptions = {
   readonly env: DelegateEnv;
@@ -60,7 +59,7 @@ export function codeWalkerMounts(runId: RunId, options: { readonly env: Delegate
   const skills = [
     repoMapSkill(knowledge),
     codegraphLimitsSkill(knowledge),
-    knowledge.skills.get(FRONTEND_ROUTING),
+    frontendRoutingSkill(knowledge),
   ].filter((s): s is SkillDefinition => s !== undefined);
 
   const doc = methodDoc(CODE_WALKER_DOC, knowledge);

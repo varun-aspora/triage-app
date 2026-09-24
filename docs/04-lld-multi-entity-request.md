@@ -162,7 +162,7 @@ Inside `Triage()`:
 const init = useInitialData<TriageInit>();                       // schema on Triage.initialData rejects a bare create
 useModel(modelForTier(init.classification.tier_final), { thinkingLevel: thinkingForTier(init.classification.tier_final) });
 useInstruction(methodText(init));                                 // always-on method + report format
-const entities = enabledEntities(init.request.hints.entities);   // TRIAGE_ENTITIES narrowed, never widened
+const entities = enabledEntitiesFor(config, registry);            // every enabled entity; hints only set the focus in the instruction
 for (const e of entities) {
   useSubagent(investigatorFor(e, init.request.request_id));                       // investigate_<e>
   useSubagent(investigatorFor(e, init.request.request_id, { deep: true }));       // investigate_<e>_deep, model MODEL_TIER_STRONG

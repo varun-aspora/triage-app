@@ -2,7 +2,7 @@
 //
 // methodText(init) joins the orchestrator's knowledge/method docs with a
 // short fixed rule block and the run's own data: run id, window, enabled
-// entities, known ids and a brief skeleton pre-filled with them. It is pure
+// entities, the entities the request names, known ids and a brief skeleton pre-filled with them. It is pure
 // and reads only the knowledge cached at boot, so it is safe in a render.
 
 import { ENTITIES, KNOWN_ID_KEYS, type Entity, type KnownIds } from '../types/core.ts';
@@ -16,11 +16,13 @@ export const ORCHESTRATOR_DOCS = ['orchestrator.md', 'brief-template.md', 'repor
 export const BRIEF_FIELDS = ['Entity', 'Question', 'Ids', 'Window', 'Services in play', 'Return'] as const;
 
 export type MethodOptions = {
-  /**
-   * The run's enabled entities, already narrowed (TRIAGE_ENTITIES narrowed by
-   * request.hints.entities). When omitted, request.hints.entities is used.
-   */
+  /** The run's enabled entities, each with its investigators. Defaults to every entity. */
   readonly entities?: readonly Entity[];
+  /**
+   * The enabled entities the request names, where the root starts. Defaults
+   * to request.hints.entities kept to the enabled ones.
+   */
+  readonly focus?: readonly Entity[];
   /** Registry services per entity, shown in the brief skeleton. */
   readonly services?: Partial<Readonly<Record<Entity, readonly string[]>>>;
   /** Defaults to the knowledge loaded at boot. */
@@ -42,25 +44,42 @@ export function methodText(init: TriageInit, options: MethodOptions = {}): strin
   const docs = ORCHESTRATOR_DOCS.map((name) => knowledge.method.get(name)).filter(
     (text): text is string => text !== undefined && text !== '',
   );
-  const entities = enabledFor(init, options.entities);
+  const entities = canonical(options.entities ?? ENTITIES);
+  const focus = canonical(options.focus ?? init.request.hints.entities ?? []).filter((e) => entities.includes(e));
   const ids = knownIds(init);
   const window = `${init.request.window.from} .. ${init.request.window.to}`;
 
-  const sections = [...docs, FIXED_RULES, runSection(init, entities, ids, window), briefSection(entities, ids, window, options.services)];
+  const sections = [
+    ...docs,
+    FIXED_RULES,
+    runSection(init, entities, focus, ids, window),
+    briefSection(focus.length > 0 ? focus : entities, ids, window, options.services),
+  ];
   return `${sections.join('\n\n')}\n`;
 }
 
-function runSection(init: TriageInit, entities: readonly Entity[], ids: string, window: string): string {
+function runSection(
+  init: TriageInit,
+  entities: readonly Entity[],
+  focus: readonly Entity[],
+  ids: string,
+  window: string,
+): string {
   const entityLine =
     entities.length > 0
       ? `${entities.join(', ')} (each has investigate_<entity> and investigate_<entity>_deep)`
-      : 'none were named for this run; brief only the investigate_<entity> subagents you have';
+      : 'none; you have only code_walker';
+  const focusLine =
+    focus.length > 0
+      ? `${focus.join(', ')}. Start there, and brief any other enabled entity when the evidence points to it.`
+      : 'none. Pick the entities from the category, the id chain and its basic state.';
   return [
     '## This run',
     '',
     `- Run id: ${clean(init.request.request_id)}`,
     `- Window: ${window}`,
     `- Enabled entities: ${entityLine}`,
+    `- Named in the request: ${focusLine}`,
     `- Known ids: ${ids}`,
     `- Tier: ${init.classification.tier_final}`,
   ].join('\n');
@@ -96,9 +115,9 @@ function briefSection(
   ].join('\n');
 }
 
-function enabledFor(init: TriageInit, given: readonly Entity[] | undefined): Entity[] {
-  const wanted = new Set<string>(given ?? init.request.hints.entities ?? []);
-  // Keep the canonical order and drop anything that is not a known entity.
+// Keep the canonical order and drop anything that is not a known entity.
+function canonical(given: readonly string[]): Entity[] {
+  const wanted = new Set<string>(given);
   return ENTITIES.filter((e) => wanted.has(e));
 }
 

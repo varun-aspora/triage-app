@@ -116,7 +116,7 @@ describe('Triage root', () => {
     expect(new Set(agents).size).toBe(agents.length);
     const plan = b.plan.triagePlan(init, home.config, home.registry);
     expect(agents).toEqual([...plan.delegates]);
-    expect(listed(system, '## Available Skills')).toEqual(['ssfb-overview', 'atspl-overview', 'rtl-overview', 'patterns']);
+    expect(listed(system, '## Available Skills')).toEqual(['ssfb-overview', 'atspl-overview', 'rtl-overview', 'patterns', 'frontend-routing']);
   });
 });
 
@@ -173,19 +173,44 @@ describe('delegates', () => {
   });
 });
 
-describe('entity narrowing', () => {
-  test('hints.entities=[atspl] mounts only investigate_atspl, investigate_atspl_deep and code_walker', async () => {
+describe('entity focus', () => {
+  test('hints.entities=[atspl] still mounts every enabled entity and names atspl as the start', async () => {
     const { s, result } = await reportRun('mount_hint_atspl', ['atspl']);
     expect(result.ok).toBe(true);
     const first = s.callsFor('triage')[0] as SeenCall;
-    expect(listed(first.systemPrompt, '## Available Agents')).toEqual([
-      'investigate_atspl',
-      'investigate_atspl_deep',
-      'code_walker',
-    ]);
-    expect(listed(first.systemPrompt, '## Available Skills')).toEqual(['atspl-overview', 'patterns']);
-    // Narrowing changes delegates and skills only; the root's own tools stay the same.
+    expect(listed(first.systemPrompt, '## Available Agents')).toEqual([...ALL_DELEGATES]);
+    expect(listed(first.systemPrompt, '## Available Skills')).toEqual(['ssfb-overview', 'atspl-overview', 'rtl-overview', 'patterns', 'frontend-routing']);
+    expect(first.systemPrompt).toContain('- Named in the request: atspl.');
+    // The focus changes the instruction only; the root's own tools stay the same.
     expect(sorted(ownTools(first))).toEqual(TRIAGE_TOOLS);
+  });
+
+  test('a run hinted at ssfb can follow up with the rtl and atspl investigators', async () => {
+    const id = nextRunId('mount_follow_up');
+    const init = triageInit(id, { hints: ['ssfb'] });
+    await createRun(b.store, init);
+    const brief = (entity: string) => `Entity: ${entity}\nQuestion: is the form stuck here?\nIds: none\nWindow: last week\nServices in play: workflow\nReturn: findings`;
+    const s = scriptAgents(fake, {
+      triage: [
+        toolCall('task', { agent: 'investigate_ssfb', prompt: brief('ssfb') }),
+        toolCalls([
+          { name: 'task', args: { agent: 'investigate_rtl', prompt: brief('rtl') } },
+          { name: 'task', args: { agent: 'investigate_atspl', prompt: brief('atspl') } },
+        ]),
+        finish(reportDraft(init)),
+        text('report written'),
+      ],
+      investigate_ssfb: [text('harbor shows the form waiting on workflow-op; check rtl')],
+      investigate_rtl: [text('rtl workflow-op has the step failed')],
+      investigate_atspl: [text('no welcome letter was requested')],
+    });
+
+    const result = await runTriage(b.Triage, id, init);
+
+    expect(result.ok).toBe(true);
+    expect(s.left()).toEqual({ triage: 0, investigate_ssfb: 0, investigate_rtl: 0, investigate_atspl: 0 });
+    for (const key of ['investigate_ssfb', 'investigate_rtl', 'investigate_atspl'] as const) expect(s.callsFor(key)).toHaveLength(1);
+    expect(fake.failures()).toEqual([]);
   });
 
   describe('with TRIAGE_ENTITIES=ssfb,atspl', () => {
@@ -210,22 +235,25 @@ describe('entity narrowing', () => {
       ]);
     });
 
-    test('a hint for an entity outside TRIAGE_ENTITIES mounts nothing extra', async () => {
+    test('a hint for an entity outside TRIAGE_ENTITIES mounts nothing extra and is not the focus', async () => {
       const only = await reportRun('mount_narrow_rtl', ['rtl']);
       expect(only.result.ok).toBe(true);
       const system = (only.s.callsFor('triage')[0] as SeenCall).systemPrompt;
-      expect(listed(system, '## Available Agents')).toEqual(['code_walker']);
-      expect(listed(system, '## Available Skills')).toEqual(['patterns']);
-      expect(system).not.toContain('investigate_rtl');
-
-      const mixed = await reportRun('mount_narrow_mixed', ['atspl', 'rtl']);
-      const mixedSystem = (mixed.s.callsFor('triage')[0] as SeenCall).systemPrompt;
-      expect(listed(mixedSystem, '## Available Agents')).toEqual([
+      expect(listed(system, '## Available Agents')).toEqual([
+        'investigate_ssfb',
+        'investigate_ssfb_deep',
         'investigate_atspl',
         'investigate_atspl_deep',
         'code_walker',
       ]);
-      expect(listed(mixedSystem, '## Available Skills')).toEqual(['atspl-overview', 'patterns']);
+      expect(listed(system, '## Available Skills')).toEqual(['ssfb-overview', 'atspl-overview', 'patterns', 'frontend-routing']);
+      expect(system).not.toContain('investigate_rtl');
+      expect(system).toContain('- Named in the request: none.');
+
+      const mixed = await reportRun('mount_narrow_mixed', ['atspl', 'rtl']);
+      const mixedSystem = (mixed.s.callsFor('triage')[0] as SeenCall).systemPrompt;
+      expect(mixedSystem).toContain('- Named in the request: atspl.');
+      expect(mixedSystem).not.toContain('investigate_rtl');
     });
 
     test('a task to a delegate that is not mounted is refused and no model call reaches it', async () => {
@@ -248,7 +276,9 @@ describe('entity narrowing', () => {
       const task = second.toolResults.find((r) => r.toolName === 'task');
       // Flue answers with a plain text refusal that names what is available.
       expect(task?.text).toContain('"investigate_rtl" is not declared');
-      expect(task?.text).toContain('Available subagents: code_walker.');
+      expect(task?.text).toContain(
+        'Available subagents: investigate_ssfb, investigate_ssfb_deep, investigate_atspl, investigate_atspl_deep, code_walker.',
+      );
       expect(fake.failures()).toEqual([]);
     });
   });

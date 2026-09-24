@@ -8,8 +8,10 @@
 // - the method text as an always-on instruction;
 // - toolsFor('triage'): resolve_identity, note_evidence and finish_report
 //   only, so the root has no entity I/O of its own;
-// - per enabled entity, investigate_<e>, investigate_<e>_deep and the
-//   <e>-overview skill; then code_walker and the patterns skill.
+// - per enabled entity (all of them, not only the hinted ones, so a
+//   follow-up can reach any entity), investigate_<e>, investigate_<e>_deep
+//   and the <e>-overview skill; then code_walker and the patterns and
+//   frontend-routing skills.
 // The choices themselves live in triage-plan.ts, which is unit tested.
 //
 // Persistent state: plan, evidence_index and escalation (mirrored from the
@@ -37,7 +39,7 @@ import { codeWalkerFor } from './delegates/code-walker.ts';
 import { type DelegateEnv, investigatorFor } from './delegates/investigator.ts';
 import type { Escalation } from './escalation.ts';
 import { methodText } from './instruction.ts';
-import { overviewSkill, patternsSkill } from './skills.ts';
+import { frontendRoutingSkill, overviewSkill, patternsSkill } from './skills.ts';
 import {
   calledFinish,
   durabilityAtImport,
@@ -68,7 +70,7 @@ export function Triage({ id }: AgentProps): string {
   useSandbox(rt.sandbox);
 
   const services = Object.fromEntries(plan.entities.map((e) => [e, rt.registry.services(e)]));
-  useInstruction(methodText(init, { entities: plan.entities, services, knowledge: rt.knowledge }));
+  useInstruction(methodText(init, { entities: plan.entities, focus: plan.focus, services, knowledge: rt.knowledge }));
 
   const deps = runDepsFor(id, init, rt);
   for (const tool of toolsFor('triage', triageToolContext(id, deps, rt))) useTool(watchFinishReport(id, tool));
@@ -83,6 +85,8 @@ export function Triage({ id }: AgentProps): string {
   useSubagent(codeWalkerFor(id, { env }));
   const patterns = patternsSkill(rt.knowledge);
   if (patterns !== undefined) useSkill(patterns);
+  const routing = frontendRoutingSkill(rt.knowledge);
+  if (routing !== undefined) useSkill(routing);
 
   const [savedPlan, setPlan] = usePersistentState<PlanState | null>('plan', null);
   const [evidenceIndex, setEvidenceIndex] = usePersistentState<EvidenceIndexEntry[]>('evidence_index', []);

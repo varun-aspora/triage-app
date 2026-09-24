@@ -23,6 +23,7 @@ import {
   durabilityAtImport,
   durabilityFor,
   enabledEntitiesFor,
+  focusEntitiesFor,
   FINISH_REQUIRED_SIGNAL,
   finishDecision,
   FinishRequiredError,
@@ -202,33 +203,42 @@ describe('triagePlan: model and thinking', () => {
 });
 
 describe('triagePlan: entities, delegates and skills', () => {
-  test('hints.entities=[atspl] gives only the atspl delegates and code_walker', () => {
+  test('hints.entities=[atspl] still mounts every enabled entity, with atspl as the focus', () => {
     const h = home();
     const plan = triagePlan(init({ hints: ['atspl'] }), h.config, h.registry);
-    expect(plan.entities).toEqual(['atspl']);
-    expect(plan.delegates).toEqual(['investigate_atspl', 'investigate_atspl_deep', 'code_walker']);
-    expect(plan.skills).toEqual(['atspl-overview', 'patterns']);
+    expect(plan.entities).toEqual(['ssfb', 'atspl', 'rtl']);
+    expect(plan.focus).toEqual(['atspl']);
+    expect(plan.delegates).toEqual([
+      'investigate_ssfb',
+      'investigate_ssfb_deep',
+      'investigate_atspl',
+      'investigate_atspl_deep',
+      'investigate_rtl',
+      'investigate_rtl_deep',
+      'code_walker',
+    ]);
+    expect(plan.skills).toEqual(['ssfb-overview', 'atspl-overview', 'rtl-overview', 'patterns', 'frontend-routing']);
   });
 
   test('a hint for an entity outside TRIAGE_ENTITIES adds nothing', () => {
     const h = home(['ssfb', 'atspl']);
     const onlyOutside = triagePlan(init({ hints: ['rtl'] }), h.config, h.registry);
-    expect(onlyOutside.entities).toEqual([]);
-    expect(onlyOutside.delegates).toEqual(['code_walker']);
-    expect(onlyOutside.skills).toEqual(['patterns']);
+    expect(onlyOutside.entities).toEqual(['ssfb', 'atspl']);
+    expect(onlyOutside.focus).toEqual([]);
+    expect(onlyOutside.delegates).not.toContain('investigate_rtl');
+    expect(onlyOutside.skills).not.toContain('rtl-overview');
 
     const mixed = triagePlan(init({ hints: ['atspl', 'rtl'] }), h.config, h.registry);
-    expect(mixed.entities).toEqual(['atspl']);
-    expect(mixed.delegates).not.toContain('investigate_rtl');
+    expect(mixed.focus).toEqual(['atspl']);
     expect(mixed.delegates).not.toContain('investigate_rtl_deep');
-    expect(mixed.skills).not.toContain('rtl-overview');
   });
 
-  test('no hints, or an empty list, means every enabled entity', () => {
+  test('no hints, or an empty list, means every enabled entity and no focus', () => {
     const h = home(['ssfb', 'rtl']);
     for (const data of [init(), init({ hints: [] })]) {
       const plan = triagePlan(data, h.config, h.registry);
       expect(plan.entities).toEqual(['ssfb', 'rtl']);
+      expect(plan.focus).toEqual([]);
       expect(plan.delegates).toEqual([
         'investigate_ssfb',
         'investigate_ssfb_deep',
@@ -236,20 +246,23 @@ describe('triagePlan: entities, delegates and skills', () => {
         'investigate_rtl_deep',
         'code_walker',
       ]);
-      expect(plan.skills).toEqual(['ssfb-overview', 'rtl-overview', 'patterns']);
+      expect(plan.skills).toEqual(['ssfb-overview', 'rtl-overview', 'patterns', 'frontend-routing']);
     }
   });
 
-  test('narrowing never widens, for every enabled set and every hint set', () => {
+  test('hints never change what is mounted, and the focus is always inside it', () => {
     const subsets = (all: readonly Entity[]): Entity[][] =>
       all.reduce<Entity[][]>((acc, e) => [...acc, ...acc.map((s) => [...s, e])], [[]]);
     for (const enabled of subsets(ENTITIES).filter((s) => s.length > 0)) {
       const h = home(enabled);
+      const mounted = enabledEntitiesFor(h.config, h.registry);
+      expect([...mounted]).toEqual(ENTITIES.filter((e) => enabled.includes(e)));
       for (const hints of subsets(ENTITIES)) {
-        const got = enabledEntitiesFor(init({ hints }), h.config, h.registry);
-        const allowed = hints.length === 0 ? enabled : enabled.filter((e) => hints.includes(e));
-        expect([...got]).toEqual(ENTITIES.filter((e) => allowed.includes(e)));
-        for (const e of got) expect(enabled).toContain(e);
+        const plan = triagePlan(init({ hints }), h.config, h.registry);
+        expect(plan.entities).toEqual(mounted);
+        expect([...focusEntitiesFor(init({ hints }), mounted, h.registry)]).toEqual(
+          ENTITIES.filter((e) => enabled.includes(e) && hints.includes(e)),
+        );
       }
     }
   });
@@ -265,7 +278,8 @@ describe('triagePlan: entities, delegates and skills', () => {
     const h = home();
     const state = planState(triagePlan(init({ hints: ['ssfb'] }), h.config, h.registry));
     expect(JSON.parse(JSON.stringify(state))).toEqual(state);
-    expect(state.entities).toEqual(['ssfb']);
+    expect(state.entities).toEqual(['ssfb', 'atspl', 'rtl']);
+    expect(state.focus).toEqual(['ssfb']);
   });
 });
 

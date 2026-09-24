@@ -403,6 +403,10 @@ export function patternsSkill(knowledge: Knowledge = currentKnowledge()): SkillD
   return knowledge.skills.get('patterns');
 }
 
+export function frontendRoutingSkill(knowledge: Knowledge = currentKnowledge()): SkillDefinition | undefined {
+  return knowledge.skills.get('frontend-routing');
+}
+
 export function repoMapSkill(knowledge: Knowledge = currentKnowledge()): SkillDefinition | undefined {
   return knowledge.skills.get('repo-map');
 }

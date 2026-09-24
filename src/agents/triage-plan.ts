@@ -3,9 +3,11 @@
 //
 // The first half is pure, so it can be unit tested under bun:
 // - triagePlan(init, config, registry): the tier model and its thinking
-//   level, the enabled entities (TRIAGE_ENTITIES narrowed by
-//   request.hints.entities, never widened) and the delegate and skill names
-//   the root mounts for them.
+//   level, the enabled entities (every one in TRIAGE_ENTITIES that the
+//   registry enables), the focus (the enabled entities request.hints.entities
+//   names) and the delegate and skill names the root mounts. Hints set where
+//   the root starts, not what it can reach: a case that starts in one entity
+//   often continues in another.
 // - finishDecision(retries, calledFinish): what useAgentFinish does when a
 //   response would stop. Signal once, then fail.
 // - durabilityFor(config) and the persistent state mirrors.
@@ -69,6 +71,7 @@ export const FINISH_REQUIRED_BODY =
 export const MAX_FINISH_SIGNALS = 1;
 
 export const PATTERNS_SKILL = 'patterns';
+export const FRONTEND_ROUTING_SKILL = 'frontend-routing';
 
 export function overviewSkillName(entity: Entity): string {
   return `${entity}-overview`;
@@ -81,44 +84,55 @@ export type TriagePlan = {
   /** modelForTier(tier_final), a 'provider/model' spec. */
   readonly model: string;
   readonly thinkingLevel: ThinkingLevel;
-  /** TRIAGE_ENTITIES narrowed by request.hints.entities, in ENTITIES order. */
+  /** Every enabled entity, in ENTITIES order. Each gets its investigators. */
   readonly entities: readonly Entity[];
+  /** The enabled entities request.hints.entities names, in ENTITIES order; empty with no hints. */
+  readonly focus: readonly Entity[];
   /** investigate_<e> and investigate_<e>_deep per entity, then code_walker. */
   readonly delegates: readonly string[];
-  /** <e>-overview per entity, then patterns. */
+  /** <e>-overview per entity, then patterns and frontend-routing. */
   readonly skills: readonly string[];
 };
 
-/**
- * The run's entities. Hints only narrow: a hinted entity outside
- * TRIAGE_ENTITIES adds nothing, and no hints (or an empty list) means every
- * enabled entity. When every hint is outside the enabled set the result is
- * empty; the root then has only code_walker.
- */
+/** Every entity in TRIAGE_ENTITIES that the registry enables. The root mounts investigators for all of them. */
 export function enabledEntitiesFor(
-  init: Pick<TriageInit, 'request'>,
   config: Pick<Config, 'entities'>,
-  registry: Pick<Registry, 'enabledEntities' | 'isEnabled'>,
+  registry: Pick<Registry, 'isEnabled'>,
 ): readonly Entity[] {
-  const narrowed = new Set<string>(registry.enabledEntities(init.request.hints.entities ?? []));
-  return Object.freeze(
-    ENTITIES.filter((e) => narrowed.has(e) && config.entities.includes(e) && registry.isEnabled(e)),
-  );
+  return Object.freeze(ENTITIES.filter((e) => config.entities.includes(e) && registry.isEnabled(e)));
+}
+
+/**
+ * The enabled entities the request names, where the root starts. A hinted
+ * entity that is not enabled adds nothing; no hints (or an empty list) means
+ * no focus, and the root picks from the category and the id chain.
+ */
+export function focusEntitiesFor(
+  init: Pick<TriageInit, 'request'>,
+  enabled: readonly Entity[],
+  registry: Pick<Registry, 'enabledEntities'>,
+): readonly Entity[] {
+  const hints = init.request.hints.entities ?? [];
+  if (hints.length === 0) return Object.freeze([]);
+  const named = new Set<string>(registry.enabledEntities(hints));
+  return Object.freeze(enabled.filter((e) => named.has(e)));
 }
 
 export function triagePlan(init: TriageInit, config: Config, registry: Registry): TriagePlan {
   const tier = init.classification.tier_final;
-  const entities = enabledEntitiesFor(init, config, registry);
+  const entities = enabledEntitiesFor(config, registry);
+  const focus = focusEntitiesFor(init, entities, registry);
   const delegates = [
     ...entities.flatMap((e) => [investigatorName(e), investigatorName(e, true)]),
     CODE_WALKER_NAME,
   ];
-  const skills = [...entities.map(overviewSkillName), PATTERNS_SKILL];
+  const skills = [...entities.map(overviewSkillName), PATTERNS_SKILL, FRONTEND_ROUTING_SKILL];
   return Object.freeze({
     tier,
     model: modelForTier(tier, config),
     thinkingLevel: thinkingForTier(tier, config),
     entities,
+    focus,
     delegates: Object.freeze(delegates),
     skills: Object.freeze(skills),
   });
@@ -130,6 +144,7 @@ export type PlanState = {
   readonly model: string;
   readonly thinking_level: ThinkingLevel;
   readonly entities: Entity[];
+  readonly focus: Entity[];
   readonly delegates: string[];
   readonly skills: string[];
 };
@@ -140,6 +155,7 @@ export function planState(plan: TriagePlan): PlanState {
     model: plan.model,
     thinking_level: plan.thinkingLevel,
     entities: [...plan.entities],
+    focus: [...plan.focus],
     delegates: [...plan.delegates],
     skills: [...plan.skills],
   };

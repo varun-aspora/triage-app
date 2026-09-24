@@ -65,6 +65,7 @@ Only places where what was built differs from the HLD, LLD, decisions or plan te
 | Patterns seed | HLD: seed from `taxonomy.json` | 35 entries seeded from the `## Known issues` sections of the service notes, frontend-routing and the sim-binding skill; `taxonomy.json` left out | Nothing taken from past case folders | T12.8 |
 | Report markdown | `affected_count` printed as a number | Printed with thousands separators (`250,000`) | Stops the persisted `digits6` detector masking a count | T08.4 |
 | Delegate factories | `investigatorFor(entity, runId)`, `codeWalkerFor(runId)` | Both also take `env {config, registry, deps, knowledge?}` | They need config, registry and run deps to build a ToolContext | T06.6 |
+| Entity mounting | HLD §1.1, LLD 04 §2.4, plan T06.8: the root mounts investigators for `TRIAGE_ENTITIES` narrowed by `request.hints.entities` | The root mounts investigators for every enabled entity. The hinted entities become `plan.focus` and the instruction's "Named in the request" line, where the root starts | Most triage-shivalik flows cross entities, and every eval case hints `[ssfb]`, so a follow-up to rtl or atspl had no investigator to brief. HLD §1.1 and LLD 04 are updated | review 01 |
 | `triage wait` timeout | Not specified | Exits 3, the same value as a config error; the JSON `status: 'timeout'` tells them apart | `output.ts` had no timeout code | T07.5 |
 
 ## Questions for the owner

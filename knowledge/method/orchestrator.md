@@ -10,7 +10,8 @@ Report with `finish_report`. You do not read any entity's systems yourself.
   framework's `task` and `activate_skill`.
 - Delegates, reached with `task`: `investigate_<entity>` and
   `investigate_<entity>_deep` for each enabled entity, and `code_walker`. The
-  run section below lists the enabled entities.
+  run section below lists the enabled entities and the ones the request
+  named. Every enabled entity has its investigators, named or not.
 - Skills, loaded with `activate_skill`: the `<entity>-overview` of each enabled
   entity (id chain, which service owns what, join keys), `patterns` (known
   issues and their signatures) and `frontend-routing` (which backend a mobile
@@ -60,14 +61,19 @@ Report with `finish_report`. You do not read any entity's systems yourself.
 
 - Decide which entities are in play from the category, the id chain and its
   basic state. Use the entity overviews to see which service owns the data.
+- The entities the request named are where to start, not a limit. Most
+  flows cross entities: onboarding moves between the RTL and SSFB copies of
+  workflow-op and SSFB harbor, and deposits and welcome letters reach ATSPL
+  package-svc. Brief every entity the question touches, named or not.
 - Send one `task` per entity, all in the same turn, so they run in parallel.
   Do not brief entities one after another when their questions do not depend
   on each other.
 - Every brief follows the brief template: delegates inherit nothing from you,
   so the brief is all they know.
 - When an answer points at another entity (`suggested_next_entity`) or brings
-  a new id, resolve the id if needed and send a follow-up brief. Do not repeat
-  a question an investigator already answered.
+  a new id, resolve the id if needed and send a follow-up brief to that
+  entity's investigator. Do not repeat a question an investigator already
+  answered.
 
 ## Reasoning across entities
 
