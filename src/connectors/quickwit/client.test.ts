@@ -2,7 +2,7 @@ import { afterAll, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { makeTestHome, type TestHome, type TestHomeOptions } from '../../../test/support/home.ts';
+import { makeTestHome, SSFB_QW_ENV, type TestHome, type TestHomeOptions } from '../../../test/support/home.ts';
 import { quickwitSlot, resetQuickwitSlotsForTests } from '../../gate/semaphore.ts';
 import { keyHash, keyString, semanticKey, type LogsSearchFacts } from '../../mock/key.ts';
 import { createFixtureStore } from '../../mock/store.ts';
@@ -44,7 +44,7 @@ afterAll(() => {
 });
 beforeEach(() => resetQuickwitSlotsForTests());
 
-const QW_HOME = (): TestHome => home();
+const QW_HOME = (): TestHome => home({ overrides: SSFB_QW_ENV });
 const HTTP_HOME = (extra: Record<string, string> = {}): TestHome =>
   home({ overrides: { SSFB_QUICKWIT_TRANSPORT: 'http', SSFB_QUICKWIT_URL: FAKE_URL, SSFB_QUICKWIT_AUTH: 'none', ...extra } });
 

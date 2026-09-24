@@ -23,7 +23,7 @@ import { foldGroups, LogsSearchInputSchema, logsModeOf, toolModule } from '../..
 import type { Entity, TimeWindow } from '../../src/types/core.ts';
 import type { IdChain } from '../../src/types/id-chain.ts';
 import { type ToolEnvelope, ToolEnvelopeSchema } from '../../src/types/tool-result.ts';
-import { makeTestHome, type TestHome, type TestHomeOptions } from '../support/home.ts';
+import { makeTestHome, SSFB_QW_ENV, type TestHome, type TestHomeOptions } from '../support/home.ts';
 import { makeToolContext } from '../support/fake-tool-context.ts';
 
 // ------------------------------------------------------------------ setup
@@ -42,7 +42,7 @@ const HIT_C = { service: 'harbor', level: 'error', message: 'timeout calling wor
 
 const homes: TestHome[] = [];
 function home(options: TestHomeOptions = {}): TestHome {
-  const h = makeTestHome(options);
+  const h = makeTestHome({ ...options, overrides: { ...SSFB_QW_ENV, ...options.overrides } });
   homes.push(h);
   return h;
 }

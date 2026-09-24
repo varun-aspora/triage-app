@@ -62,6 +62,14 @@ function expectSafeArgv(argv: readonly string[]): void {
 }
 
 describe('qwArgv', () => {
+  test('every mode passes --context with the entity context, exactly once', () => {
+    for (const r of [req(), req({ mode: 'count' }), req({ mode: 'histogram', groupBy: 'service' }), req({ context: 'core-prod-london' })]) {
+      const argv = qwArgv(r);
+      expect(argv.filter((a) => a === '--context')).toHaveLength(1);
+      expect(argv[argv.indexOf('--context') + 1]).toBe(r.context);
+    }
+  });
+
   test('search: subcommand, index, query, since, max hits, json, fields, context', () => {
     const argv = qwArgv(req());
     expect(argv).toEqual([

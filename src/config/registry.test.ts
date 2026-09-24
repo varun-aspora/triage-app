@@ -273,8 +273,18 @@ describe('field encryption', () => {
 
 describe('quickwit', () => {
   test('qw with a context is ok, with the default limits when blank', () => {
-    const q = registry({ SSFB_QUICKWIT_MAX_CONCURRENCY: '', SSFB_QUICKWIT_MAX_HITS: '' }).quickwit('ssfb');
-    expect(q).toEqual({ status: 'ok', transport: 'qw', index: 'logs-v1', maxConcurrency: 1, maxHits: 500, context: 'ssfb-prod' });
+    const q = registry({ ATSPL_QUICKWIT_MAX_CONCURRENCY: '', ATSPL_QUICKWIT_MAX_HITS: '' }).quickwit('atspl');
+    expect(q).toEqual({ status: 'ok', transport: 'qw', index: 'envoy-logs', maxConcurrency: 1, maxHits: 500, context: 'envoy-prod' });
+  });
+
+  test('.env.example puts SSFB on http and ATSPL and RTL on qw', () => {
+    const r = registry();
+    const ssfb = r.quickwit('ssfb');
+    expect(ssfb.status === 'ok' && ssfb.transport === 'http' && ssfb.auth).toBe('none');
+    expect(EXAMPLE['ATSPL_QUICKWIT_TRANSPORT']).toBe('qw');
+    expect(EXAMPLE['RTL_QUICKWIT_TRANSPORT']).toBe('qw');
+    expect(EXAMPLE['ATSPL_QW_CONTEXT']).toBe('envoy-prod');
+    expect(EXAMPLE['RTL_QW_CONTEXT']).toBe('core-prod-london');
   });
 
   test('set limits are used', () => {
@@ -283,9 +293,9 @@ describe('quickwit', () => {
   });
 
   test("transport qw with a blank <ENTITY>_QW_CONTEXT is disabled with a reason naming the key", () => {
-    const q = registry({ SSFB_QW_CONTEXT: '' }).quickwit('ssfb');
+    const q = registry({ ATSPL_QW_CONTEXT: '' }).quickwit('atspl');
     expect(q.status).toBe('disabled');
-    expect(q.status === 'disabled' && q.reason).toContain('SSFB_QW_CONTEXT');
+    expect(q.status === 'disabled' && q.reason).toContain('ATSPL_QW_CONTEXT');
   });
 
   test('transport http with auth bearer and a blank token is disabled', () => {

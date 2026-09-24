@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { makeTestHome } from '../../test/support/home.ts';
+import { makeTestHome, SSFB_QW_ENV } from '../../test/support/home.ts';
 import {
   EMPTY_MESSAGE_LABEL,
   MAX_TERMS,
@@ -236,7 +236,7 @@ describe('assertQwSafe', () => {
 });
 
 describe('quickwitGateConfig from the registry', () => {
-  const home = makeTestHome({ entities: ['ssfb'] });
+  const home = makeTestHome({ entities: ['ssfb'], overrides: SSFB_QW_ENV });
   afterAll(() => home.cleanup());
 
   test('reads fields, services and the hit cap', () => {
@@ -250,7 +250,7 @@ describe('quickwitGateConfig from the registry', () => {
   });
 
   test('a lower MAX_HITS in the .env lowers the clamp', () => {
-    const low = makeTestHome({ entities: ['ssfb'], overrides: { SSFB_QUICKWIT_MAX_HITS: '50' } });
+    const low = makeTestHome({ entities: ['ssfb'], overrides: { ...SSFB_QW_ENV, SSFB_QUICKWIT_MAX_HITS: '50' } });
     try {
       const cfg = quickwitGateConfig(low.registry, 'ssfb');
       expect(cfg && buildLogsQuery(cfg, { service: 'harbor', terms: ['x'], max_hits: 400 })).toMatchObject({ ok: true, maxHits: 50 });

@@ -47,6 +47,15 @@ export const FORCED: Readonly<Record<string, string>> = Object.freeze({
   TRIAGE_RECORD_FIXTURES: 'false',
 });
 
+/**
+ * SSFB on the qw transport. .env.example puts SSFB on http, and a test home
+ * blanks every URL, so a test that needs SSFB logs to be on asks for qw.
+ */
+export const SSFB_QW_ENV: Readonly<Record<string, string>> = Object.freeze({
+  SSFB_QUICKWIT_TRANSPORT: 'qw',
+  SSFB_QW_CONTEXT: 'ssfb-prod',
+});
+
 const KEY_NAME = /^[A-Z][A-Z0-9_]*$/;
 
 // A value that looks like a DSN, an address or a host name. Used as a second
