@@ -3,7 +3,7 @@
 // resolves them through lookupEnv. A test keeps this table and .env.example
 // in sync, including each default.
 
-export type KeyType = 'string' | 'int' | 'number' | 'bool' | 'enum' | 'path' | 'csv';
+export type KeyType = 'string' | 'int' | 'number' | 'bool' | 'enum' | 'path' | 'csv' | 'duration';
 
 export type KeyGroup =
   | 'runtime'
@@ -152,6 +152,11 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'TRIAGE_GIT_HOST', type: 'string', group: 'repos', default: 'github.com' },
   { name: 'TRIAGE_GIT_ORG', type: 'string', group: 'repos', default: 'Vance-Club' },
   { name: 'TRIAGE_GIT_HTTPS_TOKEN', type: 'string', group: 'repos', secret: true },
+  // Automatic sync (D47): the longest the checkouts may go without a sync, and the interfaces
+  // where it runs. http is the server's timer plus runs sent over HTTP; the others are runs
+  // started there. none turns it off.
+  { name: 'TRIAGE_REPOS_SYNC_INTERVAL', type: 'duration', group: 'repos', default: '24h' },
+  { name: 'TRIAGE_REPOS_SYNC_INTERFACES', type: 'csv', group: 'repos', default: 'cli,http,claude-code,slack' },
 ];
 
 export const KEY_BY_NAME: ReadonlyMap<string, KeySpec> = new Map(KEYS.map((k) => [k.name, k]));

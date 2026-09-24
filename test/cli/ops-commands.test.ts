@@ -4,7 +4,7 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -392,9 +392,16 @@ function fakeSync(report: SyncReport, seen: unknown[] = []): ReposSyncCommandOpt
   };
 }
 
+/** A test home whose TRIAGE_REPOS_DIR is a temp dir, removed after the test. */
+function reposHome(overrides: Readonly<Record<string, string>> = {}): TestHome & { reposDir: string } {
+  const reposDir = mkdtempSync(join(tmpdir(), 'triage-repos-cli-'));
+  cleanups.push(() => rmSync(reposDir, { recursive: true, force: true }));
+  return { ...home({ overrides: { TRIAGE_REPOS_DIR: reposDir, ...overrides } }), reposDir };
+}
+
 describe('triage repos sync', () => {
   test('--repo unknown exits 1 with the list of valid names and runs nothing', async () => {
-    const h = home({ overrides: { TRIAGE_REPOS_DIR: '/tmp/triage-repos-cli' } });
+    const h = reposHome();
     const r0 = runner();
     const r = await cli(h.config, [createReposSyncCommand({ runner: r0 })], ['repos', 'sync', '--repo', 'no-such-repo-xyz']);
     expect(r.code).toBe(EXIT.ERROR);
@@ -411,7 +418,7 @@ describe('triage repos sync', () => {
   });
 
   test('prints one line per repo and exits 1 when any repo failed', async () => {
-    const h = home();
+    const h = reposHome();
     const report: SyncReport = {
       status: 'done',
       results: [syncResult('harbor', 'ok'), syncResult('rhythm', 'failed'), syncResult('guardian', 'skipped')],
@@ -425,7 +432,7 @@ describe('triage repos sync', () => {
   });
 
   test('--json prints {results} and exits 0 when nothing failed; --repo is passed through', async () => {
-    const h = home();
+    const h = reposHome();
     const seen: unknown[] = [];
     const report: SyncReport = { status: 'done', results: [syncResult('harbor', 'ok')], ok: ['harbor'], skipped: [], failed: [] };
     const r = await cli(h.config, [createReposSyncCommand({ sync: fakeSync(report, seen) })], ['repos', 'sync', '--repo', 'harbor', '--json']);
@@ -442,6 +449,61 @@ describe('triage repos sync', () => {
     expect(r.code).toBe(EXIT.ERROR);
     expect(JSON.parse(r.out)).toEqual({ results: [], not_configured: { key: 'TRIAGE_REPOS_DIR', message: 'repos not configured: TRIAGE_REPOS_DIR is blank' } });
     expect(r0.calls).toEqual([]);
+  });
+
+  test('a full sync records itself; --if-stale then finds nothing due and does not sync', async () => {
+    const h = reposHome();
+    let calls = 0;
+    const report: SyncReport = { status: 'done', results: [syncResult('harbor', 'ok')], ok: ['harbor'], skipped: [], failed: [] };
+    const sync: ReposSyncCommandOptions['sync'] = async () => {
+      calls++;
+      return report;
+    };
+    const first = await cli(h.config, [createReposSyncCommand({ sync })], ['repos', 'sync']);
+    expect(first.code).toBe(EXIT.OK);
+    const state = JSON.parse(readFileSync(join(h.reposDir, '.triage-sync.json'), 'utf8')) as { trigger: string; last_ok_at?: string; ok: string[] };
+    expect(state.trigger).toBe('cli');
+    expect(state.ok).toEqual(['harbor']);
+    expect(typeof state.last_ok_at).toBe('string');
+
+    const again = await cli(h.config, [createReposSyncCommand({ sync })], ['repos', 'sync', '--if-stale', '--json']);
+    expect(again.code).toBe(EXIT.OK);
+    const body = JSON.parse(again.out) as { results: unknown[]; not_due: { reason: string; last_ok_at: string } };
+    expect(body.not_due.reason).toBe('fresh');
+    expect(body.not_due.last_ok_at).toBe(state.last_ok_at as string);
+    expect(calls).toBe(1);
+  });
+
+  test('--if-stale syncs when there is no record yet, and refuses --repo', async () => {
+    const h = reposHome();
+    let calls = 0;
+    const sync: ReposSyncCommandOptions['sync'] = async () => {
+      calls++;
+      return { status: 'done', results: [], ok: [], skipped: [], failed: [] };
+    };
+    expect((await cli(h.config, [createReposSyncCommand({ sync })], ['repos', 'sync', '--if-stale'])).code).toBe(EXIT.OK);
+    expect(calls).toBe(1);
+    const both = await cli(h.config, [createReposSyncCommand({ sync })], ['repos', 'sync', '--if-stale', '--repo', 'harbor']);
+    expect(both.code).toBe(EXIT.USAGE);
+    expect(calls).toBe(1);
+  });
+
+  test('a lock held by another live process answers busy and exits 1', async () => {
+    const h = reposHome();
+    mkdirSync(join(h.reposDir, '.triage-sync.lock'));
+    writeFileSync(
+      join(h.reposDir, '.triage-sync.lock', 'owner.json'),
+      JSON.stringify({ pid: process.pid, token: 'other-holder', started_at: new Date().toISOString() }),
+    );
+    let calls = 0;
+    const sync: ReposSyncCommandOptions['sync'] = async () => {
+      calls++;
+      return { status: 'done', results: [], ok: [], skipped: [], failed: [] };
+    };
+    const r = await cli(h.config, [createReposSyncCommand({ sync })], ['repos', 'sync', '--json']);
+    expect(r.code).toBe(EXIT.ERROR);
+    expect(JSON.parse(r.out)).toEqual({ results: [], busy: { reason: 'another process is syncing the repos' } });
+    expect(calls).toBe(0);
   });
 });
 

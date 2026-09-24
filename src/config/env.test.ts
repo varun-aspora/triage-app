@@ -148,6 +148,8 @@ describe('defaults with an empty .env', () => {
     expect(c.runs.priorCases).toBe(false);
     expect(c.code).toEqual({ codegraphBin: 'codegraph', qwBin: 'qw', syncBeforeQuery: true });
     expect({ ...c.git }).toEqual({ protocol: 'ssh', host: 'github.com', org: 'Vance-Club', httpsToken: undefined });
+    expect(c.repos.syncIntervalMs).toBe(24 * 60 * 60 * 1000);
+    expect(c.repos.syncInterfaces).toEqual(['cli', 'http', 'claude-code', 'slack']);
     expect(c.display.envLabel).toBeUndefined();
     expect(deployModeForPreflight(c)).toBe('local');
   });
@@ -292,7 +294,22 @@ describe('type refusals name the key', () => {
     ['TRIAGE_GIT_HOST', '-github.com'],
     ['TRIAGE_GIT_ORG', 'org/../x'],
     ['TRIAGE_GIT_ORG', '-org'],
+    ['TRIAGE_REPOS_SYNC_INTERVAL', '24'],
+    ['TRIAGE_REPOS_SYNC_INTERVAL', '30s'],
+    ['TRIAGE_REPOS_SYNC_INTERVAL', '0h'],
+    ['TRIAGE_REPOS_SYNC_INTERVAL', '400d'],
+    ['TRIAGE_REPOS_SYNC_INTERFACES', 'server,cli'],
+    ['TRIAGE_REPOS_SYNC_INTERFACES', 'none,cli'],
   ];
+
+  test('sync intervals and interfaces parse', () => {
+    expect(fromRecord({ TRIAGE_REPOS_SYNC_INTERVAL: '2h' }).repos.syncIntervalMs).toBe(2 * 60 * 60 * 1000);
+    expect(fromRecord({ TRIAGE_REPOS_SYNC_INTERVAL: '30m' }).repos.syncIntervalMs).toBe(30 * 60 * 1000);
+    expect(fromRecord({ TRIAGE_REPOS_SYNC_INTERVAL: '1D' }).repos.syncIntervalMs).toBe(24 * 60 * 60 * 1000);
+    expect(fromRecord({ TRIAGE_REPOS_SYNC_INTERVAL: '' }).repos.syncIntervalMs).toBe(24 * 60 * 60 * 1000);
+    expect(fromRecord({ TRIAGE_REPOS_SYNC_INTERFACES: 'http, cli' }).repos.syncInterfaces).toEqual(['http', 'cli']);
+    expect(fromRecord({ TRIAGE_REPOS_SYNC_INTERFACES: 'none' }).repos.syncInterfaces).toEqual([]);
+  });
   for (const [key, value] of cases) {
     test(`${key}=${value}`, () => {
       const err = configError(() => fromRecord({ [key]: value }));

@@ -5,7 +5,9 @@
 //   1. store.createRun with the persisted-profile copy of the request (the
 //      ingress names included in the scan). The raw thread never reaches the
 //      store.
-//   2. Pre-flight (skipped in mock mode). Warnings are kept, never fatal.
+//   2. Pre-flight and, when due, the repo sync (D47), side by side; both are
+//      skipped in mock mode. The run waits for them. Warnings are kept,
+//      never fatal.
 //   3. The ingress identity step. An unreachable database comes back as
 //      unreachable hops; any other non-loud failure becomes an empty chain and
 //      a gap. Strict fixture misses, aborts and malformed core results throw.
@@ -73,6 +75,7 @@ import { createMockLayer } from '../mock/index.ts';
 import { acceptsImages, modelForTier } from '../models.ts';
 import { netTcpConnect } from '../ops/doctor/probes.ts';
 import { runPreflight, type PreflightResult } from '../ops/preflight.ts';
+import { syncBeforeRun } from '../ops/repos-autosync.ts';
 import type { TcpProbe } from '../ops/tunnel.ts';
 import { embedRun as defaultEmbedRun } from '../runstore/embed-run.ts';
 import { priorCasesFor, type PriorCasesResult } from '../runstore/prior-cases.ts';
@@ -84,7 +87,7 @@ import {
   type TriageInit,
   TriageInitSchema,
 } from '../types/classification.ts';
-import { type Entity, RunIdSchema, type RunId, type Tier } from '../types/core.ts';
+import { type Entity, type Interface, RunIdSchema, type RunId, type Tier } from '../types/core.ts';
 import type { IdChain } from '../types/id-chain.ts';
 import type { Attachment, TriageRequest } from '../types/request.ts';
 import { type IngressIdentity, resolveIngressIdentity } from './identity.ts';
@@ -130,6 +133,8 @@ export type SettleDeps = {
 export type SubmissionDeps = SettleDeps & {
   /** Pre-flight for the request's entities. Not called in mock mode. */
   readonly preflight: (input: { readonly entities?: readonly Entity[]; readonly signal: AbortSignal }) => Promise<Pick<PreflightResult, 'warnings'>>;
+  /** Syncs the repos when due for this interface (D47). Not called in mock mode. Left out: no sync. */
+  readonly repoSync?: (input: { readonly interface: Interface; readonly signal: AbortSignal }) => Promise<readonly PreflightWarning[]>;
   readonly identity: (
     request: TriageRequest,
     opts: { readonly redactionNames: readonly string[]; readonly signal: AbortSignal },
@@ -207,11 +212,14 @@ export async function runSubmission(prepared: PreparedSubmission, deps: Submissi
 
     await store.setPhase(runId, 'preflight');
     if (!deps.config.mock.enabled) {
-      const pf = await deps.preflight({
-        ...(request.hints.entities !== undefined ? { entities: request.hints.entities } : {}),
-        signal,
-      });
-      warnings.push(...pf.warnings);
+      const [pf, repos] = await Promise.all([
+        deps.preflight({
+          ...(request.hints.entities !== undefined ? { entities: request.hints.entities } : {}),
+          signal,
+        }),
+        deps.repoSync?.({ interface: request.interface, signal }) ?? [],
+      ]);
+      warnings.push(...pf.warnings, ...repos);
     }
 
     await store.setPhase(runId, 'identity');
@@ -551,6 +559,7 @@ export function submissionDeps(options: SubmissionDepsOptions = {}): SubmissionD
         isTty: options.isTty ?? false,
         signal,
       }),
+    repoSync: ({ interface: iface, signal }) => syncBeforeRun(iface, { config, runner: options.runner ?? createExecRunner(), signal }),
     identity: (request, { redactionNames, signal }) =>
       resolveIngressIdentity(request, {
         sql,

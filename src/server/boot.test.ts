@@ -58,6 +58,9 @@ function config(http: { port?: number; authToken?: string }, retentionDays?: num
     runs: retentionDays !== undefined ? { retentionDays } : {},
     db: { provider: 'sqlite' },
     paths: {},
+    // Mock mode keeps the default repo sync timer off.
+    mock: { enabled: true },
+    repos: { syncIntervalMs: 24 * 60 * 60 * 1000, syncInterfaces: ['http'] },
   } as unknown as ServerConfig;
 }
 
@@ -113,6 +116,35 @@ describe('prepareServer', () => {
     expect(timers.cleared).toEqual([timers.handles[0]]);
     prepared.stop();
     expect(timers.cleared.length).toBe(1);
+  });
+
+  test('starts the repo sync timer with the config and stop() stops it too', async () => {
+    const seen: ServerConfig[] = [];
+    let stopped = 0;
+    const cfg = config({ port: 4321, authToken: 'test-token' });
+    const prepared = await prepareServer(cfg, {
+      createStore: async () => fakeStore(),
+      timer: { timers: fakeTimers(), log: () => {} },
+      startRepoSync: (c) => {
+        seen.push(c);
+        return { on: true, stop: () => void stopped++, idle: async () => {} };
+      },
+    });
+    expect(seen).toEqual([cfg]);
+    prepared.stop();
+    expect(stopped).toBe(1);
+  });
+
+  test('the default repo sync timer stays off in mock mode', async () => {
+    const timers = fakeTimers();
+    const prepared = await prepareServer(config({ authToken: 'test-token' }), {
+      createStore: async () => fakeStore(),
+      timer: { timers, log: () => {} },
+      repoSyncTimer: { timers, log: () => {} },
+    });
+    // Only the retention timer was set.
+    expect(timers.set).toBe(1);
+    prepared.stop();
   });
 
   test('a store that fails to build stops the boot with no timer', async () => {

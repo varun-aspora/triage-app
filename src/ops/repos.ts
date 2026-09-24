@@ -73,6 +73,11 @@ function pinsOf(deps: ReposDeps): readonly RepoPin[] {
   return deps.repos ?? loadRepos(deps.config, loadRegistry(deps.config));
 }
 
+/** Throws UnknownRepoError when --repo names no pin. Reads resources/repos.json only. */
+export function checkSelection(sel: RepoSelection, deps: ReposDeps): void {
+  select(pinsOf(deps), sel);
+}
+
 function select(pins: readonly RepoPin[], sel: RepoSelection): readonly RepoPin[] {
   if (sel.repo === undefined) return pins;
   const pin = pins.find((p) => p.repo === sel.repo);

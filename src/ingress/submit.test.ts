@@ -396,6 +396,37 @@ describe('pre-flight', () => {
     const run = await h.store.getRun(RUN_ID);
     expect(run?.classification?.preflight_warnings).toContainEqual(w);
   });
+
+  test('outside mock mode the repo sync runs with the request interface and its warnings follow pre-flight', async () => {
+    const seen: string[] = [];
+    const repoWarning = { step: 'repos', message: 'repo sync failed for rhythm; those checkouts are as they were' };
+    const h = harness({ config: { mock: false }, preflightWarnings: [{ step: 'tunnel', message: 'down' }] });
+    const deps: SubmissionDeps = {
+      ...h.deps,
+      repoSync: async ({ interface: iface }) => {
+        seen.push(iface);
+        return [repoWarning];
+      },
+    };
+    await runSubmission(prepared(), deps);
+    expect(seen).toEqual([prepared().request.interface]);
+    const warnings = initialDataOf(h).preflight_warnings ?? [];
+    expect(warnings.map((x) => x.step).slice(0, 2)).toEqual(['tunnel', 'repos']);
+    expect(warnings).toContainEqual(repoWarning);
+  });
+
+  test('mock mode does not sync repos', async () => {
+    let calls = 0;
+    const h = harness({ config: { mock: true } });
+    await runSubmission(prepared(), {
+      ...h.deps,
+      repoSync: async () => {
+        calls++;
+        return [];
+      },
+    });
+    expect(calls).toBe(0);
+  });
 });
 
 // ------------------------------------------------------------------ failures before dispatch

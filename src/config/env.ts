@@ -10,6 +10,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { parse } from 'dotenv';
+import { INTERFACES, type Interface } from '../types/core.ts';
 import { ConfigError, type ConfigProblem } from './errors.ts';
 import {
   DEPLOY_MODE_KEY,
@@ -95,6 +96,7 @@ export type Config = {
   };
   readonly code: { readonly codegraphBin: string; readonly qwBin: string; readonly syncBeforeQuery: boolean };
   readonly git: { readonly protocol: GitProtocol; readonly host: string; readonly org: string; readonly httpsToken?: string };
+  readonly repos: { readonly syncIntervalMs: number; readonly syncInterfaces: readonly Interface[] };
 };
 
 export type EnvLookup =
@@ -231,6 +233,10 @@ export function configFromRecord(
       org: r.matching('TRIAGE_GIT_ORG', GIT_ORG, 'must be a plain organisation name'),
       httpsToken: r.str('TRIAGE_GIT_HTTPS_TOKEN'),
     },
+    repos: {
+      syncIntervalMs: r.duration('TRIAGE_REPOS_SYNC_INTERVAL'),
+      syncInterfaces: r.interfaces('TRIAGE_REPOS_SYNC_INTERFACES'),
+    },
   };
   // Raw string, no enum check (D32): preflight warns on an unknown value.
   const deployMode = r.str(DEPLOY_MODE_KEY) ?? '';
@@ -327,6 +333,10 @@ const DSN = /^postgres(ql)?:\/\//i;
 // Host and organisation for built clone URLs; they end up in a git argv.
 const GIT_HOST = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*$/;
 const GIT_ORG = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const DURATION = /^(\d{1,6})(m|h|d)$/;
+const UNIT_MS: Readonly<Record<string, number>> = { m: 60_000, h: 3_600_000, d: 86_400_000 };
+const MIN_DURATION_MS = 60_000;
+const MAX_DURATION_MS = 365 * 86_400_000;
 
 // Reads typed values from the record. Problems are collected so one error lists every bad key.
 class Reader {
@@ -359,6 +369,26 @@ class Reader {
     const v = this.str(name);
     if (v === undefined) this.problem(name, 'is required');
     return v ?? '';
+  }
+
+  // '30m', '6h', '1d': minutes, hours or days, from one minute to a year.
+  duration(name: string): number {
+    const m = DURATION.exec((this.raw(name, 'duration').value ?? '').toLowerCase());
+    const ms = m === null ? NaN : Number(m[1]) * (UNIT_MS[m[2] as string] as number);
+    if (!(ms >= MIN_DURATION_MS && ms <= MAX_DURATION_MS)) {
+      this.problem(name, 'must be a duration from 1m to 365d, such as 30m, 6h or 1d');
+      return UNIT_MS['d'] as number;
+    }
+    return ms;
+  }
+
+  // Interface names from src/types/core.ts, or 'none' alone for an empty list.
+  interfaces(name: string): Interface[] {
+    const list = this.csv(name).map((s) => s.toLowerCase());
+    if (list.length === 1 && list[0] === 'none') return [];
+    const known = list.filter((s): s is Interface => (INTERFACES as readonly string[]).includes(s));
+    if (known.length !== list.length) this.problem(name, `must list ${INTERFACES.join(', ')}, or be none`);
+    return known;
   }
 
   // A required string that must match the pattern. The reason never echoes the value.
