@@ -93,13 +93,16 @@ These exist on the SSFB investigator only, and some only when configured:
 - `get_account_statement`: normalised transactions for an account in the run.
 - `detect_silent_reversals`: compares transfers with the statement and flags
   `REVERSED`, `NO_UTR` and orphan rows.
-- Harbor encrypts some columns (phone, email, CIF, the external reference id)
-  with deterministic encryption. To look a row up by one of them, call
-  `encrypt_lookup_value` with the plaintext from the brief and its `kind`, then
-  pass the ciphertext as a `$n` parameter to `sql_select`. To read encrypted
-  values you already fetched, call `decrypt_fields` with at most 20 values.
-  Never guess a plaintext, never compare plaintext with an encrypted column, and
-  never try to decrypt by hand. If these tools are absent, record the gap.
+- Some services encrypt columns with deterministic encryption, each with its
+  own key: harbor (phone, email, CIF, the external reference id) and rhythm
+  (nominee details). To look a row up by one of them, call
+  `encrypt_lookup_value` with the service whose table you will query, the
+  plaintext from the brief and its `kind`, then pass the ciphertext as a `$n`
+  parameter to `sql_select` on that service. To read encrypted values you
+  already fetched, call `decrypt_fields` with the service they came from and at
+  most 20 values. Never guess a plaintext, never compare plaintext with an
+  encrypted column, and never try to decrypt by hand. If these tools are
+  absent, or do not list the service, record the gap.
 - `cbs_call`: the CBS rung above, when mounted.
 
 ## Deep variant: code tools

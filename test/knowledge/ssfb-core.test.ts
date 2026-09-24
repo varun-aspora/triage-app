@@ -129,7 +129,7 @@ describe('resolved contradictions', () => {
     expect(harbor).toMatch(/FROM document_verifications\b/);
     expect(harbor).toMatch(/`rfi_requests` is\s+legacy/);
     expect(harbor).toMatch(/`form_attachments` is legacy/);
-    expect(harbor).toMatch(/encrypt_lookup_value\(\{ value: "<cif>", kind: "cif" \}\)/);
+    expect(harbor).toMatch(/encrypt_lookup_value\(\{ service: "harbor", value: "<cif>", kind: "cif" \}\)/);
     expect(harbor).toMatch(/`customer\.external_reference_id` holds the CIF, AES-SIV encrypted/);
   });
 
@@ -271,8 +271,8 @@ const INPUT_KEYS: Record<string, readonly string[]> = {
   ],
   get_account_statement: ['account_id', 'from', 'to', 'page'],
   detect_silent_reversals: ['account_id', 'customer_id', 'since', 'limit'],
-  encrypt_lookup_value: ['value', 'kind'],
-  decrypt_fields: ['values'],
+  encrypt_lookup_value: ['service', 'value', 'kind'],
+  decrypt_fields: ['service', 'values'],
 };
 
 /** Every `name({ ... })` call in text, with its top-level keys. */

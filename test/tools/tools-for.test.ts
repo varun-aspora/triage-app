@@ -27,7 +27,9 @@ const CBS_FLAG = 'SSFB_CBS_VIA_KUBECTL_ENABLED';
 const BASE_INVESTIGATOR = ['http_call', 'logs_search', 'note_evidence', 'sql_select'];
 const SSFB_ALWAYS = ['detect_silent_reversals', 'get_account_statement'];
 const SSFB_CRYPTO = ['decrypt_fields', 'encrypt_lookup_value'];
-const SSFB_ONLY = [...SSFB_ALWAYS, ...SSFB_CRYPTO, 'cbs_call'];
+// Scoped to ssfb in their module. The crypto tools serve any entity with a field-encryption service (D48).
+const SSFB_SCOPED = [...SSFB_ALWAYS, 'cbs_call'];
+const SSFB_ONLY = [...SSFB_SCOPED, ...SSFB_CRYPTO];
 const CODE_TOOLS = ['code_callers', 'code_explore', 'code_impact', 'code_node', 'repo_grep', 'repo_read'];
 const MOUNTS: readonly Mount[] = ['triage', 'investigator', 'investigator_deep', 'code_walker'];
 
@@ -95,15 +97,19 @@ describe('per-mount and per-entity membership', () => {
       const deep = names(toolsFor('investigator_deep', ctxFrom(h, entity)));
       expect(deep).toEqual(sorted([...BASE_INVESTIGATOR, ...CODE_TOOLS]));
       for (const name of SSFB_ONLY) expect(deep).not.toContain(name);
-      // Same answer from mountPlan: the SSFB modules are not even considered.
-      const planned = mountPlan('investigator_deep', ctxFrom(h, entity)).map((r) => r.name);
-      for (const name of SSFB_ONLY) expect(planned).not.toContain(name);
+      // Same answer from mountPlan: the SSFB modules are not even considered, and the
+      // crypto tools are off because no service of this entity has field encryption.
+      const plan = mountPlan('investigator_deep', ctxFrom(h, entity));
+      for (const name of SSFB_SCOPED) expect(plan.map((r) => r.name)).not.toContain(name);
+      for (const name of SSFB_CRYPTO) {
+        expect(plan.find((r) => r.name === name)).toEqual({ name, on: false, reason: 'no service of this entity has field encryption' });
+      }
     }
   });
 
-  test('the SSFB-only list matches the modules scoped to ssfb', () => {
+  test('the SSFB-scoped list matches the modules scoped to ssfb', () => {
     const scoped = allToolModules.filter((m) => m.entities !== 'all').map((m) => m.name);
-    expect(sorted(scoped)).toEqual(sorted(SSFB_ONLY));
+    expect(sorted(scoped)).toEqual(sorted(SSFB_SCOPED));
     for (const m of allToolModules.filter((x) => x.entities !== 'all')) expect(m.entities).toEqual(['ssfb']);
   });
 
@@ -151,7 +157,7 @@ describe('flag and key gating', () => {
     const set = names(toolsFor('investigator', ctx));
     for (const name of SSFB_CRYPTO) {
       expect(set).not.toContain(name);
-      expect(planRow('investigator', ctx, name)).toEqual({ name, on: false, reason: `${ENC_KEY} is blank` });
+      expect(planRow('investigator', ctx, name)).toEqual({ name, on: false, reason: `${ENC_KEY} and SSFB_RHYTHM_FIELD_ENC_KEY are blank` });
     }
   });
 
@@ -267,12 +273,14 @@ function picklistsOf(h: TestHome, entity: Entity): Map<string, readonly string[]
 }
 
 describe('service picklists', () => {
-  test('sql_select and http_call carry a service picklist for ssfb and rtl', () => {
+  test('sql_select and http_call carry a service picklist for ssfb and rtl; the crypto tools only where a service has a key', () => {
+    const expected = { ssfb: [...SSFB_CRYPTO, 'http_call', 'sql_select'], rtl: ['http_call', 'sql_select'] };
     for (const entity of ['ssfb', 'rtl'] as const) {
       const lists = picklistsOf(allOn, entity);
-      expect(sorted([...lists.keys()])).toEqual(['http_call', 'sql_select']);
+      expect(sorted([...lists.keys()])).toEqual(sorted(expected[entity]));
       for (const options of lists.values()) expect(options.length).toBeGreaterThan(0);
     }
+    expect(picklistsOf(allOn, 'ssfb').get('encrypt_lookup_value')).toEqual(['harbor']);
   });
 
   test('each picklist holds only services of its own entity registry', () => {

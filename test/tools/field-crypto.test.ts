@@ -2,8 +2,8 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import * as v from 'valibot';
 import { FixtureMissError } from '../../src/mock/errors.ts';
 import { buildToolIndex } from '../../src/tools/index.ts';
-import { toolModule as decryptModule } from '../../src/tools/ssfb/decrypt-fields.tool.ts';
-import { toolModule as encryptModule, renderCiphertext } from '../../src/tools/ssfb/encrypt-lookup-value.tool.ts';
+import { toolModule as decryptModule } from '../../src/tools/decrypt-fields.tool.ts';
+import { toolModule as encryptModule, renderCiphertext } from '../../src/tools/encrypt-lookup-value.tool.ts';
 import type { ToolModule } from '../../src/tools/types.ts';
 import { type ToolEnvelope, ToolEnvelopeSchema } from '../../src/types/tool-result.ts';
 import { makeTestConfig, makeToolContext } from '../support/fake-tool-context.ts';
@@ -44,10 +44,10 @@ function data(env: ToolEnvelope): Record<string, unknown> {
 describe('encrypt_lookup_value and decrypt_fields (real mode, test key)', () => {
   test('encrypt is deterministic and round-trips through decrypt_fields', async () => {
     const r = run(world(false));
-    const a = data(await r.call(r.encrypt, { value: PHONE, kind: 'phone' }));
-    const b = data(await r.call(r.encrypt, { value: PHONE, kind: 'phone' }));
-    const trimmed = data(await r.call(r.encrypt, { value: `  ${PHONE} `, kind: 'phone' }));
-    const other = data(await r.call(r.encrypt, { value: OTHER_PHONE, kind: 'phone' }));
+    const a = data(await r.call(r.encrypt, { service: 'harbor', value: PHONE, kind: 'phone' }));
+    const b = data(await r.call(r.encrypt, { service: 'harbor', value: PHONE, kind: 'phone' }));
+    const trimmed = data(await r.call(r.encrypt, { service: 'harbor', value: `  ${PHONE} `, kind: 'phone' }));
+    const other = data(await r.call(r.encrypt, { service: 'harbor', value: OTHER_PHONE, kind: 'phone' }));
 
     expect(typeof a['ciphertext']).toBe('string');
     expect(String(a['ciphertext']).startsWith('enc:')).toBe(true);
@@ -55,7 +55,7 @@ describe('encrypt_lookup_value and decrypt_fields (real mode, test key)', () => 
     expect(trimmed['ciphertext']).toBe(a['ciphertext']);
     expect(other['ciphertext']).not.toBe(a['ciphertext']);
 
-    const out = data(await r.call(r.decrypt, { values: [a['ciphertext'], other['ciphertext'], 'plain-row-value'] }));
+    const out = data(await r.call(r.decrypt, { service: 'harbor', values: [a['ciphertext'], other['ciphertext'], 'plain-row-value'] }));
     expect(out['items']).toEqual([
       { ok: true, value: PHONE, passthrough: false },
       { ok: true, value: OTHER_PHONE, passthrough: false },
@@ -66,9 +66,9 @@ describe('encrypt_lookup_value and decrypt_fields (real mode, test key)', () => 
 
   test('a tampered ciphertext fails its own item only', async () => {
     const r = run(world(false));
-    const ct = String(data(await r.call(r.encrypt, { value: PHONE, kind: 'phone' }))['ciphertext']);
+    const ct = String(data(await r.call(r.encrypt, { service: 'harbor', value: PHONE, kind: 'phone' }))['ciphertext']);
     const flipped = `enc:${Buffer.from(Buffer.from(ct.slice(4), 'base64').map((b, i) => (i === 0 ? b ^ 1 : b))).toString('base64')}`;
-    const out = data(await r.call(r.decrypt, { values: [flipped, ct, 'enc:@@@'] }));
+    const out = data(await r.call(r.decrypt, { service: 'harbor', values: [flipped, ct, 'enc:@@@'] }));
     expect(out['items']).toEqual([
       { ok: false, error: 'auth_failed' },
       { ok: true, value: PHONE, passthrough: false },
@@ -79,9 +79,9 @@ describe('encrypt_lookup_value and decrypt_fields (real mode, test key)', () => 
 
   test('decrypt output passes the model-facing profile: email local part masked, phone kept', async () => {
     const r = run(world(false));
-    const ctEmail = data(await r.call(r.encrypt, { value: EMAIL, kind: 'email' }))['ciphertext'];
-    const ctPhone = data(await r.call(r.encrypt, { value: PHONE, kind: 'phone' }))['ciphertext'];
-    const out = data(await r.call(r.decrypt, { values: [ctEmail, ctPhone] }));
+    const ctEmail = data(await r.call(r.encrypt, { service: 'harbor', value: EMAIL, kind: 'email' }))['ciphertext'];
+    const ctPhone = data(await r.call(r.encrypt, { service: 'harbor', value: PHONE, kind: 'phone' }))['ciphertext'];
+    const out = data(await r.call(r.decrypt, { service: 'harbor', values: [ctEmail, ctPhone] }));
     const items = out['items'] as { value: string }[];
     expect(items[0]?.value).toBe('****@example.com');
     expect(items[1]?.value).toBe(PHONE);
@@ -93,16 +93,16 @@ describe('deny: more than 20 values', () => {
   test('the schema says at most 20', () => {
     const r = run(world(false));
     const input = r.decrypt.input as v.GenericSchema;
-    expect(v.safeParse(input, { values: Array.from({ length: 20 }, (_, i) => `v${i}`) }).success).toBe(true);
-    expect(v.safeParse(input, { values: Array.from({ length: 21 }, (_, i) => `v${i}`) }).success).toBe(false);
-    expect(v.safeParse(input, { values: [] }).success).toBe(false);
+    expect(v.safeParse(input, { service: 'harbor', values: Array.from({ length: 20 }, (_, i) => `v${i}`) }).success).toBe(true);
+    expect(v.safeParse(input, { service: 'harbor', values: Array.from({ length: 21 }, (_, i) => `v${i}`) }).success).toBe(false);
+    expect(v.safeParse(input, { service: 'harbor', values: [] }).success).toBe(false);
   });
 
   test('21 values reaching run() are refused by the gate before any key is read', async () => {
     // A key that is not base64: if the crypto helper ran, the answer would be
     // a connector refusal instead of the gate's text.
     const r = run(world(false, { SSFB_HARBOR_FIELD_ENC_KEY: 'not base64 at all!' }));
-    const env = await r.call(r.decrypt, { values: Array.from({ length: 21 }, (_, i) => `enc:v${i}`) });
+    const env = await r.call(r.decrypt, { service: 'harbor', values: Array.from({ length: 21 }, (_, i) => `enc:v${i}`) });
     expect(env.output.status).toBe('refused');
     expect(env.output.message).toContain('at most 20 values');
     expect(r.audit.lines).toHaveLength(1);
@@ -115,7 +115,7 @@ describe('deny: more than 20 values', () => {
 
   test('an empty list reaching run() is refused', async () => {
     const r = run(world(false));
-    const env = await r.call(r.decrypt, { values: [] });
+    const env = await r.call(r.decrypt, { service: 'harbor', values: [] });
     expect(env.output.status).toBe('refused');
     expect(r.audit.lines[0]?.decision).toBe('deny');
   });
@@ -125,17 +125,17 @@ describe('key never in output, log or audit', () => {
   test('seeded test key is absent from every envelope, log line and audit line', async () => {
     const r = run(world(false));
     const envelopes: ToolEnvelope[] = [];
-    const ct = await r.call(r.encrypt, { value: PHONE, kind: 'phone' });
+    const ct = await r.call(r.encrypt, { service: 'harbor', value: PHONE, kind: 'phone' });
     envelopes.push(ct);
-    envelopes.push(await r.call(r.encrypt, { value: EMAIL, kind: 'email' }));
-    envelopes.push(await r.call(r.decrypt, { values: [String(data(ct)['ciphertext']), 'enc:AAAA', 'plain'] }));
-    envelopes.push(await r.call(r.decrypt, { values: Array.from({ length: 21 }, () => 'x') }));
+    envelopes.push(await r.call(r.encrypt, { service: 'harbor', value: EMAIL, kind: 'email' }));
+    envelopes.push(await r.call(r.decrypt, { service: 'harbor', values: [String(data(ct)['ciphertext']), 'enc:AAAA', 'plain'] }));
+    envelopes.push(await r.call(r.decrypt, { service: 'harbor', values: Array.from({ length: 21 }, () => 'x') }));
 
     // Bad keys go down the refusal paths, which build messages.
     for (const bad of [`${KEY.slice(0, 8)}!!`, Buffer.from('short').toString('base64')]) {
       const b = run(world(false, { SSFB_HARBOR_FIELD_ENC_KEY: bad }));
-      const e1 = await b.call(b.encrypt, { value: PHONE, kind: 'phone' });
-      const e2 = await b.call(b.decrypt, { values: ['enc:AAAA'] });
+      const e1 = await b.call(b.encrypt, { service: 'harbor', value: PHONE, kind: 'phone' });
+      const e2 = await b.call(b.decrypt, { service: 'harbor', values: ['enc:AAAA'] });
       expect(e1.output.status).toBe('refused');
       expect(e2.output.status).toBe('refused');
       const text = JSON.stringify([e1, e2, b.logs, b.audit.lines]);
@@ -153,8 +153,8 @@ describe('key never in output, log or audit', () => {
 describe('decrypt audit count only', () => {
   test('the audit line has a count and no plaintext or ciphertext', async () => {
     const r = run(world(false));
-    const ct = String(data(await r.call(r.encrypt, { value: PHONE, kind: 'phone' }))['ciphertext']);
-    await r.call(r.decrypt, { values: [ct, 'plain-row-value'] });
+    const ct = String(data(await r.call(r.encrypt, { service: 'harbor', value: PHONE, kind: 'phone' }))['ciphertext']);
+    await r.call(r.decrypt, { service: 'harbor', values: [ct, 'plain-row-value'] });
 
     const [encLine, decLine] = r.audit.lines;
     expect(encLine?.tool).toBe('encrypt_lookup_value');
@@ -177,8 +177,8 @@ describe('decrypt audit count only', () => {
 describe('mock mode', () => {
   test('answers from field_crypto fixtures, reads no key and audits transport mock', async () => {
     const fixtures = memoryFixtures();
-    fixtures.add('field_crypto', { op: 'encrypt', kind: 'phone', values: [PHONE] }, 'enc:bW9jay1jaXBoZXJ0ZXh0');
-    fixtures.add('field_crypto', { op: 'decrypt', values: ['enc:bW9jay1jaXBoZXJ0ZXh0', 'row'] }, {
+    fixtures.add('field_crypto', { op: 'encrypt', service: 'harbor', kind: 'phone', values: [PHONE] }, 'enc:bW9jay1jaXBoZXJ0ZXh0');
+    fixtures.add('field_crypto', { op: 'decrypt', service: 'harbor', values: ['enc:bW9jay1jaXBoZXJ0ZXh0', 'row'] }, {
       items: [
         { ok: true, value: PHONE, passthrough: false },
         { ok: true, value: 'row', passthrough: true },
@@ -189,9 +189,9 @@ describe('mock mode', () => {
     // A key that cannot be decoded: mock mode must not try.
     const r = run(world(true, { SSFB_HARBOR_FIELD_ENC_KEY: 'not base64 at all!' }), fixtures);
 
-    const enc = data(await r.call(r.encrypt, { value: PHONE, kind: 'phone' }));
+    const enc = data(await r.call(r.encrypt, { service: 'harbor', value: PHONE, kind: 'phone' }));
     expect(enc['ciphertext']).toBe('enc:bW9jay1jaXBoZXJ0ZXh0');
-    const dec = data(await r.call(r.decrypt, { values: ['enc:bW9jay1jaXBoZXJ0ZXh0', 'row'] }));
+    const dec = data(await r.call(r.decrypt, { service: 'harbor', values: ['enc:bW9jay1jaXBoZXJ0ZXh0', 'row'] }));
     expect(dec['counts']).toEqual({ decrypted: 1, passthrough: 1, failed: 0 });
     expect(r.audit.lines.map((l) => l.transport)).toEqual(['mock', 'mock']);
     expect(r.audit.lines[1]?.summary_redacted).toBe('decrypt_fields: 2 value(s)');
@@ -199,18 +199,18 @@ describe('mock mode', () => {
 
   test('a strict miss throws and writes a fixture_miss audit line', async () => {
     const r = run(world(true));
-    await expect(r.call(r.decrypt, { values: ['enc:AAAA'] })).rejects.toBeInstanceOf(FixtureMissError);
+    await expect(r.call(r.decrypt, { service: 'harbor', values: ['enc:AAAA'] })).rejects.toBeInstanceOf(FixtureMissError);
     expect(r.audit.lines[0]?.exit).toBe('fixture_miss');
   });
 
   test('a decrypt fixture with the wrong number of items is a loud error', async () => {
     const fixtures = memoryFixtures();
-    fixtures.add('field_crypto', { op: 'decrypt', values: ['a', 'b'] }, {
+    fixtures.add('field_crypto', { op: 'decrypt', service: 'harbor', values: ['a', 'b'] }, {
       items: [{ ok: true, value: 'a', passthrough: true }],
       counts: { decrypted: 0, passthrough: 1, failed: 0 },
     });
     const r = run(world(true), fixtures);
-    await expect(r.call(r.decrypt, { values: ['a', 'b'] })).rejects.toThrow('wrong number of items');
+    await expect(r.call(r.decrypt, { service: 'harbor', values: ['a', 'b'] })).rejects.toThrow('wrong number of items');
   });
 });
 
@@ -245,7 +245,7 @@ describe('isEnabled false on blank key', () => {
       const ctx = makeToolContext({ entity: 'ssfb', config, registry });
       for (const m of modules) {
         const state = m.enabled(ctx, 'investigator');
-        expect(state).toEqual({ on: false, reason: 'SSFB_HARBOR_FIELD_ENC_KEY is blank' });
+        expect(state).toEqual({ on: false, reason: 'SSFB_HARBOR_FIELD_ENC_KEY and SSFB_RHYTHM_FIELD_ENC_KEY are blank' });
       }
       const plan = buildToolIndex(modules).mountPlan('investigator', ctx);
       expect(plan.every((row) => !row.on)).toBe(true);
@@ -253,13 +253,13 @@ describe('isEnabled false on blank key', () => {
     });
   }
 
-  test('both tools are on with a key, for the SSFB investigator only, without touching deps', () => {
+  test('both tools are on with a key, only for an entity with field encryption, without touching deps', () => {
     const config = makeTestConfig({ SSFB_HARBOR_FIELD_ENC_KEY: KEY });
     const ssfb = makeToolContext({ entity: 'ssfb', config });
     for (const m of modules) {
       expect(m.enabled(ssfb, 'investigator')).toEqual({ on: true });
       expect(m.create(ssfb, 'investigator').name).toBe(m.name);
-      expect(m.entities).toEqual(['ssfb']);
+      expect(m.entities).toBe('all');
     }
     const index = buildToolIndex(modules);
     expect(index.toolsFor('investigator_deep', ssfb).map((t) => t.name).sort()).toEqual([
@@ -267,5 +267,75 @@ describe('isEnabled false on blank key', () => {
       'encrypt_lookup_value',
     ]);
     expect(index.toolsFor('investigator', makeToolContext({ entity: 'atspl', config }))).toEqual([]);
+  });
+});
+
+describe('one key per service (D48)', () => {
+  const RHYTHM_KEY = Buffer.from('synthetic-rhythm-field-key-for-tests-077').toString('base64');
+
+  test('rhythm has its own key: a harbor ciphertext does not open with it, and the audit names the service', async () => {
+    const r = run(world(false, { SSFB_RHYTHM_FIELD_ENC_KEY: RHYTHM_KEY }));
+    const harbor = String(data(await r.call(r.encrypt, { service: 'harbor', value: PHONE, kind: 'phone' }))['ciphertext']);
+    const rhythm = String(data(await r.call(r.encrypt, { service: 'rhythm', value: PHONE, kind: 'phone' }))['ciphertext']);
+    expect(rhythm).not.toBe(harbor);
+
+    const wrong = data(await r.call(r.decrypt, { service: 'rhythm', values: [harbor, rhythm] }));
+    expect(wrong['items']).toEqual([
+      { ok: false, error: 'auth_failed' },
+      { ok: true, value: PHONE, passthrough: false },
+    ]);
+    const services = r.audit.lines.map((l) => [l.service, l.target]);
+    expect(services).toEqual([
+      ['harbor', 'SSFB_HARBOR_FIELD_ENC_KEY'],
+      ['rhythm', 'SSFB_RHYTHM_FIELD_ENC_KEY'],
+      ['rhythm', 'SSFB_RHYTHM_FIELD_ENC_KEY'],
+    ]);
+    expect(JSON.stringify([r.audit.lines, r.logs])).not.toContain(RHYTHM_KEY);
+  });
+
+  test('only services with a key are offered, and the gate refuses any other', async () => {
+    const r = run(world(false));
+    for (const tool of [r.encrypt, r.decrypt]) {
+      const input = tool.input as v.GenericSchema;
+      expect(v.safeParse(input, { service: 'harbor', value: PHONE, kind: 'phone', values: ['x'] }).success).toBe(true);
+      expect(v.safeParse(input, { service: 'rhythm', value: PHONE, kind: 'phone', values: ['x'] }).success).toBe(false);
+    }
+    const enc = await r.call(r.encrypt, { service: 'rhythm', value: PHONE, kind: 'phone' });
+    const dec = await r.call(r.decrypt, { service: 'guardian', values: ['enc:AAAA'] });
+    for (const env of [enc, dec]) {
+      expect(env.output.status).toBe('refused');
+      expect(env.output.message).toBe('Refused: service must be one of harbor.');
+    }
+    expect(r.audit.lines.map((l) => [l.decision, l.service, l.target, l.reason])).toEqual([
+      ['deny', 'unknown', 'NO_FIELD_KEY', 'service without a key'],
+      ['deny', 'unknown', 'NO_FIELD_KEY', 'service without a key'],
+    ]);
+  });
+
+  test('with only the rhythm key set, the tools are on and offer rhythm alone', () => {
+    const w = world(false, { SSFB_HARBOR_FIELD_ENC_KEY: '', SSFB_RHYTHM_FIELD_ENC_KEY: RHYTHM_KEY });
+    const r = run(w);
+    expect(encryptModule.enabled(r.ctx, 'investigator')).toEqual({ on: true });
+    const input = r.encrypt.input as v.GenericSchema;
+    expect(v.safeParse(input, { service: 'rhythm', value: PHONE, kind: 'phone' }).success).toBe(true);
+    expect(v.safeParse(input, { service: 'harbor', value: PHONE, kind: 'phone' }).success).toBe(false);
+  });
+
+  test('an entity with no field-encryption service gets neither tool', () => {
+    const config = makeTestConfig({ SSFB_HARBOR_FIELD_ENC_KEY: KEY });
+    for (const entity of ['atspl', 'rtl'] as const) {
+      const ctx = makeToolContext({ entity, config });
+      for (const m of [encryptModule, decryptModule]) {
+        expect(m.enabled(ctx, 'investigator')).toEqual({ on: false, reason: 'no service of this entity has field encryption' });
+      }
+    }
+  });
+
+  test('mock fixtures are keyed by service', async () => {
+    const fixtures = memoryFixtures();
+    fixtures.add('field_crypto', { op: 'encrypt', service: 'rhythm', kind: 'phone', values: [PHONE] }, 'enc:cmh5dGhtLW1vY2s=');
+    const r = run(world(true, { SSFB_RHYTHM_FIELD_ENC_KEY: RHYTHM_KEY }), fixtures);
+    expect(data(await r.call(r.encrypt, { service: 'rhythm', value: PHONE, kind: 'phone' }))['ciphertext']).toBe('enc:cmh5dGhtLW1vY2s=');
+    await expect(r.call(r.encrypt, { service: 'harbor', value: PHONE, kind: 'phone' })).rejects.toBeInstanceOf(FixtureMissError);
   });
 });

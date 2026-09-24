@@ -1,8 +1,9 @@
-// decrypt_fields: decrypt harbor column values the investigator already
-// fetched with sql_select (HLD 02 §2; D34).
+// decrypt_fields: decrypt column values the investigator already fetched
+// with sql_select (HLD 02 §2; D34, D48).
 //
-// - Mounted on the SSFB investigator only, and only when
-//   SSFB_HARBOR_FIELD_ENC_KEY is non-blank.
+// - Mounted on any entity's investigator whose registry has a service with
+//   field_encryption and a non-blank key (harbor and rhythm in SSFB today).
+//   `service` picks the key; only services with a key are offered.
 // - At most 20 values per call. The schema says so, and the gate refuses a
 //   longer list again with an audit line, before any key is read.
 // - The key is read from config inside run() and stays in the field-crypto
@@ -15,7 +16,7 @@
 // - A value without the 'enc:' prefix comes back unchanged as passthrough;
 //   a value that fails to decrypt fails its own item only.
 // - Mock mode answers from the 'field_crypto' fixture keyed by
-//   {op: 'decrypt', values} and no key is read.
+//   {op: 'decrypt', service, values} and no key is read.
 
 import { defineTool } from '@flue/runtime/tool';
 import * as v from 'valibot';
@@ -24,20 +25,13 @@ import {
   type DecryptItem,
   DecryptResultSchema,
   MAX_DECRYPT_VALUES,
-} from '../../connectors/crypto/harbor-field.ts';
-import { semanticKey } from '../../mock/key.ts';
-import type { ToolEnvelope } from '../../types/tool-result.ts';
-import { type GateDecision, runIoTool } from '../_lib/pipeline.ts';
-import type { ToolModule } from '../types.ts';
-import {
-  FIELD_SERVICE,
-  fieldBacking,
-  fieldCryptoEnabled,
-  openFieldCrypto,
-  outcomeData,
-  realConnectorContext,
-  SSFB,
-} from './_lib/ssfb-io.ts';
+} from '../connectors/crypto/field-crypto.ts';
+import { semanticKey } from '../mock/key.ts';
+import type { ToolEnvelope } from '../types/tool-result.ts';
+import { outcomeData, realConnectorContext } from './_lib/connector-context.ts';
+import { fieldBacking, fieldCryptoEnabled, fieldServices, keyEnvFor, openFieldCrypto } from './_lib/field-crypto.ts';
+import { type GateDecision, runIoTool } from './_lib/pipeline.ts';
+import type { ToolModule } from './types.ts';
 
 const NAME = 'decrypt_fields';
 
@@ -68,7 +62,10 @@ export function checkDecrypted(value: unknown, expected: number): Decrypted {
   return { items, counts: countItems(items) };
 }
 
-function gateFor(values: unknown): GateDecision {
+function gateFor(services: readonly string[], keyEnv: string | undefined, values: unknown): GateDecision {
+  if (keyEnv === undefined) {
+    return { ok: false, message: `Refused: service must be one of ${services.join(', ')}.`, reason: 'service without a key' };
+  }
   if (!Array.isArray(values) || values.some((x) => typeof x !== 'string')) {
     return { ok: false, message: 'Refused: values must be a list of strings.', reason: 'values not a string list' };
   }
@@ -95,17 +92,24 @@ function gateFor(values: unknown): GateDecision {
 export const toolModule: ToolModule = {
   name: NAME,
   mounts: ['investigator'],
-  entities: [SSFB],
+  entities: 'all',
   enabled: (ctx) => fieldCryptoEnabled(ctx),
-  create: (ctx) =>
-    defineTool({
+  create: (ctx) => {
+    const services = fieldServices(ctx);
+    return defineTool({
       name: NAME,
       description:
-        `Decrypt up to ${MAX_DECRYPT_VALUES} harbor column values you already fetched with sql_select ` +
-        "(values that start with 'enc:'). items[i] answers values[i]: {ok: true, value, passthrough} or " +
-        '{ok: false, error}. A value without the prefix is returned unchanged with passthrough true. Ask only for ' +
-        'the fields the investigation needs; every call is audited. "not configured" means the key is not set.',
+        `Decrypt up to ${MAX_DECRYPT_VALUES} column values you already fetched with sql_select ` +
+        "(values that start with 'enc:'), all from one service's database: each service has its own key. " +
+        'items[i] answers values[i]: {ok: true, value, passthrough} or {ok: false, error}; auth_failed usually ' +
+        'means the values came from another service. A value without the prefix is returned unchanged with ' +
+        'passthrough true. Ask only for the fields the investigation needs; every call is audited. ' +
+        '"not configured" means the key is not set.',
       input: v.object({
+        service: v.pipe(
+          v.picklist(services),
+          v.description(`The service whose database the values came from: ${services.join(', ')}.`),
+        ),
         values: v.pipe(
           v.array(v.pipe(v.string(), v.maxLength(MAX_DECRYPT_VALUE_CHARS))),
           v.minLength(1),
@@ -116,17 +120,20 @@ export const toolModule: ToolModule = {
       run: async ({ data, signal, toolCallId, log }): Promise<ToolEnvelope> => {
         const values: unknown = data.values;
         const list = Array.isArray(values) ? (values as unknown[]).filter((x): x is string => typeof x === 'string') : [];
+        const keyEnv = keyEnvFor(ctx, data.service);
+        // Only an offered service name reaches audit lines and fixture keys.
+        const service = keyEnv !== undefined ? (data.service as string) : 'unknown';
         return runIoTool<'field_crypto', Decrypted>(
           {
             tool: NAME,
-            service: FIELD_SERVICE,
+            service,
             input: data,
-            backing: fieldBacking(ctx.config),
+            backing: fieldBacking(keyEnv),
             scope: 'skip',
-            gate: () => gateFor(values),
-            fixture: () => ({ kind: 'field_crypto', key: semanticKey('field_crypto', { op: 'decrypt', values: list }) }),
+            gate: () => gateFor(services, keyEnv, values),
+            fixture: () => ({ kind: 'field_crypto', key: semanticKey('field_crypto', { op: 'decrypt', service, values: list }) }),
             real: async (sig) => {
-              const crypto = openFieldCrypto(ctx.config);
+              const crypto = openFieldCrypto(ctx.config, service, keyEnv as string);
               return outcomeData(await crypto.decryptFields(realConnectorContext(ctx, sig), list));
             },
             render: (value) => {
@@ -138,5 +145,6 @@ export const toolModule: ToolModule = {
           { toolContext: ctx, toolCallId, log, ...(signal !== undefined ? { signal } : {}) },
         );
       },
-    }),
+    });
+  },
 };

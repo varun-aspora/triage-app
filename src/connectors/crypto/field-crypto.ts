@@ -1,7 +1,11 @@
-// Harbor field encryption (D34), matching go-commons lib/crypto/siv.go.
+// Field encryption as go-commons lib/crypto/siv.go does it (D34, D48). Every
+// Go service that stores columns through that library (harbor and rhythm
+// today) has its own FIELD_ENCRYPTION_SECRET_KEY, so one FieldCrypto serves
+// one service: the registry's field_encryption.key_env for that service
+// names the .env key (SSFB_HARBOR_FIELD_ENC_KEY, SSFB_RHYTHM_FIELD_ENC_KEY).
 //
-// - The base key is SSFB_HARBOR_FIELD_ENC_KEY decoded from standard base64
-//   (harbor's cmd/fle decodes FIELD_ENCRYPTION_SECRET_KEY the same way). It
+// - The base key is that env value decoded from standard base64 (the
+//   services' cmd/fle decodes FIELD_ENCRYPTION_SECRET_KEY the same way). It
 //   must be at least 16 bytes, as InitSIV requires.
 // - The AES-SIV key is 64 bytes from HKDF-SHA256(base key, empty salt,
 //   info 'vance-aes-siv-v1'), so AES-SIV runs on AES-256.
@@ -9,6 +13,10 @@
 //   and the stored form is 'enc:' + base64(tag || ciphertext).
 // - Decrypt passes a value without the 'enc:' prefix through unchanged, as
 //   DecryptValueBytes does for rows written before encryption.
+//
+// java-commons encrypts differently (AES-GCM with a random IV and an
+// 'ENC:v1:' prefix): no in-scope service uses it, and a random IV means no
+// lookup by ciphertext is possible, so it is not handled here.
 //
 // Normalisation, from harbor's call sites (read for structure only):
 // customer_repo GetByPhone, GetByEmail and GetByExternalReferenceID (the CIF),
@@ -31,7 +39,6 @@ import { withMock } from '../mock.ts';
 import { ConnectorError, type ConnectorContext, type ConnectorOutcome } from '../types.ts';
 import { AesSivError, SIV_TAG_BYTES, sivOpen, sivSeal } from './aes-siv.ts';
 
-export const FIELD_ENC_KEY_ENV = 'SSFB_HARBOR_FIELD_ENC_KEY';
 export const SIV_HKDF_INFO = 'vance-aes-siv-v1';
 export const ENC_PREFIX = 'enc:';
 export const MIN_BASE_KEY_BYTES = 16;
@@ -69,7 +76,8 @@ const EncryptFixtureSchema = v.pipe(v.string(), v.startsWith(ENC_PREFIX));
 
 export type FieldCrypto = {
   readonly status: 'ok';
-  readonly envName: typeof FIELD_ENC_KEY_ENV;
+  readonly service: string;
+  readonly envName: string;
   /** Returns 'enc:' + base64, usable as a $n param against harbor's encrypted columns. */
   encryptLookupValue(ctx: ConnectorContext, value: string, kind: FieldKind): Promise<ConnectorOutcome<string>>;
   /** At most MAX_DECRYPT_VALUES values. A bad value fails its own item only. */
@@ -77,10 +85,10 @@ export type FieldCrypto = {
 };
 
 export type FieldCryptoUnavailable =
-  | { readonly status: 'not_configured'; readonly envName: typeof FIELD_ENC_KEY_ENV; readonly reason: 'blank' | 'missing' }
+  | { readonly status: 'not_configured'; readonly envName: string; readonly reason: 'blank' | 'missing' }
   | {
       readonly status: 'refused';
-      readonly envName: typeof FIELD_ENC_KEY_ENV;
+      readonly envName: string;
       readonly reason: 'not_base64' | 'too_short';
       readonly message: string;
     };
@@ -89,6 +97,10 @@ export type FieldCryptoState = FieldCrypto | FieldCryptoUnavailable;
 
 export type CreateFieldCryptoOptions = {
   readonly config: Config;
+  /** The service whose columns these values belong to, for fixture keys and audit targets. */
+  readonly service: string;
+  /** The .env key holding that service's base key: the registry's field_encryption.key_env. */
+  readonly keyEnv: string;
 };
 
 /** The trim-only normalisation harbor's lookups need (see the header comment). */
@@ -105,12 +117,12 @@ function decodeBase64(text: string): Uint8Array | null {
   return new Uint8Array(Buffer.from(clean, 'base64'));
 }
 
-function unavailable(reason: 'not_base64' | 'too_short'): FieldCryptoUnavailable {
+function unavailable(keyEnv: string, reason: 'not_base64' | 'too_short'): FieldCryptoUnavailable {
   const message =
     reason === 'not_base64'
-      ? `${FIELD_ENC_KEY_ENV} is not valid base64`
-      : `${FIELD_ENC_KEY_ENV} must decode to at least ${MIN_BASE_KEY_BYTES} bytes`;
-  const refused: FieldCryptoUnavailable = { status: 'refused', envName: FIELD_ENC_KEY_ENV, reason, message };
+      ? `${keyEnv} is not valid base64`
+      : `${keyEnv} must decode to at least ${MIN_BASE_KEY_BYTES} bytes`;
+  const refused: FieldCryptoUnavailable = { status: 'refused', envName: keyEnv, reason, message };
   return Object.freeze(refused);
 }
 
@@ -177,16 +189,16 @@ function engineFor(derived: Uint8Array): Engine {
 }
 
 /** Reads, checks and derives the key. Returns the engine, or why the key cannot be used. */
-function realEngine(config: Config): Engine | FieldCryptoUnavailable {
-  const found = lookupEnv(config, FIELD_ENC_KEY_ENV);
+function realEngine(config: Config, keyEnv: string): Engine | FieldCryptoUnavailable {
+  const found = lookupEnv(config, keyEnv);
   if (found.state !== 'set') {
-    const off: FieldCryptoUnavailable = { status: 'not_configured', envName: FIELD_ENC_KEY_ENV, reason: found.state };
+    const off: FieldCryptoUnavailable = { status: 'not_configured', envName: keyEnv, reason: found.state };
     return Object.freeze(off);
   }
   const base = decodeBase64(found.value.trim());
-  if (base === null) return unavailable('not_base64');
+  if (base === null) return unavailable(keyEnv, 'not_base64');
   try {
-    if (base.length < MIN_BASE_KEY_BYTES) return unavailable('too_short');
+    if (base.length < MIN_BASE_KEY_BYTES) return unavailable(keyEnv, 'too_short');
     const derived = new Uint8Array(hkdfSync('sha256', base, new Uint8Array(0), SIV_HKDF_INFO, DERIVED_KEY_BYTES));
     return engineFor(derived);
   } finally {
@@ -194,35 +206,35 @@ function realEngine(config: Config): Engine | FieldCryptoUnavailable {
   }
 }
 
-function mockOnlyEngine(): Engine {
+function mockOnlyEngine(keyEnv: string): Engine {
   const fail = (): never => {
     throw new ConnectorError(
       'not_configured',
-      `field encryption was set up in mock mode, so ${FIELD_ENC_KEY_ENV} was not read; a real call cannot run`,
+      `field encryption was set up in mock mode, so ${keyEnv} was not read; a real call cannot run`,
     );
   };
   return { encrypt: fail, decryptOne: fail };
 }
 
 /**
- * Builds the harbor field-encryption helpers. A blank or missing key gives
- * not_configured, so T05 does not mount the tools. A key that is not base64
- * or is under 16 bytes gives refused, naming the env var only. In mock mode
- * (config.mock.enabled) the key is not read and the helpers answer from
- * fixtures only.
+ * Builds the field-encryption helpers for one service. A blank or missing key
+ * gives not_configured, so the tools do not offer that service. A key that is
+ * not base64 or is under 16 bytes gives refused, naming the env var only. In
+ * mock mode (config.mock.enabled) the key is not read and the helpers answer
+ * from fixtures only.
  */
 export function createFieldCrypto(options: CreateFieldCryptoOptions): FieldCryptoState {
-  const { config } = options;
+  const { config, service, keyEnv } = options;
   const mockOnly = config.mock.enabled;
   let engine: Engine;
   if (mockOnly) {
-    engine = mockOnlyEngine();
+    engine = mockOnlyEngine(keyEnv);
   } else {
-    const built = realEngine(config);
+    const built = realEngine(config, keyEnv);
     if ('status' in built) return built;
     engine = built;
   }
-  const target = { target_env: FIELD_ENC_KEY_ENV };
+  const target = { target_env: keyEnv };
 
   async function encryptLookupValue(
     ctx: ConnectorContext,
@@ -236,7 +248,7 @@ export function createFieldCrypto(options: CreateFieldCryptoOptions): FieldCrypt
     const out = await withMock(
       ctx,
       'field_crypto',
-      { op: 'encrypt', kind, values: [normalised] },
+      { op: 'encrypt', service, kind, values: [normalised] },
       async (signal) => {
         signal.throwIfAborted();
         return { data: engine.encrypt(normalised) };
@@ -256,7 +268,7 @@ export function createFieldCrypto(options: CreateFieldCryptoOptions): FieldCrypt
     const out = await withMock(
       ctx,
       'field_crypto',
-      { op: 'decrypt', values: list },
+      { op: 'decrypt', service, values: list },
       async (signal) => {
         const items: DecryptItem[] = [];
         for (const one of list) {
@@ -276,6 +288,6 @@ export function createFieldCrypto(options: CreateFieldCryptoOptions): FieldCrypt
     return out;
   }
 
-  const crypto: FieldCrypto = { status: 'ok', envName: FIELD_ENC_KEY_ENV, encryptLookupValue, decryptFields };
+  const crypto: FieldCrypto = { status: 'ok', service, envName: keyEnv, encryptLookupValue, decryptFields };
   return Object.freeze(crypto);
 }

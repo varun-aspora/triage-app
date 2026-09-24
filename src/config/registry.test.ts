@@ -267,7 +267,7 @@ describe('field encryption', () => {
   });
 
   test('services without field encryption return undefined', () => {
-    expect(registry().fieldEncryption('ssfb', 'rhythm')).toBeUndefined();
+    expect(registry().fieldEncryption('ssfb', 'guardian')).toBeUndefined();
   });
 });
 

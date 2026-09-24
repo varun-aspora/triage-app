@@ -41,6 +41,7 @@ either way.
 | `transfer_transactions` | One row per transfer: `txn_ref_id`, `account_id`, `status`, `initiated_at`, `bank_identifier` (the UTR), `failure_reason`, `cbs_response`, `created_at`. |
 | `user_limit_transaction_settings` | Per-customer limits by `type`: `enabled`, `updated_at`, `version`. |
 | `beneficiaries` | Saved payees per customer: `unique_id`, `details`. `verified` defaults to true and means nothing. |
+| `customer_nominees` | Nominees per customer: `customer_id` (harbor customer id). `name`, `nick_name`, `relationship`, `dob`, `address` and `guardian_details` are encrypted with rhythm's own key: read them with `decrypt_fields({ service: "rhythm", values: [...] })`. |
 
 `sync_state`, `reconciliation_reports` and `cdc_events` are disabled
 scaffolding with no rows, so an empty result there says nothing (basis: the

@@ -61,7 +61,7 @@ const CATEGORIES: readonly (readonly [string, RegExp, readonly string[] | null])
   ['AWS_PROFILE', /_AWS_PROFILE$/, ENTITIES],
   ['SSFB_CBS_*', /^SSFB_CBS_/, ['ssfb']],
   ['SSFB_DB_TUNNEL_*', /^SSFB_DB_TUNNEL_/, ['ssfb']],
-  ['HARBOR_FIELD_ENC_KEY', /_HARBOR_FIELD_ENC_KEY$/, ['ssfb']],
+  ['FIELD_ENC_KEY', /_FIELD_ENC_KEY$/, ['ssfb']],
   ['BRO_ADMIN_TOKEN', /_BRO_ADMIN_TOKEN$/, ['ssfb']],
   ['SLACK_BOT_TOKEN', /^SLACK_BOT_TOKEN$/, null],
 ];

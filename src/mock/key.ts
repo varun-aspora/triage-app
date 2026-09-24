@@ -81,6 +81,7 @@ export type DoctorProbeFacts = { readonly entity: FixtureEntity; readonly probe:
 
 export type FieldCryptoFacts = {
   readonly op: 'encrypt' | 'decrypt';
+  readonly service: string;
   readonly kind?: 'phone' | 'email' | 'cif';
   readonly values: readonly string[];
 };
@@ -164,7 +165,7 @@ const BUILDERS: { [K in FixtureKind]: (facts: SemanticKeyFacts[K]) => unknown } 
   slack_user: (f) => ({ email: trim(f.email).toLowerCase() }),
   doctor_probe: (f) => ({ entity: f.entity, probe: trim(f.probe) }),
   // The caller has already normalised the values; their order is kept.
-  field_crypto: (f) => ({ op: f.op, kind: f.kind, values: [...f.values] }),
+  field_crypto: (f) => ({ op: f.op, service: f.service, kind: f.kind, values: [...f.values] }),
   // Symbols are case-sensitive, so the query is trimmed and nothing more.
   code_query: (f) => ({ repo: trim(f.repo), command: f.command, query: trim(f.query) }),
 };

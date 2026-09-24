@@ -64,9 +64,11 @@ Resolved naming, stated once here:
 - `customer.external_reference_id` holds the CIF, AES-SIV encrypted. It is set
   by the `NEW` state handler; null means CBS customer creation never
   succeeded. AES-SIV is deterministic, so a lookup by CIF encrypts the CIF
-  first with `encrypt_lookup_value` (kind `cif`) and passes the ciphertext as a
-  parameter. `decrypt_fields` reads a fetched value. Both tools answer "not
-  configured" when the field key is not set; record that as a gap.
+  first with `encrypt_lookup_value` (service `harbor`, kind `cif`) and passes
+  the ciphertext as a parameter. `decrypt_fields` (service `harbor`) reads a
+  fetched value. Harbor has its own key; a harbor value does not decrypt with
+  another service's. Both tools answer "not configured" when the key is not
+  set; record that as a gap.
 - `account_forms.submission_data` (the full onboarding JSON: phone_number,
   residence_country, nri_documents, fatca_details) is encrypted. Read it from
   the workflow-op step-handler response in the logs instead; there is no tool
@@ -93,7 +95,7 @@ sql_select({ service: "harbor",
 Customer by CIF:
 
 ```
-encrypt_lookup_value({ value: "<cif>", kind: "cif" })
+encrypt_lookup_value({ service: "harbor", value: "<cif>", kind: "cif" })
 sql_select({ service: "harbor",
   sql: "SELECT customer_id, account_form_id, state, sub_state FROM customer WHERE external_reference_id = $1",
   params: ["<cif_ciphertext>"] })

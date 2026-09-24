@@ -31,7 +31,8 @@ import { semanticKey } from '../../mock/key.ts';
 import type { ToolEnvelope } from '../../types/tool-result.ts';
 import { type BackingRef, type GateDecision, type IoRunContext, runIoTool } from '../_lib/pipeline.ts';
 import type { ToolContext, ToolDeps, ToolEnabled, ToolModule } from '../types.ts';
-import { outcomeData, realConnectorContext, SSFB } from './_lib/ssfb-io.ts';
+import { outcomeData, realConnectorContext } from '../_lib/connector-context.ts';
+import { SSFB } from './_lib/ssfb-io.ts';
 
 declare module '../_lib/context.ts' {
   interface ToolConnectors {

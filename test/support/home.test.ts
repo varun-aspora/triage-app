@@ -65,6 +65,7 @@ describe('makeTestHome', () => {
       'SSFB_QUICKWIT_TOKEN',
       'SSFB_BRO_ADMIN_TOKEN',
       'SSFB_HARBOR_FIELD_ENC_KEY',
+      'SSFB_RHYTHM_FIELD_ENC_KEY',
       'SSFB_CBS_CREDS_SECRET',
       'SSFB_CBS_GATEWAY_URL',
       'SSFB_CBS_OAUTH_SCOPE',

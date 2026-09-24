@@ -15,7 +15,8 @@
       "api": "SSFB_RHYTHM_API_URL",
       "quickwit_service": "rhythm",
       "repo": "rhythm",
-      "customer_header": "x-customer-id"
+      "customer_header": "x-customer-id",
+      "field_encryption": { "algorithm": "aes-siv", "key_env": "SSFB_RHYTHM_FIELD_ENC_KEY" }
     },
     "guardian": {
       "db": "SSFB_GUARDIAN_DB_URL",

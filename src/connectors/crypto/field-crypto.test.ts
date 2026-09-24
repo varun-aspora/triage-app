@@ -13,14 +13,17 @@ import { ConnectorError, type ConnectorContext, type ConnectorOutcome } from '..
 import {
   createFieldCrypto,
   ENC_PREFIX,
-  FIELD_ENC_KEY_ENV,
   MAX_DECRYPT_VALUES,
   normaliseLookupValue,
   SIV_HKDF_INFO,
   type DecryptResult,
   type FieldCrypto,
   type FieldCryptoState,
-} from './harbor-field.ts';
+} from './field-crypto.ts';
+
+const FIELD_ENC_KEY_ENV = 'SSFB_HARBOR_FIELD_ENC_KEY';
+/** Harbor's registry entry: the service and its key name. */
+const HARBOR = { service: 'harbor', keyEnv: FIELD_ENC_KEY_ENV } as const;
 
 // The non-secret base key from go-commons lib/crypto/siv_test.go. Harbor reads
 // the env key as base64, so the env value is the base64 of these 32 bytes.
@@ -69,7 +72,7 @@ function ok(state: FieldCryptoState): FieldCrypto {
 }
 
 function realCrypto(envKey = GO_TEST_ENV_KEY): FieldCrypto {
-  return ok(createFieldCrypto({ config: config({ [FIELD_ENC_KEY_ENV]: envKey }) }));
+  return ok(createFieldCrypto({ config: config({ [FIELD_ENC_KEY_ENV]: envKey }), ...HARBOR }));
 }
 
 function data<T>(out: ConnectorOutcome<T>): T {
@@ -210,16 +213,16 @@ describe('decryptFields', () => {
 
 describe('key handling', () => {
   test('a blank key is not_configured', () => {
-    expect(createFieldCrypto({ config: config({ [FIELD_ENC_KEY_ENV]: '' }) })).toEqual({
+    expect(createFieldCrypto({ config: config({ [FIELD_ENC_KEY_ENV]: '' }), ...HARBOR })).toEqual({
       status: 'not_configured',
       envName: FIELD_ENC_KEY_ENV,
       reason: 'blank',
     });
-    expect(createFieldCrypto({ config: config({ [FIELD_ENC_KEY_ENV]: '   ' }) }).status).toBe('not_configured');
+    expect(createFieldCrypto({ config: config({ [FIELD_ENC_KEY_ENV]: '   ' }), ...HARBOR }).status).toBe('not_configured');
   });
 
   test('a missing key is not_configured', () => {
-    expect(createFieldCrypto({ config: config({ [FIELD_ENC_KEY_ENV]: undefined }) })).toEqual({
+    expect(createFieldCrypto({ config: config({ [FIELD_ENC_KEY_ENV]: undefined }), ...HARBOR })).toEqual({
       status: 'not_configured',
       envName: FIELD_ENC_KEY_ENV,
       reason: 'missing',
@@ -228,7 +231,7 @@ describe('key handling', () => {
 
   test('a base key under 16 bytes is refused naming the env var only', () => {
     const short = Buffer.from('fifteen-bytes!!', 'utf8').toString('base64');
-    const state = createFieldCrypto({ config: config({ [FIELD_ENC_KEY_ENV]: short }) });
+    const state = createFieldCrypto({ config: config({ [FIELD_ENC_KEY_ENV]: short }), ...HARBOR });
     expect(state).toEqual({
       status: 'refused',
       envName: FIELD_ENC_KEY_ENV,
@@ -238,12 +241,12 @@ describe('key handling', () => {
     expect(JSON.stringify(state)).not.toContain(short);
     expect(JSON.stringify(state)).not.toContain('fifteen');
     // Exactly 16 bytes is enough.
-    expect(createFieldCrypto({ config: config({ [FIELD_ENC_KEY_ENV]: Buffer.alloc(16, 7).toString('base64') }) }).status).toBe('ok');
+    expect(createFieldCrypto({ config: config({ [FIELD_ENC_KEY_ENV]: Buffer.alloc(16, 7).toString('base64') }), ...HARBOR }).status).toBe('ok');
   });
 
   test('a key that is not standard base64 is refused naming the env var only', () => {
     for (const bad of ['not base64 at all!', 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY', 'MDEy-_Q1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=']) {
-      const state = createFieldCrypto({ config: config({ [FIELD_ENC_KEY_ENV]: bad }) });
+      const state = createFieldCrypto({ config: config({ [FIELD_ENC_KEY_ENV]: bad }), ...HARBOR });
       expect(state.status).toBe('refused');
       expect(state.status === 'refused' ? state.reason : '').toBe('not_base64');
       expect(JSON.stringify(state)).not.toContain(bad);
@@ -288,7 +291,7 @@ describe('key handling', () => {
         const err = await caught(p);
         outputs.push(err.message, err.stack ?? '', inspect(err, { depth: 10, showHidden: true }));
       }
-      const refused = createFieldCrypto({ config: config({ [FIELD_ENC_KEY_ENV]: `${envKey}!` }) });
+      const refused = createFieldCrypto({ config: config({ [FIELD_ENC_KEY_ENV]: `${envKey}!` }), ...HARBOR });
       outputs.push(JSON.stringify(refused), inspect(refused, { showHidden: true }));
     } finally {
       for (const s of spies) s.mockRestore();
@@ -320,15 +323,15 @@ describe('mock mode', () => {
 
   test('never reads the env key: an invalid key still gives ok', () => {
     // In real mode this key is refused (see above); in mock mode it is not looked at.
-    expect(createFieldCrypto({ config: mockConfig('not base64 at all!') }).status).toBe('ok');
-    expect(createFieldCrypto({ config: mockConfig('') }).status).toBe('ok');
+    expect(createFieldCrypto({ config: mockConfig('not base64 at all!'), ...HARBOR }).status).toBe('ok');
+    expect(createFieldCrypto({ config: mockConfig(''), ...HARBOR }).status).toBe('ok');
   });
 
   test('never derives a key', async () => {
     const cryptoModule = await import('node:crypto');
     const spy = spyOn(cryptoModule, 'hkdfSync');
     try {
-      const fc = ok(createFieldCrypto({ config: mockConfig(GO_TEST_ENV_KEY) }));
+      const fc = ok(createFieldCrypto({ config: mockConfig(GO_TEST_ENV_KEY), ...HARBOR }));
       const { port } = fakePort(() => ({ hit: true, value: 'enc:fixture', hash: '0123456789abcdef' }));
       await fc.encryptLookupValue(ctx(port), 'ABCDEF', 'cif');
       await fc.decryptFields(ctx(port), ['enc:x']).catch(() => undefined);
@@ -342,16 +345,16 @@ describe('mock mode', () => {
   });
 
   test('encrypt answers from the fixture with keyInput {op, kind, values}', async () => {
-    const fc = ok(createFieldCrypto({ config: mockConfig(GO_TEST_ENV_KEY) }));
+    const fc = ok(createFieldCrypto({ config: mockConfig(GO_TEST_ENV_KEY), ...HARBOR }));
     const { port, calls } = fakePort(() => ({ hit: true, value: 'enc:FROMFIXTURE', hash: '0123456789abcdef' }));
     const out = await fc.encryptLookupValue(ctx(port), ' +919000000001 ', 'phone');
     expect(out.transport).toBe('mock');
     expect(data(out)).toBe('enc:FROMFIXTURE');
-    expect(calls).toEqual([{ op: 'encrypt', kind: 'phone', values: ['+919000000001'] }]);
+    expect(calls).toEqual([{ op: 'encrypt', service: 'harbor', kind: 'phone', values: ['+919000000001'] }]);
   });
 
   test('decrypt answers from the fixture, with counts recomputed from the items', async () => {
-    const fc = ok(createFieldCrypto({ config: mockConfig(GO_TEST_ENV_KEY) }));
+    const fc = ok(createFieldCrypto({ config: mockConfig(GO_TEST_ENV_KEY), ...HARBOR }));
     const fixture: DecryptResult = {
       items: [
         { ok: true, value: '+919000000001', passthrough: false },
@@ -364,24 +367,24 @@ describe('mock mode', () => {
     const res = data(await fc.decryptFields(ctx(port), ['enc:a', 'plain', 'enc:b']));
     expect(res.items).toEqual(fixture.items);
     expect(res.counts).toEqual({ decrypted: 1, passthrough: 1, failed: 1 });
-    expect(calls).toEqual([{ op: 'decrypt', values: ['enc:a', 'plain', 'enc:b'] }]);
+    expect(calls).toEqual([{ op: 'decrypt', service: 'harbor', values: ['enc:a', 'plain', 'enc:b'] }]);
   });
 
   test('the 20-value cap applies before the fixture lookup', async () => {
-    const fc = ok(createFieldCrypto({ config: mockConfig('') }));
+    const fc = ok(createFieldCrypto({ config: mockConfig(''), ...HARBOR }));
     const { port, calls } = fakePort(() => ({ hit: false, key_string: 'k', hash: '0123456789abcdef' }));
     expect((await caught(fc.decryptFields(ctx(port), Array.from({ length: 21 }, () => 'enc:x')))).code).toBe('refused');
     expect(calls).toEqual([]);
   });
 
   test('a strict miss throws strict_miss', async () => {
-    const fc = ok(createFieldCrypto({ config: mockConfig('') }));
+    const fc = ok(createFieldCrypto({ config: mockConfig(''), ...HARBOR }));
     const { port } = fakePort(() => ({ hit: false, key_string: 'k', hash: '0123456789abcdef' }));
     expect((await caught(fc.encryptLookupValue(ctx(port), 'ABCDEF', 'cif'))).code).toBe('strict_miss');
   });
 
   test('a fixture with the wrong shape is a loud error', async () => {
-    const fc = ok(createFieldCrypto({ config: mockConfig('') }));
+    const fc = ok(createFieldCrypto({ config: mockConfig(''), ...HARBOR }));
     const bad = fakePort(() => ({ hit: true, value: { nope: true }, hash: '0123456789abcdef' }));
     await expect(fc.encryptLookupValue(ctx(bad.port), 'ABCDEF', 'cif')).rejects.toThrow('fixture has the wrong shape');
     await expect(fc.decryptFields(ctx(bad.port), ['enc:a'])).rejects.toThrow('fixture has the wrong shape');
@@ -390,7 +393,7 @@ describe('mock mode', () => {
   });
 
   test('set up in mock mode, a real context cannot run without the key', async () => {
-    const fc = ok(createFieldCrypto({ config: mockConfig(GO_TEST_ENV_KEY) }));
+    const fc = ok(createFieldCrypto({ config: mockConfig(GO_TEST_ENV_KEY), ...HARBOR }));
     const err = await caught(fc.encryptLookupValue(ctx(realPort), 'ABCDEF', 'cif'));
     expect(err.code).toBe('not_configured');
     expect(err.message).toContain(FIELD_ENC_KEY_ENV);
@@ -400,7 +403,7 @@ describe('mock mode', () => {
   test('works end to end with a field_crypto fixture file in the store', async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), 'triage-field-crypto-test-')));
     made.push(dir);
-    const key = semanticKey('field_crypto', { op: 'encrypt', kind: 'phone', values: ['+919000000001'] });
+    const key = semanticKey('field_crypto', { op: 'encrypt', service: 'harbor', kind: 'phone', values: ['+919000000001'] });
     const path = join(dir, 'shared', 'field_crypto', 'global', `${keyHash(key)}.json`);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(
@@ -419,7 +422,7 @@ describe('mock mode', () => {
       settings: { mockMode: true, strict: true, record: false },
       store: createFixtureStore({ fixturesDir: dir }),
     });
-    const fc = ok(createFieldCrypto({ config: mockConfig('') }));
+    const fc = ok(createFieldCrypto({ config: mockConfig(''), ...HARBOR }));
     expect(data(await fc.encryptLookupValue(ctx(port), '+919000000001', 'phone'))).toBe(GOLDEN[1].enc);
     expect((await caught(fc.encryptLookupValue(ctx(port), '+919000000002', 'phone'))).code).toBe('strict_miss');
   });

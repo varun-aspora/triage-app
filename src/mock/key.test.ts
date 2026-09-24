@@ -68,8 +68,8 @@ const SAME: readonly AnyCase[] = [
   },
   {
     kind: 'field_crypto',
-    a: { op: 'encrypt', kind: 'phone', values: ['+919000000001'] },
-    b: { values: ['+919000000001'], kind: 'phone', op: 'encrypt' },
+    a: { op: 'encrypt', service: 'harbor', kind: 'phone', values: ['+919000000001'] },
+    b: { values: ['+919000000001'], kind: 'phone', service: 'harbor', op: 'encrypt' },
   },
   {
     kind: 'code_query',

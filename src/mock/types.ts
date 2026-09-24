@@ -132,6 +132,8 @@ export const FIELD_CRYPTO_OPS = ['encrypt', 'decrypt'] as const;
 export const FIELD_VALUE_KINDS = ['phone', 'email', 'cif'] as const;
 export const FieldCryptoKeySchema = v.strictObject({
   op: v.picklist(FIELD_CRYPTO_OPS),
+  /** The registry service whose key is used (D48): each has its own. */
+  service: v.pipe(v.string(), v.regex(/^[a-z][a-z0-9_]*$/)),
   kind: v.optional(v.picklist(FIELD_VALUE_KINDS)),
   values: v.pipe(v.array(v.string()), v.minLength(1)),
 });

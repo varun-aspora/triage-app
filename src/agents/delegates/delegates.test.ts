@@ -186,11 +186,12 @@ describe('tool sets (mock mode, credentials blank)', () => {
       const ssfbOnly = allToolModules
         .filter((m) => m.entities !== 'all' && !m.entities.includes('atspl') && !m.entities.includes('rtl'))
         .map((m) => m.name);
-      expect(sorted(ssfbOnly)).toEqual(sorted([...SSFB_ALWAYS, ...SSFB_FLAGGED]));
+      // The crypto tools serve any entity with a field-encryption service (D48); none in atspl or rtl.
+      expect(sorted(ssfbOnly)).toEqual(sorted([...SSFB_ALWAYS, 'cbs_call']));
       for (const e of ['atspl', 'rtl'] as const) {
         for (const deep of [false, true]) {
           const names = namesOf(investigatorMounts(e, RUN, { env, deep }).tools);
-          for (const name of ssfbOnly) expect(names).not.toContain(name);
+          for (const name of [...SSFB_ALWAYS, ...SSFB_FLAGGED]) expect(names).not.toContain(name);
         }
       }
     });
