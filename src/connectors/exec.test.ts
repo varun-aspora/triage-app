@@ -132,6 +132,18 @@ describe('createExecRunner', () => {
     expect(JSON.parse(r.stdout)).toEqual(['$(id)', 'a;b']);
   });
 
+  test('env adds variables for the child and keeps the rest of the environment', async () => {
+    const script = "process.stdout.write(JSON.stringify([process.env.TRIAGE_EXEC_TEST_VAR, typeof process.env.PATH]))";
+    const r = await runner.run(node, ['-e', script], { timeoutMs: 20_000, env: { TRIAGE_EXEC_TEST_VAR: 'set for the child' } });
+    expect(JSON.parse(r.stdout)).toEqual(['set for the child', 'string']);
+  });
+
+  test('a bad env name or value rejects without echoing the value', async () => {
+    await expect(runner.run(node, [], { timeoutMs: 1000, env: { 'A=B': 'x' } })).rejects.toThrow('not a plain variable name');
+    await expect(runner.run(node, [], { timeoutMs: 1000, env: { OK: 'se\0cret' } })).rejects.toThrow('env OK contains a NUL byte');
+    await expect(runner.run(node, [], { timeoutMs: 1000, env: { OK: 1 as unknown as string } })).rejects.toThrow('env OK is not a string');
+  });
+
   test('a non-zero exit is a result, not a rejection', async () => {
     const r = await runner.run(node, ['-e', "process.stderr.write('bad');process.exit(3)"], { timeoutMs: 20_000 });
     expect(r.exitCode).toBe(3);

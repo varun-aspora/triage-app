@@ -500,10 +500,16 @@ describe('no command prints an env value', () => {
   }
 
   test('mock mode home with seeded values', async () => {
-    const h = home({ overrides: { ...SEEDED, TRIAGE_REPOS_DIR: '/tmp/triage-repos-leak' } });
-    for (const argv of argvs) {
-      const r = await cli(h.config, commandsFor(echoingRunner()), argv);
-      expectClean(argv.join(' '), r.out + r.err);
+    // repos sync clones every pin into this dir, so it is a temp dir.
+    const reposDir = mkdtempSync(join(tmpdir(), 'triage-repos-leak-'));
+    try {
+      const h = home({ overrides: { ...SEEDED, TRIAGE_REPOS_DIR: reposDir } });
+      for (const argv of argvs) {
+        const r = await cli(h.config, commandsFor(echoingRunner()), argv);
+        expectClean(argv.join(' '), r.out + r.err);
+      }
+    } finally {
+      rmSync(reposDir, { recursive: true, force: true });
     }
   });
 

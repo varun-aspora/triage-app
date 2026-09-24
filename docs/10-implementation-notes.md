@@ -95,7 +95,7 @@ Only places where what was built differs from the HLD, LLD, decisions or plan te
 | promptfoo full-Triage suite (`triage evals triage`) is refused as not in v1. | T10.8 |
 | HTTP `POST /triage/:run_id/post-to-slack` answers 403, or 501 when enabled; posting is CLI only. | T07.7 |
 | just-bash defence-in-depth patches cannot install under bun, so the bun unit tests run the virtual sandbox with it off. Node, where the app runs, has it on. | T06.7 |
-| `resources/repos.json` pins carry no `remote`, so `triage repos sync` cannot clone a repo that is not checked out. | T11.4 |
+| ~~`resources/repos.json` pins carry no `remote`, so `triage repos sync` cannot clone a repo that is not checked out.~~ Fixed by D46: a pin without a remote is cloned from `TRIAGE_GIT_PROTOCOL`, `TRIAGE_GIT_HOST` and `TRIAGE_GIT_ORG`. | T11.4 |
 | Decrypted values that the `credential` detector would read as a secret come back as null with a note (about 4 in 10,000). | T05.7 |
 | Stored `report.json` can hold a masked run id (question 12). | T08.4 |
 | HLD §7 still says libsql and LLD 04 still shows `uid` on `dispatch()`; the tables above are the correction. | T01.1, T07.4 |

@@ -24,6 +24,7 @@ import {
 export type DbProvider = 'sqlite' | 'postgres';
 export type ApprovalMode = 'cli' | 'slack';
 export type SandboxProvider = 'virtual' | 'e2b' | 'daytona' | 'local';
+export type GitProtocol = 'ssh' | 'https';
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
 export type Config = {
@@ -93,6 +94,7 @@ export type Config = {
     readonly daytonaApiUrl?: string;
   };
   readonly code: { readonly codegraphBin: string; readonly qwBin: string; readonly syncBeforeQuery: boolean };
+  readonly git: { readonly protocol: GitProtocol; readonly host: string; readonly org: string; readonly httpsToken?: string };
 };
 
 export type EnvLookup =
@@ -223,6 +225,12 @@ export function configFromRecord(
       qwBin: r.requiredStr('QW_BIN'),
       syncBeforeQuery: r.bool('CODEGRAPH_SYNC_BEFORE_QUERY'),
     },
+    git: {
+      protocol: r.enumOf<GitProtocol>('TRIAGE_GIT_PROTOCOL'),
+      host: r.matching('TRIAGE_GIT_HOST', GIT_HOST, 'must be a host name such as github.com'),
+      org: r.matching('TRIAGE_GIT_ORG', GIT_ORG, 'must be a plain organisation name'),
+      httpsToken: r.str('TRIAGE_GIT_HTTPS_TOKEN'),
+    },
   };
   // Raw string, no enum check (D32): preflight warns on an unknown value.
   const deployMode = r.str(DEPLOY_MODE_KEY) ?? '';
@@ -316,6 +324,9 @@ function seal(obj: object, label: string, names: () => string[]): void {
 }
 
 const DSN = /^postgres(ql)?:\/\//i;
+// Host and organisation for built clone URLs; they end up in a git argv.
+const GIT_HOST = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*$/;
+const GIT_ORG = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
 // Reads typed values from the record. Problems are collected so one error lists every bad key.
 class Reader {
@@ -348,6 +359,13 @@ class Reader {
     const v = this.str(name);
     if (v === undefined) this.problem(name, 'is required');
     return v ?? '';
+  }
+
+  // A required string that must match the pattern. The reason never echoes the value.
+  matching(name: string, pattern: RegExp, reason: string): string {
+    const v = this.requiredStr(name);
+    if (v !== '' && !pattern.test(v)) this.problem(name, reason);
+    return v;
   }
 
   bool(name: string): boolean {

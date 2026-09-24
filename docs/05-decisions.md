@@ -235,6 +235,11 @@ Append-only. When a decision is reversed, add a new entry that supersedes it; do
 - **Why virtual first**: no Docker, no daemon, nothing to install, covers the join-and-chart case, and Python is a config flag away. Honest limits: the boundary is the emulator plus WebAssembly, not an OS; files are wiped per message (use `note_evidence` for anything that must persist); which Python packages ship with the WASM build is unverified.
 - **Rejected**: `local()`; a separate typed `run_analysis` tool with Docker or a standalone WASM runtime (more moving parts for the same result once `python: true` exists in just-bash); sandbox-backed `repo_grep` (D11 stands); running repo tests or linters (later); executing `suggested_fix` in any sandbox (D35, never).
 
+### D46. Repos are cloned from an org over ssh or https; the token goes through git's environment (2026-09-24; refines D37)
+- **Chosen**: a pin in `resources/repos.json` without `remote` is cloned from a URL built from `TRIAGE_GIT_PROTOCOL` (`ssh` default, or `https`), `TRIAGE_GIT_HOST` (`github.com`) and `TRIAGE_GIT_ORG` (`Vance-Club`): `git@github.com:Vance-Club/<repo>.git` or `https://github.com/Vance-Club/<repo>.git`, the same org and shallow clone as triage-shivalik's `git-clone.sh`. A pin's own `remote` still wins. When the protocol changes, sync points an existing clone's `origin` at the new URL if it names the same repo; an `origin` that names another repo is left alone with a warning that does not print it. Four repos sync at a time.
+- **Auth**: ssh uses the host's keys and ssh config as they are. For https, `TRIAGE_GIT_HTTPS_TOKEN` reaches git as `http.https://<host>/.extraheader` through `GIT_CONFIG_COUNT/KEY/VALUE` variables, so it is never in argv, a URL or `.git/config`; blank means the host's credential helper. Every git call gets `GIT_TERMINAL_PROMPT=0`. git's stderr is mapped to fixed reasons and never returned, as the tunnel does for ssh.
+- **Rejected**: a token inside the clone URL (it lands in `.git/config` and in `ps`); a `-c http.extraheader=...` argument (visible in `ps`); setting `GIT_SSH_COMMAND` (it would override a per-directory `core.sshCommand` that picks the right GitHub account); a `remote` on every pin (21 near-identical URLs to keep in step).
+
 ## Assumptions (explicit; each needs your confirmation or correction)
 
 | # | Assumption | Basis | If wrong |

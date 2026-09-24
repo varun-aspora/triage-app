@@ -1,6 +1,8 @@
 // resources/repos.json: which repos are checked out, which entities they serve,
 // and the branch `triage repos sync` pins them to (D37). A pin without a
-// branch follows the repo's default branch.
+// branch follows the repo's default branch. A pin without a remote is cloned
+// from the URL built from TRIAGE_GIT_PROTOCOL, TRIAGE_GIT_HOST and
+// TRIAGE_GIT_ORG (D46).
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -20,7 +22,8 @@ export const BranchNameSchema = v.pipe(
   v.check((b) => !b.endsWith('/') && !b.endsWith('.lock'), 'must be a plain branch name'),
 );
 
-// Clone URL for `triage repos sync`. scp-style ssh (git@host:org/repo.git),
+// Clone URL for `triage repos sync`, set on a pin that does not live in
+// TRIAGE_GIT_ORG. scp-style ssh (git@host:org/repo.git),
 // ssh:// or https:// only, with no user info other than 'git@', so no
 // credentials or other git transports (ext::, file://) can be pinned.
 export const RemoteUrlSchema = v.pipe(
@@ -37,7 +40,7 @@ export const RepoPinSchema = v.strictObject({
   entities: v.pipe(v.array(v.string()), v.minLength(1, 'must list at least one entity')),
   /** Absent means the repo's default branch. */
   branch: v.optional(BranchNameSchema),
-  /** Where `triage repos sync` clones a missing repo from. Absent means it is never cloned. */
+  /** Where `triage repos sync` clones a missing repo from. Absent means the URL built from TRIAGE_GIT_*. */
   remote: v.optional(RemoteUrlSchema),
 });
 
@@ -46,7 +49,7 @@ export type RepoPin = {
   readonly entities: readonly Entity[];
   /** undefined means the repo's default branch. */
   readonly branch?: string;
-  /** undefined means sync never clones this repo. */
+  /** undefined means the URL built from TRIAGE_GIT_PROTOCOL, TRIAGE_GIT_HOST and TRIAGE_GIT_ORG. */
   readonly remote?: string;
 };
 

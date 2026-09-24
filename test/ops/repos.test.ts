@@ -1,14 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import * as v from 'valibot';
 import { configFromRecord, type Config } from '../../src/config/env.ts';
 import { RegistryError } from '../../src/config/registry.ts';
 import { parseRepos, RemoteUrlSchema, type RepoPin } from '../../src/config/repos.ts';
 import { createFakeRunner, type FakeStep } from '../../src/connectors/exec-fake.ts';
 import * as git from '../../src/ops/git.ts';
-import { addIndexExclude, currentCommit, repoStatus, syncRepos, UnknownRepoError } from '../../src/ops/repos.ts';
+import { addIndexExclude, currentCommit, defaultRemote, gitEnv, repoStatus, SYNC_JOBS, syncRepos, UnknownRepoError } from '../../src/ops/repos.ts';
 import { makeTestHome, testEnvRecord } from '../support/home.ts';
 
 const GIT = 'git';
@@ -55,10 +55,21 @@ function deps(steps: readonly FakeStep[], repos: readonly RepoPin[], overrides: 
   return { runner, d: { config: configWith(overrides), runner, repos } };
 }
 
+/** The URL sync builds for a repo with the .env.example defaults (ssh, github.com, Vance-Club). */
+const orgRemote = (repo: string): string => `git@github.com:Vance-Club/${repo}.git`;
+
+/** origin already points at the built URL. */
+const originStep = (dir: string, url = orgRemote(basename(dir))): FakeStep => ({
+  bin: GIT,
+  argv: git.remoteGetUrl(dir),
+  result: { stdout: `${url}\n` },
+});
+
 /** The steps for a clean checkout that syncs to `branch` and has an index. */
 function cleanSyncSteps(dir: string, branch: string, sha: string): FakeStep[] {
   return [
     { bin: GIT, argv: git.statusPorcelain(dir), result: { stdout: '' } },
+    originStep(dir),
     { bin: GIT, argv: git.fetchBranch(dir, branch) },
     { bin: GIT, argv: git.checkoutFetched(dir, branch) },
     { bin: GIT, argv: git.revParseHead(dir), result: { stdout: `${sha}\n` } },
@@ -166,6 +177,7 @@ describe('syncRepos', () => {
     const seq = runner.calls.map((c) => `${c.bin} ${c.argv.filter((a) => a !== '-C' && a !== dir).join(' ')}`);
     expect(seq).toEqual([
       'git status --porcelain --untracked-files=normal',
+      'git remote get-url origin',
       'git fetch --no-tags origin main',
       'git checkout -B main FETCH_HEAD',
       'git rev-parse --verify HEAD',
@@ -181,17 +193,16 @@ describe('syncRepos', () => {
   test('branch absent in the pin gives a default-branch lookup, then that branch is used', async () => {
     const dir = makeRepo('harbor');
     const steps: FakeStep[] = [
-      { bin: GIT, argv: git.statusPorcelain(dir), result: { stdout: '' } },
       { bin: GIT, argv: git.remoteDefaultBranch(dir), result: { stdout: `ref: refs/heads/develop\tHEAD\n${SHA_B}\tHEAD\n` } },
-      ...cleanSyncSteps(dir, 'develop', SHA_B).slice(1),
+      ...cleanSyncSteps(dir, 'develop', SHA_B),
     ];
     const { runner, d } = deps(steps, [pin('harbor')]);
     const report = await syncRepos({}, d);
     if (report.status !== 'done') throw new Error('expected done');
     const subcommands = runner.calls.map((c) => c.argv[c.bin === GIT ? 2 : 0]);
-    expect(subcommands).toEqual(['status', 'ls-remote', 'fetch', 'checkout', 'rev-parse', 'sync']);
-    expect(runner.calls[2]!.argv).toEqual(git.fetchBranch(dir, 'develop'));
-    expect(runner.calls[3]!.argv).toEqual(git.checkoutFetched(dir, 'develop'));
+    expect(subcommands).toEqual(['status', 'remote', 'ls-remote', 'fetch', 'checkout', 'rev-parse', 'sync']);
+    expect(runner.calls[3]!.argv).toEqual(git.fetchBranch(dir, 'develop'));
+    expect(runner.calls[4]!.argv).toEqual(git.checkoutFetched(dir, 'develop'));
     expect(report.results[0]).toMatchObject({ status: 'ok', branch: 'develop' });
   });
 
@@ -200,6 +211,7 @@ describe('syncRepos', () => {
     const { runner, d } = deps(
       [
         { bin: GIT, argv: git.statusPorcelain(dir), result: { stdout: '' } },
+        originStep(dir),
         { bin: GIT, argv: git.remoteDefaultBranch(dir), result: { stdout: `ref: refs/heads/-x\tHEAD\n` } },
       ],
       [pin('harbor')],
@@ -207,7 +219,7 @@ describe('syncRepos', () => {
     const report = await syncRepos({}, d);
     if (report.status !== 'done') throw new Error('expected done');
     expect(report.results[0]).toMatchObject({ status: 'failed' });
-    expect(runner.calls.map((c) => c.argv[2])).toEqual(['status', 'ls-remote']);
+    expect(runner.calls.map((c) => c.argv[2])).toEqual(['status', 'remote', 'ls-remote']);
   });
 
   test('a dirty tree gives skipped: dirty, with no fetch or checkout calls', async () => {
@@ -227,14 +239,25 @@ describe('syncRepos', () => {
     expect(existsSync(join(dir, '.git', 'info', 'exclude'))).toBe(false);
   });
 
-  test("missing dir with no remote gives 'not checked out' and no clone", async () => {
-    const { runner, d } = deps([], [pin('harbor', { branch: 'main' })]);
+  test('missing dir with no remote in the pin is cloned from TRIAGE_GIT_ORG over ssh', async () => {
+    const dir = join(reposDir, 'harbor');
+    const steps: FakeStep[] = [
+      {
+        bin: GIT,
+        argv: git.cloneBranch(reposDir, orgRemote('harbor'), 'main', 'harbor'),
+        result: () => {
+          mkdirSync(join(dir, '.git'), { recursive: true });
+          return {};
+        },
+      },
+      { bin: GIT, argv: git.revParseHead(dir), result: { stdout: `${SHA_A}\n` } },
+      { bin: CG, argv: ['init', dir] },
+    ];
+    const { runner, d } = deps(steps, [pin('harbor', { branch: 'main' })]);
     const report = await syncRepos({}, d);
     if (report.status !== 'done') throw new Error('expected done');
-    expect(report.results[0]).toMatchObject({ repo: 'harbor', status: 'skipped', reason: 'not checked out' });
-    expect(report.results[0]!.line).toBe('harbor: skipped: not checked out');
-    expect(runner.calls).toEqual([]);
-    expect(existsSync(join(reposDir, 'harbor'))).toBe(false);
+    expect(runner.calls[0]!.argv).toContain('git@github.com:Vance-Club/harbor.git');
+    expect(report.results[0]).toMatchObject({ repo: 'harbor', status: 'ok', action: 'cloned', branch: 'main' });
   });
 
   test('missing dir with a remote gives clone --branch, then codegraph init', async () => {
@@ -317,6 +340,7 @@ describe('syncRepos', () => {
     const b = makeRepo('b');
     const steps: FakeStep[] = [
       { bin: GIT, argv: git.statusPorcelain(a), result: { stdout: '' } },
+      originStep(a),
       { bin: GIT, argv: git.fetchBranch(a, 'main'), result: { exitCode: 128, stderr: 'fatal: could not read from remote repository\n' } },
       ...cleanSyncSteps(b, 'main', SHA_B),
     ];
@@ -375,7 +399,7 @@ describe('syncRepos', () => {
   test('a busy codegraph lock reports skipped with the reason', async () => {
     const dir = makeRepo('harbor');
     writeFileSync(join(dir, '.codegraph', '.triage-sync.lock'), '{"token":"other"}\n');
-    const { d } = deps(cleanSyncSteps(dir, 'main', SHA_A).slice(0, 4), [pin('harbor', { branch: 'main' })]);
+    const { d } = deps(cleanSyncSteps(dir, 'main', SHA_A).slice(0, -1), [pin('harbor', { branch: 'main' })]);
     const report = await syncRepos({}, d);
     if (report.status !== 'done') throw new Error('expected done');
     expect(report.results[0]).toMatchObject({ status: 'skipped', reason: 'another codegraph writer holds the sync lock' });
@@ -383,7 +407,7 @@ describe('syncRepos', () => {
 
   test('a codegraph error fails the repo', async () => {
     const dir = makeRepo('harbor');
-    const steps = cleanSyncSteps(dir, 'main', SHA_A).slice(0, 4);
+    const steps = cleanSyncSteps(dir, 'main', SHA_A).slice(0, -1);
     steps.push({ bin: CG, argv: ['sync', dir], result: { exitCode: 1, stderr: 'boom' } });
     const { d } = deps(steps, [pin('harbor', { branch: 'main' })]);
     const report = await syncRepos({}, d);
@@ -393,7 +417,7 @@ describe('syncRepos', () => {
 
   test('a blank CODEGRAPH_BIN keeps the git update and warns', async () => {
     const dir = makeRepo('harbor');
-    const { runner, d } = deps(cleanSyncSteps(dir, 'main', SHA_A).slice(0, 4), [pin('harbor', { branch: 'main' })], { CODEGRAPH_BIN: '' });
+    const { runner, d } = deps(cleanSyncSteps(dir, 'main', SHA_A).slice(0, -1), [pin('harbor', { branch: 'main' })], { CODEGRAPH_BIN: '' });
     const report = await syncRepos({}, d);
     if (report.status !== 'done') throw new Error('expected done');
     expect(report.results[0]).toMatchObject({ status: 'ok', action: 'updated' });
@@ -406,6 +430,189 @@ describe('syncRepos', () => {
     expect(await syncRepos({}, d)).toMatchObject({ status: 'not_configured', key: 'TRIAGE_REPOS_DIR' });
     expect(await repoStatus(d)).toMatchObject({ status: 'not_configured', key: 'TRIAGE_REPOS_DIR' });
     expect(runner.calls).toEqual([]);
+  });
+});
+
+describe('sync remotes, protocol and auth', () => {
+  const TOKEN = 'ghp_TESTtoken0123456789abcdef';
+  const BASIC = Buffer.from(`x-access-token:${TOKEN}`).toString('base64');
+
+  function cloneSteps(dir: string, remote: string): FakeStep[] {
+    return [
+      {
+        bin: GIT,
+        argv: git.cloneBranch(reposDir, remote, 'main', basename(dir)),
+        result: () => {
+          mkdirSync(join(dir, '.git'), { recursive: true });
+          return {};
+        },
+      },
+      { bin: GIT, argv: git.revParseHead(dir), result: { stdout: `${SHA_A}\n` } },
+      { bin: CG, argv: ['init', dir] },
+    ];
+  }
+
+  test('defaultRemote builds ssh and https URLs from TRIAGE_GIT_HOST and TRIAGE_GIT_ORG', () => {
+    expect(defaultRemote(configWith(), 'harbor')).toBe('git@github.com:Vance-Club/harbor.git');
+    expect(defaultRemote(configWith({ TRIAGE_GIT_PROTOCOL: 'https' }), 'harbor')).toBe('https://github.com/Vance-Club/harbor.git');
+    expect(defaultRemote(configWith({ TRIAGE_GIT_HOST: 'git.example.test', TRIAGE_GIT_ORG: 'acme' }), 'x')).toBe('git@git.example.test:acme/x.git');
+    for (const url of [defaultRemote(configWith(), 'harbor'), defaultRemote(configWith({ TRIAGE_GIT_PROTOCOL: 'https' }), 'harbor')]) {
+      expect(git.remoteArg(url)).toBe(url);
+    }
+  });
+
+  test('every git call gets GIT_TERMINAL_PROMPT=0 and, without a token, no auth header', async () => {
+    const dir = makeRepo('harbor');
+    const { runner, d } = deps(cleanSyncSteps(dir, 'main', SHA_A), [pin('harbor', { branch: 'main' })]);
+    await syncRepos({}, d);
+    const gitCalls = runner.calls.filter((c) => c.bin === GIT);
+    expect(gitCalls.length).toBeGreaterThan(0);
+    for (const c of gitCalls) expect(c.env).toEqual({ GIT_TERMINAL_PROMPT: '0' });
+  });
+
+  test('https with a token clones the https URL and passes the token in the env only', async () => {
+    const dir = join(reposDir, 'harbor');
+    const remote = 'https://github.com/Vance-Club/harbor.git';
+    const { runner, d } = deps(cloneSteps(dir, remote), [pin('harbor', { branch: 'main' })], {
+      TRIAGE_GIT_PROTOCOL: 'https',
+      TRIAGE_GIT_HTTPS_TOKEN: TOKEN,
+    });
+    const report = await syncRepos({}, d);
+    if (report.status !== 'done') throw new Error('expected done');
+    expect(report.results[0]).toMatchObject({ status: 'ok', action: 'cloned' });
+    const clone = runner.calls[0]!;
+    expect(clone.argv).toContain(remote);
+    expect(clone.env).toEqual({
+      GIT_TERMINAL_PROMPT: '0',
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
+      GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${BASIC}`,
+    });
+    for (const c of runner.calls) expect(c.argv.join(' ')).not.toContain(TOKEN);
+    expect(JSON.stringify(report)).not.toContain(TOKEN);
+  });
+
+  test('a failure reason is a fixed text: git stderr, and the token in it, never reach the report', async () => {
+    const dir = makeRepo('harbor');
+    const { d } = deps(
+      [
+        { bin: GIT, argv: git.statusPorcelain(dir), result: { stdout: '' } },
+        originStep(dir, 'https://github.com/Vance-Club/harbor.git'),
+        { bin: GIT, argv: git.fetchBranch(dir, 'main'), result: { exitCode: 128, stderr: `fatal: bad header ${BASIC} for ${TOKEN}\n` } },
+      ],
+      [pin('harbor', { branch: 'main' })],
+      { TRIAGE_GIT_PROTOCOL: 'https', TRIAGE_GIT_HTTPS_TOKEN: TOKEN },
+    );
+    const report = await syncRepos({}, d);
+    if (report.status !== 'done') throw new Error('expected done');
+    expect(report.results[0]).toMatchObject({ status: 'failed', reason: 'git fetch exited with code 128' });
+    expect(JSON.stringify(report)).not.toContain(TOKEN);
+    expect(JSON.stringify(report)).not.toContain(BASIC);
+  });
+
+  test('common git failures map to fixed reasons', async () => {
+    const cases: [string, string][] = [
+      ['git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.', 'the ssh key was refused'],
+      ["remote: Repository not found.\nfatal: repository 'https://github.com/Vance-Club/harbor.git/' not found", 'the repository was not found, or this identity cannot read it'],
+      ["fatal: could not read Username for 'https://github.com': terminal prompts disabled", 'https authentication failed; check TRIAGE_GIT_HTTPS_TOKEN or the credential helper'],
+      ['ssh: Could not resolve hostname github.com: nodename nor servname provided', 'the git host name did not resolve'],
+      ["fatal: couldn't find remote ref release/9", 'the branch is not on the remote'],
+    ];
+    for (const [stderr, reason] of cases) {
+      const dir = makeRepo('harbor');
+      const { d } = deps(
+        [
+          { bin: GIT, argv: git.statusPorcelain(dir), result: { stdout: '' } },
+          originStep(dir),
+          { bin: GIT, argv: git.fetchBranch(dir, 'main'), result: { exitCode: 128, stderr } },
+        ],
+        [pin('harbor', { branch: 'main' })],
+      );
+      const report = await syncRepos({}, d);
+      if (report.status !== 'done') throw new Error('expected done');
+      expect(report.results[0]!.reason).toBe(`git fetch exited with code 128: ${reason}`);
+    }
+  });
+
+  test('an ssh origin is switched to https when the protocol is https', async () => {
+    const dir = makeRepo('harbor');
+    const https = 'https://github.com/Vance-Club/harbor.git';
+    const steps: FakeStep[] = [
+      { bin: GIT, argv: git.statusPorcelain(dir), result: { stdout: '' } },
+      originStep(dir, 'git@github.com:vance-club/harbor.git'),
+      { bin: GIT, argv: git.remoteSetUrl(dir, https) },
+      ...cleanSyncSteps(dir, 'main', SHA_A).slice(2),
+    ];
+    const { runner, d } = deps(steps, [pin('harbor', { branch: 'main' })], { TRIAGE_GIT_PROTOCOL: 'https' });
+    const report = await syncRepos({}, d);
+    if (report.status !== 'done') throw new Error('expected done');
+    expect(runner.calls.map((c) => c.argv[c.bin === GIT ? 2 : 0])).toEqual(['status', 'remote', 'remote', 'fetch', 'checkout', 'rev-parse', 'sync']);
+    expect(runner.calls[2]!.argv).toEqual(['-C', dir, 'remote', 'set-url', 'origin', https]);
+    expect(report.results[0]).toMatchObject({ status: 'ok', action: 'updated' });
+    expect(report.results[0]!.warnings).toContain(`origin now points at ${https}`);
+  });
+
+  test('an origin that names another repo is left alone, with a warning that does not print it', async () => {
+    const dir = makeRepo('harbor');
+    const other = 'https://someone:secret@github.com/fork-owner/harbor.git';
+    const steps: FakeStep[] = [
+      { bin: GIT, argv: git.statusPorcelain(dir), result: { stdout: '' } },
+      originStep(dir, other),
+      ...cleanSyncSteps(dir, 'main', SHA_A).slice(2),
+    ];
+    const { runner, d } = deps(steps, [pin('harbor', { branch: 'main' })]);
+    const report = await syncRepos({}, d);
+    if (report.status !== 'done') throw new Error('expected done');
+    expect(runner.calls.some((c) => c.argv.includes('set-url'))).toBe(false);
+    expect(report.results[0]).toMatchObject({ status: 'ok', action: 'updated' });
+    expect(report.results[0]!.warnings[0]).toContain('origin does not point at git@github.com:Vance-Club/harbor.git');
+    expect(JSON.stringify(report)).not.toContain('secret');
+  });
+
+  test(`at most ${SYNC_JOBS} repos sync at once, and results keep the pin order`, async () => {
+    const names = ['r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'r7'];
+    const steps = names.flatMap((n) => cleanSyncSteps(makeRepo(n), 'main', SHA_A));
+    const fake = createFakeRunner(steps);
+    let active = 0;
+    let peak = 0;
+    const runner = {
+      calls: fake.calls,
+      async run(bin: string, argv: readonly string[], opts: Parameters<typeof fake.run>[2]) {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((r) => setTimeout(r, 2));
+        try {
+          return await fake.run(bin, argv, opts);
+        } finally {
+          active--;
+        }
+      },
+    };
+    const report = await syncRepos({}, { config: configWith(), runner, repos: names.map((n) => pin(n, { branch: 'main' })) });
+    if (report.status !== 'done') throw new Error('expected done');
+    expect(report.results.map((r) => r.repo)).toEqual(names);
+    expect(report.ok).toEqual(names);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(SYNC_JOBS);
+  });
+
+  test('gitEnv scopes the header to the configured host', () => {
+    const env = gitEnv(configWith({ TRIAGE_GIT_HOST: 'git.example.test', TRIAGE_GIT_HTTPS_TOKEN: TOKEN }));
+    expect(env['GIT_CONFIG_KEY_0']).toBe('http.https://git.example.test/.extraheader');
+  });
+
+  test('remoteIdentity matches one repo across forms and tells other repos apart', () => {
+    const forms = [
+      'git@github.com:Vance-Club/harbor.git',
+      'ssh://git@github.com/Vance-Club/harbor',
+      'https://github.com/vance-club/harbor.git',
+      'https://user:tok@github.com:443/Vance-Club/harbor/',
+    ];
+    const ids = forms.map((f) => git.remoteIdentity(f));
+    expect(new Set(ids)).toEqual(new Set(['github.com/vance-club/harbor']));
+    expect(git.remoteIdentity('git@github.com:other/harbor.git')).not.toBe(ids[0]);
+    expect(git.remoteIdentity('/local/path/harbor')).toBeUndefined();
+    expect(git.remoteIdentity('')).toBeUndefined();
   });
 });
 

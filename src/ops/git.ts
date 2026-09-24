@@ -64,6 +64,16 @@ export function statusPorcelain(dir: string): readonly string[] {
   return at(dir, 'status', '--porcelain', '--untracked-files=normal');
 }
 
+/** Prints the URL origin points at. */
+export function remoteGetUrl(dir: string): readonly string[] {
+  return at(dir, 'remote', 'get-url', 'origin');
+}
+
+/** Points origin at another URL, for a switch between ssh and https. */
+export function remoteSetUrl(dir: string, remote: string): readonly string[] {
+  return at(dir, 'remote', 'set-url', 'origin', remoteArg(remote));
+}
+
 /** Fetches one branch from origin into FETCH_HEAD. Tags are left alone. */
 export function fetchBranch(dir: string, branch: string): readonly string[] {
   return at(dir, 'fetch', '--no-tags', 'origin', branchArg(branch));
@@ -134,6 +144,23 @@ export function parseLocalDefaultBranch(stdout: string): string | undefined {
 export function parseBranch(stdout: string): string | undefined {
   const branch = stdout.trim();
   return v.is(BranchNameSchema, branch) ? branch : undefined;
+}
+
+/**
+ * The host and repo path a clone URL names, lowercased, without user info,
+ * port or a .git suffix: 'github.com/org/repo' for git@github.com:org/repo.git,
+ * ssh://git@github.com/org/repo and https://github.com/org/repo.git alike.
+ * Undefined for any other form. Used to tell a protocol switch from an origin
+ * that points at another repo; the result is never printed, since an origin
+ * URL may carry credentials.
+ */
+export function remoteIdentity(url: string): string | undefined {
+  const text = url.trim();
+  const m = /^[^@/\s]+@([^:/\s]+):([^\s]+)$/.exec(text) ?? /^(?:ssh|https?):\/\/(?:[^@/\s]*@)?([^:/\s]+)(?::\d+)?\/([^\s]+)$/.exec(text);
+  if (m === null) return undefined;
+  const path = (m[2] as string).replace(/^\/+|\/+$/g, '').replace(/\.git$/i, '');
+  if (path === '') return undefined;
+  return `${(m[1] as string).toLowerCase()}/${path.toLowerCase()}`;
 }
 
 /** A full commit id (sha1 or sha256) from rev-parse, else undefined. */

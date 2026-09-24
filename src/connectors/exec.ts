@@ -15,6 +15,7 @@
 // read data from stdin).
 
 import childProcess from 'node:child_process';
+import { childEnv } from '../config/child-env.ts';
 
 export type ExecOptions = {
   /** Hard limit for the run. The child is killed when it passes. */
@@ -26,6 +27,11 @@ export type ExecOptions = {
   readonly cwd?: string;
   /** Cap per stream in bytes. Passing it kills the child and sets truncated. */
   readonly maxOutputBytes?: number;
+  /**
+   * Variables added to this process's environment for the child. For values
+   * that must stay out of argv, such as a git auth header.
+   */
+  readonly env?: Readonly<Record<string, string>>;
 };
 
 export type ExecResult = {
@@ -68,7 +74,20 @@ function checkOptions(opts: ExecOptions): number {
   if (!Number.isInteger(t) || t <= 0 || t > MAX_TIMEOUT_MS) throw new TypeError('exec: timeoutMs must be a positive integer');
   const cap = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
   if (!Number.isInteger(cap) || cap <= 0) throw new TypeError('exec: maxOutputBytes must be a positive integer');
+  if (opts.env !== undefined) checkEnv(opts.env);
   return cap;
+}
+
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** Names must be plain variable names and values strings without NUL. Messages name the variable, never the value. */
+function checkEnv(env: unknown): void {
+  if (typeof env !== 'object' || env === null || Array.isArray(env)) throw new TypeError('exec: env must be an object of strings');
+  for (const [name, value] of Object.entries(env)) {
+    if (!ENV_NAME.test(name)) throw new TypeError('exec: env has a name that is not a plain variable name');
+    if (typeof value !== 'string') throw new TypeError(`exec: env ${name} is not a string`);
+    if (value.includes('\0')) throw new TypeError(`exec: env ${name} contains a NUL byte`);
+  }
 }
 
 function emptyResult(extra: Partial<ExecResult>): ExecResult {
@@ -137,6 +156,7 @@ function run(bin: string, argv: readonly string[], opts: ExecOptions): Promise<E
           maxBuffer: cap,
           killSignal: 'SIGKILL',
           windowsHide: true,
+          ...(opts.env !== undefined ? { env: childEnv(opts.env) } : {}),
         },
         (error, stdoutRaw, stderrRaw) => {
           cleanup();

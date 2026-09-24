@@ -147,6 +147,7 @@ describe('defaults with an empty .env', () => {
     expect(c.http.allowSlackPost).toBe(false);
     expect(c.runs.priorCases).toBe(false);
     expect(c.code).toEqual({ codegraphBin: 'codegraph', qwBin: 'qw', syncBeforeQuery: true });
+    expect({ ...c.git }).toEqual({ protocol: 'ssh', host: 'github.com', org: 'Vance-Club', httpsToken: undefined });
     expect(c.display.envLabel).toBeUndefined();
     expect(deployModeForPreflight(c)).toBe('local');
   });
@@ -286,6 +287,11 @@ describe('type refusals name the key', () => {
     ['TRIAGE_HTTP_PORT', '70000'],
     ['TRIAGE_RUNS_RETENTION_DAYS', '1.5'],
     ['TRIAGE_EVAL_MAX_COST_USD', 'cheap'],
+    ['TRIAGE_GIT_PROTOCOL', 'git'],
+    ['TRIAGE_GIT_HOST', 'github.com/org'],
+    ['TRIAGE_GIT_HOST', '-github.com'],
+    ['TRIAGE_GIT_ORG', 'org/../x'],
+    ['TRIAGE_GIT_ORG', '-org'],
   ];
   for (const [key, value] of cases) {
     test(`${key}=${value}`, () => {

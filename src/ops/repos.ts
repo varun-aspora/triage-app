@@ -2,19 +2,28 @@
 // check with branch drift, the current commit per repo for the report, and
 // `triage repos sync`.
 //
-// Sync runs outside the request path and the model never reaches it. For
-// each pin it:
-// - clones a missing repo only when the pin names a remote, and otherwise
-//   reports 'not checked out';
+// Sync runs outside the model's reach. For each pin it:
+// - clones a missing repo from the pin's remote, or from the URL built from
+//   TRIAGE_GIT_PROTOCOL, TRIAGE_GIT_HOST and TRIAGE_GIT_ORG (D46), shallow
+//   and single-branch, as triage-shivalik's git-clone.sh did;
 // - skips a dirty working tree and never resets or checks it out;
+// - points origin at that URL when origin names the same repo over the other
+//   protocol, and warns (changing nothing) when origin names another repo;
 // - fetches the pinned branch (the remote's default branch when the pin has
 //   none) and checks it out at FETCH_HEAD, so nothing is merged;
 // - adds .codegraph/ to .git/info/exclude and runs codegraphIndex (T11.3).
-// One repo failing does not stop the rest. Every git call is the fixed 'git'
-// binary with argv from git.ts, through the ExecRunner.
+// SYNC_JOBS repos run at a time and one repo failing does not stop the rest.
+// Every git call is the fixed 'git' binary with argv from git.ts, through the
+// ExecRunner, with GIT_TERMINAL_PROMPT=0 so git never waits for a prompt. With
+// TRIAGE_GIT_HTTPS_TOKEN set, the token reaches git as an http.extraheader
+// set through GIT_CONFIG_* variables and scoped to https://TRIAGE_GIT_HOST/:
+// never in argv, a URL or .git/config. git's stderr is mapped to fixed
+// reasons and never returned, as the tunnel does for ssh: it can repeat URLs,
+// hosts and whatever else git was handed.
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import type { Config } from '../config/env.ts';
 import { loadRegistry } from '../config/registry.ts';
 import { loadRepos, type RepoPin } from '../config/repos.ts';
 import type { ExecResult } from '../connectors/exec.ts';
@@ -32,8 +41,9 @@ import * as git from './git.ts';
 export const LOCAL_TIMEOUT_MS = 30 * 1000;
 export const FETCH_TIMEOUT_MS = 5 * 60 * 1000;
 export const CLONE_TIMEOUT_MS = 10 * 60 * 1000;
+/** Repos synced at the same time, as git-clone.sh's MAX_JOBS. */
+export const SYNC_JOBS = 4;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
-const STDERR_TAIL_CHARS = 300;
 
 export type ReposDeps = Omit<CodegraphDeps, 'repos'> & {
   /** The repos manifest. Loaded from resources/repos.json when left out. */
@@ -80,25 +90,81 @@ function codegraphDeps(deps: ReposDeps, pins: readonly RepoPin[]): CodegraphDeps
   return { ...deps, repos: pins };
 }
 
-function runGit(deps: ReposDeps, argv: readonly string[], timeoutMs: number): Promise<ExecResult> {
-  return deps.runner.run(git.GIT_BIN, argv, {
+// ------------------------------------------------------------ remotes and auth
+
+type GitConfig = Pick<Config, 'git'>;
+
+/** The clone URL for a repo in TRIAGE_GIT_ORG on TRIAGE_GIT_HOST over TRIAGE_GIT_PROTOCOL. */
+export function defaultRemote(config: GitConfig, repo: string): string {
+  const { protocol, host, org } = config.git;
+  return protocol === 'https' ? `https://${host}/${org}/${repo}.git` : `git@${host}:${org}/${repo}.git`;
+}
+
+/** The pin's own remote, else the built one. */
+export function remoteFor(pin: RepoPin, config: GitConfig): string {
+  return pin.remote ?? defaultRemote(config, pin.repo);
+}
+
+function basicAuth(token: string): string {
+  return Buffer.from(`x-access-token:${token}`, 'utf8').toString('base64');
+}
+
+/**
+ * The variables every git call gets. GIT_TERMINAL_PROMPT=0 always; with a
+ * token, an Authorization header for https://<host>/ through GIT_CONFIG_*,
+ * the same header actions/checkout sets.
+ */
+export function gitEnv(config: GitConfig): Readonly<Record<string, string>> {
+  const env: Record<string, string> = { GIT_TERMINAL_PROMPT: '0' };
+  const token = config.git.httpsToken;
+  if (token !== undefined) {
+    env['GIT_CONFIG_COUNT'] = '1';
+    env['GIT_CONFIG_KEY_0'] = `http.https://${config.git.host}/.extraheader`;
+    env['GIT_CONFIG_VALUE_0'] = `AUTHORIZATION: basic ${basicAuth(token)}`;
+  }
+  return Object.freeze(env);
+}
+
+/** Cuts the token, and the header built from it, out of git's output. */
+function scrubToken(config: GitConfig, text: string): string {
+  const token = config.git.httpsToken;
+  if (token === undefined || text === '') return text;
+  return text.split(basicAuth(token)).join('***').split(token).join('***');
+}
+
+async function runGit(deps: ReposDeps, argv: readonly string[], timeoutMs: number): Promise<ExecResult> {
+  const r = await deps.runner.run(git.GIT_BIN, argv, {
     timeoutMs,
     maxOutputBytes: MAX_OUTPUT_BYTES,
+    env: gitEnv(deps.config),
     ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
   });
+  return { ...r, stdout: scrubToken(deps.config, r.stdout), stderr: scrubToken(deps.config, r.stderr) };
 }
 
 const succeeded = (r: ExecResult): boolean =>
   r.exitCode === 0 && !r.timedOut && !r.aborted && r.spawnError === undefined;
 
+// Fixed reasons for the common git failures. The stderr text itself is never returned.
+const GIT_REASONS: readonly (readonly [RegExp, string])[] = [
+  [/permission denied \(publickey|publickey\)/i, 'the ssh key was refused'],
+  [/host key verification failed/i, 'the ssh host key is not known; connect to the host once with ssh'],
+  [/couldn't find remote ref|remote branch \S+ not found/i, 'the branch is not on the remote'],
+  [/repository not found|repository '[^']*' not found|does not appear to be a git repository/i, 'the repository was not found, or this identity cannot read it'],
+  [/authentication failed|could not read username|could not read password|terminal prompts disabled|http basic: access denied|403/i, 'https authentication failed; check TRIAGE_GIT_HTTPS_TOKEN or the credential helper'],
+  [/could not resolve host|could not resolve hostname|name or service not known|nodename nor servname/i, 'the git host name did not resolve'],
+  [/connection timed out|operation timed out|connection refused|no route to host|network is unreachable|failed to connect/i, 'the git host is unreachable'],
+  [/already exists and is not an empty directory/i, 'the target directory already exists'],
+  [/could not read from remote repository/i, 'could not read from the remote'],
+];
+
 function failure(what: string, r: ExecResult): string {
-  let why: string;
-  if (r.spawnError !== undefined) why = `could not start git (${r.spawnError})`;
-  else if (r.timedOut) why = 'timed out';
-  else if (r.aborted) why = 'was aborted';
-  else why = `exited with code ${r.exitCode === null ? 'none' : r.exitCode}`;
-  const tail = r.stderr.trim().slice(-STDERR_TAIL_CHARS).trim();
-  return tail === '' ? `git ${what} ${why}` : `git ${what} ${why}: ${tail}`;
+  if (r.spawnError !== undefined) return `git ${what} could not start git (${r.spawnError})`;
+  if (r.timedOut) return `git ${what} timed out`;
+  if (r.aborted) return `git ${what} was aborted`;
+  const why = `git ${what} exited with code ${r.exitCode === null ? 'none' : r.exitCode}`;
+  const known = GIT_REASONS.find(([re]) => re.test(r.stderr));
+  return known === undefined ? why : `${why}: ${known[1]}`;
 }
 
 class StepError extends Error {}
@@ -236,7 +302,7 @@ export type RepoSyncResult = {
   readonly commit?: string;
   /** The codegraph command that ran, when one did. */
   readonly index?: 'init' | 'sync';
-  /** Why the repo was skipped or failed: 'dirty', 'not checked out', or a message. */
+  /** Why the repo was skipped or failed: 'dirty', a codegraph lock, or a message. */
   readonly reason?: string;
   readonly warnings: readonly string[];
   /** One human line for this repo. */
@@ -264,16 +330,13 @@ export async function syncRepos(sel: RepoSelection, deps: ReposDeps): Promise<Sy
   const nc = reposDirNotConfigured(deps);
   if (nc !== undefined) return nc;
 
-  const results: RepoSyncResult[] = [];
-  for (const pin of chosen) {
-    let result: RepoSyncResult;
+  const results = await inPool(chosen, SYNC_JOBS, async (pin) => {
     try {
-      result = await syncOne(pin, deps, pins);
+      return await syncOne(pin, deps, pins);
     } catch (e) {
-      result = finish(pin.repo, { status: 'failed', reason: e instanceof Error ? e.message : 'unexpected error' });
+      return finish(pin.repo, { status: 'failed', reason: e instanceof Error ? scrubToken(deps.config, e.message) : 'unexpected error' });
     }
-    results.push(result);
-  }
+  });
   const names = (s: RepoSyncResult['status']) => Object.freeze(results.filter((r) => r.status === s).map((r) => r.repo));
   return Object.freeze({
     status: 'done',
@@ -282,6 +345,20 @@ export async function syncRepos(sel: RepoSelection, deps: ReposDeps): Promise<Sy
     skipped: names('skipped'),
     failed: names('failed'),
   });
+}
+
+/** Runs fn over items, at most `jobs` at a time. Results keep the items' order. */
+async function inPool<T, R>(items: readonly T[], jobs: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i] as T);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(jobs, items.length) }, worker));
+  return out;
 }
 
 type Draft = Omit<RepoSyncResult, 'repo' | 'line' | 'warnings'> & { readonly warnings?: readonly string[] };
@@ -305,24 +382,27 @@ function finish(repo: string, d: Draft): RepoSyncResult {
 async function syncOne(pin: RepoPin, deps: ReposDeps, pins: readonly RepoPin[]): Promise<RepoSyncResult> {
   // Validate the pin before any git call, so a bad branch or remote runs nothing.
   if (pin.branch !== undefined) git.branchArg(pin.branch);
-  if (pin.remote !== undefined) git.remoteArg(pin.remote);
+  const remote = git.remoteArg(remoteFor(pin, deps.config));
 
   const r = resolveRepoDir(pin.repo, deps, pins);
   if (r.status !== 'ok') return finish(pin.repo, { status: 'failed', reason: r.message });
 
   try {
-    if (!r.present) {
-      if (pin.remote === undefined) return finish(pin.repo, { status: 'skipped', reason: 'not checked out' });
-      return await cloneAndIndex(pin, pin.remote, deps, pins);
-    }
-    return await updateAndIndex(pin, r.dir, deps, pins);
+    if (!r.present) return await cloneAndIndex(pin, remote, deps, pins);
+    return await updateAndIndex(pin, r.dir, remote, deps, pins);
   } catch (e) {
     if (e instanceof StepError) return finish(pin.repo, { status: 'failed', reason: e.message });
     throw e;
   }
 }
 
-async function updateAndIndex(pin: RepoPin, dir: string, deps: ReposDeps, pins: readonly RepoPin[]): Promise<RepoSyncResult> {
+async function updateAndIndex(
+  pin: RepoPin,
+  dir: string,
+  remote: string,
+  deps: ReposDeps,
+  pins: readonly RepoPin[],
+): Promise<RepoSyncResult> {
   const status = await mustRun(deps, 'status', git.statusPorcelain(dir), LOCAL_TIMEOUT_MS);
   if (git.isDirty(status)) {
     return finish(pin.repo, {
@@ -330,6 +410,19 @@ async function updateAndIndex(pin: RepoPin, dir: string, deps: ReposDeps, pins: 
       reason: 'dirty',
       warnings: ['the working tree has local changes, so nothing was fetched or checked out; commit or stash them first'],
     });
+  }
+
+  const warnings: string[] = [];
+  const origin = (await mustRun(deps, 'remote get-url', git.remoteGetUrl(dir), LOCAL_TIMEOUT_MS)).trim();
+  if (origin !== remote) {
+    const same = git.remoteIdentity(origin);
+    if (same !== undefined && same === git.remoteIdentity(remote)) {
+      await mustRun(deps, 'remote set-url', git.remoteSetUrl(dir, remote), LOCAL_TIMEOUT_MS);
+      warnings.push(`origin now points at ${remote}`);
+    } else {
+      // The origin URL is not printed: it may carry credentials.
+      warnings.push(`origin does not point at ${remote}; fetched from origin as it is`);
+    }
   }
 
   let branch = pin.branch;
@@ -341,7 +434,7 @@ async function updateAndIndex(pin: RepoPin, dir: string, deps: ReposDeps, pins: 
 
   await mustRun(deps, 'fetch', git.fetchBranch(dir, branch), FETCH_TIMEOUT_MS);
   await mustRun(deps, 'checkout', git.checkoutFetched(dir, branch), LOCAL_TIMEOUT_MS);
-  return indexAndFinish(pin, dir, branch, 'updated', deps, pins);
+  return indexAndFinish(pin, dir, branch, 'updated', deps, pins, warnings);
 }
 
 async function cloneAndIndex(pin: RepoPin, remote: string, deps: ReposDeps, pins: readonly RepoPin[]): Promise<RepoSyncResult> {
@@ -371,8 +464,9 @@ async function indexAndFinish(
   action: 'cloned' | 'updated',
   deps: ReposDeps,
   pins: readonly RepoPin[],
+  earlier: readonly string[] = [],
 ): Promise<RepoSyncResult> {
-  const warnings: string[] = [];
+  const warnings: string[] = [...earlier];
   const head = await mustRun(deps, 'rev-parse', git.revParseHead(dir), LOCAL_TIMEOUT_MS);
   const commit = git.parseCommit(head);
 

@@ -11,6 +11,8 @@ export type FakeCall = {
   readonly stdin?: string;
   readonly cwd?: string;
   readonly timeoutMs: number;
+  /** The variables the caller added for the child, when any. */
+  readonly env?: Readonly<Record<string, string>>;
 };
 
 export type FakeStep = {
@@ -68,6 +70,7 @@ export function createFakeRunner(script: readonly FakeStep[]): FakeRunner {
         timeoutMs: opts.timeoutMs,
         ...(stdin !== undefined ? { stdin } : {}),
         ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+        ...(opts.env !== undefined ? { env: Object.freeze({ ...opts.env }) } : {}),
       };
       const match = steps.find(
         (s) => s.step.bin === bin && sameArgv(s.step.argv, argv) && (s.step.times === undefined || s.used < s.step.times),

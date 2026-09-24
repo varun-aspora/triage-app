@@ -19,7 +19,8 @@ export type KeyGroup =
   | 'http'
   | 'slack'
   | 'sandbox'
-  | 'code';
+  | 'code'
+  | 'repos';
 
 export type KeySpec = {
   readonly name: string;
@@ -143,6 +144,14 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'CODEGRAPH_BIN', type: 'string', group: 'code', default: 'codegraph' },
   { name: 'QW_BIN', type: 'string', group: 'code', default: 'qw' },
   { name: 'CODEGRAPH_SYNC_BEFORE_QUERY', type: 'bool', group: 'code', default: 'true' },
+
+  // Repo checkouts (D37, D46). A pin in resources/repos.json without a remote is cloned from
+  // <protocol> + TRIAGE_GIT_HOST + TRIAGE_GIT_ORG + <repo>. The token is sent to git through
+  // its environment, never in argv, a URL or .git/config.
+  { name: 'TRIAGE_GIT_PROTOCOL', type: 'enum', group: 'repos', default: 'ssh', values: ['ssh', 'https'] },
+  { name: 'TRIAGE_GIT_HOST', type: 'string', group: 'repos', default: 'github.com' },
+  { name: 'TRIAGE_GIT_ORG', type: 'string', group: 'repos', default: 'Vance-Club' },
+  { name: 'TRIAGE_GIT_HTTPS_TOKEN', type: 'string', group: 'repos', secret: true },
 ];
 
 export const KEY_BY_NAME: ReadonlyMap<string, KeySpec> = new Map(KEYS.map((k) => [k.name, k]));
