@@ -246,13 +246,20 @@ Deviations from the spec, kept:
 Assumptions made, not verified against a real system:
 
 - The per-run failure record lives in the process that ran the tools. After a crash, a run recovered by another process has no record, so `stop_blocked` is refused there and the model finishes with gaps, as before D55.
-- A resume into a system that is still down blocks again on the next "did not answer"; nothing probes the system first.
+- A resume into a system that is still down blocks again on the next "did not answer"; nothing probes the system first. D56 brings the SSFB tunnel back before a resume; the databases themselves are still not probed.
 - `stop_blocked` is only as good as the model's judgement of "cannot go on"; the recorded-failure check stops it from citing a system that answered, not from blocking on one that did not matter.
 
 Known gaps:
 
 - No deadline for a blocked run (as for questions, D53).
 - The Ollama keyless auth in `src/models.ts` still resolves to an empty credential, so a run on an `ollama/*` tier fails at the first model call (`No API key for provider: ollama`, seen on 2026-09-25). Not part of D55; a placeholder key fixes it.
+
+### Postgres connection loss and the resume tunnel check (D56, 2026-09-26)
+
+- The crash: pg-pool takes its `error` listener off a client at checkout and puts it back at release, and pg emits `error` on the client, as well as rejecting the query, when the socket closes under a query. Both manual checkouts in the app (`transaction()` in `src/db/pg.ts`, `execute()` in `src/connectors/sql/pg-client.ts`) had no listener, so Node ended the process with `Unhandled 'error' event`. `pool.query()` was never exposed: pg-pool adds a listener of its own for those calls.
+- The fix: a listener for the life of each checkout, removed just before release; the client is released with the error so the pool discards it; the connector sends no ROLLBACK on a dead socket. The test fakes are EventEmitters and raise the event from a macrotask, the way pg does, so the new tests hang and fail without the fix.
+- Resume: `runResumePreflight` (the tunnel step only, local mode) runs in `resumeRun` before the block is closed, and in `triage resume` before the worker starts. A tunnel warning refuses with `ResumeNotReadyError`, handled wherever `RunNotResumableError` is (worker: exit 1, run left as it was; HTTP: 409 with the hint).
+- Left as they were: no retry or reconnect inside a run; no probe of the databases before a resume.
 
 ## Commit trailer note
 

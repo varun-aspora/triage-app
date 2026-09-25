@@ -272,7 +272,7 @@ triage start … --json          # same inputs, returns {run_id} immediately
 triage wait   <run_id> [--timeout <s>] --json    # exit 4 with the question when the run is waiting on one; asks at a terminal
 triage status <run_id> --json
 triage ask    <run_id> "follow-up question"      # new submission on the same conversation
-triage resume <run_id> ["message"]                # sends a blocked run on once the system answers; also a run that failed after dispatch or was stopped (D55); wait/run exit 6 on a blocked run
+triage resume <run_id> ["message"]                # sends a blocked run on once the system answers; also a run that failed after dispatch or was stopped (D55); brings the SSFB tunnel back first in local mode (D56); wait/run exit 6 on a blocked run
 triage input  <run_id> ["answer"] [--question q1] [--ids k=v…] [--skip]   # answers the question a run is waiting on (needs_input) and resumes it (D53)
 triage post   <run_id> [--yes --approved-by <who>]  # interactive y/N only when stdin is a TTY
 triage feedback <run_id> --verdict correct|partial|wrong|pending [--actual-root-cause …] [--faster-path …]   # also writes an eval case draft to evals/_unreviewed/<run_id>/
