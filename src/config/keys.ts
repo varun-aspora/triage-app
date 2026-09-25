@@ -127,6 +127,8 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'TRIAGE_HTTP_AUTH_TOKEN', type: 'string', group: 'http', secret: true },
   { name: 'TRIAGE_HTTP_ALLOW_SLACK_POST', type: 'bool', group: 'http', default: 'false' },
   { name: 'TRIAGE_UI_ENV', type: 'enum', group: 'http', default: 'non-production', values: ['production', 'non-production'] },
+  // Read only by web/vite.config.ts: the port `bun run dev:web` listens on.
+  { name: 'TRIAGE_UI_DEV_PORT', type: 'int', group: 'http', default: '5173', min: 1, max: 65535 },
 
   // Slack
   { name: 'SLACK_BOT_TOKEN', type: 'string', group: 'slack', secret: true },
