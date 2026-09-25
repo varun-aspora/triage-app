@@ -26,6 +26,23 @@ export function checkIds(checks: readonly DoctorCheck[]): string[] {
   return [...new Set(checks.map((c) => c.id))];
 }
 
-export function toggle(list: readonly string[], id: string): string[] {
+export function toggle<T extends string>(list: readonly T[], id: T): T[] {
   return list.includes(id) ? list.filter((x) => x !== id) : [...list, id];
+}
+
+export type CheckFilter = {
+  /** Statuses to show; empty shows every status. */
+  readonly statuses: readonly DoctorCheck['status'][];
+  /** Check ids to show; empty shows every check. */
+  readonly checks: readonly string[];
+};
+
+/**
+ * Filters in the browser, so clicking a tile or chip never re-runs the
+ * probes: GET /doctor opens SQL pools and calls Quickwit every time.
+ */
+export function filterChecks(checks: readonly DoctorCheck[], f: CheckFilter): DoctorCheck[] {
+  return checks.filter(
+    (c) => (f.statuses.length === 0 || f.statuses.includes(c.status)) && (f.checks.length === 0 || f.checks.includes(c.id)),
+  );
 }

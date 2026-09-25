@@ -1,71 +1,49 @@
-import { Fragment, useEffect, useState } from 'react';
-import { ApiError } from '../../api/client.ts';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { getDoctor } from '../../api/endpoints.ts';
 import type { DoctorCheck, DoctorResponse } from '../../api/types.ts';
 import { Button } from '../../components/Button.tsx';
 import { EmptyState } from '../../components/EmptyState.tsx';
 import { Checkbox } from '../../components/Field.tsx';
 import { ErrorNotice, Loading } from '../../components/LoadState.tsx';
-import { Notice } from '../../components/Notice.tsx';
 import { PageHeader } from '../../components/PageHeader.tsx';
 import { Panel } from '../../components/Panel.tsx';
 import { Segmented } from '../../components/Segmented.tsx';
 import { StatusTag } from '../../components/StatusTag.tsx';
-import { DOCTOR_STATUSES } from '../../lib/constants.ts';
+import { DOCTOR_STATUSES, type DoctorStatus } from '../../lib/constants.ts';
 import { formatDateTime } from '../../lib/format.ts';
 import { doctorStatusTone } from '../../lib/status.ts';
 import { useApi } from '../../lib/useApi.ts';
-import { type DoctorSort, checkIds, groupChecks, toggle } from './doctor-model.ts';
+import { type DoctorSort, checkIds, filterChecks, groupChecks, toggle } from './doctor-model.ts';
 
 const SORTS = [
   { value: 'entity', label: 'By entity' },
   { value: 'check', label: 'By check' },
 ] as const;
 
+const PROBLEMS: readonly DoctorStatus[] = ['warn', 'fail'];
+
 export default function DoctorPage() {
   const [sortBy, setSortBy] = useState<DoctorSort>('entity');
-  const [errorsOnly, setErrorsOnly] = useState(false);
+  const [statuses, setStatuses] = useState<DoctorStatus[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
-  // Filter chips come from the last answer that was not narrowed, so picking one chip does not hide the others.
-  const [knownChecks, setKnownChecks] = useState<string[]>([]);
   const [lastRun, setLastRun] = useState<string | null>(null);
-  const [rerunning, setRerunning] = useState(false);
-  const [resetNotice, setResetNotice] = useState(false);
 
-  // No polling: every request runs the live probes.
-  const doctor = useApi(
-    (signal) => getDoctor({ check: selected, errorsOnly, sortBy }, { signal }),
-    [sortBy, errorsOnly, selected.join(',')],
-  );
-  const unfiltered = selected.length === 0 && !errorsOnly;
-
-  useEffect(() => {
-    if (doctor.data === undefined) return;
-    setLastRun(new Date().toISOString());
-    if (unfiltered) setKnownChecks(checkIds(doctor.data.checks));
-  }, [doctor.data]);
-
-  useEffect(() => {
-    setRerunning(false);
-    const err = doctor.error;
-    // A check id the server no longer knows (for example after a restart with other entities): start over.
-    if (isUnknownCheck(err)) {
-      setKnownChecks(err.body.valid_checks ?? []);
-      setSelected([]);
-      setResetNotice(true);
-    }
-  }, [doctor.error]);
-
-  useEffect(() => setRerunning(false), [doctor.data]);
-
-  const runAgain = () => {
-    setRerunning(true);
-    setResetNotice(false);
-    doctor.reload();
-  };
-
-  const busy = doctor.loading || rerunning;
+  // One request per page load or "Run again". Sorting and filtering happen on
+  // the rows already received, because every request runs the live probes.
+  const doctor = useApi((signal) => getDoctor({}, { signal }), []);
   const data = doctor.data;
+
+  useEffect(() => {
+    if (data !== undefined) setLastRun(new Date().toISOString());
+  }, [data]);
+
+  const knownChecks = useMemo(() => (data === undefined ? [] : checkIds(data.checks)), [data]);
+  const rows = useMemo(
+    () => (data === undefined ? [] : filterChecks(data.checks, { statuses, checks: selected })),
+    [data, statuses, selected],
+  );
+  const problemsOnly = statuses.length === PROBLEMS.length && PROBLEMS.every((s) => statuses.includes(s));
+  const filtered = statuses.length > 0 || selected.length > 0;
 
   return (
     <>
@@ -79,43 +57,50 @@ export default function DoctorPage() {
                 Last run {formatDateTime(lastRun)}
               </span>
             )}
-            <Button variant="primary" icon="refresh" busy={busy} onClick={runAgain}>
-              {busy ? 'Running checks…' : 'Run again'}
+            <Button variant="primary" icon="refresh" busy={doctor.loading} onClick={doctor.reload}>
+              {doctor.loading ? 'Running checks…' : 'Run again'}
             </Button>
           </div>
         }
       />
 
-      {resetNotice && (
-        <Notice variant="info" title="Check filter cleared">
-          The server did not recognise one of the selected checks, so all checks are shown.
-        </Notice>
+      {data !== undefined && (
+        <Counts counts={data.counts} selected={statuses} onToggle={(s) => setStatuses((cur) => toggle(cur, s))} />
       )}
-
-      {data !== undefined && <Counts counts={data.counts} />}
 
       <div style={{ display: 'flex', gap: 20, alignItems: 'center', flexWrap: 'wrap' }}>
         <Segmented label="Sort by" options={SORTS} value={sortBy} onChange={setSortBy} />
-        <Checkbox label="Problems only" checked={errorsOnly} onChange={(e) => setErrorsOnly(e.target.checked)} />
+        <Checkbox
+          label="Problems only"
+          checked={problemsOnly}
+          onChange={(e) => setStatuses(e.target.checked ? [...PROBLEMS] : [])}
+        />
         {knownChecks.length > 0 && (
           <div role="group" aria-label="Checks" style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
             {knownChecks.map((id) => (
               <CheckChip key={id} id={id} on={selected.includes(id)} onToggle={() => setSelected((s) => toggle(s, id))} />
             ))}
-            {selected.length > 0 && (
-              <Button size="sm" variant="ghost" onClick={() => setSelected([])}>
-                Clear
-              </Button>
-            )}
           </div>
+        )}
+        {filtered && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              setStatuses([]);
+              setSelected([]);
+            }}
+          >
+            Clear filters
+          </Button>
         )}
       </div>
 
       {doctor.loading && <Loading label="Running checks…" />}
-      {!doctor.loading && doctor.error !== undefined && !isUnknownCheck(doctor.error) && (
-        <ErrorNotice title="Could not run the checks" error={doctor.error} onRetry={runAgain} />
+      {!doctor.loading && doctor.error !== undefined && (
+        <ErrorNotice title="Could not run the checks" error={doctor.error} onRetry={doctor.reload} />
       )}
-      {!doctor.loading && data !== undefined && <ChecksTable checks={data.checks} sortBy={sortBy} errorsOnly={errorsOnly} />}
+      {!doctor.loading && data !== undefined && <ChecksTable checks={rows} sortBy={sortBy} filtered={filtered} />}
     </>
   );
 }
@@ -127,33 +112,47 @@ function problemRowClass(status: DoctorCheck['status']): string | undefined {
   return undefined;
 }
 
-function isUnknownCheck(err: unknown): err is ApiError {
-  return err instanceof ApiError && err.status === 400 && err.body.valid_checks !== undefined;
-}
-
-function Counts({ counts }: { counts: DoctorResponse['counts'] }) {
+function Counts({
+  counts,
+  selected,
+  onToggle,
+}: {
+  counts: DoctorResponse['counts'];
+  selected: readonly DoctorStatus[];
+  onToggle: (s: DoctorStatus) => void;
+}) {
   return (
-    <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+    <div role="group" aria-label="Filter by status" style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
       {DOCTOR_STATUSES.map((status) => {
         const n = counts[status] ?? 0;
+        const on = selected.includes(status);
         // Tint only when there is something to fix, so a clean run looks calm.
         const tone = n > 0 ? (status === 'fail' ? 'rust' : status === 'warn' ? 'amber' : null) : null;
         return (
-          <div
+          <button
             key={status}
+            type="button"
+            aria-pressed={on}
+            onClick={() => onToggle(status)}
             style={{
               flex: '1 1 120px',
               padding: '12px 16px',
+              textAlign: 'left',
+              font: 'inherit',
+              cursor: 'pointer',
               background: tone === null ? 'var(--surface)' : `var(--tone-${tone}-row)`,
               border: `1px solid ${tone === null ? 'var(--line)' : `var(--tone-${tone}-fg)`}`,
               borderRadius: 'var(--radius-lg)',
+              // The ring marks the active filter; unselected tiles fade while any filter is on.
+              boxShadow: on ? '0 0 0 2px var(--text)' : 'none',
+              opacity: selected.length > 0 && !on ? 0.55 : 1,
             }}
           >
             <div style={{ margin: '0 0 6px' }}>
               <StatusTag look={doctorStatusTone(status)}>{status}</StatusTag>
             </div>
-            <div style={{ fontSize: 24, fontWeight: 600, color: tone === null ? undefined : `var(--tone-${tone}-fg)` }}>{n}</div>
-          </div>
+            <div style={{ fontSize: 24, fontWeight: 600, color: tone === null ? 'var(--text)' : `var(--tone-${tone}-fg)` }}>{n}</div>
+          </button>
         );
       })}
     </div>
@@ -184,17 +183,17 @@ function CheckChip({ id, on, onToggle }: { id: string; on: boolean; onToggle: ()
   );
 }
 
-function ChecksTable({ checks, sortBy, errorsOnly }: { checks: DoctorCheck[]; sortBy: DoctorSort; errorsOnly: boolean }) {
+function ChecksTable({ checks, sortBy, filtered }: { checks: DoctorCheck[]; sortBy: DoctorSort; filtered: boolean }) {
   if (checks.length === 0) {
     return (
       <Panel>
-        {errorsOnly ? (
-          <EmptyState icon="check" title="No problems">
-            Every selected check passed, is turned off or was skipped.
+        {filtered ? (
+          <EmptyState icon="check" title="Nothing matches">
+            No check has the selected status. Clear the filters to see every row.
           </EmptyState>
         ) : (
           <EmptyState icon="doctor" title="No checks">
-            The server returned no checks for this filter.
+            The server returned no checks.
           </EmptyState>
         )}
       </Panel>

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { DoctorCheck, RepoStatusRow } from '../../api/types.ts';
-import { checkIds, groupChecks, toggle } from './doctor-model.ts';
+import { checkIds, filterChecks, groupChecks, toggle } from './doctor-model.ts';
 import { syncResultTone } from '../../lib/status.ts';
 import {
   countsLine,
@@ -127,5 +127,12 @@ describe('doctor model', () => {
     expect(checkIds(checks)).toEqual(['env', 'models', 'db', 'quickwit']);
     expect(toggle(['env'], 'db')).toEqual(['env', 'db']);
     expect(toggle(['env', 'db'], 'env')).toEqual(['db']);
+  });
+
+  test('filterChecks by status and check id, empty lists meaning all', () => {
+    expect(filterChecks(checks, { statuses: [], checks: [] })).toHaveLength(5);
+    expect(filterChecks(checks, { statuses: ['warn', 'fail'], checks: [] }).map((c) => c.status)).toEqual(['warn', 'fail']);
+    expect(filterChecks(checks, { statuses: ['ok'], checks: ['db'] }).map((c) => c.entity)).toEqual(['ssfb']);
+    expect(filterChecks(checks, { statuses: ['skipped'], checks: [] })).toEqual([]);
   });
 });
