@@ -8,8 +8,10 @@
 //   names) and the delegate and skill names the root mounts. Hints set where
 //   the root starts, not what it can reach: a case that starts in one entity
 //   often continues in another.
-// - finishDecision(retries, calledFinish): what useAgentFinish does when a
-//   response would stop. Signal once, then fail.
+// - finishDecision(retries, calledFinish, calledAsk, calledBlocked): what
+//   useAgentFinish does when a response would stop. A written report, an
+//   opened question or an opened block ends it; otherwise signal once, then
+//   fail.
 // - durabilityFor(config) and the persistent state mirrors.
 //
 // The second half wires one run:
@@ -21,8 +23,9 @@
 //   same object on every render. Keeping one object matters: widenIdChain
 //   finds the chain by deps identity, and the delegates share it, so an id
 //   resolve_identity adds is seen by later investigator calls.
-// - watchFinishReport() wraps finish_report so the root knows whether the
-//   report was actually written. Flue's tool call record says only whether a
+// - watchFinishReport() wraps finish_report, ask_requester and stop_blocked
+//   so the root knows whether the report was actually written, the question
+//   opened or the run parked. Flue's tool call record says only whether a
 //   call threw, and a redaction refusal is a normal (refused) result.
 // - settleRun(runId) drops the per-run state when a response settles.
 
@@ -41,6 +44,7 @@ import { type AuditSink, createJsonlAuditSink } from '../gate/audit-sink.ts';
 import { modelForTier, thinkingForTier } from '../models.ts';
 import { getRunStore } from '../runstore/index.ts';
 import type { RunStore } from '../runstore/types.ts';
+import { releaseConnectorFailures } from '../tools/_lib/connector-failures.ts';
 import { createToolDeps, type ToolConnectors } from '../tools/_lib/context.ts';
 import { ASK_REQUESTER } from '../tools/ask-requester.tool.ts';
 import {
@@ -50,6 +54,7 @@ import {
   releaseFinishReport,
   type UsageReader,
 } from '../tools/finish-report.tool.ts';
+import { STOP_BLOCKED } from '../tools/stop-blocked.tool.ts';
 import type { ToolContext, ToolDeps } from '../tools/types.ts';
 import type { TriageInit } from '../types/classification.ts';
 import { ENTITIES, type Entity, type Interface, type RunId, type Tier } from '../types/core.ts';
@@ -177,12 +182,13 @@ export type FinishStep =
  * What to do at a would-stop point. retries is the persisted finish_retries.
  * A written report ends the response and resets the count, so a follow-up
  * submission on the same run gets its own signal; so does an opened question
- * for the requester (calledAsk), which parks the run in needs_input. The
- * first miss signals once; the next miss fails.
+ * for the requester (calledAsk), which parks the run in needs_input, and an
+ * opened block (calledBlocked), which parks it in blocked (D55). The first
+ * miss signals once; the next miss fails.
  */
-export function finishDecision(retries: number, calledFinish: boolean, calledAsk = false): FinishStep {
+export function finishDecision(retries: number, calledFinish: boolean, calledAsk = false, calledBlocked = false): FinishStep {
   const used = Number.isInteger(retries) && retries > 0 ? retries : 0;
-  if (calledFinish || calledAsk) return { kind: 'done', retries: 0 };
+  if (calledFinish || calledAsk || calledBlocked) return { kind: 'done', retries: 0 };
   if (used < MAX_FINISH_SIGNALS) return { kind: 'signal', retries: used + 1 };
   return { kind: 'fail', retries: used };
 }
@@ -208,8 +214,14 @@ export function calledAsk(toolCalls: readonly AgentResponseToolCall[], askOpened
   return askOpened && toolCalls.some((c) => c.tool === ASK_REQUESTER && !c.isError);
 }
 
+/** True when this response has a stop_blocked call that did not throw and the watched tool saw it park the run. */
+export function calledBlocked(toolCalls: readonly AgentResponseToolCall[], blockOpened: boolean): boolean {
+  return blockOpened && toolCalls.some((c) => c.tool === STOP_BLOCKED && !c.isError);
+}
+
 const reportsWritten = new Set<RunId>();
 const asksOpened = new Set<RunId>();
+const blocksOpened = new Set<RunId>();
 
 export function reportWrittenFor(runId: RunId): boolean {
   return reportsWritten.has(runId);
@@ -218,6 +230,11 @@ export function reportWrittenFor(runId: RunId): boolean {
 /** True when ask_requester opened a question for the run in this process. */
 export function askOpenedFor(runId: RunId): boolean {
   return asksOpened.has(runId);
+}
+
+/** True when stop_blocked parked the run in this process. */
+export function blockOpenedFor(runId: RunId): boolean {
+  return blocksOpened.has(runId);
 }
 
 /**
@@ -242,13 +259,20 @@ function isOkEnvelope(result: unknown): boolean {
   return output?.status === 'ok';
 }
 
+const ENDING_MARKS: ReadonlyMap<string, Set<RunId>> = new Map([
+  [FINISH_REPORT, reportsWritten],
+  [ASK_REQUESTER, asksOpened],
+  [STOP_BLOCKED, blocksOpened],
+]);
+
 /**
- * Wraps the two tools that may end a response: an ok finish_report marks the
- * run's report as written, an ok ask_requester marks a question as opened.
- * Other tools pass through.
+ * Wraps the three tools that may end a response: an ok finish_report marks
+ * the run's report as written, an ok ask_requester marks a question as
+ * opened, an ok stop_blocked marks the run as parked. Other tools pass
+ * through.
  */
 export function watchFinishReport(runId: RunId, tool: ToolDefinition): ToolDefinition {
-  const marks = tool.name === FINISH_REPORT ? reportsWritten : tool.name === ASK_REQUESTER ? asksOpened : undefined;
+  const marks = ENDING_MARKS.get(tool.name);
   if (marks === undefined) return tool;
   const run = tool.run.bind(tool) as (context: never) => unknown;
   return {
@@ -451,6 +475,8 @@ export function lazyRunStore(config: Pick<Config, 'db'>, load: () => Promise<Run
     putInputRequest: async (...a) => (await store()).putInputRequest(...a),
     markStopped: async (...a) => (await store()).markStopped(...a),
     resolveInputRequest: async (...a) => (await store()).resolveInputRequest(...a),
+    putBlock: async (...a) => (await store()).putBlock(...a),
+    resolveBlock: async (...a) => (await store()).resolveBlock(...a),
     putEvidence: async (...a) => (await store()).putEvidence(...a),
     putReport: async (...a) => (await store()).putReport(...a),
     putFeedback: async (...a) => (await store()).putFeedback(...a),
@@ -508,15 +534,18 @@ export function triageToolContext(runId: RunId, deps: ToolDeps, rt: TriageRuntim
 
 /**
  * Drops the run's in-process state once a response settles: its deps, the
- * escalation store, the synthesis count, the written-report mark and the
- * metered usage. Persistent state and the run store keep what matters.
+ * escalation store, the connector failure record, the synthesis count, the
+ * written-report, opened-question and opened-block marks and the metered
+ * usage. Persistent state and the run store keep what matters.
  */
 export function settleRun(runId: RunId): void {
   runDeps.delete(runId);
   runInterfaces.delete(runId);
   reportsWritten.delete(runId);
   asksOpened.delete(runId);
+  blocksOpened.delete(runId);
   releaseEscalation(runId);
+  releaseConnectorFailures(runId);
   releaseFinishReport(runId);
   installedTripwire()?.forgetRun(runId);
 }

@@ -7,7 +7,10 @@
 // Every decision writes exactly one audit line, refusals included. Refusals
 // come back as short model-facing text and the run continues. Two things
 // throw on purpose: an aborted signal (before the budget is touched) and a
-// strict mock miss (a loud tool error that names the semantic key).
+// strict mock miss (a loud tool error that names the semantic key). A
+// connector error that is not a refusal comes back as "did not answer" and
+// is also recorded for the run (connector-failures.ts), which is what lets
+// stop_blocked park the run on that system (D55).
 //
 // Staging is owned here and nowhere else: stageRows() writes the full result
 // to /data/<toolCallId>.json in the sandbox. On the virtual sandbox it writes
@@ -25,6 +28,7 @@ import type { AuditDecision, AuditTransport } from '../../types/audit.ts';
 import type { Entity } from '../../types/core.ts';
 import { notConfigured, ok, refused, type ToolEnvelope, unreachable } from '../../types/tool-result.ts';
 import type { ToolContext } from '../types.ts';
+import { recordConnectorFailure } from './connector-failures.ts';
 import { scopeSetOf } from './context.ts';
 
 // ------------------------------------------------------------------ types
@@ -375,6 +379,14 @@ export async function runIoTool<K extends FixtureKind, T>(
       return refuse(`Refused by the ${where} connector (${code}). Record the gap and try another source.`);
     }
     audit({ decision: 'allow', exit: code ?? 'error', transport: 'real', gate });
+    // The one outcome stop_blocked may later cite (D55). Only the codes the
+    // block record knows; anything else is an 'error'.
+    recordConnectorFailure(toolContext.runId, {
+      system: where,
+      tool: spec.tool,
+      code: code === 'unreachable' || code === 'timeout' ? code : 'error',
+      at: now().toISOString(),
+    });
     return finish(
       (t) => unreachable(t, now),
       `${where} did not answer (${code ?? 'error'}). Record the gap and try another source.`,

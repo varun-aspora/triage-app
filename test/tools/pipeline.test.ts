@@ -12,6 +12,7 @@ import { createMockLayer } from '../../src/mock/index.ts';
 import { semanticKey } from '../../src/mock/key.ts';
 import type { FixtureStore } from '../../src/mock/store.ts';
 import type { RunStore } from '../../src/runstore/types.ts';
+import { connectorFailuresFor, releaseConnectorFailures } from '../../src/tools/_lib/connector-failures.ts';
 import { createToolDeps, widenIdChain } from '../../src/tools/_lib/context.ts';
 import {
   type IoRunContext,
@@ -95,6 +96,7 @@ function setup(opts: SetupOptions = {}): Harness {
   cleanups.push(() => {
     releaseRunBudget(runId);
     releaseEscalation(runId);
+    releaseConnectorFailures(runId);
   });
   const spyBudget: RunBudget = {
     ...budget,
@@ -797,5 +799,90 @@ describe('createToolDeps', () => {
   test('widenIdChain refuses deps it did not build', () => {
     const fake = { idChain: () => CHAIN } as unknown as ToolDeps;
     expect(() => widenIdChain(fake, CHAIN)).toThrow('createToolDeps');
+  });
+});
+
+// ------------------------------------------------------------------ connector failures (D55)
+
+describe('connector failures', () => {
+  const coded = (code: string): Error => Object.assign(new Error('boom'), { code });
+  const failing = (h: Harness, err: unknown, extra: Partial<IoToolSpec<'sql_select', Row[]>> = {}) =>
+    sqlSpec(h, {
+      real: async () => {
+        throw err;
+      },
+      ...extra,
+    });
+
+  test('a "did not answer" outcome is recorded with the system, the tool, the code and the time', async () => {
+    const h = setup({ env: REAL });
+    expect((await runIoTool(failing(h, coded('unreachable')), runCtx(h))).output.status).toBe('unreachable');
+    expect((await runIoTool(failing(h, coded('timeout')), runCtx(h))).output.status).toBe('unreachable');
+    expect(connectorFailuresFor(h.runId)).toEqual([
+      { system: 'ssfb:harbor', tool: 'sql_select', code: 'unreachable', at: FIXED_NOW.toISOString() },
+      { system: 'ssfb:harbor', tool: 'sql_select', code: 'timeout', at: FIXED_NOW.toISOString() },
+    ]);
+  });
+
+  test('any other connector error is recorded as error, and a tool without an entity names global', async () => {
+    const h = setup({ env: REAL });
+    await runIoTool(failing(h, new Error('socket hang up')), runCtx(h));
+    await runIoTool(failing(h, coded('econnreset')), runCtx(h));
+    await runIoTool(failing(h, coded('unreachable'), { entity: null }), runCtx(h));
+    expect(connectorFailuresFor(h.runId).map((f) => [f.system, f.tool, f.code])).toEqual([
+      ['ssfb:harbor', 'sql_select', 'error'],
+      ['ssfb:harbor', 'sql_select', 'error'],
+      ['global:harbor', 'sql_select', 'unreachable'],
+    ]);
+  });
+
+  test('nothing is recorded for a refusal, blank config, a gate or scope refusal, an exhausted budget, a fixture miss or an abort', async () => {
+    const h = setup({ env: REAL, maxToolCalls: 20 });
+    for (const code of ['readonly_role_required', 'refused', 'cap_exceeded', 'not_configured']) {
+      await runIoTool(failing(h, coded(code)), runCtx(h));
+    }
+    await runIoTool(sqlSpec(h, { backing: { envName: 'SSFB_HARBOR_DB_URL', status: 'disabled' } }), runCtx(h));
+    await runIoTool(sqlSpec(h, { gate: () => ({ ok: false, message: 'no', reason: 'no' }) }), runCtx(h));
+    await runIoTool(sqlSpec(h, { input: { params: [STRANGER] } }), runCtx(h));
+    const controller = new AbortController();
+    const aborting = sqlSpec(h, {
+      real: async () => {
+        controller.abort();
+        throw new DOMException('aborted', 'AbortError');
+      },
+    });
+    await expect(runIoTool(aborting, runCtx(h, { signal: controller.signal }))).rejects.toThrow();
+    expect(h.audit.lines).toHaveLength(8);
+    expect(connectorFailuresFor(h.runId)).toEqual([]);
+
+    const exhausted = setup({ env: REAL, maxToolCalls: 1 });
+    exhausted.budget.consumeToolCall('sql_select', 'ssfb');
+    expect((await runIoTool(failing(exhausted, coded('unreachable')), runCtx(exhausted))).output.status).toBe('refused');
+    expect(connectorFailuresFor(exhausted.runId)).toEqual([]);
+
+    const strict = setup({});
+    await expect(runIoTool(sqlSpec(strict), runCtx(strict))).rejects.toThrow();
+    expect(connectorFailuresFor(strict.runId)).toEqual([]);
+    const lenient = setup({ env: { TRIAGE_MOCK_STRICT: 'false' } });
+    expect((await runIoTool(sqlSpec(lenient), runCtx(lenient))).output.status).toBe('refused');
+    expect(connectorFailuresFor(lenient.runId)).toEqual([]);
+  });
+
+  test('the record never carries the connector message', async () => {
+    const h = setup({ env: { ...REAL, SSFB_HARBOR_DB_URL: FAKE_DSN } });
+    const leaky = Object.assign(new Error(`could not connect to ${FAKE_DSN}`), { code: 'unreachable' });
+    await runIoTool(failing(h, leaky), runCtx(h));
+    const recorded = connectorFailuresFor(h.runId);
+    expect(recorded).toHaveLength(1);
+    const text = JSON.stringify(recorded);
+    expect(text).not.toContain(FAKE_DSN);
+    for (const part of FAKE_DSN_PARTS) expect(text).not.toContain(part);
+  });
+
+  test('the record is released with the run', async () => {
+    const h = setup({ env: REAL });
+    await runIoTool(failing(h, coded('unreachable')), runCtx(h));
+    expect(releaseConnectorFailures(h.runId)).toBe(true);
+    expect(connectorFailuresFor(h.runId)).toEqual([]);
   });
 });
