@@ -103,6 +103,32 @@ Only places where what was built differs from the HLD, LLD, decisions or plan te
 | Pattern entries marked `stable: true` only where a note states the cause as fact; the sim-binding entries stay `stable: false` until reviewed. | T12.8 |
 | `test/server/triage-server.test.ts` skips its "says to build first" case when `dist/server.mjs` exists. | T07.10 |
 
+## Follow-ups on 2026-09-24
+
+Owner review items, decided in D46 to D49 and the D44 update.
+
+| Change | Decision |
+|---|---|
+| SSFB logs over HTTP; ATSPL and RTL over `qw` with `--context` on every call | D44 |
+| Repos cloned from `TRIAGE_GIT_ORG` over `ssh` or `https`; token through git's environment | D46 |
+| Repo sync every `TRIAGE_REPOS_SYNC_INTERVAL` (default 24h) on a server timer and before runs on `TRIAGE_REPOS_SYNC_INTERFACES`; `POST /repos/sync`, `GET /repos/sync/:sync_id`, `GET /repos`; sync ids in memory only | D47 |
+| `encrypt_lookup_value` and `decrypt_fields` per service; rhythm added | D48 |
+| `code_callers` removed | D49 |
+
+Assumptions made, not verified against a real system:
+
+- The host's git is 2.31 or later, which reads `GIT_CONFIG_COUNT`. The local git is 2.54. An older git ignores the variables, so an https clone falls back to the credential helper.
+- GitHub accepts `AUTHORIZATION: basic base64(x-access-token:<token>)` for a fine-grained or classic token, as actions/checkout sends it. No clone has been run with a token.
+- Rhythm's `FIELD_ENCRYPTION_SECRET_KEY` differs from harbor's. The code reads it per deployment (`rhythm/cmd/orchestrator/encryption.go`); the values were not looked at.
+- `customer_nominees` in rhythm is the only rhythm table with encrypted columns (from the gorm tags in `rhythm/internal/model`).
+- `TRIAGE_REPOS_DIR` points at a folder used only for these checkouts. A sync checks out the pinned branch in every clean clone there.
+
+For an existing `.env`:
+
+- `SSFB_RHYTHM_FIELD_ENC_KEY=` must be added (blank is fine). The registry refuses to start when a key it names is missing.
+- `SSFB_QUICKWIT_TRANSPORT=http` switches SSFB logs to HTTP; `.env.example` ships that value.
+- The `TRIAGE_GIT_*` and `TRIAGE_REPOS_SYNC_*` keys can be left out; their defaults apply.
+
 ## Commit trailer note
 
 The trailer was pinned in CONVENTIONS.md and plan.json after wave 1 (`74cfcb3`, later `58b12b3`), because implementers had each picked their own model name. Commit T01.3 (`a70343b`) still carries a different co-author line from the rest, and T01.2 (`bb11e37`) was one of the two commits the wave log flagged at the time; on main today only `a70343b` differs. The commits before `58b12b3` also carry a `Claude-Session` line. History was left as is.

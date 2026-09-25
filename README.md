@@ -41,7 +41,7 @@ Mock mode is the default (`TRIAGE_MOCK_MODE=true`, `TRIAGE_MOCK_STRICT=true`): e
 
 ## Repo sync
 
-The code tools read the repos in `resources/repos.json`, checked out under `TRIAGE_REPOS_DIR`. Use a folder that holds only these checkouts: a sync checks out the pinned branch in every clean clone. A sync clones a missing repo, shallow and single-branch, and moves every clean checkout to its pinned branch (or the default branch), then refreshes its codegraph index. A checkout with local changes is left alone.
+The code tools read the repos in `resources/repos.json`, checked out under `TRIAGE_REPOS_DIR`. A sync clones a missing repo, shallow and single-branch, moves every clean checkout to its pinned branch (or the default branch) and refreshes its codegraph index. A checkout with local changes is left alone. Point `TRIAGE_REPOS_DIR` at a folder that holds only these checkouts, not your own working clones.
 
 | Key | Default | What it does |
 |---|---|---|
