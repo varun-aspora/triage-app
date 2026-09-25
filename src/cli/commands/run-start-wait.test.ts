@@ -16,9 +16,9 @@ import { redactPersisted } from '../../gate/redact.ts';
 import { WorkerSpawnError } from '../../ingress/detach.ts';
 import { prepareDeps, prepareRequest, type PrepareInput, type PreparedSubmission } from '../../ingress/prepare.ts';
 import { SlackFetchError, THREAD_FILE_HINT } from '../../ingress/slack.ts';
-import type { AnswerInput, SubmissionResult } from '../../ingress/submit.ts';
+import { RunNotResumableError, type AnswerInput, type SubmissionResult } from '../../ingress/submit.ts';
 import type { WorkerPayload } from '../../ingress/worker-payload.ts';
-import { sampleClassification, sampleInputRequest, sampleReport, SYNTHETIC_PHONE } from '../../runstore/contract.ts';
+import { sampleBlock, sampleClassification, sampleInputRequest, sampleReport, SYNTHETIC_PHONE } from '../../runstore/contract.ts';
 import { createRunStore } from '../../runstore/index.ts';
 import type { RunPhase, RunRecord, RunStore } from '../../runstore/types.ts';
 import type { Entity } from '../../types/core.ts';
@@ -26,6 +26,7 @@ import { commands as generatedCommands } from '../command-modules.gen.ts';
 import { buildProgram, runCli } from '../index.ts';
 import {
   AskOutputSchema,
+  EXIT_BLOCKED,
   EXIT_NEEDS_INPUT,
   EXIT_STOPPED,
   EXIT_WAIT_TIMEOUT,
@@ -194,6 +195,8 @@ function record(phase: RunPhase, extra: Partial<RunRecord> = {}): RunRecord {
     phase,
     input_request: null,
     input_history: [],
+    block: null,
+    block_history: [],
     request: {} as RunRecord['request'],
     classification: null,
     evidence: {},
@@ -495,6 +498,88 @@ describe('worker', () => {
     expect(r.code).toBe(EXIT.ERROR);
     expect(calls).toEqual([[RUN_ID, 'did the retry go out?', 'ops-reviewer']]);
     expect((await (await createRunStore(h.config)).getRun(RUN_ID))?.worker_pid).toBe(888);
+  });
+
+  test('a resume payload calls resumeRun with who resumed and the note; the phase and its reason are kept and the pid recorded', async () => {
+    const h = home();
+    const store = await seed(h, { phase: 'failed', reason: 'AgentRunError', pid: 4242 });
+    const calls: unknown[][] = [];
+    const worker = createWorkerCommand({
+      boot: async () => undefined,
+      deps: () => ({}) as never,
+      pid: () => 1212,
+      runSubmission: async () => {
+        throw new Error('runSubmission must not be called');
+      },
+      askRun: async () => {
+        throw new Error('askRun must not be called');
+      },
+      answerRun: async () => {
+        throw new Error('answerRun must not be called');
+      },
+      resumeRun: async (...args) => {
+        const run = await store.getRun(RUN_ID);
+        calls.push([...args.slice(0, 2), run?.phase, run?.phase_reason, run?.worker_pid]);
+        return { run_id: RUN_ID, status: 'blocked', submission_seq: 2, submission_id: 's2', block: sampleBlock('b1'), gaps: [] };
+      },
+    });
+    const stdin = Readable.from([JSON.stringify({ kind: 'resume', run_id: RUN_ID, note: 'harbor is back', by: 'ops-reviewer' })]);
+    const r = await cli([worker], ['__worker', RUN_ID], { config: () => h.config, stdin });
+    // A run that blocked again is not a failure.
+    expect(r.code).toBe(EXIT.OK);
+    expect(calls).toEqual([[RUN_ID, { by: 'ops-reviewer', note: 'harbor is back' }, 'failed', 'AgentRunError', 1212]]);
+  });
+
+  test('a resume payload on a run that cannot be resumed is refused before its pid is written; one that lost the race leaves the run alone', async () => {
+    const h = home();
+    await seed(h, { phase: 'investigating', pid: 4242 });
+    let resumed = 0;
+    const worker = createWorkerCommand({
+      boot: async () => undefined,
+      deps: () => ({}) as never,
+      pid: () => 1313,
+      resumeRun: async () => {
+        resumed++;
+        throw new RunNotResumableError(RUN_ID, 'investigating', 'the run is still working; follow it with triage wait');
+      },
+    });
+    const payload = JSON.stringify({ kind: 'resume', run_id: RUN_ID, by: 'ops-reviewer' });
+    const busy = await cli([worker], ['__worker', RUN_ID], { config: () => h.config, stdin: Readable.from([payload]) });
+    expect(busy.code).toBe(EXIT.ERROR);
+    expect(busy.err).toContain('cannot be resumed');
+    expect(resumed).toBe(0);
+    const store = await createRunStore(h.config);
+    expect((await store.getRun(RUN_ID))?.worker_pid).toBe(4242);
+
+    // The check passed (the run was blocked) but resumeRun found it sent on by another resume.
+    await store.putBlock(RUN_ID, redactPersisted(sampleBlock('b1')));
+    const lost = await cli([worker], ['__worker', RUN_ID], { config: () => h.config, stdin: Readable.from([payload]) });
+    expect(lost.code).toBe(EXIT.ERROR);
+    expect(lost.err).toContain('cannot be resumed');
+    expect(resumed).toBe(1);
+    const run = await store.getRun(RUN_ID);
+    expect(run?.phase).toBe('blocked');
+    expect(run?.phase_reason).toBeUndefined();
+    expect(run?.block?.block_id).toBe('b1');
+  });
+
+  test('a resume whose runtime fails to start marks a stopped run failed, so the next wait shows it', async () => {
+    const h = home();
+    await seed(h, { phase: 'stopped', reason: 'cancelled' });
+    class BootFailure extends Error {}
+    const worker = createWorkerCommand({
+      boot: async () => {
+        throw new BootFailure('detail that must not be stored');
+      },
+      pid: () => 1414,
+    });
+    const stdin = Readable.from([JSON.stringify({ kind: 'resume', run_id: RUN_ID, by: 'ops-reviewer' })]);
+    const r = await cli([worker], ['__worker', RUN_ID], { config: () => h.config, stdin });
+    expect(r.code).toBe(EXIT.ERROR);
+    const run = await (await createRunStore(h.config)).getRun(RUN_ID);
+    expect(run?.phase).toBe('failed');
+    expect(run?.phase_reason).toBe('BootFailure');
+    expect(run?.worker_pid).toBe(1414);
   });
 
   test('refuses a bad payload, a run_id mismatch and a run that already started', async () => {
@@ -1268,5 +1353,113 @@ describe('a run waiting on a question', () => {
     expect(doc.input_request.question_id).toBe('q1');
     expect(t.order).toEqual(['boot', 'prepare', 'submit']);
     expect((await (await createRunStore(h.config)).getRun(RUN_ID))?.phase).toBe('needs_input');
+  });
+});
+
+// ------------------------------------------------------------------ a run blocked on a system
+
+describe('a run blocked on a system that did not answer', () => {
+  /** A real stored run parked on b1, the way stop_blocked leaves it. */
+  async function blocked(h: TestHome): Promise<RunStore> {
+    const store = await seed(h, { phase: 'investigating', pid: 4242 });
+    await store.putBlock(RUN_ID, redactPersisted(sampleBlock('b1')));
+    return store;
+  }
+
+  test('status reports blocked with the block, whether or not a worker is alive', async () => {
+    const h = home();
+    await blocked(h);
+    for (const alive of [true, false]) {
+      const r = await cli([createStatusCommand({ isAlive: () => alive })], ['status', RUN_ID, '--json'], { config: () => h.config });
+      expect(r.code).toBe(EXIT.OK);
+      const doc = jsonLine(r.out) as { status: string; phase: string; block?: { block_id: string; systems: string[] } };
+      expect(v.is(StatusOutputSchema, doc)).toBe(true);
+      expect(doc.status).toBe('blocked');
+      expect(doc.phase).toBe('blocked');
+      expect(doc.block?.block_id).toBe('b1');
+      expect(doc.block?.systems).toEqual(['ssfb:harbor']);
+    }
+    const human = await cli([createStatusCommand({ isAlive: () => false })], ['status', RUN_ID], { config: () => h.config });
+    expect(human.code).toBe(EXIT.OK);
+    expect(human.out).toContain(`run ${RUN_ID}: blocked (phase blocked, not finished)`);
+    expect(human.out).toContain('is blocked (b1): ssfb:harbor did not answer');
+    expect(human.out).toContain('harbor did not answer; nothing else shows the payout state');
+    expect(human.out).toContain('ssfb:harbor  sql_select: unreachable');
+    expect(human.out).toContain(`blocked since ${sampleBlock('b1').blocked_at}`);
+    expect(human.out).toContain(`triage resume ${RUN_ID}`);
+  });
+
+  test('wait returns the block, exits 6 and starts nothing, at a terminal too', async () => {
+    const h = home();
+    await blocked(h);
+    const spy = spawnSpy();
+    const r = await cli([createWaitCommand({ spawn: spy.spawn, isAlive: () => false })], ['wait', RUN_ID, '--json'], { config: () => h.config });
+    expect(r.code).toBe(EXIT_BLOCKED);
+    expect(r.code).toBe(6);
+    const doc = jsonLine(r.out) as { status: string; phase: string; block: { block_id: string; failures: unknown[] } };
+    expect(v.is(WaitOutputSchema, doc)).toBe(true);
+    expect(Object.keys(doc).sort()).toEqual(['block', 'phase', 'run_id', 'status']);
+    expect(doc.status).toBe('blocked');
+    expect(doc.phase).toBe('blocked');
+    expect(doc.block.block_id).toBe('b1');
+    expect(doc.block.failures).toHaveLength(1);
+    expect(spy.calls).toHaveLength(0);
+
+    // A person has to bring the system back first, so there is nothing to ask at the terminal.
+    const human = await cli([createWaitCommand({ spawn: spy.spawn, isAlive: () => false })], ['wait', RUN_ID], { config: () => h.config, isTTY: true });
+    expect(human.code).toBe(6);
+    expect(human.out).toContain('is blocked (b1)');
+    expect(human.out).toContain(`triage resume ${RUN_ID}`);
+    expect(spy.calls).toHaveLength(0);
+    expect((await (await createRunStore(h.config)).getRun(RUN_ID))?.phase).toBe('blocked');
+  });
+
+  test('ask refuses a blocked run and points at resume', async () => {
+    const h = home();
+    await blocked(h);
+    const spy = spawnSpy();
+    const r = await cli([createAskCommand({ spawn: spy.spawn, defaultRequestedBy: fixedUser, isAlive: () => false })], ['ask', RUN_ID, 'why?'], {
+      config: () => h.config,
+    });
+    expect(r.code).toBe(EXIT.ERROR);
+    expect(r.err).toContain('is blocked (ssfb:harbor did not answer)');
+    expect(r.err).toContain(`resume it with: triage resume ${RUN_ID}`);
+    expect(spy.calls).toHaveLength(0);
+    expect((await (await createRunStore(h.config)).getRun(RUN_ID))?.phase).toBe('blocked');
+  });
+
+  test('run prints the block in the wait shape and exits 6', async () => {
+    const order: string[] = [];
+    /** A fake pipeline whose response ended on stop_blocked. */
+    const submitBlocked = (h: TestHome) => async (p: PreparedSubmission): Promise<SubmissionResult> => {
+      order.push('submit');
+      const store = await createRunStore(h.config);
+      await store.createRun(p.run_id, redactPersisted(p.request, { names: [...p.redaction_names] }));
+      await store.addSubmission(p.run_id, redactPersisted({ kind: 'initial' as const }));
+      await store.putBlock(p.run_id, redactPersisted(sampleBlock('b1')));
+      return { run_id: p.run_id, status: 'blocked', submission_seq: 1, submission_id: 's1', block: sampleBlock('b1'), gaps: [] };
+    };
+    const cmd = (h: TestHome): CliCommand =>
+      createRunCommand({
+        boot: async () => undefined,
+        prepare: async (input, config, registry: Registry) => prepareRequest(input, { ...prepareDeps(config, registry), newId: () => RUN_ID }),
+        submit: submitBlocked(h),
+        defaultRequestedBy: fixedUser,
+      });
+    const h = home();
+    const r = await cli([cmd(h)], ['run', '--text', TEXT, '--json'], { config: () => h.config });
+    expect(r.code).toBe(EXIT_BLOCKED);
+    const doc = jsonLine(r.out) as { status: string; phase: string; block: { block_id: string } };
+    expect(v.is(WaitOutputSchema, doc)).toBe(true);
+    expect(doc).toMatchObject({ run_id: RUN_ID, status: 'blocked', phase: 'blocked' });
+    expect(doc.block.block_id).toBe('b1');
+    expect(order).toEqual(['submit']);
+    expect((await (await createRunStore(h.config)).getRun(RUN_ID))?.phase).toBe('blocked');
+
+    const h2 = home();
+    const human = await cli([cmd(h2)], ['run', '--text', TEXT], { config: () => h2.config, isTTY: true });
+    expect(human.code).toBe(6);
+    expect(human.out).toContain('is blocked (b1)');
+    expect(human.out).toContain(`triage resume ${RUN_ID}`);
   });
 });

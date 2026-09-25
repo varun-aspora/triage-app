@@ -36,6 +36,7 @@ const ROUTES: readonly (readonly [string, string])[] = [
   ['POST', '/triage'],
   ['GET', `/triage/${RUN}`],
   ['POST', `/triage/${RUN}/ask`],
+  ['POST', `/triage/${RUN}/resume`],
   ['POST', `/triage/${RUN}/feedback`],
   ['POST', `/triage/${RUN}/post-to-slack`],
   ['GET', '/no/such/route'],

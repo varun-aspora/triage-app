@@ -1,14 +1,16 @@
 // triage wait <run_id> [--timeout <seconds>] [--requested-by <who>] [--json]
 //
 // Polls the run store until the run's phase is terminal, the worker is gone,
-// the run is waiting on a question, or the timeout passes, then prints
-// {run_id, status, report?, reason?, input_request?}.
+// the run is waiting on a question or blocked on a system, or the timeout
+// passes, then prints {run_id, status, report?, reason?, input_request?, block?}.
 //
 //   completed   -> the stored report (persisted profile), exit 0
 //   failed      -> the failure reason, exit 1
 //   stalled     -> the phase is not terminal and the worker pid is dead, exit 1
 //   timeout     -> the run is still going, exit 3
 //   needs_input -> the question the run is waiting on, exit 4 (P6 §4.5)
+//   stopped     -> a person stopped the run, exit 5
+//   blocked     -> the block the run is parked on, exit 6; `triage resume` sends it on (D55)
 //
 // With a terminal and no --json, a question is asked right here: the answer
 // (or a skip) goes to a detached worker the way `triage input` does, and the
@@ -20,8 +22,8 @@
 // it cannot abort or change the run.
 import { spawnWorker } from '../../ingress/detach.ts';
 import type { RunRecord } from '../../runstore/types.ts';
-import { answerHint, askAtTerminal, questionLines, startAnswer } from '../lib/input-request.ts';
-import { EXIT_NEEDS_INPUT, EXIT_STOPPED, EXIT_WAIT_TIMEOUT, emitJson, WaitOutputSchema, type WaitOutput } from '../lib/output-schemas.ts';
+import { answerHint, askAtTerminal, blockLines, copyBlock, questionLines, resumeHint, startAnswer } from '../lib/input-request.ts';
+import { EXIT_BLOCKED, EXIT_NEEDS_INPUT, EXIT_STOPPED, EXIT_WAIT_TIMEOUT, emitJson, WaitOutputSchema, type WaitOutput } from '../lib/output-schemas.ts';
 import { type LineReader, linePrompt } from '../lib/prompt.ts';
 import { requestedByOf } from '../lib/request-args.ts';
 import { EXIT, printError, printHuman } from '../output.ts';
@@ -75,6 +77,9 @@ export function settledOutput(run: RunRecord, isAlive: PidChecker): WaitOutput |
       ...(run.input_request !== null ? { input_request: { ...run.input_request, options: [...run.input_request.options] } } : {}),
     };
   }
+  if (status === 'blocked') {
+    return { run_id: run.run_id, status, phase: run.phase, ...(run.block !== null ? { block: copyBlock(run.block) } : {}) };
+  }
   return undefined;
 }
 
@@ -97,7 +102,9 @@ export function printWaitResult(
           ? EXIT_NEEDS_INPUT
           : out.status === 'stopped'
             ? EXIT_STOPPED
-            : EXIT.ERROR;
+            : out.status === 'blocked'
+              ? EXIT_BLOCKED
+              : EXIT.ERROR;
   if (json) {
     emitJson(io, WaitOutputSchema, out);
     return code;
@@ -124,6 +131,14 @@ export function printWaitResult(
         out.input_request !== undefined
           ? [...questionLines(out.run_id, out.input_request), '', ...answerHint(out.run_id)]
           : [`run ${out.run_id} is waiting for an answer`, ...answerHint(out.run_id)],
+      );
+      break;
+    case 'blocked':
+      printHuman(
+        io,
+        out.block !== undefined
+          ? [...blockLines(out.run_id, out.block), '', ...resumeHint(out.run_id)]
+          : [`run ${out.run_id} is blocked on a system that did not answer`, ...resumeHint(out.run_id)],
       );
       break;
   }

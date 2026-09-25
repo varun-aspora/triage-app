@@ -6,7 +6,7 @@ Framework: **Flue 2.x** (`@flue/runtime`) on Node ≥ 22.19, package management 
 flowchart TB
     subgraph Ingress["src/ingress"]
         CLI["cli.ts (bin: triage)<br/>run · start · wait · status · ask · input · post · feedback<br/>doctor · preflight · tunnel · repos sync"]
-        API["app.ts (Hono)<br/>POST /triage → 202 run_id<br/>GET /triage/:run_id · POST /triage/:run_id/ask<br/>POST /triage/:run_id/post-to-slack (off by default) · POST /triage/:run_id/feedback<br/>no agent-router mount in v1 (polling only)<br/>bearer auth on every route"]
+        API["app.ts (Hono)<br/>POST /triage → 202 run_id<br/>GET /triage/:run_id · POST /triage/:run_id/ask · POST /triage/:run_id/resume<br/>POST /triage/:run_id/post-to-slack (off by default) · POST /triage/:run_id/feedback<br/>no agent-router mount in v1 (polling only)<br/>bearer auth on every route"]
         SKILL["Claude Code / Codex skill<br/>calls the CLI, asks the user in chat before posting"]
         SLACKCH["@flue/slack channel (later)"]
         NORM["normalise.ts → TriageRequest<br/>slack.ts (bot token) or --thread-file<br/>identity.ts: deterministic ID chain + basic state<br/>redact.ts before persisting"]
@@ -272,6 +272,7 @@ triage start … --json          # same inputs, returns {run_id} immediately
 triage wait   <run_id> [--timeout <s>] --json    # exit 4 with the question when the run is waiting on one; asks at a terminal
 triage status <run_id> --json
 triage ask    <run_id> "follow-up question"      # new submission on the same conversation
+triage resume <run_id> ["message"]                # sends a blocked run on once the system answers; also a run that failed after dispatch or was stopped (D55); wait/run exit 6 on a blocked run
 triage input  <run_id> ["answer"] [--question q1] [--ids k=v…] [--skip]   # answers the question a run is waiting on (needs_input) and resumes it (D53)
 triage post   <run_id> [--yes --approved-by <who>]  # interactive y/N only when stdin is a TTY
 triage feedback <run_id> --verdict correct|partial|wrong|pending [--actual-root-cause …] [--faster-path …]   # also writes an eval case draft to evals/_unreviewed/<run_id>/
@@ -289,7 +290,7 @@ Built on `start({agents:[Triage], db: sqlite(...)})` + `init(Triage,{id: run_id}
 
 - `POST /triage` `{slack_url | messages[], ids?, entities?, tier?, requested_by}` + optional `Idempotency-Key` header (deduped in ingress, stored in sqlite) → `202 {run_id}`.
 - `GET /triage/:run_id` → `{status, phase, classification, id_chain, report?}`, all through the egress redaction profile. Polling replaces streaming in v1.
-- `POST /triage/:run_id/ask`, `POST /triage/:run_id/feedback`.
+- `POST /triage/:run_id/ask`, `POST /triage/:run_id/resume` (D55), `POST /triage/:run_id/feedback`.
 - A run parked on a question (`phase: needs_input`, D53) shows `status: running` here with no question, and `ask` is not refused while one is open. The web adapter (the record on `GET`, `POST /triage/:run_id/input`) is not built.
 - `POST /triage/:run_id/post-to-slack` exists in code but is **disabled by default** (`TRIAGE_HTTP_ALLOW_SLACK_POST=false`), because a bearer holder asserting `approved_by` is not an approval. It is enabled only for the v2 Slack bot, where the approval is a Slack interaction verified by signature. In v1 the CLI is the only posting path.
 - `createAgentRouter(Triage)` is **not mounted** in v1. The conversation stream carries model-facing tool results (account numbers, phones) and a generic router would expose creation and arbitrary-conversation reads behind one shared token. If streaming is wanted later, it is a redacted relay of `observe()` events under the same auth.

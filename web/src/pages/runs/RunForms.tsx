@@ -8,6 +8,7 @@ import { Field, Input, Textarea } from '../../components/Field.tsx';
 import { describeError } from '../../components/LoadState.tsx';
 import { Notice } from '../../components/Notice.tsx';
 import { Panel } from '../../components/Panel.tsx';
+import { refusalText } from './block-logic.ts';
 import { useRememberedName } from './remembered-name.ts';
 
 const MAX_QUESTION = 4000;
@@ -36,7 +37,14 @@ export function AskForm({ runId, reports, onAsked }: { runId: string; reports: n
       onAsked();
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) return;
-      setStatus({ kind: 'error', text: err instanceof ApiError && err.status === 404 ? 'This run no longer exists.' : describeError(err) });
+      // 409: the run is blocked; the hint says to resume it first.
+      const text =
+        err instanceof ApiError && err.status === 404
+          ? 'This run no longer exists.'
+          : err instanceof ApiError && err.status === 409
+            ? refusalText(err.body)
+            : describeError(err);
+      setStatus({ kind: 'error', text });
     } finally {
       setBusy(false);
     }

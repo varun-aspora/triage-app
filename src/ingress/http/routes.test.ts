@@ -6,13 +6,15 @@ import { fileURLToPath } from 'node:url';
 import type { Agent, AgentReply, InitOptions } from '@flue/runtime';
 import { FeedbackError, type FeedbackDeps, type FeedbackInput, type FeedbackResult } from '../../report/feedback.ts';
 import { redactPersisted } from '../../gate/redact.ts';
-import { sampleClassification, sampleFeedback, sampleRequest } from '../../runstore/contract.ts';
+import { sampleBlock, sampleClassification, sampleFeedback, sampleRequest } from '../../runstore/contract.ts';
 import { createFolderRunStore } from '../../runstore/folder.ts';
-import type { RunPhase, RunQuery, RunRecord, RunStore, RunSummary } from '../../runstore/types.ts';
+import { RunNotFoundError, type RunPhase, type RunQuery, type RunRecord, type RunStore, type RunSummary } from '../../runstore/types.ts';
+import { BLOCK_RESUME_SIGNAL, MAX_RESUME_NOTE_CHARS } from '../../types/block.ts';
 import type { RunId } from '../../types/core.ts';
+import { IngressInputError } from '../normalise.ts';
 import { prepareRequest, type PrepareDeps, type PrepareInput, type PreparedSubmission } from '../prepare.ts';
 import { SlackFetchError, type SlackThread, type SlackThreadRef } from '../slack.ts';
-import type { AgentHandle, Dispatcher, SettleDeps } from '../submit.ts';
+import { RESUME_HINTS, RunNotResumableError, type AgentHandle, type Dispatcher, type ResumeInput, type SettleDeps } from '../submit.ts';
 import {
   createTriageRoutes,
   IDEMPOTENCY_TTL_MS,
@@ -21,6 +23,7 @@ import {
   SLACK_POST_DISABLED,
   SLACK_POST_NOT_IMPLEMENTED,
   startAsk,
+  startResume,
   type AskStart,
   type TriageRouteDeps,
 } from './routes.ts';
@@ -29,6 +32,7 @@ import { MAX_IDEMPOTENCY_KEY_LENGTH } from './schemas.ts';
 // Synthetic ids and people only. The phone below is a made-up test number.
 const RUN_A = '01J8Z3K4M5N6P7Q8R9S0T1V2W3';
 const RUN_B = '01J8Z3K4M5N6P7Q8R9S0T1V2W4';
+const RUN_C = '01J8Z3K4M5N6P7Q8R9S0T1V2W5';
 const UNKNOWN_RUN = '01J8Z3K4M5N6P7Q8R9S0T1V2W9';
 const SYNTHETIC_PHONE = '9876543210';
 const PERMALINK = 'https://example.slack.com/archives/C0123456789/p1695460000123456';
@@ -45,6 +49,8 @@ function record(runId: string, phase: RunPhase, report: unknown = null): RunReco
     phase,
     input_request: null,
     input_history: [],
+    block: null,
+    block_history: [],
     request: {} as RunRecord['request'],
     classification: {
       decision: { category: 'payment_stuck', tier_final: 'mid' } as unknown as NonNullable<RunRecord['classification']>['decision'],
@@ -112,6 +118,7 @@ type Harness = {
   prepared: PrepareInput[];
   submitted: PreparedSubmission[];
   asks: [string, string, string][];
+  resumes: [string, ResumeInput][];
   feedback: [string, FeedbackInput, FeedbackDeps][];
   app: ReturnType<typeof createTriageRoutes>;
 };
@@ -124,8 +131,9 @@ function harness(
   const prepared: PrepareInput[] = [];
   const submitted: PreparedSubmission[] = [];
   const asks: [string, string, string][] = [];
+  const resumes: [string, ResumeInput][] = [];
   const feedback: [string, FeedbackInput, FeedbackDeps][] = [];
-  const ids = [RUN_A, RUN_B, '01J8Z3K4M5N6P7Q8R9S0T1V2W5'];
+  const ids = [RUN_A, RUN_B, RUN_C];
   const deps: TriageRouteDeps = {
     store,
     home: '/tmp/triage-test-home',
@@ -142,6 +150,10 @@ function harness(
       asks.push([runId, question, by]);
       return { dispatched: Promise.resolve('sub-2'), settled: new Promise(() => undefined) };
     },
+    resume: (runId, input): AskStart => {
+      resumes.push([runId, input]);
+      return { dispatched: Promise.resolve('sub-3'), settled: new Promise(() => undefined) };
+    },
     recordFeedback: async (runId, input, fdeps): Promise<FeedbackResult> => {
       feedback.push([runId, input, fdeps]);
       return {
@@ -155,7 +167,15 @@ function harness(
     onBackgroundError: () => undefined,
     ...rest,
   };
-  return { deps, store, prepared, submitted, asks, feedback, app: createTriageRoutes(deps) };
+  return { deps, store, prepared, submitted, asks, resumes, feedback, app: createTriageRoutes(deps) };
+}
+
+const AT = '2026-09-24T00:00:00.000Z';
+const INITIAL: RunRecord['submissions'][number] = { seq: 1, kind: 'initial', created_at: AT, report: null, report_md: null };
+
+/** A run parked on b1 after its first submission, the way stop_blocked leaves it. */
+function blockedRecord(runId: string): RunRecord {
+  return { ...record(runId, 'blocked'), block: sampleBlock('b1'), submissions: [INITIAL] };
 }
 
 function post(app: Harness['app'], path: string, body: unknown, headers: Record<string, string> = {}): Promise<Response> {
@@ -600,6 +620,14 @@ describe('GET /triage', () => {
     expect(none.runs.map((r) => r.run_id)).toEqual([RUN_B, UNKNOWN_RUN]);
   });
 
+  test('a blocked run lists under status blocked, not running', async () => {
+    const h = harness({ summaries: [summary(RUN_C, T1, { phase: 'blocked' }), ...rows] });
+    const blocked = (await (await h.app.request('/triage?status=blocked')).json()) as { runs: RunSummary[] };
+    expect(blocked.runs.map((r) => r.run_id)).toEqual([RUN_C]);
+    const running = (await (await h.app.request('/triage?status=running')).json()) as { runs: RunSummary[] };
+    expect(running.runs.map((r) => r.run_id)).toEqual([RUN_B]);
+  });
+
   test('next_cursor walks two pages', async () => {
     const h = harness({ summaries: rows });
     const first = (await (await h.app.request('/triage?limit=2')).json()) as { runs: RunSummary[]; next_cursor: string | null };
@@ -699,8 +727,15 @@ describe('POST /triage/:run_id/ask', () => {
     expect(h.asks).toHaveLength(0);
   });
 
+  test('a blocked run -> 409 pointing at resume, nothing dispatched', async () => {
+    const h = harness({ runs: { [RUN_A]: blockedRecord(RUN_A) } });
+    const res = await post(h.app, `/triage/${RUN_A}/ask`, { question: 'why?', requested_by: 'ops@example.com' });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'run is blocked', hint: 'resume it first' });
+    expect(h.asks).toHaveLength(0);
+  });
+
   test('an ask that fails before dispatch is mapped, not left hanging', async () => {
-    const { RunNotFoundError } = await import('../../runstore/types.ts');
     const h = harness({
       runs: { [RUN_A]: record(RUN_A, 'completed') },
       ask: () => ({ dispatched: new Promise(() => undefined), settled: Promise.reject(new RunNotFoundError(RUN_A)) }),
@@ -916,6 +951,236 @@ describe('source rules', () => {
   });
 });
 
+// ------------------------------------------------------------------ blocked runs and resume (D55)
+
+describe('GET /triage/:run_id on a blocked run', () => {
+  test('status blocked, the open block, an empty history and no report', async () => {
+    const h = harness({ runs: { [RUN_A]: blockedRecord(RUN_A) } });
+    const res = await h.app.request(`/triage/${RUN_A}`);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as Record<string, unknown>;
+    expect(json.status).toBe('blocked');
+    expect(json.phase).toBe('blocked');
+    expect(json.block).toEqual(sampleBlock('b1'));
+    expect(json.block_history).toEqual([]);
+    expect('report' in json).toBe(false);
+  });
+
+  test('a closed block sits in block_history with block null, and the resume submission is listed', async () => {
+    const closed = { ...sampleBlock('b1'), status: 'resumed' as const, resolved_at: AT, resolved_by: 'ops-reviewer', note: 'harbor is back' };
+    const resume: RunRecord['submissions'][number] = { seq: 2, kind: 'resume', block_id: 'b1', note: 'harbor is back', created_at: AT, report: null, report_md: null };
+    const run: RunRecord = { ...record(RUN_A, 'investigating'), block_history: [closed], submissions: [INITIAL, resume] };
+    const json = (await (await harness({ runs: { [RUN_A]: run } }).app.request(`/triage/${RUN_A}`)).json()) as Record<string, unknown>;
+    expect(json.status).toBe('running');
+    expect(json.block).toBeNull();
+    expect(json.block_history).toEqual([closed]);
+    expect((json.submissions as Record<string, unknown>[])[1]).toEqual({ seq: 2, kind: 'resume', created_at: AT, has_report: false });
+  });
+
+  test('a synthetic phone in the block reason comes back masked', async () => {
+    const run: RunRecord = { ...blockedRecord(RUN_A), block: { ...sampleBlock('b1'), reason: `harbor did not answer for ${SYNTHETIC_PHONE}` } };
+    const text = await (await harness({ runs: { [RUN_A]: run } }).app.request(`/triage/${RUN_A}`)).text();
+    expect(text).not.toContain(SYNTHETIC_PHONE);
+    expect((JSON.parse(text) as { block: { reason: string } }).block.reason).toContain('****3210');
+  });
+
+  test('a bare record renders block null and an empty history', () => {
+    const view = runView(record(RUN_A, 'created'));
+    expect(view.block).toBeNull();
+    expect(view.block_history).toEqual([]);
+  });
+});
+
+describe('POST /triage/:run_id/resume', () => {
+  const body = { requested_by: 'ops@example.com', note: 'harbor is back' };
+
+  test('a blocked run -> 202 {run_id, submission_id}; the resume gets who and the note', async () => {
+    const h = harness({ runs: { [RUN_A]: blockedRecord(RUN_A) } });
+    const res = await post(h.app, `/triage/${RUN_A}/resume`, body);
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ run_id: RUN_A, submission_id: 'sub-3' });
+    expect(h.resumes).toEqual([[RUN_A, { by: 'ops@example.com', note: 'harbor is back' }]]);
+  });
+
+  test('the note is trimmed; a blank or missing note is left out', async () => {
+    const h = harness({ runs: { [RUN_A]: blockedRecord(RUN_A) } });
+    await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops', note: '  fixed the tunnel  ' });
+    await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops', note: '   ' });
+    await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops' });
+    expect(h.resumes.map(([, input]) => input)).toEqual([{ by: 'ops', note: 'fixed the tunnel' }, { by: 'ops' }, { by: 'ops' }]);
+  });
+
+  test('a run that failed or was stopped after dispatch is resumed', async () => {
+    for (const phase of ['failed', 'stopped'] as const) {
+      const h = harness({ runs: { [RUN_A]: { ...record(RUN_A, phase), phase_reason: 'AgentRunError', submissions: [INITIAL] } } });
+      const res = await post(h.app, `/triage/${RUN_A}/resume`, body);
+      expect(res.status).toBe(202);
+      expect(h.resumes).toEqual([[RUN_A, { by: 'ops@example.com', note: 'harbor is back' }]]);
+    }
+  });
+
+  test.each([
+    ['created', record(RUN_A, 'created'), RESUME_HINTS.running],
+    ['investigating', record(RUN_A, 'investigating'), RESUME_HINTS.running],
+    ['waiting on a question', record(RUN_A, 'needs_input'), RESUME_HINTS.needs_input],
+    ['completed', { ...record(RUN_A, 'completed'), submissions: [INITIAL] }, RESUME_HINTS.completed],
+    ['failed before dispatch', record(RUN_A, 'failed'), RESUME_HINTS.never_started],
+    ['stopped before dispatch', record(RUN_A, 'stopped'), RESUME_HINTS.never_started],
+  ])('a run that is %s -> 409 with the phase and a hint, nothing started', async (_name, run, hint) => {
+    const h = harness({ runs: { [RUN_A]: run } });
+    const res = await post(h.app, `/triage/${RUN_A}/resume`, body);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'run is not resumable', phase: run.phase, hint });
+    expect(h.resumes).toHaveLength(0);
+  });
+
+  test('an unknown run -> 404 and a malformed id -> 400; nothing started', async () => {
+    const h = harness();
+    expect((await post(h.app, `/triage/${UNKNOWN_RUN}/resume`, body)).status).toBe(404);
+    expect((await post(h.app, '/triage/not%20a%20run/resume', body)).status).toBe(400);
+    expect(h.resumes).toHaveLength(0);
+  });
+
+  test.each([
+    ['a missing requested_by', { note: 'x' }, ['requested_by']],
+    ['a blank requested_by', { requested_by: '   ' }, ['requested_by']],
+    ['a note over the limit', { requested_by: 'ops', note: 'x'.repeat(MAX_RESUME_NOTE_CHARS + 1) }, ['note']],
+    ['a note that is not text', { requested_by: 'ops', note: 5 }, ['note']],
+    ['a body that is not an object', '"just text"', ['body']],
+  ])('%s -> 400 naming the field, nothing started', async (_name, b, fields) => {
+    const h = harness({ runs: { [RUN_A]: blockedRecord(RUN_A) } });
+    const res = await post(h.app, `/triage/${RUN_A}/resume`, b);
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error: string; fields: string[] };
+    expect(json.error).toBe('invalid request');
+    expect(json.fields).toEqual(fields);
+    expect(h.resumes).toHaveLength(0);
+  });
+
+  test('invalid JSON -> 400; error bodies never repeat the values sent', async () => {
+    const h = harness({ runs: { [RUN_A]: blockedRecord(RUN_A) } });
+    expect((await post(h.app, `/triage/${RUN_A}/resume`, '{not json')).status).toBe(400);
+    const res = await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops', note: `${'x'.repeat(MAX_RESUME_NOTE_CHARS)} ${SYNTHETIC_PHONE}` });
+    expect(res.status).toBe(400);
+    expect(await res.text()).not.toContain(SYNTHETIC_PHONE);
+    expect(h.resumes).toHaveLength(0);
+  });
+
+  test('a resume that fails before dispatch is mapped, not left hanging', async () => {
+    const failing = (err: unknown) => (): AskStart => ({ dispatched: new Promise(() => undefined), settled: Promise.reject(err) });
+    const runs = { [RUN_A]: blockedRecord(RUN_A) };
+
+    const gone = await post(harness({ runs, resume: failing(new RunNotFoundError(RUN_A)) }).app, `/triage/${RUN_A}/resume`, body);
+    expect(gone.status).toBe(404);
+
+    // The run moved on between the route's check and the resume.
+    const moved = await post(
+      harness({ runs, resume: failing(new RunNotResumableError(RUN_A, 'investigating', RESUME_HINTS.running)) }).app,
+      `/triage/${RUN_A}/resume`,
+      body,
+    );
+    expect(moved.status).toBe(409);
+    expect(await moved.json()).toEqual({ error: 'run is not resumable', phase: 'investigating', hint: RESUME_HINTS.running });
+
+    const bad = await post(harness({ runs, resume: failing(new IngressInputError('by', 'is required')) }).app, `/triage/${RUN_A}/resume`, body);
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as { fields: string[] }).fields).toEqual(['requested_by']);
+  });
+
+  test('when the reply lands before the receipt, the submission id comes from the result', async () => {
+    const h = harness({
+      runs: { [RUN_A]: blockedRecord(RUN_A) },
+      resume: () => ({ dispatched: new Promise(() => undefined), settled: Promise.resolve({ submission_id: 'sub-9' }) }),
+    });
+    const res = await post(h.app, `/triage/${RUN_A}/resume`, body);
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ run_id: RUN_A, submission_id: 'sub-9' });
+  });
+
+  test('a later failure of the resume is reported as resume, never thrown into the response', async () => {
+    const seen: string[] = [];
+    const h = harness({
+      runs: { [RUN_A]: blockedRecord(RUN_A) },
+      resume: () => ({
+        dispatched: Promise.resolve('sub-3'),
+        settled: tick().then(() => {
+          throw new Error('boom');
+        }),
+      }),
+      onBackgroundError: (runId, what) => seen.push(`${what}:${runId}`),
+    });
+    const res = await post(h.app, `/triage/${RUN_A}/resume`, body);
+    expect(res.status).toBe(202);
+    await tick();
+    await tick();
+    expect(seen).toEqual([`resume:${RUN_A}`]);
+  });
+});
+
+describe('startResume', () => {
+  test('closes the block, dispatches the resume signal on the same instance and resolves dispatched before the reply', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'triage-resume-'));
+    try {
+      const store = createFolderRunStore({ runsDir: join(root, 'runs'), dataDir: join(root, 'data') });
+      await store.createRun(RUN_A, redactPersisted(sampleRequest(RUN_A)));
+      await store.addSubmission(RUN_A, redactPersisted({ kind: 'initial' as const }));
+      await store.putBlock(RUN_A, redactPersisted(sampleBlock('b1')));
+
+      let finishRead: ((reply: AgentReply) => void) | undefined;
+      const inits: InitOptions[] = [];
+      const messages: { kind: string; type?: string; body: string }[] = [];
+      const dispatcher: Dispatcher = {
+        init(_agent, options) {
+          inits.push(options);
+          const handle = {
+            dispatch: async (request: { message?: { kind: string; type?: string; body: string } }) => {
+              if (request.message !== undefined) messages.push(request.message);
+              return { submissionId: 'sub-8', acceptedAt: AT };
+            },
+            read: () => new Promise<AgentReply>((resolve) => (finishRead = resolve)),
+            abort: async () => undefined,
+          };
+          return handle as unknown as AgentHandle;
+        },
+      };
+      const deps: SettleDeps = {
+        config: { mock: { enabled: true }, runs: { priorCases: false }, budgets: { runTimeoutMs: 60_000, runMaxAttempts: 1 } },
+        store,
+        dispatcher,
+        agent: {} as Agent,
+        embedder: null,
+        embedRun: async () => ({ gaps: [] }) as unknown as Awaited<ReturnType<NonNullable<SettleDeps['embedRun']>>>,
+        now: () => new Date(AT),
+      };
+      const started = startResume(RUN_A as RunId, { by: 'ops-reviewer', note: 'harbor is back' }, deps);
+      expect(await started.dispatched).toBe('sub-8');
+      expect(inits).toEqual([{ id: RUN_A }]);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({ kind: 'signal', type: BLOCK_RESUME_SIGNAL });
+      expect(messages[0]?.body).toContain('ssfb:harbor');
+      expect(messages[0]?.body).toContain('harbor is back');
+
+      // The block is closed and the resume submission stored before the reply arrives.
+      const parked = await store.getRun(RUN_A);
+      expect(parked?.block).toBeNull();
+      expect(parked?.block_history.map((b) => [b.block_id, b.status, b.resolved_by, b.note])).toEqual([['b1', 'resumed', 'ops-reviewer', 'harbor is back']]);
+      expect(parked?.submissions.map((s) => [s.seq, s.kind, s.block_id, s.note])).toEqual([
+        [1, 'initial', undefined, undefined],
+        [2, 'resume', 'b1', 'harbor is back'],
+      ]);
+
+      for (let i = 0; i < 20 && finishRead === undefined; i++) await tick();
+      expect(finishRead).toBeDefined();
+      finishRead?.({ text: 'done', submissionId: 'sub-8' } as unknown as AgentReply);
+      const result = (await started.settled) as { status: string; submission_id: string; submission_seq: number };
+      expect(result).toMatchObject({ status: 'completed', submission_id: 'sub-8', submission_seq: 2 });
+      expect((await store.getRun(RUN_A))?.phase).toBe('completed');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 // ------------------------------------------------------------------ stop, events and verdicts before the report
 
 describe('POST /triage/:run_id/stop, GET /triage/:run_id/events, feedback on a running run', () => {
@@ -952,6 +1217,30 @@ describe('POST /triage/:run_id/stop, GET /triage/:run_id/events, feedback on a r
     const again = await post(h.app, `/triage/${RUN_A}/stop`, { given_by: 'ops@example.com' });
     expect(again.status).toBe(409);
     expect(await again.json()).toEqual({ error: 'run is not running', phase: 'stopped' });
+  });
+
+  test('stop on a blocked run closes the block as cancelled; the stopped run can then be resumed', async () => {
+    const { store, home } = await realStore();
+    await store.putBlock(RUN_A, redactPersisted(sampleBlock('b1')));
+    const h = harness({ store, home, recordFeedback: undefined as never });
+    const before = (await (await h.app.request(`/triage/${RUN_A}`)).json()) as Record<string, any>;
+    expect(before.status).toBe('blocked');
+    expect(before.block.block_id).toBe('b1');
+
+    // A plain name: the persisted profile masks an email in the stored resolution.
+    const res = await post(h.app, `/triage/${RUN_A}/stop`, { given_by: 'ops-reviewer' });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { stopped_from: string }).stopped_from).toBe('blocked');
+    const view = (await (await h.app.request(`/triage/${RUN_A}`)).json()) as Record<string, any>;
+    expect(view.status).toBe('stopped');
+    expect(view.block).toBeNull();
+    expect(view.block_history).toHaveLength(1);
+    expect(view.block_history[0]).toMatchObject({ block_id: 'b1', status: 'cancelled', resolved_by: 'ops-reviewer' });
+
+    // Stopped after dispatch: the conversation exists, so a resume is accepted.
+    const resumed = await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops-reviewer' });
+    expect(resumed.status).toBe(202);
+    expect(h.resumes).toEqual([[RUN_A, { by: 'ops-reviewer' }]]);
   });
 
   test('stop with verdict false records no feedback; bad bodies and unknown runs are refused', async () => {

@@ -56,6 +56,8 @@ function fakeRunStore(): FakeStore {
     putInputRequest: unused,
     markStopped: unused,
     resolveInputRequest: unused,
+    putBlock: unused,
+    resolveBlock: unused,
     putReport: unused,
     putFeedback: unused,
     claimIdempotencyKey: unused,

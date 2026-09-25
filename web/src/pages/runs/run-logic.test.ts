@@ -1,10 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import type { RunDetail, TierDecision } from '../../api/types.ts';
 import {
-  askPending,
+  blockedSteps,
   buildStartBody,
   costTotals,
   deriveInvestigators,
+  followUpPending,
   formFieldOf,
   formatUsd,
   inferFailure,
@@ -210,6 +211,11 @@ test('runningSteps', () => {
   expect([s.preflight, s.dispatched, s.investigating, s.completed]).toEqual(['done', 'done', 'current', 'todo']);
 });
 
+test('blockedSteps parks on investigating', () => {
+  const s = blockedSteps();
+  expect([s.preflight, s.dispatched, s.investigating, s.completed]).toEqual(['done', 'done', 'waiting', 'todo']);
+});
+
 test('permalinkHref only links unmasked https links', () => {
   expect(permalinkHref('https://acme.slack.com/archives/C1/p1727275322000100')).toBe('https://acme.slack.com/archives/C1/p1727275322000100');
   expect(permalinkHref('https://acme.slack.com/archives/C1/p17272******00100')).toBeUndefined();
@@ -224,11 +230,15 @@ test('reportVersionLabel', () => {
   expect(reportVersionLabel([s(1, false)])).toBeUndefined();
 });
 
-test('askPending waits for a newer submission with a report', () => {
+test('followUpPending waits for the newer submission, then for the run to settle', () => {
   const s = (seq: number, has: boolean) => ({ seq, kind: 'ask' as const, created_at: '', has_report: has });
-  expect(askPending([s(1, true)], 1)).toBe(true);
-  expect(askPending([s(1, true), s(2, false)], 1)).toBe(true);
-  expect(askPending([s(1, true), s(2, true)], 1)).toBe(false);
+  expect(followUpPending({ status: 'completed', submissions: [s(1, true)] }, 1)).toBe(true);
+  expect(followUpPending({ status: 'running', submissions: [s(1, true), s(2, false)] }, 1)).toBe(true);
+  expect(followUpPending({ status: 'completed', submissions: [s(1, true), s(2, true)] }, 1)).toBe(false);
+  // A resume that blocked again, or a follow-up that failed or was stopped, settled without a report.
+  expect(followUpPending({ status: 'blocked', submissions: [s(1, true), s(2, false)] }, 1)).toBe(false);
+  expect(followUpPending({ status: 'failed', submissions: [s(1, true), s(2, false)] }, 1)).toBe(false);
+  expect(followUpPending({ status: 'stopped', submissions: [s(1, true), s(2, false)] }, 1)).toBe(false);
 });
 
 test('cost helpers', () => {

@@ -2,6 +2,7 @@
 //
 // Layout under TRIAGE_RUNS_DIR/<run_id>/ (HLD 02 §7, 03 data objects):
 //   meta.json                      {schema_version, run_id, created_at, updated_at, phase, ...}
+//                                  plus the open question and block and their histories
 //   input.json                     the persisted-profile TriageRequest
 //   classification.json            {decision, id_chain, preflight_warnings?}
 //   evidence/<entity|code>.json    latest findings, as written
@@ -72,13 +73,22 @@ import {
   type SubmissionInput,
   type SubmissionMeta,
 } from './types.ts';
-import { assertQuestionId, InputRequestNotOpenError, InputRequestOpenError } from './types.ts';
+import {
+  assertBlockId,
+  assertQuestionId,
+  BlockNotOpenError,
+  BlockOpenError,
+  cancelledBlockResolution,
+  InputRequestNotOpenError,
+  InputRequestOpenError,
+} from './types.ts';
 import {
   InputRequestSchema,
   InputResolutionSchema,
   type InputRequest,
   type InputResolution,
 } from '../types/input-request.ts';
+import { BlockRecordSchema, BlockResolutionSchema, type BlockRecord, type BlockResolution } from '../types/block.ts';
 
 export type FolderRunStoreOptions = {
   /** TRIAGE_RUNS_DIR, absolute. */
@@ -262,6 +272,7 @@ class FolderRunStore implements RunStore {
         ...(detail.reason !== undefined ? { phase_reason: detail.reason } : {}),
         ...((detail.worker_pid ?? meta.worker_pid) !== undefined ? { worker_pid: detail.worker_pid ?? meta.worker_pid } : {}),
         ...inputFields(meta),
+        ...blockFields(meta),
       };
       await writeFileAtomic(join(this.#dir(runId), 'meta.json'), json(next));
       return true;
@@ -283,6 +294,7 @@ class FolderRunStore implements RunStore {
         ...(meta.worker_pid !== undefined ? { worker_pid: meta.worker_pid } : {}),
         input_request: value,
         ...(meta.input_history !== undefined ? { input_history: meta.input_history } : {}),
+        ...blockFields(meta),
       };
       await writeFileAtomic(join(this.#dir(runId), 'meta.json'), json(next));
     });
@@ -304,6 +316,51 @@ class FolderRunStore implements RunStore {
         ...(meta.phase_reason !== undefined ? { phase_reason: meta.phase_reason } : {}),
         ...(meta.worker_pid !== undefined ? { worker_pid: meta.worker_pid } : {}),
         input_history: [...(meta.input_history ?? []), { ...open, ...value }],
+        ...blockFields(meta),
+      };
+      await writeFileAtomic(join(this.#dir(runId), 'meta.json'), json(next));
+    });
+  }
+
+  async putBlock(runId: RunId, block: Persisted<BlockRecord>): Promise<void> {
+    const value = parseRecord(BlockRecordSchema, assertPersisted(block, 'block'), 'block');
+    await serial(this.#lock(runId), async () => {
+      const meta = await this.#requireRun(runId);
+      if (meta.phase === 'stopped') throw new RunStoppedError(runId);
+      if (meta.block !== undefined) throw new BlockOpenError(runId, meta.block.block_id);
+      if (meta.input_request !== undefined) throw new InputRequestOpenError(runId, meta.input_request.question_id);
+      const next: RunMeta = {
+        schema_version: meta.schema_version,
+        run_id: meta.run_id,
+        created_at: meta.created_at,
+        updated_at: this.#iso(),
+        phase: 'blocked',
+        ...(meta.worker_pid !== undefined ? { worker_pid: meta.worker_pid } : {}),
+        ...inputFields(meta),
+        block: value,
+        ...(meta.block_history !== undefined ? { block_history: meta.block_history } : {}),
+      };
+      await writeFileAtomic(join(this.#dir(runId), 'meta.json'), json(next));
+    });
+  }
+
+  async resolveBlock(runId: RunId, blockId: string, resolution: Persisted<BlockResolution>): Promise<void> {
+    assertBlockId(blockId);
+    const value = parseRecord(BlockResolutionSchema, assertPersisted(resolution, 'block resolution'), 'block resolution');
+    await serial(this.#lock(runId), async () => {
+      const meta = await this.#requireRun(runId);
+      const open = meta.block;
+      if (open === undefined || open.block_id !== blockId) throw new BlockNotOpenError(runId, blockId);
+      const next: RunMeta = {
+        schema_version: meta.schema_version,
+        run_id: meta.run_id,
+        created_at: meta.created_at,
+        updated_at: this.#iso(),
+        phase: meta.phase,
+        ...(meta.phase_reason !== undefined ? { phase_reason: meta.phase_reason } : {}),
+        ...(meta.worker_pid !== undefined ? { worker_pid: meta.worker_pid } : {}),
+        ...inputFields(meta),
+        block_history: [...(meta.block_history ?? []), { ...open, ...value }],
       };
       await writeFileAtomic(join(this.#dir(runId), 'meta.json'), json(next));
     });
@@ -317,6 +374,10 @@ class FolderRunStore implements RunStore {
       if (isTerminalPhase(meta.phase)) return null;
       const open = meta.input_request;
       const history = open !== undefined ? [...(meta.input_history ?? []), { ...open, ...value }] : meta.input_history;
+      // An open block is closed as cancelled by the same person at the same time.
+      const block = meta.block;
+      const blocks =
+        block !== undefined ? [...(meta.block_history ?? []), { ...block, ...cancelledBlockResolution(value) }] : meta.block_history;
       const next: RunMeta = {
         schema_version: meta.schema_version,
         run_id: meta.run_id,
@@ -326,6 +387,7 @@ class FolderRunStore implements RunStore {
         phase_reason: reason,
         ...(meta.worker_pid !== undefined ? { worker_pid: meta.worker_pid } : {}),
         ...(history !== undefined ? { input_history: history } : {}),
+        ...(blocks !== undefined ? { block_history: blocks } : {}),
       };
       await writeFileAtomic(join(this.#dir(runId), 'meta.json'), json(next));
       return meta.phase;
@@ -642,6 +704,8 @@ class FolderRunStore implements RunStore {
       ...(meta.worker_pid !== undefined ? { worker_pid: meta.worker_pid } : {}),
       input_request: meta.input_request ?? null,
       input_history: meta.input_history ?? [],
+      block: meta.block ?? null,
+      block_history: meta.block_history ?? [],
       request,
       classification: classification ?? null,
       evidence: await this.#evidence(runId),
@@ -782,5 +846,13 @@ function inputFields(meta: RunMeta): Pick<RunMeta, 'input_request' | 'input_hist
   return {
     ...(meta.input_request !== undefined ? { input_request: meta.input_request } : {}),
     ...(meta.input_history !== undefined ? { input_history: meta.input_history } : {}),
+  };
+}
+
+/** The block fields (D55), carried over the same way. */
+function blockFields(meta: RunMeta): Pick<RunMeta, 'block' | 'block_history'> {
+  return {
+    ...(meta.block !== undefined ? { block: meta.block } : {}),
+    ...(meta.block_history !== undefined ? { block_history: meta.block_history } : {}),
   };
 }

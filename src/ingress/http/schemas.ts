@@ -5,6 +5,7 @@
 // the CLI. Error helpers report field paths, never the values received.
 
 import * as v from 'valibot';
+import { MAX_RESUME_NOTE_CHARS } from '../../types/block.ts';
 import { NonEmptyStringSchema, TierSchema } from '../../types/core.ts';
 import { MAX_CONTEXT_CHARS, ThreadFileMessageSchema } from '../normalise.ts';
 import { FEEDBACK_VERDICTS, FINDING_VERDICTS } from '../../runstore/types.ts';
@@ -47,6 +48,13 @@ export const AskBodySchema = v.object({
   requested_by: WhoSchema,
 });
 export type AskBody = v.InferOutput<typeof AskBodySchema>;
+
+/** POST /triage/:run_id/resume (D55). note is the person's message (what was fixed, anything new to consider), trimmed; a blank one counts as none. */
+export const ResumeBodySchema = v.object({
+  requested_by: WhoSchema,
+  note: v.optional(v.pipe(v.string(), v.trim(), v.maxLength(MAX_RESUME_NOTE_CHARS))),
+});
+export type ResumeBody = v.InferOutput<typeof ResumeBodySchema>;
 
 /** POST /triage/:run_id/feedback. The interface is always 'http' and is not read from the body. */
 export const FeedbackBodySchema = v.object({

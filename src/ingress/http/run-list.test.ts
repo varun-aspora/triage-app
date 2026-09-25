@@ -88,8 +88,15 @@ describe('parseListQuery', () => {
     expect(failedField({ status: 'running', phase: 'completed' })).toBe('phase');
     expect(failedField({ status: 'completed', phase: 'failed' })).toBe('phase');
     expect(failedField({ status: 'failed', phase: 'created' })).toBe('phase');
+    expect(failedField({ status: 'running', phase: 'blocked' })).toBe('phase');
+    expect(failedField({ status: 'blocked', phase: 'needs_input' })).toBe('phase');
     expect(parsed({ status: 'failed', phase: 'failed' }).phase).toBe('failed');
     expect(parsed({ status: 'running', phase: 'created' }).phase).toBe('created');
+    expect(parsed({ status: 'blocked', phase: 'blocked' }).phase).toBe('blocked');
+  });
+
+  test('blocked is a status of its own', () => {
+    expect(parsed({ status: 'blocked' }).status).toBe('blocked');
   });
 
   test('a blank parameter counts as absent', () => {
@@ -104,11 +111,14 @@ describe('parseListQuery', () => {
 });
 
 describe('statusOfPhase', () => {
-  test('non-terminal phases are running', () => {
+  test('non-terminal phases are running, except blocked', () => {
     expect(statusOfPhase('created')).toBe('running');
     expect(statusOfPhase('investigating')).toBe('running');
+    expect(statusOfPhase('needs_input')).toBe('running');
+    expect(statusOfPhase('blocked')).toBe('blocked');
     expect(statusOfPhase('completed')).toBe('completed');
     expect(statusOfPhase('failed')).toBe('failed');
+    expect(statusOfPhase('stopped')).toBe('stopped');
   });
 });
 
@@ -142,6 +152,13 @@ describe('filterRuns', () => {
     expect(filterRuns(rows, parsed({ status: 'running' })).runs.map((r) => r.run_id)).toEqual(['C']);
     expect(filterRuns(rows, parsed({ status: 'failed' })).runs.map((r) => r.run_id)).toEqual(['A']);
     expect(filterRuns(rows, parsed({ status: 'completed' })).runs.map((r) => r.run_id)).toEqual(['B', 'Z']);
+  });
+
+  test('a blocked run lists under blocked, not under running', () => {
+    const withBlocked = [row('D', T1, { phase: 'blocked' }), ...rows];
+    expect(filterRuns(withBlocked, parsed({ status: 'blocked' })).runs.map((r) => r.run_id)).toEqual(['D']);
+    expect(filterRuns(withBlocked, parsed({ status: 'running' })).runs.map((r) => r.run_id)).toEqual(['C']);
+    expect(filterRuns(withBlocked, parsed({})).runs.map((r) => r.run_id)).toEqual(['D', 'C', 'B', 'A', 'Z']);
   });
 
   test('feedback none keeps runs without a verdict', () => {

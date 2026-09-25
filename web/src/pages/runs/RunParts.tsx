@@ -124,14 +124,23 @@ export function PhaseStepper({ steps }: { steps: Record<StepperPhase, StepState>
         {STEPPER_PHASES.map((p) => {
           const state = steps[p];
           return (
-            <li key={p} className={`step ${state}`} aria-current={state === 'current' ? 'step' : undefined}>
+            <li key={p} className={`step ${state}`} aria-current={state === 'current' || state === 'waiting' ? 'step' : undefined}>
               <span className="dot">
                 {state === 'done' && <Icon name="check" size={12} />}
                 {state === 'failed' && <Icon name="x" size={12} />}
+                {state === 'waiting' && <Icon name="clock" size={12} />}
               </span>
               <span>{p}</span>
               <span className="visually-hidden">
-                {state === 'done' ? ' (done)' : state === 'current' ? ' (in progress)' : state === 'failed' ? ' (failed here)' : ''}
+                {state === 'done'
+                  ? ' (done)'
+                  : state === 'current'
+                    ? ' (in progress)'
+                    : state === 'waiting'
+                      ? ' (waiting on a system)'
+                      : state === 'failed'
+                        ? ' (failed here)'
+                        : ''}
               </span>
             </li>
           );

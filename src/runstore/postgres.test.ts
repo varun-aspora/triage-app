@@ -14,6 +14,8 @@ import {
   SYNTHETIC_PHONE,
   runContractCase,
   runStoreContract,
+  sampleBlock,
+  sampleBlockResolution,
   sampleEmbedding,
   sampleFeedback,
   sampleResolution,
@@ -33,7 +35,7 @@ import {
   embeddingTableDdl,
   sanitiseModelTable,
 } from './postgres.ts';
-import { RunNotFoundError, RunStoreError, RunStoreRedactionError, type RunStore } from './types.ts';
+import { BlockOpenError, RunNotFoundError, RunStoreError, RunStoreRedactionError, type RunStore } from './types.ts';
 
 const p = <T>(value: T): Persisted<T> => redactPersisted(value);
 
@@ -237,6 +239,44 @@ describe('postgres provider: statements', () => {
     expect(err).toBeInstanceOf(RunStoreError);
     expect(err).not.toBeInstanceOf(RunNotFoundError);
     expect(String(err)).toContain('submission 3 not found');
+  });
+
+  test('putBlock and resolveBlock are single guarded updates; markStopped closes the block in the same statement', async () => {
+    const { fake, store } = setup(() => Date.parse('2026-09-01T00:00:00.000Z'));
+    await store.createRun(RUN_A, p(sampleRequest(RUN_A)));
+    await store.putBlock(RUN_A, p(sampleBlock('b1')));
+    expect(SQL.putBlock).toContain("WHERE run_id = $1 AND block IS NULL AND input_request IS NULL AND phase <> 'stopped'");
+    const [put] = callsOf(fake, SQL.putBlock);
+    expect(put?.params[0]).toBe(RUN_A);
+    expect(JSON.parse(String(put?.params[1]))).toEqual(sampleBlock('b1'));
+    expect(put?.params[2]).toBe('2026-09-01T00:00:00.000Z');
+
+    // A refused block reads the run once to name what is open and writes nothing.
+    const before = fake.calls.length;
+    await expect(store.putBlock(RUN_A, p(sampleBlock('b2')))).rejects.toThrow(BlockOpenError);
+    expect(fake.calls.slice(before).map((c) => c.text)).toEqual([SQL.putBlock, SQL.getRun]);
+
+    await store.resolveBlock(RUN_A, 'b1', p(sampleBlockResolution('resumed')));
+    expect(SQL.resolveBlock).toContain("WHERE run_id = $1 AND block->>'block_id' = $2::text");
+    const [resolve] = callsOf(fake, SQL.resolveBlock);
+    expect(resolve?.params[1]).toBe('b1');
+    expect(JSON.parse(String(resolve?.params[2]))).toEqual(sampleBlockResolution('resumed'));
+
+    await store.putBlock(RUN_A, p(sampleBlock('b2')));
+    expect(await store.markStopped(RUN_A, 'cancelled', p(sampleResolution('cancelled')))).toBe('blocked');
+    const [stop] = callsOf(fake, SQL.markStopped);
+    expect(stop?.params).toHaveLength(6);
+    expect(JSON.parse(String(stop?.params[5]))).toEqual({
+      status: 'cancelled',
+      resolved_at: '2026-09-01T10:00:00.000Z',
+      resolved_by: 'ops-reviewer',
+    });
+    const run = await store.getRun(RUN_A);
+    expect(run?.block).toBeNull();
+    expect(run?.block_history.map((b) => [b.block_id, b.status])).toEqual([
+      ['b1', 'resumed'],
+      ['b2', 'cancelled'],
+    ]);
   });
 
   test('putClassification fills the summary columns used by listRuns', async () => {

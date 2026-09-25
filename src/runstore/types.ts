@@ -41,6 +41,14 @@ import {
   type InputResolution,
   type ResolvedInputRequest,
 } from '../types/input-request.ts';
+import {
+  BlockIdSchema,
+  BlockRecordSchema,
+  ResolvedBlockSchema,
+  type BlockRecord,
+  type BlockResolution,
+  type ResolvedBlock,
+} from '../types/block.ts';
 import type { TriageRequest } from '../types/request.ts';
 
 export type { Persisted } from '../gate/redact.ts';
@@ -59,6 +67,9 @@ export const RUN_PHASES = [
   'investigating',
   // Paused on a question for the requester (P6 §4.3). Not terminal; nothing runs.
   'needs_input',
+  // Parked on a system that did not answer (D55). Not terminal; nothing runs
+  // until `triage resume` sends the run on as a new submission.
+  'blocked',
   'completed',
   'failed',
   // Stopped by a person (triage stop, POST /triage/:run_id/stop). Terminal
@@ -101,6 +112,10 @@ export const RunMetaSchema = v.object({
   input_request: v.optional(InputRequestSchema),
   /** Closed questions with their resolutions, oldest first. */
   input_history: v.optional(v.array(ResolvedInputRequestSchema)),
+  /** The open block, while the run is parked on a system that did not answer (D55). */
+  block: v.optional(BlockRecordSchema),
+  /** Closed blocks with their resolutions, oldest first. */
+  block_history: v.optional(v.array(ResolvedBlockSchema)),
 });
 export type RunMeta = v.InferOutput<typeof RunMetaSchema>;
 
@@ -122,7 +137,7 @@ export type EvidenceRecord = {
   readonly findings: Findings;
 };
 
-export const SUBMISSION_KINDS = ['initial', 'ask', 'answer'] as const;
+export const SUBMISSION_KINDS = ['initial', 'ask', 'answer', 'resume'] as const;
 export const SubmissionInputSchema = v.object({
   kind: v.picklist(SUBMISSION_KINDS),
   // The follow-up question of a `triage ask`, persisted profile.
@@ -131,6 +146,10 @@ export const SubmissionInputSchema = v.object({
   // was skipped, the answer text (persisted profile).
   question_id: v.optional(QuestionIdSchema),
   answer: v.optional(v.string()),
+  // A 'resume' submission (D55): the block it closes, when the run was
+  // blocked, and the note from the person who resumed (persisted profile).
+  block_id: v.optional(BlockIdSchema),
+  note: v.optional(v.string()),
 });
 export type SubmissionInput = v.InferOutput<typeof SubmissionInputSchema>;
 
@@ -261,6 +280,10 @@ export type RunRecord = {
   readonly input_request: InputRequest | null;
   /** Closed questions, oldest first. */
   readonly input_history: readonly ResolvedInputRequest[];
+  /** The open block while the phase is blocked; null otherwise. */
+  readonly block: BlockRecord | null;
+  /** Closed blocks, oldest first. */
+  readonly block_history: readonly ResolvedBlock[];
   readonly request: TriageRequest;
   readonly classification: ClassificationRecord | null;
   /** Latest version per key. */
@@ -326,9 +349,23 @@ export interface RunStore {
    */
   resolveInputRequest(runId: RunId, questionId: string, resolution: Persisted<InputResolution>): Promise<void>;
   /**
-   * Stops a run that has not finished: phase stopped with the reason, and an
-   * open question closed with the resolution. Returns the phase the run was
-   * in, or null when it had already finished, in which case nothing is
+   * Parks the run on a system that did not answer (D55): phase blocked,
+   * phase reason cleared, the record kept as the open block. Throws
+   * BlockOpenError while another block is open, InputRequestOpenError while
+   * a question is open, and RunStoppedError on a stopped run.
+   */
+  putBlock(runId: RunId, block: Persisted<BlockRecord>): Promise<void>;
+  /**
+   * Closes the open block with that id: it joins the history with the
+   * resolution. The phase is left as it is; the caller moves it. Throws
+   * BlockNotOpenError when no open block has that id.
+   */
+  resolveBlock(runId: RunId, blockId: string, resolution: Persisted<BlockResolution>): Promise<void>;
+  /**
+   * Stops a run that has not finished: phase stopped with the reason, an
+   * open question closed with the resolution, and an open block closed as
+   * cancelled by the same person at the same time. Returns the phase the run
+   * was in, or null when it had already finished, in which case nothing is
    * written.
    */
   markStopped(runId: RunId, reason: string, resolution: Persisted<InputResolution>): Promise<RunPhase | null>;
@@ -407,6 +444,30 @@ export class InputRequestNotOpenError extends RunStoreError {
   }
 }
 
+/** putBlock while a block is open (D55). */
+export class BlockOpenError extends RunStoreError {
+  override name = 'BlockOpenError';
+  readonly runId: string;
+  readonly blockId: string;
+  constructor(runId: string, blockId: string) {
+    super(`run ${runId} is already blocked (${blockId})`);
+    this.runId = runId;
+    this.blockId = blockId;
+  }
+}
+
+/** resolveBlock for a block that is not the open one. */
+export class BlockNotOpenError extends RunStoreError {
+  override name = 'BlockNotOpenError';
+  readonly runId: string;
+  readonly blockId: string;
+  constructor(runId: string, blockId: string) {
+    super(`run ${runId} has no open block ${blockId}`);
+    this.runId = runId;
+    this.blockId = blockId;
+  }
+}
+
 /**
  * The persisted-profile check found something unmasked. The message and the
  * fields carry pattern names and JSON paths only, never the matched text.
@@ -440,6 +501,20 @@ export function assertPersisted<T>(value: Persisted<T>, what: string): T {
 export function assertQuestionId(questionId: string): string {
   if (!v.is(QuestionIdSchema, questionId)) throw new RunStoreError('invalid question id');
   return questionId;
+}
+
+export function assertBlockId(blockId: string): string {
+  if (!v.is(BlockIdSchema, blockId)) throw new RunStoreError('invalid block id');
+  return blockId;
+}
+
+/**
+ * How markStopped closes an open block: cancelled by the person who stopped
+ * the run, at the same time. The fields come from the persisted resolution
+ * the caller passed, so they carry persisted-profile text.
+ */
+export function cancelledBlockResolution(resolution: InputResolution): BlockResolution {
+  return { status: 'cancelled', resolved_at: resolution.resolved_at, resolved_by: resolution.resolved_by };
 }
 
 /** A plain-text field the store writes that is not a Persisted value (phase reason). */

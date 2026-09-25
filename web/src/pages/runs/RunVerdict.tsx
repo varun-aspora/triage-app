@@ -36,6 +36,8 @@ export function VerdictPanel({ run, onSaved }: { run: RunDetail; onSaved: () => 
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [status, setStatus] = useState<Status>({ kind: 'idle' });
   const running = canCancel(run);
+  // Parked on a system that did not answer: nothing runs, but the run can still be judged or cancelled.
+  const blocked = run.status === 'blocked';
 
   const fail = (err: unknown, notFound: string) => {
     if (err instanceof ApiError && err.status === 401) return;
@@ -55,7 +57,7 @@ export function VerdictPanel({ run, onSaved }: { run: RunDetail; onSaved: () => 
       const res = await sendFeedback(run.run_id, built.body);
       setStatus({
         kind: 'ok',
-        text: `${choice === 'accept' ? 'Accepted' : 'Rejected'}. This run has ${res.count} verdict${res.count === 1 ? '' : 's'}.${running ? ' The run keeps going.' : ''}`,
+        text: `${choice === 'accept' ? 'Accepted' : 'Rejected'}. This run has ${res.count} verdict${res.count === 1 ? '' : 's'}.${blocked ? ' The run stays parked.' : running ? ' The run keeps going.' : ''}`,
       });
       setNotes('');
       setRootCause('');
@@ -104,9 +106,11 @@ export function VerdictPanel({ run, onSaved }: { run: RunDetail; onSaved: () => 
     <Panel
       title="Accept or reject"
       description={
-        running
-          ? 'You can judge the run while it is still going. Cancel stops it and records it as rejected, with no notes.'
-          : 'Your verdict, notes and ticks on findings are kept with the run for evals and learning. The latest verdict wins.'
+        blocked
+          ? 'You can judge the run while it waits on a system. Cancel closes it and records it as rejected, with no notes.'
+          : running
+            ? 'You can judge the run while it is still going. Cancel stops it and records it as rejected, with no notes.'
+            : 'Your verdict, notes and ticks on findings are kept with the run for evals and learning. The latest verdict wins.'
       }
     >
       <form onSubmit={onSubmit} noValidate style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -158,7 +162,7 @@ export function VerdictPanel({ run, onSaved }: { run: RunDetail; onSaved: () => 
             actions={
               <>
                 <Button size="sm" onClick={() => setConfirmCancel(false)} disabled={busy === 'cancel'}>
-                  Keep running
+                  {blocked ? 'Keep waiting' : 'Keep running'}
                 </Button>
                 <Button size="sm" variant="primary" busy={busy === 'cancel'} onClick={() => void cancel()}>
                   Stop and reject
@@ -166,7 +170,9 @@ export function VerdictPanel({ run, onSaved }: { run: RunDetail; onSaved: () => 
               </>
             }
           >
-            The agent stops within a few seconds and the run is recorded as rejected, with no notes. A follow-up question starts it again.
+            {blocked
+              ? 'Nothing is running: the run is recorded as stopped and rejected, with no notes. Resume or a follow-up starts it again.'
+              : 'The agent stops within a few seconds and the run is recorded as rejected, with no notes. Resume or a follow-up starts it again.'}
           </Notice>
         )}
         {status.kind !== 'idle' && <Notice variant={status.kind === 'ok' ? 'info' : 'error'}>{status.text}</Notice>}

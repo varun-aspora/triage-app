@@ -22,7 +22,10 @@ import { type Classification, type TriageInit, TriageInitSchema } from '../types
 import type { Tier } from '../types/core.ts';
 import type { IdChain } from '../types/id-chain.ts';
 import { INPUT_ANSWER_CHAIN_ATTR, INPUT_ANSWER_SIGNAL } from '../types/input-request.ts';
-import { sampleInputRequest } from '../runstore/contract.ts';
+import { BLOCK_RESUME_SIGNAL, MAX_RESUME_NOTE_CHARS } from '../types/block.ts';
+import { flushRunEventLog, installRunEventLog, uninstallRunEventLog } from '../runlog/event-log.ts';
+import { readRunEvents } from '../runlog/read.ts';
+import { sampleBlock, sampleInputRequest } from '../runstore/contract.ts';
 import type { Attachment } from '../types/request.ts';
 import type { IngressIdentity } from './identity.ts';
 import { buildTriageRequest, IngressInputError, type TriageInput } from './normalise.ts';
@@ -39,6 +42,9 @@ import {
   answerRun,
   RunNotWaitingError,
   SubmissionInputError,
+  RESUME_HINTS,
+  resumeRun,
+  RunNotResumableError,
 } from './submit.ts';
 import { makeTestHome } from '../../test/support/home.ts';
 
@@ -1044,5 +1050,224 @@ describe('a stop from another process', () => {
     const result = await askRun(RUN_ID, 'did the reversal land?', 'ops', h.deps);
     expect(result.status).toBe('completed');
     expect((await h.store.getRun(RUN_ID))?.phase).toBe('completed');
+  });
+});
+
+// ------------------------------------------------------------------ blocked runs and resumeRun
+
+describe('blocked and resumeRun', () => {
+  const RUN_B = '01JSUBMITBBBBBBBBBBBBBBBBB';
+  const cancel = () => redactPersisted({ status: 'cancelled' as const, resolved_at: NOW.toISOString(), resolved_by: 'ops' });
+
+  /** A stored run with one submission, the way a dispatched run looks. */
+  async function dispatched(h: Harness, runId = RUN_ID): Promise<void> {
+    await h.store.createRun(runId, redactPersisted(prepared({ runId }).request, { names: [NAME] }));
+    await h.store.addSubmission(runId, redactPersisted({ kind: 'initial' as const }));
+  }
+
+  /** A stored run parked on b1, the way stop_blocked leaves it. */
+  async function blocked(h: Harness): Promise<void> {
+    await dispatched(h);
+    await h.store.putBlock(RUN_ID, redactPersisted(sampleBlock('b1')));
+  }
+
+  function signalOf(h: Harness, i = 0): { kind: string; type: string; body: string } {
+    return h.flue.dispatches[i]!.message as { kind: string; type: string; body: string };
+  }
+
+  test('a response that ended on stop_blocked settles as blocked: phase kept, no report, nothing embedded', async () => {
+    // The tool runs during the read, after the phase went to investigating.
+    let h!: Harness;
+    h = harness({
+      read: async () => {
+        await h.store.putBlock(RUN_ID, redactPersisted(sampleBlock('b1')));
+        return { text: 'blocked', submissionId: 'sub-1', data: {} };
+      },
+    });
+    const result = await runSubmission(prepared(), h.deps);
+    expect(result.status).toBe('blocked');
+    expect(result.block).toEqual(sampleBlock('b1'));
+    expect(result.input_request).toBeUndefined();
+    expect(result.gaps).toEqual([]);
+    expect(h.events).not.toContain('embedRun');
+    expect(h.events).not.toContain('phase:completed');
+    expect(h.events).not.toContain('phase:failed');
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('blocked');
+    expect(run?.block?.block_id).toBe('b1');
+    expect(run?.report).toBeNull();
+  });
+
+  test('resumeRun closes the block as resumed, records a resume submission and sends the run on with a signal', async () => {
+    const h = harness();
+    await blocked(h);
+    const result = await resumeRun(RUN_ID, { by: 'ops-reviewer', note: 'harbor is back' }, { ...h.deps, now: () => NOW });
+    expect(result).toMatchObject({ run_id: RUN_ID, status: 'completed', submission_seq: 2, submission_id: 'sub-1', reply_text: 'done' });
+    expect(result.block).toBeUndefined();
+
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('completed');
+    expect(run?.block).toBeNull();
+    expect(run?.block_history).toEqual([
+      { ...sampleBlock('b1'), status: 'resumed', resolved_at: NOW.toISOString(), resolved_by: 'ops-reviewer', note: 'harbor is back' },
+    ]);
+    expect(run?.submissions.map((s) => s.kind)).toEqual(['initial', 'resume']);
+    expect(run?.submissions[1]).toMatchObject({ kind: 'resume', block_id: 'b1', note: 'harbor is back' });
+
+    // The same instance, no initialData, and the resume signal.
+    expect(h.flue.inits[0]?.options).toEqual({ id: RUN_ID });
+    expect(h.flue.dispatches[0]?.keys).toEqual(['message']);
+    const msg = signalOf(h);
+    expect(msg.kind).toBe('signal');
+    expect(msg.type).toBe(BLOCK_RESUME_SIGNAL);
+    expect(msg.body).toContain('This run was blocked (b1) because ssfb:harbor did not answer');
+    expect(msg.body).toContain(`ops-reviewer resumed it at ${NOW.toISOString()}.`);
+    expect(msg.body).toContain('Message from ops-reviewer:\nharbor is back');
+    expect(msg.body).toContain('finish_report');
+    expect(msg.body).toContain('stop_blocked');
+    expect(h.events.filter((e) => e.startsWith('phase:'))).toEqual(['phase:dispatched', 'phase:investigating', 'phase:completed']);
+    expect(h.events.filter((e) => e === 'embedRun')).toHaveLength(1);
+  });
+
+  test('the note is model-facing in the signal and persisted-profile in the store; a blank note is left out', async () => {
+    const h = harness();
+    await blocked(h);
+    await resumeRun(RUN_ID, { by: 'ops', note: `  harbor is back for ${PHONE}; card ${PAN} was the test card  ` }, h.deps);
+    const body = signalOf(h).body;
+    expect(body).toContain(`harbor is back for ${PHONE}`);
+    expect(body).not.toContain(PAN);
+    const run = await h.store.getRun(RUN_ID);
+    const stored = JSON.stringify([run?.submissions[1]?.note, run?.block_history[0]?.note]);
+    expect(stored).toContain('harbor is back for');
+    expect(stored).not.toContain(PHONE);
+    expect(stored).not.toContain(PAN);
+
+    const g = harness();
+    await blocked(g);
+    await resumeRun(RUN_ID, { by: 'ops', note: '   ' }, g.deps);
+    const again = await g.store.getRun(RUN_ID);
+    expect(again?.submissions[1]?.note).toBeUndefined();
+    expect(again?.block_history[0]?.note).toBeUndefined();
+    expect(signalOf(g).body).not.toContain('Message from');
+  });
+
+  test('a resume that blocks again settles as blocked on the new block, with the first one in the history', async () => {
+    let h!: Harness;
+    h = harness({
+      read: async () => {
+        await h.store.putBlock(RUN_ID, redactPersisted({ ...sampleBlock('b2', ['atspl:core']), submission_seq: 2 }));
+        return { text: 'blocked again', submissionId: 'sub-1', data: {} };
+      },
+    });
+    await blocked(h);
+    const result = await resumeRun(RUN_ID, { by: 'ops' }, h.deps);
+    expect(result.status).toBe('blocked');
+    expect(result.block?.block_id).toBe('b2');
+    expect(result.block?.systems).toEqual(['atspl:core']);
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('blocked');
+    expect(run?.block_history.map((b) => [b.block_id, b.status])).toEqual([['b1', 'resumed']]);
+    expect(h.events).not.toContain('embedRun');
+  });
+
+  test('a run that failed after dispatch is resumed and told so', async () => {
+    const h = harness();
+    await dispatched(h);
+    await h.store.setPhase(RUN_ID, 'failed', { reason: 'AgentRunError' });
+    const result = await resumeRun(RUN_ID, { by: 'ops' }, h.deps);
+    expect(result.status).toBe('completed');
+    expect(signalOf(h).body).toContain('This run failed (AgentRunError) before it finished.');
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('completed');
+    expect(run?.submissions[1]).toMatchObject({ kind: 'resume', seq: 2 });
+    expect(run?.submissions[1]?.block_id).toBeUndefined();
+    expect(run?.block_history).toEqual([]);
+  });
+
+  test('a stopped run is resumed, its cancelled block left in the history', async () => {
+    const h = harness({ stopPollMs: 0 });
+    await blocked(h);
+    await h.store.markStopped(RUN_ID, 'cancelled', cancel());
+    const result = await resumeRun(RUN_ID, { by: 'ops' }, h.deps);
+    expect(result.status).toBe('completed');
+    const body = signalOf(h).body;
+    expect(body).toContain('This run was stopped before it finished.');
+    expect(body).not.toContain('was blocked');
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('completed');
+    expect(run?.block_history.map((b) => [b.block_id, b.status])).toEqual([['b1', 'cancelled']]);
+    expect(run?.submissions[1]?.block_id).toBeUndefined();
+  });
+
+  test('refuses an unknown run, a working run, a question, a finished run and a run that never started, dispatching nothing', async () => {
+    const h = harness();
+    await expect(resumeRun(RUN_ID, { by: 'ops' }, h.deps)).rejects.toBeInstanceOf(RunNotFoundError);
+
+    const refusal = async (runId = RUN_ID): Promise<RunNotResumableError> => {
+      const err = await resumeRun(runId, { by: 'ops' }, h.deps).catch((x: unknown) => x);
+      expect(err).toBeInstanceOf(RunNotResumableError);
+      return err as RunNotResumableError;
+    };
+
+    await h.store.createRun(RUN_ID, redactPersisted(prepared().request));
+    expect(await refusal()).toMatchObject({ runId: RUN_ID, phase: 'created', hint: RESUME_HINTS.running });
+    // Failed before dispatch: no conversation to continue.
+    await h.store.setPhase(RUN_ID, 'failed', { reason: 'FixtureMissError' });
+    expect(await refusal()).toMatchObject({ phase: 'failed', hint: RESUME_HINTS.never_started });
+    await h.store.addSubmission(RUN_ID, redactPersisted({ kind: 'initial' as const }));
+    await h.store.setPhase(RUN_ID, 'investigating');
+    expect(await refusal()).toMatchObject({ phase: 'investigating', hint: RESUME_HINTS.running });
+    await h.store.putInputRequest(RUN_ID, redactPersisted(sampleInputRequest('q1')));
+    expect(await refusal()).toMatchObject({ phase: 'needs_input', hint: RESUME_HINTS.needs_input });
+    await h.store.resolveInputRequest(RUN_ID, 'q1', redactPersisted({ status: 'skipped' as const, resolved_at: NOW.toISOString(), resolved_by: 'ops' }));
+    await h.store.setPhase(RUN_ID, 'completed');
+    expect(await refusal()).toMatchObject({ phase: 'completed', hint: RESUME_HINTS.completed });
+    expect((await refusal()).message).toContain(RESUME_HINTS.completed);
+
+    // Stopped before dispatch: no conversation either.
+    await h.store.createRun(RUN_B, redactPersisted(prepared({ runId: RUN_B }).request));
+    await h.store.markStopped(RUN_B, 'cancelled', cancel());
+    expect(await refusal(RUN_B)).toMatchObject({ phase: 'stopped', hint: RESUME_HINTS.never_started });
+
+    expect(h.flue.dispatches).toHaveLength(0);
+    expect((await h.store.getRun(RUN_ID))?.phase).toBe('completed');
+  });
+
+  test('bad input is refused before the store is read', async () => {
+    const h = harness();
+    await blocked(h);
+    await expect(resumeRun('not a run id!', { by: 'ops' }, h.deps)).rejects.toBeInstanceOf(IngressInputError);
+    await expect(resumeRun(RUN_ID, { by: '  ' }, h.deps)).rejects.toBeInstanceOf(IngressInputError);
+    await expect(resumeRun(RUN_ID, { by: 'ops', note: 'x'.repeat(MAX_RESUME_NOTE_CHARS + 1) }, h.deps)).rejects.toBeInstanceOf(IngressInputError);
+    expect(h.flue.dispatches).toHaveLength(0);
+    expect((await h.store.getRun(RUN_ID))?.block?.block_id).toBe('b1');
+  });
+
+  test('the step log gets a blocked line at the settle and a resume line on the resume', async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), 'triage-submit-log-'));
+    dirs.push(runsDir);
+    // No Flue events here: the subscriber is a no-op.
+    installRunEventLog({ runsDir, observe: () => () => undefined });
+    try {
+      let h!: Harness;
+      h = harness({
+        read: async () => {
+          if (h.flue.reads.length === 1) await h.store.putBlock(RUN_ID, redactPersisted(sampleBlock('b1')));
+          return { text: 'done', submissionId: 'sub-1', data: {} };
+        },
+      });
+      expect((await runSubmission(prepared(), h.deps)).status).toBe('blocked');
+      expect((await resumeRun(RUN_ID, { by: 'ops', note: 'harbor is back' }, h.deps)).status).toBe('completed');
+      await flushRunEventLog();
+      const { events } = await readRunEvents(runsDir, RUN_ID);
+      const pipeline = events.filter((e) => e.source === 'pipeline').map((e) => [e.type, e.data]);
+      expect(pipeline).toContainEqual(['blocked', { submission_seq: 1, block_id: 'b1', systems: ['ssfb:harbor'] }]);
+      expect(pipeline).toContainEqual(['resume', { kind: 'resume', from: 'blocked', block_id: 'b1', by: 'ops', note: 'harbor is back' }]);
+      const settled = events.filter((e) => e.type === 'settled').map((e) => (e.data as { status: string }).status);
+      expect(settled).toEqual(['blocked', 'completed']);
+    } finally {
+      await flushRunEventLog();
+      uninstallRunEventLog();
+    }
   });
 });

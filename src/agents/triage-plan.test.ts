@@ -7,10 +7,12 @@ import type { ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
 import { ConfigError } from '../config/errors.ts';
 import type { RunStore } from '../runstore/types.ts';
+import { connectorFailuresFor, recordConnectorFailure } from '../tools/_lib/connector-failures.ts';
 import { mergeIdChains, widenIdChain } from '../tools/_lib/context.ts';
 import { ASK_REQUESTER } from '../tools/ask-requester.tool.ts';
 import { FINISH_REPORT, synthesisPassesFor } from '../tools/finish-report.tool.ts';
 import { toolsFor } from '../tools/index.ts';
+import { STOP_BLOCKED } from '../tools/stop-blocked.tool.ts';
 import { type TriageInit, TriageInitSchema } from '../types/classification.ts';
 import { ENTITIES, type Entity, type Tier } from '../types/core.ts';
 import type { IdChain } from '../types/id-chain.ts';
@@ -22,7 +24,9 @@ import { type Knowledge, loadKnowledge } from './skills.ts';
 import {
   answerChainOf,
   askOpenedFor,
+  blockOpenedFor,
   calledAsk,
+  calledBlocked,
   calledFinish,
   configureTriageRuntime,
   defaultDurability,
@@ -130,6 +134,8 @@ function fakeStore(): RunStore & { calls: string[] } {
     putInputRequest: record('putInputRequest'),
     markStopped: record('markStopped'),
     resolveInputRequest: record('resolveInputRequest'),
+    putBlock: record('putBlock'),
+    resolveBlock: record('resolveBlock'),
     putEvidence: record('putEvidence'),
     putReport: record('putReport'),
     putFeedback: record('putFeedback'),
@@ -295,13 +301,13 @@ describe('triagePlan: entities, delegates and skills', () => {
 // ------------------------------------------------------------------ mount and deps
 
 describe('the triage mount', () => {
-  test('toolsFor(triage) holds ask_requester, resolve_identity, note_evidence and finish_report only', () => {
+  test('toolsFor(triage) holds ask_requester, stop_blocked, resolve_identity, note_evidence and finish_report only', () => {
     const h = home();
     useTestRuntime(h);
     const runId = nextRunId();
     const deps = runDepsFor(runId, init({ runId }));
     const names = toolsFor('triage', triageToolContext(runId, deps)).map((t) => t.name).sort();
-    expect(names).toEqual(['ask_requester', 'finish_report', 'note_evidence', 'resolve_identity']);
+    expect(names).toEqual(['ask_requester', 'finish_report', 'note_evidence', 'resolve_identity', 'stop_blocked']);
     for (const io of ['sql_select', 'http_call', 'logs_search']) expect(names).not.toContain(io);
     settleRun(runId);
   });
@@ -534,8 +540,10 @@ describe('lazyRunStore', () => {
     expect(loads).toBe(0);
     await store.getRun('run_x');
     await store.putEvidence('run_x', 'ssfb', {} as never);
+    await store.putBlock('run_x', {} as never);
+    await store.resolveBlock('run_x', 'b1', {} as never);
     expect(loads).toBe(1);
-    expect(inner.calls).toEqual(['getRun', 'putEvidence']);
+    expect(inner.calls).toEqual(['getRun', 'putEvidence', 'putBlock', 'resolveBlock']);
   });
 
   test('a failed load is not kept, so the next call tries again', async () => {
@@ -701,6 +709,68 @@ describe('ask_requester as a valid end of a response', () => {
     settleRun(runId);
     const fresh = runDepsFor(runId, data);
     expect(fresh.idChain().ids.form_id).toBeUndefined();
+    settleRun(runId);
+  });
+});
+
+// ------------------------------------------------------------------ stop_blocked and the block
+
+describe('stop_blocked as a valid end of a response', () => {
+  const call = (tool: string, isError = false): AgentResponseToolCall => ({ tool, isError });
+
+  function stopTool(name: string, status: string): ToolDefinition {
+    return {
+      name,
+      description: 'test tool',
+      input: v.object({}),
+      output: undefined,
+      run: async () => ({ output: { status, taken_at: '2026-09-23T10:00:00.000Z' } }),
+    } as unknown as ToolDefinition;
+  }
+
+  test('finishDecision is done when the run was parked, and the count resets', () => {
+    expect(finishDecision(0, false, false, true)).toEqual({ kind: 'done', retries: 0 });
+    expect(finishDecision(1, false, false, true)).toEqual({ kind: 'done', retries: 0 });
+    expect(finishDecision(0, true, false, true)).toEqual({ kind: 'done', retries: 0 });
+    expect(finishDecision(0, false, true, true)).toEqual({ kind: 'done', retries: 0 });
+    expect(finishDecision(0, false, false, false)).toEqual({ kind: 'signal', retries: 1 });
+    expect(finishDecision(1, false, false, false)).toEqual({ kind: 'fail', retries: 1 });
+  });
+
+  test('calledBlocked needs an ok stop_blocked call that the watched tool saw park the run', async () => {
+    const runId = nextRunId();
+    expect(calledBlocked([call(STOP_BLOCKED)], false)).toBe(false);
+    expect(calledBlocked([call(STOP_BLOCKED, true)], true)).toBe(false);
+    expect(calledBlocked([call('task'), call(FINISH_REPORT), call(ASK_REQUESTER)], true)).toBe(false);
+
+    const tool = watchFinishReport(runId, stopTool(STOP_BLOCKED, 'ok'));
+    expect(blockOpenedFor(runId)).toBe(false);
+    await tool.run({} as never);
+    expect(blockOpenedFor(runId)).toBe(true);
+    expect(calledBlocked([call(STOP_BLOCKED)], blockOpenedFor(runId))).toBe(true);
+    // The three marks are separate: a parked run is neither a written report nor an opened question.
+    expect(reportWrittenFor(runId)).toBe(false);
+    expect(askOpenedFor(runId)).toBe(false);
+    settleRun(runId);
+    expect(blockOpenedFor(runId)).toBe(false);
+  });
+
+  test('a refused or throwing stop_blocked does not count', async () => {
+    const runId = nextRunId();
+    await watchFinishReport(runId, stopTool(STOP_BLOCKED, 'refused')).run({} as never);
+    expect(blockOpenedFor(runId)).toBe(false);
+    const failing = { ...stopTool(STOP_BLOCKED, 'ok'), run: async () => Promise.reject(new Error('boom')) };
+    await expect(watchFinishReport(runId, failing as ToolDefinition).run({} as never)).rejects.toThrow('boom');
+    expect(blockOpenedFor(runId)).toBe(false);
+    expect(calledBlocked([call(STOP_BLOCKED)], blockOpenedFor(runId))).toBe(false);
+  });
+
+  test('settleRun drops the connector failure record, so a resumed run must see the system fail again', () => {
+    const runId = nextRunId();
+    recordConnectorFailure(runId, { system: 'ssfb:harbor', tool: 'sql_select', code: 'unreachable', at: '2026-09-23T10:00:00.000Z' });
+    expect(connectorFailuresFor(runId)).toHaveLength(1);
+    settleRun(runId);
+    expect(connectorFailuresFor(runId)).toEqual([]);
     settleRun(runId);
   });
 });

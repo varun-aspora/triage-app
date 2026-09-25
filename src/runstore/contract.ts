@@ -11,9 +11,12 @@ import assert from 'node:assert/strict';
 import { redactPersisted, type Persisted } from '../gate/redact.ts';
 import type { EntityFindings, CodeFindings } from '../types/findings.ts';
 import type { InputRequest, InputResolution, InputResolutionStatus } from '../types/input-request.ts';
+import type { BlockRecord, BlockResolution, BlockResolutionStatus, ConnectorFailure } from '../types/block.ts';
 import type { Report } from '../types/report.ts';
 import type { TriageRequest } from '../types/request.ts';
 import {
+  BlockNotOpenError,
+  BlockOpenError,
   InputRequestNotOpenError,
   InputRequestOpenError,
   RunNotFoundError,
@@ -180,6 +183,25 @@ export function sampleInputRequest(questionId: string): InputRequest {
 
 export function sampleResolution(status: InputResolutionStatus, resolvedAt = AT): InputResolution {
   return { status, resolved_at: resolvedAt, resolved_by: 'ops-reviewer' };
+}
+
+export function sampleFailure(system: string, at = AT): ConnectorFailure {
+  return { system, tool: 'sql_select', code: 'unreachable', at };
+}
+
+export function sampleBlock(blockId: string, systems: string[] = ['ssfb:harbor'], blockedAt = AT): BlockRecord {
+  return {
+    block_id: blockId,
+    systems,
+    failures: systems.map((system) => sampleFailure(system, blockedAt)),
+    reason: 'The account form lives in harbor and harbor did not answer; nothing else shows the payout state.',
+    blocked_at: blockedAt,
+    submission_seq: 1,
+  };
+}
+
+export function sampleBlockResolution(status: BlockResolutionStatus, resolvedAt = AT, note?: string): BlockResolution {
+  return { status, resolved_at: resolvedAt, resolved_by: 'ops-reviewer', ...(note !== undefined ? { note } : {}) };
 }
 
 export function sampleFeedback(verdict: FeedbackVerdict, givenAt: string): Feedback {
@@ -410,6 +432,155 @@ export const runStoreContract: readonly ContractCase[] = [
       );
       await assert.rejects(() => store.resolveInputRequest(RUN_B, 'q1', p(sampleResolution('answered'))), (err: unknown) => err instanceof RunNotFoundError);
       await assert.rejects(() => store.resolveInputRequest(RUN_A, 'not an id', p(sampleResolution('answered'))), (err: unknown) => err instanceof RunStoreError);
+    },
+  },
+  {
+    name: 'putBlock parks the run in phase blocked with the open block; a second putBlock throws BlockOpenError',
+    async run(store, clock) {
+      await newRun(store, RUN_A);
+      await store.setPhase(RUN_A, 'investigating', { worker_pid: 4242, reason: 'x' });
+      clock.advance(HOUR);
+      await store.putBlock(RUN_A, p(sampleBlock('b1')));
+      const run = await store.getRun(RUN_A);
+      assert.ok(run);
+      assert.equal(run.phase, 'blocked');
+      assert.equal(run.phase_reason, undefined);
+      assert.equal(run.worker_pid, 4242);
+      assert.deepEqual(run.block, sampleBlock('b1'));
+      assert.deepEqual(run.block_history, []);
+      assert.equal(run.input_request, null);
+      assert.equal(run.updated_at, new Date(clock.now()).toISOString());
+      await assert.rejects(
+        () => store.putBlock(RUN_A, p(sampleBlock('b2'))),
+        (err: unknown) => err instanceof BlockOpenError && err.runId === RUN_A && err.blockId === 'b1',
+      );
+      assert.equal((await store.getRun(RUN_A))?.block?.block_id, 'b1');
+      await assert.rejects(() => store.putBlock(RUN_B, p(sampleBlock('b1'))), (err: unknown) => err instanceof RunNotFoundError);
+      // The list shows the phase; the summary has no block field.
+      const [summary] = await store.listRuns({ phase: 'blocked' });
+      assert.equal(summary?.run_id, RUN_A);
+      assert.ok(!('block' in (summary ?? {})));
+      // A run that never blocked has no open block and no history.
+      await newRun(store, RUN_C);
+      const fresh = await store.getRun(RUN_C);
+      assert.equal(fresh?.block, null);
+      assert.deepEqual(fresh?.block_history, []);
+    },
+  },
+  {
+    name: 'putBlock is refused while a question is open and on a stopped run',
+    async run(store) {
+      await newRun(store, RUN_A);
+      await store.putInputRequest(RUN_A, p(sampleInputRequest('q1')));
+      await assert.rejects(
+        () => store.putBlock(RUN_A, p(sampleBlock('b1'))),
+        (err: unknown) => err instanceof InputRequestOpenError && err.questionId === 'q1',
+      );
+      const run = await store.getRun(RUN_A);
+      assert.equal(run?.phase, 'needs_input');
+      assert.equal(run?.block, null);
+      await newRun(store, RUN_B);
+      await store.markStopped(RUN_B, 'cancelled', p(sampleResolution('cancelled')));
+      await assert.rejects(() => store.putBlock(RUN_B, p(sampleBlock('b1'))), (err: unknown) => err instanceof RunStoppedError);
+      assert.equal((await store.getRun(RUN_B))?.phase, 'stopped');
+      assert.equal((await store.getRun(RUN_B))?.block, null);
+    },
+  },
+  {
+    name: 'resolveBlock moves the open block into the history and leaves the phase alone; the wrong id throws BlockNotOpenError',
+    async run(store, clock) {
+      await newRun(store, RUN_A);
+      await store.putBlock(RUN_A, p(sampleBlock('b1')));
+      const notOpen = (err: unknown) => err instanceof BlockNotOpenError;
+      await assert.rejects(() => store.resolveBlock(RUN_A, 'b2', p(sampleBlockResolution('resumed'))), notOpen);
+      // The caller moves the phase itself; the open block survives a phase write.
+      await store.setPhase(RUN_A, 'dispatched', { worker_pid: 99 });
+      clock.advance(HOUR);
+      const at = new Date(clock.now()).toISOString();
+      await store.resolveBlock(RUN_A, 'b1', p(sampleBlockResolution('resumed', at, 'harbor is back')));
+      const run = await store.getRun(RUN_A);
+      assert.ok(run);
+      assert.equal(run.block, null);
+      assert.equal(run.phase, 'dispatched');
+      assert.equal(run.worker_pid, 99);
+      assert.equal(run.updated_at, at);
+      assert.deepEqual(run.block_history, [{ ...sampleBlock('b1'), ...sampleBlockResolution('resumed', at, 'harbor is back') }]);
+      await assert.rejects(() => store.resolveBlock(RUN_A, 'b1', p(sampleBlockResolution('resumed'))), notOpen);
+      // The next block keeps the history, and a question can open again after a resume.
+      await store.putBlock(RUN_A, p(sampleBlock('b2', ['ssfb:harbor', 'global:codegraph'])));
+      await store.resolveBlock(RUN_A, 'b2', p(sampleBlockResolution('resumed')));
+      const again = await store.getRun(RUN_A);
+      assert.equal(again?.block, null);
+      assert.deepEqual(
+        again?.block_history.map((b) => [b.block_id, b.status, b.systems.length, b.note]),
+        [
+          ['b1', 'resumed', 1, 'harbor is back'],
+          ['b2', 'resumed', 2, undefined],
+        ],
+      );
+      await store.putInputRequest(RUN_A, p(sampleInputRequest('q1')));
+      assert.equal((await store.getRun(RUN_A))?.block_history.length, 2);
+      await assert.rejects(
+        () => store.resolveBlock(RUN_B, 'b1', p(sampleBlockResolution('resumed'))),
+        (err: unknown) => err instanceof RunNotFoundError,
+      );
+      await assert.rejects(
+        () => store.resolveBlock(RUN_A, 'not an id', p(sampleBlockResolution('resumed'))),
+        (err: unknown) => err instanceof RunStoreError,
+      );
+    },
+  },
+  {
+    name: 'markStopped on a blocked run closes the block as cancelled',
+    async run(store, clock) {
+      await newRun(store, RUN_A);
+      await store.putBlock(RUN_A, p(sampleBlock('b1')));
+      clock.advance(HOUR);
+      const at = new Date(clock.now()).toISOString();
+      assert.equal(await store.markStopped(RUN_A, 'cancelled', p(sampleResolution('cancelled', at))), 'blocked');
+      const run = await store.getRun(RUN_A);
+      assert.ok(run);
+      assert.equal(run.phase, 'stopped');
+      assert.equal(run.phase_reason, 'cancelled');
+      assert.equal(run.block, null);
+      assert.deepEqual(run.block_history, [
+        { ...sampleBlock('b1'), status: 'cancelled', resolved_at: at, resolved_by: 'ops-reviewer' },
+      ]);
+      assert.deepEqual(run.input_history, []);
+      await assert.rejects(
+        () => store.resolveBlock(RUN_A, 'b1', p(sampleBlockResolution('resumed'))),
+        (err: unknown) => err instanceof BlockNotOpenError,
+      );
+      // A follow-up on the stopped run starts with no open block and keeps the history.
+      assert.equal(await store.setPhase(RUN_A, 'dispatched', { resume: true }), true);
+      const resumed = await store.getRun(RUN_A);
+      assert.equal(resumed?.block, null);
+      assert.equal(resumed?.block_history.length, 1);
+    },
+  },
+  {
+    name: 'a resume submission keeps the block id and the note',
+    async run(store) {
+      await newRun(store, RUN_A);
+      const seq = await store.addSubmission(RUN_A, p({ kind: 'resume' as const, block_id: 'b1', note: 'harbor is back' }));
+      assert.equal(seq, 1);
+      const bare = await store.addSubmission(RUN_A, p({ kind: 'resume' as const }));
+      assert.equal(bare, 2);
+      const run = await store.getRun(RUN_A);
+      assert.ok(run);
+      assert.equal(run.submissions[0]?.kind, 'resume');
+      assert.equal(run.submissions[0]?.block_id, 'b1');
+      assert.equal(run.submissions[0]?.note, 'harbor is back');
+      assert.equal(run.submissions[0]?.question_id, undefined);
+      assert.equal(run.submissions[0]?.report, null);
+      assert.equal(run.submissions[1]?.kind, 'resume');
+      assert.equal(run.submissions[1]?.block_id, undefined);
+      assert.equal(run.submissions[1]?.note, undefined);
+      await assert.rejects(
+        () => store.addSubmission(RUN_A, p({ kind: 'resume' as const, block_id: 'not an id' })),
+        (err: unknown) => err instanceof RunStoreError,
+      );
+      assert.equal((await store.listRuns())[0]?.submissions, 2);
     },
   },
   {
@@ -770,6 +941,44 @@ export const runStoreContract: readonly ContractCase[] = [
       );
       assert.equal((await store.getRun(RUN_A))?.input_request?.question_id, 'q1');
       await store.resolveInputRequest(RUN_A, 'q1', p(sampleResolution('skipped')));
+      await rejectsRedaction(
+        () =>
+          store.putBlock(
+            RUN_A,
+            tampered(sampleBlock('b1'), (b) => {
+              b.reason = `harbor holds the form for ${SYNTHETIC_EMAIL}`;
+            }),
+          ),
+        'email',
+        SYNTHETIC_EMAIL,
+      );
+      assert.equal((await store.getRun(RUN_A))?.block, null);
+      await store.putBlock(RUN_A, p(sampleBlock('b1')));
+      await rejectsRedaction(
+        () =>
+          store.resolveBlock(
+            RUN_A,
+            'b1',
+            tampered(sampleBlockResolution('resumed'), (r) => {
+              r.note = `fixed for ${SYNTHETIC_PHONE}`;
+            }),
+          ),
+        'phone',
+        SYNTHETIC_PHONE,
+      );
+      assert.equal((await store.getRun(RUN_A))?.block?.block_id, 'b1');
+      await store.resolveBlock(RUN_A, 'b1', p(sampleBlockResolution('resumed')));
+      await rejectsRedaction(
+        () =>
+          store.addSubmission(
+            RUN_A,
+            tampered({ kind: 'resume' as 'resume' | 'initial', note: 'ok' }, (s) => {
+              s.note = `call ${SYNTHETIC_PHONE}`;
+            }),
+          ),
+        'phone',
+        SYNTHETIC_PHONE,
+      );
       await store.setPhase(RUN_A, 'created');
       await rejectsRedaction(
         () =>

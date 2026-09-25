@@ -27,7 +27,8 @@
 //      run's status.
 //
 // Every step records a phase: preflight, identity, classifying, dispatched,
-// investigating, then completed or failed.
+// investigating, then completed or failed (or needs_input or blocked, when a
+// tool parked the run).
 //
 // Screenshots (D36): Flue's dispatch message takes image parts
 // ({ kind: 'user', body, attachments: [{ type: 'image', data, mimeType }] }),
@@ -57,13 +58,26 @@
 // chain rides in the signal's attributes, where the root merges it into the
 // run's scope (D26). Free text never widens scope.
 //
+// A response can also end on stop_blocked (D55): the tool stores the block
+// and moves the run to blocked, and read() returns as for a completed
+// response. dispatchAndSettle reports status blocked with the block; the
+// phase is left as the tool set it, no report exists and nothing is embedded.
+//
+// resumeRun(run_id, input, deps) sends a parked run on: it closes the open
+// block as resumed (who, when, the note) and dispatches a triage.resume
+// signal on the same instance, as a submission of kind resume. It also takes
+// a run that failed after it was dispatched, and a stopped run, because
+// their conversations exist. A run that failed before dispatch has none, so
+// resumeRun refuses it and points at a new run (RunNotResumableError).
+//
 // A run can be stopped from another process (src/ingress/stop.ts). While a
 // run works, the pipeline reads the store every STOP_POLL_MS; once the phase
 // is stopped it aborts its own steps and, after dispatch, the Flue instance.
 // The store refuses phase writes on a stopped run (setPhase returns false),
 // which catches a stop that lands between two polls. A stop before dispatch
 // makes runSubmission throw RunStoppedError; after dispatch the result has
-// status stopped. A follow-up (askRun) resumes a stopped run.
+// status stopped. A follow-up (askRun) or a resume (resumeRun) moves a
+// stopped run on.
 //
 // The CLI and the HTTP routes both submit through these functions.
 // submissionDeps() builds the production deps from the Triage runtime.
@@ -107,10 +121,12 @@ import {
   type PhaseDetail,
   RunNotFoundError,
   type RunPhase,
+  type RunRecord,
   RunStoppedError,
   type RunStore,
   type SubmissionInput,
 } from '../runstore/types.ts';
+import { BLOCK_RESUME_SIGNAL, type BlockRecord, MAX_RESUME_NOTE_CHARS } from '../types/block.ts';
 import {
   type Classification,
   type PreflightWarning,
@@ -125,7 +141,7 @@ import type { Attachment, TriageRequest } from '../types/request.ts';
 import { type IngressIdentity, NO_IDS_GAP, resolveIngressIdentity } from './identity.ts';
 import { IngressInputError } from './normalise.ts';
 import type { PreparedSubmission } from './prepare.ts';
-import { renderAnswer, renderAsk, renderThread, type RenderImages } from './render-thread.ts';
+import { renderAnswer, renderAsk, renderResume, renderThread, type RenderImages, type ResumeFrom } from './render-thread.ts';
 
 // ------------------------------------------------------------------ types
 
@@ -193,7 +209,7 @@ export type SubmissionDeps = SettleDeps & {
   readonly readAttachment: (bytesRef: string, signal: AbortSignal) => Promise<Uint8Array>;
 };
 
-export type SubmissionStatus = 'completed' | 'failed' | 'needs_input' | 'stopped';
+export type SubmissionStatus = 'completed' | 'failed' | 'needs_input' | 'blocked' | 'stopped';
 
 export type SubmissionResult = {
   readonly run_id: RunId;
@@ -208,6 +224,8 @@ export type SubmissionResult = {
   readonly error?: string;
   /** The question the run paused on, when needs_input. */
   readonly input_request?: InputRequest;
+  /** The block the run parked on, when blocked. */
+  readonly block?: BlockRecord;
   /** Things that did not happen after the settle, such as embeddings. */
   readonly gaps: readonly string[];
 };
@@ -234,6 +252,49 @@ export class RunNotWaitingError extends Error {
     super(questionId === undefined ? `run ${runId} is not waiting for an answer` : `run ${runId} is not waiting on question ${questionId}`);
     this.runId = runId;
     if (questionId !== undefined) this.questionId = questionId;
+  }
+}
+
+/** resumeRun on a run that is not blocked, failed after dispatch or stopped. The hint says what to do instead. */
+export class RunNotResumableError extends Error {
+  override readonly name = 'RunNotResumableError';
+  readonly runId: string;
+  readonly phase: RunPhase;
+  readonly hint: string;
+  constructor(runId: string, phase: RunPhase, hint: string) {
+    super(`run ${runId} cannot be resumed (phase ${phase}): ${hint}`);
+    this.runId = runId;
+    this.phase = phase;
+    this.hint = hint;
+  }
+}
+
+/** The hints RunNotResumableError carries. The CLI and the HTTP routes reuse them. */
+export const RESUME_HINTS = {
+  running: 'the run is still working; follow it with triage wait',
+  needs_input: 'answer it with triage input',
+  completed: 'ask a follow-up with triage ask',
+  never_started: 'the run never started an investigation; start a new run',
+} as const;
+
+/**
+ * Why a stored run cannot be resumed, or null when it can: blocked, failed
+ * after it was dispatched, or stopped after it was dispatched. Without a
+ * submission there is no conversation to continue.
+ */
+export function resumeRefusal(run: Pick<RunRecord, 'run_id' | 'phase' | 'submissions'>): RunNotResumableError | null {
+  switch (run.phase) {
+    case 'blocked':
+      return null;
+    case 'failed':
+    case 'stopped':
+      return run.submissions.length > 0 ? null : new RunNotResumableError(run.run_id, run.phase, RESUME_HINTS.never_started);
+    case 'needs_input':
+      return new RunNotResumableError(run.run_id, run.phase, RESUME_HINTS.needs_input);
+    case 'completed':
+      return new RunNotResumableError(run.run_id, run.phase, RESUME_HINTS.completed);
+    default:
+      return new RunNotResumableError(run.run_id, run.phase, RESUME_HINTS.running);
   }
 }
 
@@ -459,6 +520,71 @@ export async function answerRun(runId: string, input: AnswerInput, deps: AnswerD
   );
 }
 
+// ------------------------------------------------------------------ resume
+
+export type ResumeInput = {
+  /** Who resumed the run: an email, a Slack user id or the OS user. */
+  readonly by: string;
+  /** What was fixed, for the model and the record. Blank means none. */
+  readonly note?: string;
+};
+
+/**
+ * Sends a blocked run on (D55), or one that failed after dispatch, or a
+ * stopped one: closes the open block as resumed and dispatches a
+ * triage.resume signal on the same instance as a submission of kind resume.
+ */
+export async function resumeRun(runId: string, input: ResumeInput, deps: SettleDeps): Promise<SubmissionResult> {
+  if (!v.is(RunIdSchema, runId)) throw new IngressInputError('run_id', 'is not a run id');
+  const by = typeof input.by === 'string' ? input.by.trim() : '';
+  if (by === '') throw new IngressInputError('by', 'is required');
+  const note = typeof input.note === 'string' ? input.note.trim() : '';
+  if (note.length > MAX_RESUME_NOTE_CHARS) throw new IngressInputError('note', `must be at most ${MAX_RESUME_NOTE_CHARS} characters`);
+
+  const run = await deps.store.getRun(runId);
+  if (run === null) throw new RunNotFoundError(runId);
+  const refusal = resumeRefusal(run);
+  if (refusal !== null) throw refusal;
+
+  const now = deps.now ?? (() => new Date());
+  const at = now().toISOString();
+  // A run that failed after stop_blocked stored its block still has it open; it is closed too.
+  const open = run.block;
+  if (open !== null) {
+    await deps.store.resolveBlock(
+      runId,
+      open.block_id,
+      redactPersisted({ status: 'resumed' as const, resolved_at: at, resolved_by: by, ...(note !== '' ? { note } : {}) }),
+    );
+  }
+  logRunEvent(runId, 'resume', {
+    kind: 'resume',
+    from: run.phase,
+    ...(open !== null ? { block_id: open.block_id } : {}),
+    by,
+    ...(note !== '' ? { note } : {}),
+  });
+
+  const message: DeliveredMessage = { kind: 'signal', type: BLOCK_RESUME_SIGNAL, body: renderResume(resumeFrom(run), { by, at, note }) };
+  return dispatchAndSettle(
+    runId,
+    { kind: 'resume', ...(open !== null ? { block_id: open.block_id } : {}), ...(note !== '' ? { note } : {}) },
+    { message },
+    { id: runId },
+    deps,
+  );
+}
+
+// What the signal tells the model the run was doing. A blocked run whose
+// block was closed but not sent on (a crash between the two writes) is
+// described by its last block.
+function resumeFrom(run: RunRecord): ResumeFrom {
+  const block = run.block ?? (run.phase === 'blocked' ? run.block_history.at(-1) : undefined);
+  if (block !== undefined) return { kind: 'blocked', block };
+  if (run.phase === 'stopped') return { kind: 'stopped' };
+  return { kind: 'failed', ...(run.phase_reason !== undefined ? { reason: run.phase_reason } : {}) };
+}
+
 // ------------------------------------------------------------------ settle
 
 async function dispatchAndSettle(
@@ -477,8 +603,8 @@ async function dispatchAndSettle(
   let investigating: boolean;
   try {
     seq = await store.addSubmission(runId, redactPersisted(submission));
-    // Only a follow-up may move a stopped run on.
-    await advance(store, runId, 'dispatched', submission.kind === 'ask' ? { resume: true } : {});
+    // Only a follow-up or a resume may move a stopped run on.
+    await advance(store, runId, 'dispatched', submission.kind === 'ask' || submission.kind === 'resume' ? { resume: true } : {});
     handle = deps.dispatcher.init(deps.agent, initOptions);
     receipt = await handle.dispatch(request);
     logRunEvent(runId, 'dispatch', { submission_seq: seq, kind: submission.kind, submission_id: receipt.submissionId });
@@ -500,6 +626,7 @@ async function dispatchAndSettle(
   let replyText: string | undefined;
   let error: string | undefined;
   let inputRequest: InputRequest | undefined;
+  let block: BlockRecord | undefined;
   let readError: unknown;
   try {
     // Stopped before the read began: the abort is on its way, there is nothing to wait for.
@@ -532,12 +659,16 @@ async function dispatchAndSettle(
   watch.dispose();
 
   if (status === 'completed') {
-    // The response may have ended on ask_requester: then the run is parked on
-    // the question the tool stored, not done.
+    // The response may have ended on ask_requester or stop_blocked: then the
+    // run is parked on the question or the block the tool stored, not done.
     const run = await store.getRun(runId);
     if (run !== null && run.phase === 'needs_input' && run.input_request !== null) {
       status = 'needs_input';
       inputRequest = run.input_request;
+    } else if (run !== null && run.phase === 'blocked' && run.block !== null) {
+      status = 'blocked';
+      block = run.block;
+      logRunEvent(runId, 'blocked', { submission_seq: seq, block_id: block.block_id, systems: block.systems });
     }
   }
   // A refused write means a stop landed first (an abort from another
@@ -548,9 +679,9 @@ async function dispatchAndSettle(
     error = undefined;
   }
 
-  // A parked run is embedded when it settles for real, like any other. A
-  // stopped one is not embedded.
-  const gaps = status === 'needs_input' || status === 'stopped' ? [] : await embedAfterSettle(deps, runId);
+  // A parked run (needs_input, blocked) is embedded when it settles for real,
+  // like any other. A stopped one is not embedded.
+  const gaps = status === 'completed' || status === 'failed' ? await embedAfterSettle(deps, runId) : [];
   logRunEvent(runId, 'settled', {
     submission_seq: seq,
     submission_id: receipt.submissionId,
@@ -568,6 +699,7 @@ async function dispatchAndSettle(
     ...(replyText !== undefined ? { reply_text: replyText } : {}),
     ...(error !== undefined ? { error } : {}),
     ...(inputRequest !== undefined ? { input_request: inputRequest } : {}),
+    ...(block !== undefined ? { block } : {}),
     gaps: Object.freeze(gaps),
   });
 }

@@ -17,8 +17,9 @@ const DSN = 'postgresql://triage_rw:not-a-real-password@db.invalid:5432/triage';
 const MIGRATIONS_DIR = fileURLToPath(new URL('./migrations/', import.meta.url));
 const INIT_SQL = readFileSync(join(MIGRATIONS_DIR, '0001_init.sql'), 'utf8');
 const INPUT_SQL = readFileSync(join(MIGRATIONS_DIR, '0002_input_requests.sql'), 'utf8');
+const BLOCKS_SQL = readFileSync(join(MIGRATIONS_DIR, '0003_blocks.sql'), 'utf8');
 /** Every shipped migration, in order. */
-const ALL_VERSIONS = ['0001_init', '0002_input_requests'];
+const ALL_VERSIONS = ['0001_init', '0002_input_requests', '0003_blocks'];
 
 // ------------------------------------------------------------------ fake database
 
@@ -166,6 +167,14 @@ describe('migrateRunStore', () => {
       'INSERT INTO triage.schema_migrations (version) VALUES ($1)',
       'COMMIT',
     ]);
+    expect(db.clientCalls(4)).toEqual([
+      'BEGIN',
+      'SELECT pg_advisory_xact_lock(7426150093)',
+      'SELECT version FROM triage.schema_migrations WHERE version = $1',
+      BLOCKS_SQL,
+      'INSERT INTO triage.schema_migrations (version) VALUES ($1)',
+      'COMMIT',
+    ]);
     const inserts = db.calls.filter((c) => c.text.startsWith('INSERT INTO triage.schema_migrations'));
     expect(inserts.map((c) => c.params)).toEqual(ALL_VERSIONS.map((v) => [v]));
   });
@@ -182,6 +191,7 @@ describe('migrateRunStore', () => {
     const second = db.calls.slice(before).map((c) => c.text);
     expect(second).not.toContain(INIT_SQL);
     expect(second).not.toContain(INPUT_SQL);
+    expect(second).not.toContain(BLOCKS_SQL);
     expect(second.some((t) => t.startsWith('INSERT'))).toBe(false);
     // Only the bootstrap transaction opens; no transaction for a skipped file.
     expect(second.filter((t) => t === 'BEGIN')).toHaveLength(1);

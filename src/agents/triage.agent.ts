@@ -18,11 +18,13 @@
 // run's escalation store in the callbacks), finish_retries and id_chain (the
 // run's chain as the last response left it, so ids added mid-run survive
 // the next submission and a new process). useAgentFinish appends
-// triage.finish_required once when neither finish_report nor ask_requester
-// ended the response, and throws on the next miss, so the submission
-// settles failed with the evidence kept. A successful ask_requester parks
-// the run in needs_input (P6 §4.3); the answer arrives as a signal whose
-// attributes may carry ids the requester gave, verified by ingress.
+// triage.finish_required once when none of finish_report, ask_requester and
+// stop_blocked ended the response, and throws on the next miss, so the
+// submission settles failed with the evidence kept. A successful
+// ask_requester parks the run in needs_input (P6 §4.3); the answer arrives
+// as a signal whose attributes may carry ids the requester gave, verified
+// by ingress. A successful stop_blocked parks the run in blocked (D55); a
+// person resumes it with a triage.resume signal on the same conversation.
 
 import '../models.ts';
 import {
@@ -52,7 +54,9 @@ import { frontendRoutingSkill, overviewSkill, patternsSkill } from './skills.ts'
 import {
   answerChainOf,
   askOpenedFor,
+  blockOpenedFor,
   calledAsk,
+  calledBlocked,
   calledFinish,
   durabilityAtImport,
   type EvidenceIndexEntry,
@@ -138,6 +142,7 @@ export function Triage({ id }: AgentProps): string {
       retries,
       calledFinish(ctx.response.toolCalls, reportWrittenFor(id)),
       calledAsk(ctx.response.toolCalls, askOpenedFor(id)),
+      calledBlocked(ctx.response.toolCalls, blockOpenedFor(id)),
     );
     if (step.kind === 'done') {
       if (retries !== step.retries) setRetries(step.retries);

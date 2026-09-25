@@ -149,6 +149,7 @@ describe('allowlist', () => {
       'repo_read',
       'resolve_identity',
       'sql_select',
+      'stop_blocked',
       'task',
       'write',
     ]);

@@ -11,6 +11,8 @@
 //     (exit 1; a stalled run may be asked again);
 //   - a run waiting on a question: that is answered with `triage input`,
 //     not asked around (exit 1);
+//   - a run blocked on a system that did not answer: that is sent on with
+//     `triage resume`, which closes the block (exit 1);
 //   - an empty question or a bad run_id (exit 2).
 //
 // After the worker starts, the phase is set to dispatched with the worker's
@@ -77,6 +79,11 @@ export function createAskCommand(options: AskCommandOptions = {}): CliCommand {
       if (status === 'needs_input') {
         const qid = run.input_request?.question_id ?? '?';
         printError(io, json, 'ERROR', `run ${runId} is waiting for an answer to question ${qid}; answer it with: triage input ${runId} "<answer>" (or --skip)`);
+        return EXIT.ERROR;
+      }
+      if (status === 'blocked') {
+        const systems = run.block?.systems.join(', ') ?? 'a system';
+        printError(io, json, 'ERROR', `run ${runId} is blocked (${systems} did not answer); resume it with: triage resume ${runId}`);
         return EXIT.ERROR;
       }
       const submissionId = run.submissions.length + 1;

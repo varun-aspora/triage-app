@@ -71,6 +71,16 @@ describe('methodText', () => {
     expect(text).toContain('The current ask is the latest message');
   });
 
+  test('names the three ways a turn ends: finish_report, ask_requester and stop_blocked', () => {
+    const text = methodText(init(), { knowledge });
+    const rules = text.slice(text.indexOf('## Fixed rules'), text.indexOf('## This run'));
+    expect(rules).toContain('end with finish_report');
+    expect(rules).toContain('The two other ways to end a turn are ask_requester');
+    expect(rules).toContain('and stop_blocked, when a tool result said a system did not answer and the investigation cannot go on without it');
+    expect(rules).toContain('after either call, stop');
+    expect(rules).toContain('A system that is not needed for the current ask is a gap in the report, not a block.');
+  });
+
   test('includes the orchestrator method docs in order and not the delegate docs', () => {
     const text = methodText(init(), { knowledge });
     const at = ORCHESTRATOR_DOCS.map((name) => text.indexOf(knowledge.method.get(name) as string));

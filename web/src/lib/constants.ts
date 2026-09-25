@@ -9,14 +9,15 @@ export const RUN_PHASES = [
   'dispatched',
   'investigating',
   'needs_input',
+  'blocked',
   'completed',
   'failed',
   'stopped',
 ] as const;
 export type RunPhase = (typeof RUN_PHASES)[number];
 
-/** GET /triage status filter. running is any phase that is not completed, failed or stopped. */
-export const RUN_STATUSES = ['running', 'completed', 'failed', 'stopped'] as const;
+/** GET /triage status filter. blocked is its own phase; running is any other phase that is not completed, failed or stopped. */
+export const RUN_STATUSES = ['running', 'blocked', 'completed', 'failed', 'stopped'] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
 export const CATEGORIES = [

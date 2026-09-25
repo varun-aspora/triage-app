@@ -63,6 +63,8 @@ function runRecord(o: { report?: Report | null; source?: TriageRequest['source']
     phase: 'completed',
     input_request: null,
     input_history: [],
+    block: null,
+    block_history: [],
     request: {
       request_id: RUN_ID,
       interface: 'cli',

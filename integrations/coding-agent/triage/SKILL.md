@@ -66,11 +66,15 @@ Read the `status` field of the JSON:
   one short line now and then, not after every poll.
 - `needs_input` (exit 4): the run is paused on a question only the user can
   answer. Go to step 2a, then wait again.
+- `blocked` (exit 6): the run is parked because a system it needs did not
+  answer. Go to step 2b; wait again once the run is resumed.
 - `failed` or `stalled` (exit 1): tell the user the `reason` and stop. Do not
   start a new run unless they ask. To see what went wrong, read the run's
-  steps with `triage logs <run_id>` (step 7).
+  steps with `triage logs <run_id>` (step 7). If the user asks to try again,
+  `triage resume <run_id>` (step 2b) continues a run that failed after it had
+  started; the CLI says so when a new run is needed instead.
 - `stopped` (exit 5): someone stopped the run. Tell the user. A follow-up
-  (step 4) starts it again.
+  (step 4) or `triage resume` (step 2b) starts it again.
 
 Exit 3 is also a config error. That one prints `{"error":{"code":"CONFIG",...}}`
 instead of a `status`; show the message to the user and stop.
@@ -98,6 +102,31 @@ triage wait <run_id> --timeout 90 --json
   pass it as well with `--ids key=value`, so the run can verify it before it
   is used.
 - A run may ask more than once. Each time, ask the user and send the answer.
+
+### 2b. When the run is blocked on a system
+
+The JSON carries `block` with `systems` (the ones that did not answer, as
+`<entity>:<service>`), `reason`, `failures` (each failed call, with its time)
+and `blocked_at`. Tell the user which systems did not answer and the reason,
+as the run states them. Do not probe, restart or fix anything yourself, and
+do not resume on your own: the run needs the system back first.
+
+When the user says the system is back, or asks to try again, resume the run
+and wait again:
+
+```sh
+triage resume <run_id> "<what the user said was fixed, and anything new to consider>" --requested-by '<user email or Slack id>' --json
+triage wait <run_id> --timeout 90 --json
+```
+
+- The message is optional. When the user said what changed, or added anything the run should consider, pass their words.
+- `triage resume` prints `{"run_id":"...","submission_id":...}` once the run
+  is on its way. It refuses a run that is still going, is waiting on a
+  question or has completed, and says what to do instead; show that message
+  to the user.
+- If the system still does not answer, the run blocks again. Tell the user
+  and wait for them.
+- `triage ask` is refused while a run is blocked. Resume it first.
 
 ## 3. Show the report
 
@@ -173,7 +202,7 @@ triage stop <run_id> --given-by '<user email or Slack id>' --json
 ```
 
 This stops the agent and records the run as rejected, with no notes. A
-follow-up (step 4) starts it again.
+follow-up (step 4) or `triage resume` (step 2b) starts it again.
 
 Every step of a run is logged. When the user asks what a run did, or why it
 failed, print the steps:

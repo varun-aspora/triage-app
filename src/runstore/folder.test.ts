@@ -15,6 +15,8 @@ import {
   makeClock,
   runContractCase,
   runStoreContract,
+  sampleBlock,
+  sampleBlockResolution,
   sampleFeedback,
   sampleFindings,
   sampleReport,
@@ -130,6 +132,29 @@ describe('folder provider: layout', () => {
     expect(embeddings).toEqual([
       { run_id: RUN_A, kind: 'case', model: 'ollama/x', text_sha256: 'cd'.repeat(32), source_text: 'case', vector: [1, 2] },
     ]);
+  });
+
+  test('a block lives in meta.json and a resume submission in its submission.json', async () => {
+    const { store, runsDir } = makeStore();
+    await store.createRun(RUN_A, p(sampleRequest(RUN_A)));
+    await store.putBlock(RUN_A, p(sampleBlock('b1')));
+    const dir = join(runsDir, RUN_A);
+    const parked = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8')) as Record<string, unknown>;
+    expect(parked).toMatchObject({ phase: 'blocked', block: sampleBlock('b1') });
+    expect(parked.block_history).toBeUndefined();
+
+    const at = '2026-09-01T11:00:00.000Z';
+    await store.resolveBlock(RUN_A, 'b1', p(sampleBlockResolution('resumed', at, 'harbor is back')));
+    const seq = await store.addSubmission(RUN_A, p({ kind: 'resume' as const, block_id: 'b1', note: 'harbor is back' }));
+    const meta = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8')) as Record<string, unknown>;
+    expect(meta.phase).toBe('blocked');
+    expect(meta.block).toBeUndefined();
+    expect(meta.block_history).toEqual([
+      { ...sampleBlock('b1'), status: 'resumed', resolved_at: at, resolved_by: 'ops-reviewer', note: 'harbor is back' },
+    ]);
+    const submission = JSON.parse(readFileSync(join(dir, 'submissions', String(seq), 'submission.json'), 'utf8')) as unknown;
+    expect(submission).toMatchObject({ kind: 'resume', block_id: 'b1', note: 'harbor is back', seq });
+    expect(walk(dir)).toEqual(['input.json', 'meta.json', 'submissions/1/submission.json']);
   });
 
   test('default feedback.md names the latest verdict', async () => {

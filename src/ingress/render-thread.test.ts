@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { TriageRequest } from '../types/request.ts';
-import { renderAnswer, renderAsk, renderThread } from './render-thread.ts';
+import { renderAnswer, renderAsk, renderResume, renderThread } from './render-thread.ts';
 
 const PAN = '4111111111111111';
 const ACCOUNT = '918020012345678';
@@ -108,3 +108,61 @@ describe('renderAnswer', () => {
     expect(text).not.toContain('x'.repeat(121));
   });
 });
+
+describe('renderResume', () => {
+  const block = {
+    block_id: 'b1',
+    systems: ['ssfb:harbor', 'global:codegraph'],
+    reason: 'The account form lives in harbor.\n  Nothing else shows the payout state.',
+  };
+  const none = { by: 'ops', at: AT, note: '' };
+
+  test('a blocked run: the block, the systems, the reason on one line, who resumed it and when, and the note', () => {
+    const text = renderResume(
+      { kind: 'blocked', block },
+      { by: 'ops-reviewer', at: AT, note: `harbor is back; card ${PAN} was the test card on ${ACCOUNT}` },
+    );
+    expect(text).toContain(
+      'This run was blocked (b1) because ssfb:harbor and global:codegraph did not answer: The account form lives in harbor. Nothing else shows the payout state.',
+    );
+    expect(text).toContain(`ops-reviewer resumed it at ${AT}.`);
+    expect(text).toContain('Message from ops-reviewer:');
+    expect(text).toContain('harbor is back');
+    expect(text).toContain('Take the message into account');
+    // Model-facing profile: the PAN is masked, the account number is kept.
+    expect(text).not.toContain(PAN);
+    expect(text).toContain(ACCOUNT);
+    expect(text).toContain('ssfb:harbor and global:codegraph are expected to answer now.');
+    expect(text).toContain('the evidence you noted stands');
+    expect(text).toContain('call finish_report with the report');
+    expect(text).toContain('call stop_blocked again');
+  });
+
+  test('one system reads as singular, and no note means no note line', () => {
+    const text = renderResume({ kind: 'blocked', block: { ...block, systems: ['ssfb:harbor'] } }, none);
+    expect(text).toContain('because ssfb:harbor did not answer');
+    expect(text).toContain('ssfb:harbor is expected to answer now.');
+    expect(text).not.toContain('Message from');
+    expect(text).not.toContain('Take the message into account');
+  });
+
+  test('a failed run names the phase reason and a stopped run says so; both end with finish_report or stop_blocked', () => {
+    const failed = renderResume({ kind: 'failed', reason: 'AgentRunError' }, none);
+    expect(failed).toContain('This run failed (AgentRunError) before it finished.');
+    expect(failed).toContain(`ops resumed it at ${AT}.`);
+    expect(failed).not.toContain('expected to answer now');
+    expect(failed).toContain('call finish_report with the report');
+    expect(failed).toContain('call stop_blocked.');
+    expect(renderResume({ kind: 'failed' }, none)).toContain('This run failed before it finished.');
+    const stopped = renderResume({ kind: 'stopped' }, none);
+    expect(stopped).toContain('This run was stopped before it finished.');
+    expect(stopped).toContain('the evidence you noted stands');
+  });
+
+  test('the email local part of who resumed is masked', () => {
+    const text = renderResume({ kind: 'stopped' }, { ...none, by: 'ops.reviewer@example.com' });
+    expect(text).not.toContain('ops.reviewer@');
+    expect(text).toContain('example.com');
+  });
+});
+

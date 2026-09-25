@@ -1,4 +1,4 @@
-// The --json shapes of run, start, wait, status, ask and input. Each command checks
+// The --json shapes of run, start, wait, status, ask, input and resume. Each command checks
 // its document against the schema here before printing it with printJson
 // from src/cli/output.ts, so a shape cannot drift without a test failing.
 import * as v from 'valibot';
@@ -6,6 +6,7 @@ import { PreflightWarningSchema } from '../../types/classification.ts';
 import { ReportStatusSchema, RunIdSchema, TierSchema } from '../../types/core.ts';
 import { RunPhaseSchema } from '../../runstore/types.ts';
 import { InputRequestSchema, QuestionIdSchema } from '../../types/input-request.ts';
+import { BlockRecordSchema } from '../../types/block.ts';
 import { EXIT, printJson } from '../output.ts';
 import type { CliIo } from '../types.ts';
 
@@ -22,6 +23,9 @@ export const EXIT_NEEDS_INPUT = 4;
 /** Exit code of a `triage wait` or `triage run` on a run a person stopped. */
 export const EXIT_STOPPED = 5;
 
+/** Exit code of a `triage wait` or `triage run` on a run parked on a system that did not answer (D55). */
+export const EXIT_BLOCKED = 6;
+
 /**
  * The stored report as the run store returns it (persisted profile). Loose on
  * purpose: the persisted profile can mask digits in the run id, so the stored
@@ -36,7 +40,7 @@ export const StoredReportSchema = v.looseObject({
 export const StartOutputSchema = v.strictObject({ run_id: RunIdSchema });
 export type StartOutput = v.InferOutput<typeof StartOutputSchema>;
 
-export const WAIT_STATUSES = ['completed', 'failed', 'stalled', 'timeout', 'needs_input', 'stopped'] as const;
+export const WAIT_STATUSES = ['completed', 'failed', 'stalled', 'timeout', 'needs_input', 'stopped', 'blocked'] as const;
 
 /** `triage wait --json`, and `triage run --json` (completed or failed only). */
 export const WaitOutputSchema = v.strictObject({
@@ -50,10 +54,12 @@ export const WaitOutputSchema = v.strictObject({
   phase: v.optional(RunPhaseSchema),
   /** The open question, with status needs_input. */
   input_request: v.optional(InputRequestSchema),
+  /** The open block, with status blocked. */
+  block: v.optional(BlockRecordSchema),
 });
 export type WaitOutput = v.InferOutput<typeof WaitOutputSchema>;
 
-export const RUN_STATUSES = ['running', 'completed', 'failed', 'stalled', 'needs_input', 'stopped'] as const;
+export const RUN_STATUSES = ['running', 'completed', 'failed', 'stalled', 'needs_input', 'stopped', 'blocked'] as const;
 export const RunStatusSchema = v.picklist(RUN_STATUSES);
 export type RunStatus = v.InferOutput<typeof RunStatusSchema>;
 
@@ -69,6 +75,8 @@ export const StatusOutputSchema = v.strictObject({
   preflight_warnings: v.array(PreflightWarningSchema),
   /** The open question, with status needs_input. */
   input_request: v.optional(InputRequestSchema),
+  /** The open block, with status blocked. */
+  block: v.optional(BlockRecordSchema),
 });
 export type StatusOutput = v.InferOutput<typeof StatusOutputSchema>;
 
@@ -87,6 +95,13 @@ export const InputOutputSchema = v.strictObject({
   skipped: v.boolean(),
 });
 export type InputOutput = v.InferOutput<typeof InputOutputSchema>;
+
+/** `triage resume --json`. submission_id is the run store seq the resume gets. */
+export const ResumeOutputSchema = v.strictObject({
+  run_id: RunIdSchema,
+  submission_id: v.pipe(v.number(), v.integer(), v.minValue(1)),
+});
+export type ResumeOutput = v.InferOutput<typeof ResumeOutputSchema>;
 
 /** Checks the document against its schema, then prints it with printJson. */
 export function emitJson<S extends v.GenericSchema>(io: Pick<CliIo, 'stdout'>, schema: S, value: v.InferInput<S>): void {

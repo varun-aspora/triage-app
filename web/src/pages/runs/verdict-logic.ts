@@ -68,9 +68,9 @@ export function buildVerdictBody(choice: VerdictChoice, form: VerdictForm, findi
   };
 }
 
-/** Cancel stops the run; there is nothing to cancel once it has finished. */
+/** Cancel stops the run while it is going or parked on a system (blocked); there is nothing to cancel once it has finished. */
 export function canCancel(run: Pick<RunDetail, 'status'>): boolean {
-  return run.status === 'running';
+  return run.status === 'running' || run.status === 'blocked';
 }
 
 /** How a feedback entry reads in the list: accepted, rejected, cancelled, or the stored verdict. */
@@ -189,6 +189,10 @@ export function summariseStep(e: Pick<RunEvent, 'type' | 'data'>): string {
       return `${s(d.verdict)}${d.cancelled === true ? ' (cancel)' : ''}${d.notes !== undefined ? ` · ${excerpt(d.notes)}` : ''}`;
     case 'stop':
       return `by ${s(d.by)} from ${s(d.stopped_from)}`;
+    case 'blocked':
+      return `${s(d.block_id)} · ${Array.isArray(d.systems) ? d.systems.map(s).join(', ') : ''}`;
+    case 'resume':
+      return `by ${s(d.by)} from ${s(d.from)}${d.block_id !== undefined ? ` (${s(d.block_id)})` : ''}${d.note !== undefined ? ` · ${excerpt(d.note)}` : ''}`;
     case 'turn_request': {
       const req = (d.request ?? {}) as Data;
       const input = (req.input ?? {}) as Data;
