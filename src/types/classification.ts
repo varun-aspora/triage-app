@@ -31,15 +31,12 @@ export const ClassificationSchema = v.object({
   category: CategorySchema,
   subcategory: v.string(),
   entities_likely: v.array(EntitySchema),
-  // One sentence, from the latest messages.
-  current_ask: v.string(),
   // A transfer, credit or reversal is involved.
   money_moved: v.boolean(),
   misdirected_funds: v.boolean(),
   tier_proposed: TierSchema,
   confidence: v.pipe(v.number(), v.minValue(0), v.maxValue(1)),
   matched_pattern_id: v.optional(NonEmptyStringSchema),
-  missing_info: v.array(v.string()),
   images_seen: v.boolean(),
   // Set when the classifier output was invalid; the tier policy then forces strong.
   classifier_error: v.optional(v.string()),

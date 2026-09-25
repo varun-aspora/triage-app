@@ -53,12 +53,10 @@ faux_classification:
   category: account_view
   subcategory: balance_not_shown
   entities_likely: [ssfb]
-  current_ask: Explain why the balance stays blank on an active account and when it will show.
   money_moved: false
   misdirected_funds: false
   tier_proposed: mid
   confidence: 0.85
-  missing_info: []
   images_seen: false
 provenance:
   origin: synthetic

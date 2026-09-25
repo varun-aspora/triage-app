@@ -11,12 +11,10 @@ const base = (over: Partial<Classification> = {}): Classification => ({
   category: 'onboarding',
   subcategory: 'sim_binding',
   entities_likely: ['ssfb'],
-  current_ask: 'why is the form stuck',
   money_moved: false,
   misdirected_funds: false,
   tier_proposed: 'cheap',
   confidence: 0.9,
-  missing_info: [],
   images_seen: false,
   ...over,
 });

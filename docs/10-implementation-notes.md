@@ -269,6 +269,16 @@ Known gaps:
 - Tests drive the fakes with a fake sleep, so no test waits; the fakes count refused connects and dropped clients.
 - Not done: retries in the HTTP and Quickwit connectors; a probe of the databases before a resume.
 
+### Decision model classifier (D58, 2026-09-26)
+
+- `src/classify/decision.ts` builds the questions from the categories file and the enabled entities and maps the answers back to a `Classification`, checked with `ClassificationSchema`. `src/classify/classify.ts` picks the path with `decisionRoute()` from `src/decisions/registry.ts`; `deps.decisions` lets tests pass `fakeDecisionProvider`.
+- `src/classify/prompt.ts` shares its redaction between the text prompt and `buildDecisionState()`, the JSON state sent to the decision model. `PERSISTED_PROFILE_PROVIDERS` covers `openrouter` and `typesafe`. The `LATEST` tag on thread lines is gone; it only served `current_ask`.
+- `src/models.ts` accepts `typesafe/<model>` for `MODEL_CLASSIFIER` only; the doctor checks `TYPESAFE_API_KEY` for it. `src/ingress/http/routes.ts` and `src/embed/case-text.ts` read `current_ask` from the report only.
+- The classifier eval provider builds the decision provider itself and meters the reported cost through `CostMeter.addUsd`. The `current_ask` rubric is gone from the classifier suite; `--judge` stays, with no case using it yet.
+- `OPENAI_BASE_URL` is declared in `keys.ts`; nothing reads it yet.
+- Tests use the fake decision provider, and the route tests stub `fetch`, so no test calls TypeSafe or OpenRouter.
+- Not done: a classifier eval run against a real jev model (question wording, the one-call subcategory and the derived confidence are untried); an eval case that runs the decision path; a separate time limit for decision models.
+
 ## Commit trailer note
 
 The trailer was pinned in CONVENTIONS.md and plan.json after wave 1 (`74cfcb3`, later `58b12b3`), because implementers had each picked their own model name. Commit T01.3 (`a70343b`) still carries a different co-author line from the rest, and T01.2 (`bb11e37`) was one of the two commits the wave log flagged at the time; on main today only `a70343b` differs. The commits before `58b12b3` also carry a `Claude-Session` line. History was left as is.

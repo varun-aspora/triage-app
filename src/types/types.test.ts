@@ -48,12 +48,10 @@ const classification = () => ({
   category: 'delivery',
   subcategory: 'welcome_letter',
   entities_likely: ['atspl'],
-  current_ask: 'Why was the welcome letter not delivered?',
   money_moved: false,
   misdirected_funds: false,
   tier_proposed: 'cheap',
   confidence: 0.8,
-  missing_info: [],
   images_seen: false,
 });
 

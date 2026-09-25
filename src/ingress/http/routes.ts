@@ -388,7 +388,7 @@ export function runView(run: RunRecord): Record<string, unknown> {
     ...(request?.interface !== undefined ? { interface: request.interface } : {}),
     // This is the persisted copy, so its p<digits> part is usually masked.
     ...(source?.kind === 'slack' ? { permalink: source.permalink } : {}),
-    current_ask: run.report?.request?.current_ask ?? decision?.proposed?.current_ask ?? null,
+    current_ask: run.report?.request?.current_ask ?? null,
     ...(warnings !== undefined ? { preflight_warnings: warnings } : {}),
     evidence: EVIDENCE_KEYS.flatMap((key) => {
       const item = run.evidence?.[key];

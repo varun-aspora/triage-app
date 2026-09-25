@@ -340,6 +340,24 @@ describe('models check', () => {
     expect(slot(rs, 'MODEL_CLASSIFIER')).toMatchObject({ status: 'fail', key_names: ['MODEL_CLASSIFIER', 'OPENROUTER_API_KEY'] });
   });
 
+  test('typesafe on the classifier is ok with TYPESAFE_API_KEY and fail without it', async () => {
+    const ok = await models({ MODEL_CLASSIFIER: 'typesafe/jev-1.13', TYPESAFE_API_KEY: 'fake-ts-key-01' });
+    expect(slot(ok, 'MODEL_CLASSIFIER')?.status).toBe('ok');
+    const blank = await models({ MODEL_CLASSIFIER: 'typesafe/jev-1.13', TYPESAFE_API_KEY: '' });
+    expect(slot(blank, 'MODEL_CLASSIFIER')).toMatchObject({ status: 'fail', key_names: ['MODEL_CLASSIFIER', 'TYPESAFE_API_KEY'] });
+  });
+
+  test('openrouter/typesafe on the classifier needs OPENROUTER_API_KEY', async () => {
+    const rs = await models({ MODEL_CLASSIFIER: 'openrouter/typesafe/jev-1.13', OPENROUTER_API_KEY: 'fake-or-key-01' });
+    expect(slot(rs, 'MODEL_CLASSIFIER')?.status).toBe('ok');
+  });
+
+  test('typesafe on a tier or the judge is fail', async () => {
+    const rs = await models({ MODEL_TIER_MID: 'typesafe/jev-1.13', TRIAGE_EVAL_JUDGE_MODEL: 'typesafe/jev-1.13', TYPESAFE_API_KEY: 'fake-ts-key-01' });
+    expect(slot(rs, 'MODEL_TIER_MID')?.status).toBe('fail');
+    expect(slot(rs, 'TRIAGE_EVAL_JUDGE_MODEL')?.status).toBe('fail');
+  });
+
   test('openrouter on the code walker and the judge is fail', async () => {
     const rs = await models({ MODEL_CODE_WALKER: 'openrouter/x', TRIAGE_EVAL_JUDGE_MODEL: 'openrouter/x', OPENROUTER_API_KEY: 'fake-or-key-01' });
     expect(slot(rs, 'MODEL_CODE_WALKER')?.status).toBe('fail');

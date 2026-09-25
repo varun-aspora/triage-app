@@ -18,7 +18,7 @@ flowchart TD
     K --> D
     D --> E[Classification proposed]
     E --> F[Tier policy<br/>ordered deterministic rules + known-pattern index]
-    F --> G[Classification final<br/>tier, entities, current_ask, flags]
+    F --> G[Classification final<br/>tier, entities, flags]
     G --> P2[(runs/run_id/classification.json)]
     G --> H[dispatch Triage<br/>initialData = request + classification + id_chain]
     K --> H

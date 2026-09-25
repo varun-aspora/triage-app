@@ -7,8 +7,8 @@
 // - resolves the grader first, so a bad judge setting fails before any case
 //   runs;
 // - loads evals/cases and makes one test per case with the schema, category
-//   and tier asserts, plus the llm-rubric current_ask check only when the
-//   judge is on and the case has expected.current_ask;
+//   and tier asserts. No case has a model-graded assert: the classifier gives
+//   decisions only, and each one is checked in code;
 // - always sets defaultTest.options.provider (and the rubric's own provider)
 //   to the resolved grader, which refuses every call when the judge is off,
 //   so promptfoo can never fall back to a default grading model.
@@ -37,15 +37,7 @@ import {
 import type { JudgeProviderDeps } from './provider-judge.ts';
 
 export const DEFAULT_CASES_DIR = fileURLToPath(new URL('../cases/', import.meta.url));
-export const CURRENT_ASK_METRIC = 'current_ask';
 export const DEFAULT_MAX_CONCURRENCY = 4;
-
-// Reasoning before the verdict, binary (P1 §3.4).
-export const CURRENT_ASK_RUBRIC =
-  'The output is the "current ask" a classifier extracted from a support thread: what the requester wants done now. ' +
-  'Reference current ask: "{{expected.current_ask}}". ' +
-  'First explain in one or two sentences whether the output asks for the same action on the same thing as the reference. ' +
-  'Wording may differ. Then pass only if it does; score 1 for pass and 0 for fail.';
 
 export class SuiteConfigError extends Error {
   override readonly name = 'SuiteConfigError';
@@ -101,7 +93,7 @@ export async function buildClassifierSuite(options: BuildClassifierSuiteOptions)
     prompts: ['{{case_id}}'],
     providers,
     defaultTest: { options: { provider: grader } },
-    tests: cases.map((c) => caseTest(c.case, options.judgeOn, grader)),
+    tests: cases.map((c) => caseTest(c.case)),
     sharing: false,
   };
   const evaluateOptions: EvaluateOptions = {
@@ -128,22 +120,12 @@ function modelSpecs(requested: readonly string[] | undefined, config: Config): s
 }
 
 /** The promptfoo test for one case. */
-export function caseTest(c: EvalCase, judgeOn: boolean, grader: ApiProvider): TestCase {
+export function caseTest(c: EvalCase): TestCase {
   const assert: Assertion[] = [
     { type: 'javascript', value: schemaAssert, metric: SCHEMA_METRIC },
     { type: 'javascript', value: categoryAssert, metric: CATEGORY_METRIC },
     { type: 'javascript', value: tierAssert, metric: TIER_METRIC },
   ];
-  if (judgeOn && c.expected.current_ask !== undefined) {
-    assert.push({
-      type: 'llm-rubric',
-      value: CURRENT_ASK_RUBRIC,
-      metric: CURRENT_ASK_METRIC,
-      provider: grader,
-      // The judge sees the extracted ask only, not the whole output.
-      transform: 'JSON.parse(output).classification.current_ask',
-    });
-  }
   return {
     description: c.id,
     vars: caseVars(c) as TestCase['vars'],

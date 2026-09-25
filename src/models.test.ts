@@ -116,6 +116,19 @@ describe('tier mapping', () => {
     expect(models.classifierModel(c)).toBe('ollama/qwen3:8b');
   });
 
+  test('classifier accepts typesafe decision specs, direct and through openrouter', () => {
+    for (const spec of ['typesafe/jev-1.13', 'openrouter/typesafe/jev-1.13']) {
+      expect(models.classifierModel(cfg({ ...BASE, MODEL_CLASSIFIER: spec }))).toBe(spec);
+    }
+  });
+
+  test('a typesafe spec with more than one model part is refused for the classifier', () => {
+    const err = configError(() => models.classifierModel(cfg({ ...BASE, MODEL_CLASSIFIER: `typesafe/${SEED}/x` })));
+    expect(err.keys).toEqual(['MODEL_CLASSIFIER']);
+    expect(err.message).toContain('typesafe/<model>');
+    expect(err.message).not.toContain(SEED);
+  });
+
   test('parseSpec splits at the first slash', () => {
     expect(models.parseSpec('openrouter/moonshotai/kimi-k2.6')).toEqual({
       provider: 'openrouter',
@@ -134,6 +147,14 @@ describe('refused specs', () => {
   ];
 
   for (const [key, call] of slots) {
+    test(`typesafe in ${key} is refused and the error names the key only`, () => {
+      const err = configError(() => call(cfg({ ...BASE, [key]: `typesafe/${SEED}` })));
+      expect(err.keys).toEqual([key]);
+      expect(err.message).toContain(key);
+      expect(err.message).toContain('typesafe is allowed for MODEL_CLASSIFIER only');
+      expect(err.message).not.toContain(SEED);
+    });
+
     test(`openrouter in ${key} is refused and the error names the key only`, () => {
       const err = configError(() => call(cfg({ ...BASE, [key]: `openrouter/${SEED}/model` })));
       expect(err.keys).toEqual([key]);

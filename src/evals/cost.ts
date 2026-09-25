@@ -1,6 +1,8 @@
 // Suite spend meter (D42, P1 §3.7). Prices come from the model's pi-ai cost
 // metadata through calculateCost, never from a provider's own usage.cost, so
 // a faux or local model costs 0 and a known model costs what pi-ai says.
+// The one exception is a decision model (src/decisions/): pi-ai has no entry
+// for it, so addUsd meters the cost its provider reports.
 //
 // Bad input fails loudly: a NaN or negative token count, a model with no cost
 // metadata or a cap that is not a number would otherwise make overCap quietly
@@ -83,6 +85,19 @@ export class CostMeter {
     entry.calls += 1;
     entry.usd += usd;
     this.perModel.set(key, entry);
+    this.total += usd;
+    return usd;
+  }
+
+  /** Adds one call whose provider reported its own USD cost (decision models). */
+  addUsd(model: string, usd: number | undefined): number {
+    if (typeof usd !== 'number' || !Number.isFinite(usd) || usd < 0) {
+      throw new CostError(`model ${model} reported no usable cost`);
+    }
+    const entry = this.perModel.get(model) ?? { calls: 0, usd: 0 };
+    entry.calls += 1;
+    entry.usd += usd;
+    this.perModel.set(model, entry);
     this.total += usd;
     return usd;
   }

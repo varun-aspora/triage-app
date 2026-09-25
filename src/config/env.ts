@@ -88,6 +88,8 @@ export type Config = {
     readonly anthropicApiKey?: string;
     readonly openaiApiKey?: string;
     readonly openrouterApiKey?: string;
+    /** Direct TypeSafe decision calls (src/decisions/). */
+    readonly typesafeApiKey?: string;
     readonly ollamaBaseUrl?: string;
   };
   readonly evals: { readonly judgeModel?: string; readonly maxCostUsd?: number };
@@ -227,6 +229,7 @@ export function configFromRecord(
       anthropicApiKey: r.str('ANTHROPIC_API_KEY'),
       openaiApiKey: r.str('OPENAI_API_KEY'),
       openrouterApiKey: r.str('OPENROUTER_API_KEY'),
+      typesafeApiKey: r.str('TYPESAFE_API_KEY'),
       ollamaBaseUrl: r.str('OLLAMA_BASE_URL'),
     },
     evals: { judgeModel: r.str('TRIAGE_EVAL_JUDGE_MODEL'), maxCostUsd: r.num('TRIAGE_EVAL_MAX_COST_USD') },

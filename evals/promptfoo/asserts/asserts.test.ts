@@ -12,12 +12,10 @@ const CLASSIFICATION: Classification = {
   category: 'card',
   subcategory: 'card_view',
   entities_likely: ['ssfb'],
-  current_ask: 'Explain the error on the card screen.',
   money_moved: false,
   misdirected_funds: false,
   tier_proposed: 'cheap',
   confidence: 0.8,
-  missing_info: [],
   images_seen: false,
 };
 

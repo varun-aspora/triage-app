@@ -8,6 +8,7 @@ import { applyTierPolicy } from '../../src/classify/policy.ts';
 import { loadCategories, type CategoryEntry } from '../../src/classify/prompt.ts';
 import { loadCases, policyContextFor, type EvalCase } from '../../src/evals/case-schema.ts';
 import type { CostModel } from '../../src/evals/cost.ts';
+import type { DecisionProvider } from '../../src/decisions/types.ts';
 import { createFakeModel, text } from '../../src/mock/fake-model.ts';
 import { makeTestHome, type TestHome } from '../../test/support/home.ts';
 import { isNoIoGuardInstalled } from '../../test/support/no-io-guard.ts';
@@ -274,6 +275,50 @@ describe('cost cap', () => {
       costModel: (spec) => ({ provider: 'faux', id: spec, cost: undefined as never }),
     });
     const res = await run(p, byId('syn-unknown'));
+    expect(res.error).toContain('cost meter');
+    expect(res.output).toBeUndefined();
+  });
+});
+
+describe('decision models', () => {
+  // A scripted decision provider that reports its own cost, as TypeSafe does.
+  function fakeDecisions(costUsd: number | undefined): DecisionProvider & { calls: number } {
+    const p = {
+      id: 'fake',
+      model: 'fake/decider',
+      calls: 0,
+      async decide() {
+        p.calls += 1;
+        const answers = {
+          category: { kind: 'choice', choice: 'transfer_out', probabilities: { transfer_out: 0.9 } },
+          subcategory: { kind: 'choice', choice: 'none' },
+          entity_ssfb: { kind: 'yes_no', yes: 0.9 },
+          entity_atspl: { kind: 'yes_no', yes: 0.1 },
+          entity_rtl: { kind: 'yes_no', yes: 0.1 },
+          money_moved: { kind: 'yes_no', yes: 0.9 },
+          misdirected_funds: { kind: 'yes_no', yes: 0.1 },
+          tier_proposed: { kind: 'choice', choice: 'mid' },
+        };
+        return { answers, model: 'fake/decider', usage: { inputTokens: 10, outputTokens: 5, ...(costUsd === undefined ? {} : { costUsd }) } } as never;
+      },
+    };
+    return p;
+  }
+
+  test('a typesafe spec goes through decide() and meters the reported cost', async () => {
+    const budget = new SuiteBudget(undefined);
+    const decisions = fakeDecisions(0.002);
+    const p = provider('typesafe/jev-1.13', { budget, decisions, complete: async () => { throw new Error('completion path ran'); } });
+    const out = outputOf(await run(p, byId('syn-money-moved')));
+    expect(decisions.calls).toBe(1);
+    expect(out.classification.category).toBe('transfer_out');
+    expect(out.cost_usd).toBe(0.002);
+    expect(budget.meter.byModel()).toEqual([{ model: 'typesafe/jev-1.13', calls: 1, usd: 0.002 }]);
+  });
+
+  test('a decision call that reports no cost is an error, not an uncapped call', async () => {
+    const p = provider('openrouter/typesafe/jev-1.13', { budget: new SuiteBudget(10), decisions: fakeDecisions(undefined) });
+    const res = await run(p, byId('syn-money-moved'));
     expect(res.error).toContain('cost meter');
     expect(res.output).toBeUndefined();
   });

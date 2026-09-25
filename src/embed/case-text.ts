@@ -27,8 +27,9 @@ export type RequestSource = Pick<RunRecord, 'request' | 'submissions'>;
  * category, subcategory, current_ask, root_cause.statement, status and
  * matched_pattern_id as short labelled lines. The run's report (the latest
  * submission that has one) wins; the stored classification fills in when
- * there is no report yet. Missing fields are left out, so a run with nothing
- * to say gives an empty text.
+ * there is no report yet. current_ask comes from the report only, since the
+ * classifier does not give one. Missing fields are left out, so a run with
+ * nothing to say gives an empty text.
  */
 export function caseCardText(run: CaseCardSource): Persisted<string> {
   const report = run.report;
@@ -36,7 +37,7 @@ export function caseCardText(run: CaseCardSource): Persisted<string> {
   const lines: string[] = [];
   push(lines, 'category', proposed?.category);
   push(lines, 'subcategory', proposed?.subcategory);
-  push(lines, 'current_ask', report?.request.current_ask ?? proposed?.current_ask);
+  push(lines, 'current_ask', report?.request.current_ask);
   push(lines, 'root_cause', report?.root_cause?.statement);
   push(lines, 'status', report?.status);
   push(lines, 'matched_pattern_id', report?.root_cause?.matched_pattern_id ?? proposed?.matched_pattern_id);

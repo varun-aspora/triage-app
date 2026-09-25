@@ -97,12 +97,10 @@ function goodClassification(): Classification {
     category: 'card',
     subcategory: 'charge not reflected',
     entities_likely: ['ssfb'],
-    current_ask: 'why is the charge not shown',
     money_moved: false,
     misdirected_funds: false,
     tier_proposed: 'mid',
     confidence: 0.9,
-    missing_info: [],
     images_seen: false,
   };
 }
