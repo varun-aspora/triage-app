@@ -439,7 +439,7 @@ describe('module rules', () => {
 
   test('every schema module is present', () => {
     expect(sources.sort()).toEqual(
-      ['audit.ts', 'classification.ts', 'core.ts', 'findings.ts', 'id-chain.ts', 'input-request.ts', 'report.ts', 'request.ts', 'tool-result.ts'].sort(),
+      ['audit.ts', 'block.ts', 'classification.ts', 'core.ts', 'findings.ts', 'id-chain.ts', 'input-request.ts', 'report.ts', 'request.ts', 'tool-result.ts'].sort(),
     );
   });
 

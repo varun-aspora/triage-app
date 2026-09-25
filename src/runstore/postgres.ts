@@ -3,7 +3,7 @@
 //
 // It runs over the shared PgRunner from src/db/pg.ts, so Flue persistence and
 // the run store use one pool on TRIAGE_DB_URL. The tables are the ones in
-// migrations/0001_init.sql; createRunStore (index.ts) applies them first.
+// migrations/*.sql; createRunStore (index.ts) applies them first.
 //
 // Every value reaches the database as a $n parameter. The only text built at
 // run time is the per-model embedding table name, which comes from
@@ -61,7 +61,15 @@ import {
   type Submission,
   type SubmissionInput,
 } from './types.ts';
-import { assertQuestionId, InputRequestNotOpenError, InputRequestOpenError } from './types.ts';
+import {
+  assertBlockId,
+  assertQuestionId,
+  BlockNotOpenError,
+  BlockOpenError,
+  cancelledBlockResolution,
+  InputRequestNotOpenError,
+  InputRequestOpenError,
+} from './types.ts';
 import {
   InputRequestSchema,
   InputResolutionSchema,
@@ -69,6 +77,13 @@ import {
   type InputRequest,
   type InputResolution,
 } from '../types/input-request.ts';
+import {
+  BlockRecordSchema,
+  BlockResolutionSchema,
+  ResolvedBlockSchema,
+  type BlockRecord,
+  type BlockResolution,
+} from '../types/block.ts';
 
 /** The parts of the shared pg runner the provider uses. */
 export type PgStoreRunner = Pick<PgRunner, 'query' | 'transaction'>;
@@ -189,17 +204,30 @@ SET input_history = input_history || jsonb_build_array(input_request || $3::json
 WHERE run_id = $1 AND input_request->>'question_id' = $2::text
 RETURNING run_id`,
 
+  // A block (D55) opens only with no question and no other block open.
+  putBlock: `UPDATE triage.runs
+SET block = $2::jsonb, phase = 'blocked', phase_reason = NULL, updated_at = $3::timestamptz
+WHERE run_id = $1 AND block IS NULL AND input_request IS NULL AND phase <> 'stopped'
+RETURNING run_id`,
+  resolveBlock: `UPDATE triage.runs
+SET block_history = block_history || jsonb_build_array(block || $3::jsonb), block = NULL, updated_at = $4::timestamptz
+WHERE run_id = $1 AND block->>'block_id' = $2::text
+RETURNING run_id`,
+
   phaseForUpdate: 'SELECT phase FROM triage.runs WHERE run_id = $1 FOR UPDATE',
+  // $4 closes an open question and $6 an open block, each only when there is one.
   markStopped: `UPDATE triage.runs
 SET phase = $5::text, phase_reason = $2::text, updated_at = $3::timestamptz,
   input_history = CASE WHEN input_request IS NULL THEN input_history ELSE input_history || jsonb_build_array(input_request || $4::jsonb) END,
-  input_request = NULL
+  input_request = NULL,
+  block_history = CASE WHEN block IS NULL THEN block_history ELSE block_history || jsonb_build_array(block || $6::jsonb) END,
+  block = NULL
 WHERE run_id = $1
 RETURNING run_id`,
 
   nextSubmissionSeq: 'SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM triage.submissions WHERE run_id = $1',
-  insertSubmission: `INSERT INTO triage.submissions (run_id, seq, kind, question, created_at, question_id, answer)
-VALUES ($1, $2, $3, $4::text, $5::timestamptz, $6::text, $7::text)`,
+  insertSubmission: `INSERT INTO triage.submissions (run_id, seq, kind, question, created_at, question_id, answer, block_id, note)
+VALUES ($1, $2, $3, $4::text, $5::timestamptz, $6::text, $7::text, $8::text, $9::text)`,
 
   nextEvidenceVersion:
     'SELECT COALESCE(MAX(version), 0) + 1 AS version FROM triage.evidence WHERE run_id = $1 AND key = $2',
@@ -227,11 +255,11 @@ RETURNING run_id`,
   dropKeysForRun: 'DELETE FROM triage.idempotency WHERE run_id = $1',
 
   getRun: `SELECT run_id, schema_version, created_at, updated_at, phase, phase_reason, worker_pid, request, classification,
-  input_request, input_history
+  input_request, input_history, block, block_history
 FROM triage.runs WHERE run_id = $1`,
   latestEvidence: `SELECT DISTINCT ON (key) key, version, findings FROM triage.evidence
 WHERE run_id = $1 ORDER BY key, version DESC`,
-  submissions: `SELECT s.seq, s.kind, s.question, s.question_id, s.answer, s.created_at, r.report, r.report_md
+  submissions: `SELECT s.seq, s.kind, s.question, s.question_id, s.answer, s.block_id, s.note, s.created_at, r.report, r.report_md
 FROM triage.submissions s LEFT JOIN triage.reports r ON r.run_id = s.run_id AND r.seq = s.seq
 WHERE s.run_id = $1 ORDER BY s.seq`,
   feedback: 'SELECT body FROM triage.feedback WHERE run_id = $1 ORDER BY id',
@@ -415,7 +443,14 @@ class PostgresRunStore implements RunStore {
       if (row === undefined) throw new RunNotFoundError(id);
       const phase = parseRecord(RunPhaseSchema, row.phase, 'phase');
       if (isTerminalPhase(phase)) return null;
-      await tx.query(SQL.markStopped, [id, reason, this.#iso(), JSON.stringify(value), 'stopped']);
+      await tx.query(SQL.markStopped, [
+        id,
+        reason,
+        this.#iso(),
+        JSON.stringify(value),
+        'stopped',
+        JSON.stringify(cancelledBlockResolution(value)),
+      ]);
       return phase;
     });
   }
@@ -462,6 +497,36 @@ class PostgresRunStore implements RunStore {
     throw new InputRequestNotOpenError(id, questionId);
   }
 
+  async putBlock(runId: RunId, block: Persisted<BlockRecord>): Promise<void> {
+    const id = assertRunId(runId);
+    const value = parseRecord(BlockRecordSchema, assertPersisted(block, 'block'), 'block');
+    const rows = await this.#runner.query(SQL.putBlock, [id, JSON.stringify(value), this.#iso()]);
+    if (rows.length > 0) return;
+    // No row updated: the run is missing, stopped, or a block or question is already open.
+    const [run] = await this.#runner.query(SQL.getRun, [id]);
+    if (run === undefined) throw new RunNotFoundError(id);
+    if (run.phase === 'stopped') throw new RunStoppedError(id);
+    if (run.block !== null && run.block !== undefined) {
+      const open = fromJson(run.block, 'block') as BlockRecord;
+      throw new BlockOpenError(id, open.block_id);
+    }
+    const question = run.input_request === null || run.input_request === undefined
+      ? null
+      : (fromJson(run.input_request, 'input request') as InputRequest);
+    throw new InputRequestOpenError(id, question?.question_id ?? '?');
+  }
+
+  async resolveBlock(runId: RunId, blockId: string, resolution: Persisted<BlockResolution>): Promise<void> {
+    const id = assertRunId(runId);
+    assertBlockId(blockId);
+    const value = parseRecord(BlockResolutionSchema, assertPersisted(resolution, 'block resolution'), 'block resolution');
+    const rows = await this.#runner.query(SQL.resolveBlock, [id, blockId, JSON.stringify(value), this.#iso()]);
+    if (rows.length > 0) return;
+    const exists = await this.#runner.query(SQL.runExists, [id]);
+    if (exists.length === 0) throw new RunNotFoundError(id);
+    throw new BlockNotOpenError(id, blockId);
+  }
+
   // ---------------------------------------------------------------- submissions and reports
 
   async addSubmission(runId: RunId, submission: Persisted<SubmissionInput>): Promise<number> {
@@ -480,6 +545,8 @@ class PostgresRunStore implements RunStore {
         this.#iso(),
         input.question_id ?? null,
         input.answer ?? null,
+        input.block_id ?? null,
+        input.note ?? null,
       ]);
       return seq;
     });
@@ -675,12 +742,16 @@ class PostgresRunStore implements RunStore {
       const question = optText(row.question);
       const questionId = optText(row.question_id);
       const answer = optText(row.answer);
+      const blockId = optText(row.block_id);
+      const note = optText(row.note);
       const report = row.report === null || row.report === undefined ? null : (fromJson(row.report, 'report') as Report);
       return {
         kind: parseRecord(SubmissionInputSchema.entries.kind, row.kind, 'submission kind'),
         ...(question !== undefined ? { question } : {}),
         ...(questionId !== undefined ? { question_id: questionId } : {}),
         ...(answer !== undefined ? { answer } : {}),
+        ...(blockId !== undefined ? { block_id: blockId } : {}),
+        ...(note !== undefined ? { note } : {}),
         seq: toInt(row.seq, 'submission seq'),
         created_at: toIso(row.created_at, 'submission time'),
         report,
@@ -718,6 +789,12 @@ class PostgresRunStore implements RunStore {
     const inputHistory = run.input_history === null || run.input_history === undefined
       ? []
       : parseRecord(v.array(ResolvedInputRequestSchema), fromJson(run.input_history, 'input history'), 'input history');
+    const block = run.block === null || run.block === undefined
+      ? null
+      : parseRecord(BlockRecordSchema, fromJson(run.block, 'block'), 'block');
+    const blockHistory = run.block_history === null || run.block_history === undefined
+      ? []
+      : parseRecord(v.array(ResolvedBlockSchema), fromJson(run.block_history, 'block history'), 'block history');
     return {
       run_id: String(run.run_id),
       schema_version: toInt(run.schema_version, 'schema version'),
@@ -728,6 +805,8 @@ class PostgresRunStore implements RunStore {
       ...(pid !== undefined ? { worker_pid: pid } : {}),
       input_request: inputRequest,
       input_history: inputHistory,
+      block,
+      block_history: blockHistory,
       request: fromJson(run.request, 'request') as TriageRequest,
       classification,
       evidence,

@@ -41,6 +41,8 @@ type RunRow = {
   id_chain: unknown;
   input_request: unknown;
   input_history: unknown[];
+  block: unknown;
+  block_history: unknown[];
 };
 
 type EmbRow = {
@@ -65,6 +67,8 @@ type State = {
     created_at: Date;
     question_id: string | null;
     answer: string | null;
+    block_id: string | null;
+    note: string | null;
   }[];
   evidence: { run_id: string; key: string; version: number; findings: unknown; created_at: Date }[];
   reports: { run_id: string; seq: number; report: unknown; report_md: string; created_at: Date }[];
@@ -265,6 +269,8 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
       id_chain: null,
       input_request: null,
       input_history: [],
+      block: null,
+      block_history: [],
     });
     return [];
   },
@@ -318,6 +324,25 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
     row.updated_at = ts(p[3], 'updated_at');
     return [{ run_id: row.run_id }];
   },
+  putBlock(p, db) {
+    const row = runRow(db, str(p[0], 'run_id'));
+    if (!row || row.block !== null || row.input_request !== null || row.phase === 'stopped') return [];
+    row.block = jsonb(p[1], 'block');
+    row.phase = 'blocked';
+    row.phase_reason = null;
+    row.updated_at = ts(p[2], 'updated_at');
+    return [{ run_id: row.run_id }];
+  },
+  resolveBlock(p, db) {
+    const row = runRow(db, str(p[0], 'run_id'));
+    if (!row) return [];
+    const open = row.block as { block_id?: unknown } | null;
+    if (open === null || open.block_id !== str(p[1], 'block_id')) return [];
+    row.block_history = [...row.block_history, { ...open, ...(jsonb(p[2], 'resolution') as object) }];
+    row.block = null;
+    row.updated_at = ts(p[3], 'updated_at');
+    return [{ run_id: row.run_id }];
+  },
   phaseForUpdate(p, db) {
     const row = runRow(db, str(p[0], 'run_id'));
     return row ? [{ phase: row.phase }] : [];
@@ -331,6 +356,10 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
     if (row.input_request !== null) {
       row.input_history = [...row.input_history, { ...(row.input_request as object), ...(jsonb(p[3], 'resolution') as object) }];
       row.input_request = null;
+    }
+    if (row.block !== null) {
+      row.block_history = [...row.block_history, { ...(row.block as object), ...(jsonb(p[5], 'block resolution') as object) }];
+      row.block = null;
     }
     return [{ run_id: row.run_id }];
   },
@@ -353,6 +382,8 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
       created_at: ts(p[4], 'created_at'),
       question_id: strOrNull(p[5], 'question_id'),
       answer: strOrNull(p[6], 'answer'),
+      block_id: strOrNull(p[7], 'block_id'),
+      note: strOrNull(p[8], 'note'),
     });
     return [];
   },
@@ -458,6 +489,8 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
         classification: row.classification,
         input_request: row.input_request,
         input_history: row.input_history,
+        block: row.block,
+        block_history: row.block_history,
       }),
     ];
   },
@@ -486,6 +519,8 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
           question: s.question,
           question_id: s.question_id,
           answer: s.answer,
+          block_id: s.block_id,
+          note: s.note,
           created_at: s.created_at,
           report: r?.report ?? null,
           report_md: r?.report_md ?? null,
@@ -693,8 +728,12 @@ function migratorHandler(text: string): Handler | undefined {
       return [];
     };
   }
-  // The body of 0002_input_requests.sql: columns the fake's rows carry from the start.
-  if (text.includes('ADD COLUMN input_request jsonb') && text.includes('ADD COLUMN answer text')) {
+  // The bodies of 0002_input_requests.sql and 0003_blocks.sql: columns the
+  // fake's rows carry from the start.
+  if (
+    (text.includes('ADD COLUMN input_request jsonb') && text.includes('ADD COLUMN answer text')) ||
+    (text.includes('ADD COLUMN block jsonb') && text.includes('ADD COLUMN note text'))
+  ) {
     return (_p, db) => {
       if (!db.migrated) throw missingRelation('triage.runs');
       return [];

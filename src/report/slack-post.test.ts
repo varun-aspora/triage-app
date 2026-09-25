@@ -87,6 +87,8 @@ function runRecord(o: { report?: Report | null; source?: Source; requestedBy?: s
     phase: 'completed',
     input_request: null,
     input_history: [],
+    block: null,
+    block_history: [],
     request,
     classification: null,
     evidence: {},
