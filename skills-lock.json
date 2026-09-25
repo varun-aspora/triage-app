@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "quickwit-logs": {
+      "source": "../ai-velocity",
+      "sourceType": "local",
+      "computedHash": "870150ebff4ba7b89fac0599ad01d3ca14cfe51fff79790035b05c8e78888913"
+    }
+  }
+}
