@@ -252,7 +252,7 @@ Assumptions made, not verified against a real system:
 Known gaps:
 
 - No deadline for a blocked run (as for questions, D53).
-- The Ollama keyless auth in `src/models.ts` still resolves to an empty credential, so a run on an `ollama/*` tier fails at the first model call (`No API key for provider: ollama`, seen on 2026-09-25). Not part of D55; a placeholder key fixes it.
+- The Ollama keyless auth in `src/models.ts` resolved to an empty credential, so a run on an `ollama/*` tier failed at the first model call (`No API key for provider: ollama`, seen on 2026-09-25). Fixed on 2026-09-26: the provider now resolves to the placeholder key `ollama`, which Ollama ignores.
 
 ### Postgres connection loss and the resume tunnel check (D56, 2026-09-26)
 

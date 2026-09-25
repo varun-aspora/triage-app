@@ -139,7 +139,9 @@ function ollamaModelIds(config: Config): string[] {
   return [...ids].sort();
 }
 
-// Ollama's OpenAI-compatible endpoint, keyless. Models are declared text-only:
+// Ollama's OpenAI-compatible endpoint. Ollama ignores the API key, but pi-ai's
+// openai-completions API refuses to send a request without one, so the provider
+// resolves to a fixed placeholder. Models are declared text-only:
 // Ollama does not report vision support up front, so the tier policy treats them
 // as unable to take images. Context and output sizes follow the Flue guide example.
 export function ollamaProvider(baseUrl: string, ids: readonly string[]) {
@@ -147,7 +149,7 @@ export function ollamaProvider(baseUrl: string, ids: readonly string[]) {
     id: OLLAMA,
     name: 'Ollama (local)',
     baseUrl,
-    auth: { apiKey: { name: 'Ollama (keyless)', resolve: async () => ({ auth: {} }) } },
+    auth: { apiKey: { name: 'Ollama (keyless)', resolve: async () => ({ auth: { apiKey: 'ollama' } }) } },
     models: ids.map((id) => ({
       id,
       name: `${id} (ollama)`,
