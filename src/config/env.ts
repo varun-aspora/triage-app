@@ -14,6 +14,7 @@ import { INTERFACES, type Interface } from '../types/core.ts';
 import { ConfigError, type ConfigProblem } from './errors.ts';
 import {
   DEPLOY_MODE_KEY,
+  ENTITY_KEY_PATTERN,
   HOME_KEY,
   KEY_BY_NAME,
   PROVIDER_KEYS,
@@ -26,6 +27,8 @@ export type DbProvider = 'sqlite' | 'postgres';
 export type ApprovalMode = 'cli' | 'slack';
 export type SandboxProvider = 'virtual' | 'e2b' | 'daytona' | 'local';
 export type GitProtocol = 'ssh' | 'https';
+/** Colour theme of the web console. Display only; nothing else branches on it. */
+export type UiEnv = 'production' | 'non-production';
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
 export type Config = {
@@ -82,6 +85,7 @@ export type Config = {
   };
   readonly evals: { readonly judgeModel?: string; readonly maxCostUsd?: number };
   readonly http: { readonly port: number; readonly authToken?: string; readonly allowSlackPost: boolean };
+  readonly ui: { readonly env: UiEnv };
   readonly slack: {
     readonly botToken?: string;
     readonly signingSecret?: string;
@@ -211,6 +215,7 @@ export function configFromRecord(
       authToken: r.str('TRIAGE_HTTP_AUTH_TOKEN'),
       allowSlackPost: r.bool('TRIAGE_HTTP_ALLOW_SLACK_POST'),
     },
+    ui: { env: r.enumOf<UiEnv>('TRIAGE_UI_ENV') },
     slack: {
       botToken: r.str('SLACK_BOT_TOKEN'),
       signingSecret: r.str('SLACK_SIGNING_SECRET'),
@@ -277,6 +282,29 @@ export function lookupEnv(config: Config, name: string): EnvLookup {
 /** The only accessor for the deploy mode. Used by src/ops/preflight.ts alone. */
 export function deployModeForPreflight(config: Config): string {
   return hiddenOf(config).deployMode;
+}
+
+export type EnvFileKeyState = 'missing' | 'blank' | 'set';
+
+/**
+ * Whether an entity key is in <home>/.env as the file is now, not as it was at
+ * boot. The catalog uses it before it writes a registry entry that names the
+ * key: the registry refuses to boot when a named key is absent, and an
+ * operator may have just added it without restarting. Never returns the value.
+ * An unreadable .env counts as missing, which makes the caller refuse.
+ */
+export function envFileKeyState(config: Config, name: string): EnvFileKeyState {
+  if (isTableKey(name)) throw ConfigError.of(name, 'is a config key; read it from config, not envFileKeyState');
+  if (!ENTITY_KEY_PATTERN.test(name)) throw ConfigError.of(name, 'is not an entity key');
+  let fromFile: Record<string, string>;
+  try {
+    fromFile = parse(readFileSync(join(config.home, '.env'), 'utf8'));
+  } catch {
+    return 'missing';
+  }
+  const value = fromFile[name];
+  if (value === undefined) return 'missing';
+  return value.trim() === '' ? 'blank' : 'set';
 }
 
 export type RawKeyState = 'missing' | 'empty' | 'set';

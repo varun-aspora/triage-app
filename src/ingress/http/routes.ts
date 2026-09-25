@@ -2,7 +2,9 @@
 //
 // createTriageRoutes(deps) returns a Hono app with:
 //   POST /triage                       -> 202 {run_id} (or {run_id, deduplicated: true})
-//   GET  /triage/:run_id               -> {run_id, status, phase, classification, id_chain, report?}
+//   GET  /triage                       -> {runs: RunSummary[], next_cursor} (filters in run-list.ts)
+//   GET  /triage/:run_id               -> {run_id, status, phase, classification, id_chain, report?,
+//                                          created_at, updated_at, requested_by, submissions, feedback, ...}
 //   POST /triage/:run_id/ask           -> 202 {run_id, submission_id}
 //   POST /triage/:run_id/feedback      -> 200 {run_id, verdict, count}
 //   POST /triage/:run_id/post-to-slack -> 403, or 501 when enabled (v1)
@@ -17,8 +19,10 @@
 // submission then runs in the background inside the server's own Flue
 // runtime. This module never starts a runtime.
 //
-// GET passes the whole answer through one more persisted-profile redaction,
-// even though the store holds redacted text only.
+// GET /triage/:run_id passes the whole answer through one more
+// persisted-profile redaction, even though the store holds redacted text only.
+// GET /triage does not: a RunSummary holds ids, enums, counts and timestamps,
+// no free text.
 //
 // post-to-slack never calls Slack and never reads the body, so a caller's
 // approved_by has no effect. A bearer holder asserting approval is not an
@@ -29,13 +33,15 @@ import { bodyLimit } from 'hono/body-limit';
 import * as v from 'valibot';
 import { redactPersisted } from '../../gate/redact.ts';
 import { FeedbackError, recordFeedback as defaultRecordFeedback, type FeedbackDeps, type FeedbackInput, type FeedbackResult } from '../../report/feedback.ts';
-import { isTerminalPhase, RunNotFoundError, type RunPhase, type RunRecord, type RunStore } from '../../runstore/types.ts';
+import { EVIDENCE_KEYS, RunNotFoundError, type RunRecord, type RunStore } from '../../runstore/types.ts';
 import { RunIdSchema, type KnownIds, type RunId } from '../../types/core.ts';
+import type { TriageRequest } from '../../types/request.ts';
 import { IngressInputError, NoEnabledEntityError, type InputHints } from '../normalise.ts';
 import { MAX_THREAD_FILE_BYTES, type PrepareInput, type PreparedSubmission } from '../prepare.ts';
 import { SlackFetchError } from '../slack.ts';
 import { SlackPermalinkError } from '../slack-url.ts';
 import { askRun, className, type Dispatcher, type SettleDeps, type SubmissionResult } from '../submit.ts';
+import { filterRuns, parseListQuery, statusOfPhase, storeQuery } from './run-list.ts';
 import { AskBodySchema, checkIdempotencyKey, FeedbackBodySchema, parseBody, TriageBodySchema, type TriageBody } from './schemas.ts';
 
 /** How long an Idempotency-Key maps to its run (LLD 04 §2.1). */
@@ -74,8 +80,6 @@ export type TriageRouteDeps = {
 };
 
 export type TriageRouteDepsSource = TriageRouteDeps | (() => TriageRouteDeps | Promise<TriageRouteDeps>);
-
-type RunStatus = 'running' | 'completed' | 'failed';
 
 export function createTriageRoutes(source: TriageRouteDepsSource): Hono {
   const load = memoise(source);
@@ -117,6 +121,18 @@ export function createTriageRoutes(source: TriageRouteDepsSource): Hono {
       .then(() => deps.submit(prepared))
       .catch((err: unknown) => backgroundError(deps, runId, 'submission', err));
     return c.json({ run_id: runId }, 202);
+  });
+
+  app.get('/triage', async (c) => {
+    const parsed = parseListQuery(c.req.query());
+    if (!parsed.ok) return invalid(c, [parsed.field], parsed.reason);
+    const deps = await load();
+    // With a status, feedback or cursor filter the store returns every match
+    // and the route drops rows. The folder store reads every run anyway and v1
+    // volumes are small, so this costs little; push the filters into the store
+    // if Postgres volumes grow.
+    const rows = await deps.store.listRuns(storeQuery(parsed.value));
+    return c.json(filterRuns(rows, parsed.value));
   });
 
   app.get('/triage/:run_id', async (c) => {
@@ -226,23 +242,53 @@ export function startAsk(
 
 /** The GET answer. Everything but the run id goes through the persisted profile again. */
 export function runView(run: RunRecord): Record<string, unknown> {
+  // Optional access throughout: older or partial records (and test fixtures)
+  // may lack parts of the request or classification.
+  const request = run.request as Partial<TriageRequest> | undefined;
+  const source = request?.source;
+  const decision = run.classification?.decision;
+  const warnings = run.classification?.preflight_warnings;
   const view = {
-    status: statusOf(run.phase),
+    status: statusOfPhase(run.phase),
     phase: run.phase,
-    classification: run.classification?.decision ?? null,
+    classification: decision ?? null,
     id_chain: run.classification?.id_chain ?? null,
     ...(run.report !== null ? { report: run.report } : {}),
+    created_at: run.created_at,
+    updated_at: run.updated_at,
+    ...(run.phase_reason !== undefined ? { phase_reason: run.phase_reason } : {}),
+    ...(request?.requested_by !== undefined ? { requested_by: request.requested_by } : {}),
+    ...(request?.interface !== undefined ? { interface: request.interface } : {}),
+    // This is the persisted copy, so its p<digits> part is usually masked.
+    ...(source?.kind === 'slack' ? { permalink: source.permalink } : {}),
+    current_ask: run.report?.request?.current_ask ?? decision?.proposed?.current_ask ?? null,
+    ...(warnings !== undefined ? { preflight_warnings: warnings } : {}),
+    evidence: EVIDENCE_KEYS.flatMap((key) => {
+      const item = run.evidence?.[key];
+      return item !== undefined ? [{ key, version: item.version }] : [];
+    }),
+    submissions: (run.submissions ?? []).map((s) => ({
+      seq: s.seq,
+      kind: s.kind,
+      ...(s.question !== undefined ? { question: s.question } : {}),
+      created_at: s.created_at,
+      has_report: s.report !== null && s.report !== undefined,
+    })),
+    feedback: (run.feedback ?? []).map((f) => ({
+      verdict: f.verdict,
+      ...(f.actual_root_cause !== undefined ? { actual_root_cause: f.actual_root_cause } : {}),
+      ...(f.faster_path !== undefined ? { faster_path: f.faster_path } : {}),
+      given_by: f.given_by,
+      given_at: f.given_at,
+      interface: f.interface,
+    })),
+    ...(run.report !== null && run.report_md !== null ? { report_md: run.report_md } : {}),
   };
   // The persisted profile can mask digit runs in a ULID, so the id is put back after.
   return { run_id: run.run_id, ...redactPersisted(view).value };
 }
 
 // ------------------------------------------------------------------ helpers
-
-function statusOf(phase: RunPhase): RunStatus {
-  if (!isTerminalPhase(phase)) return 'running';
-  return phase === 'completed' ? 'completed' : 'failed';
-}
 
 function toPrepareInput(body: TriageBody): PrepareInput {
   const common = { interface: 'http' as const, requested_by: body.requested_by };

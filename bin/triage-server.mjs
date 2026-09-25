@@ -13,6 +13,12 @@ if (major < 22 || (major === 22 && minor < 19)) {
   process.exit(1);
 }
 
+// The server is started by hand from its home folder, so an unset TRIAGE_HOME
+// means that folder. Set here, before any import, because the config is loaded
+// from several modules. The CLI keeps requiring it: Claude Code runs the CLI
+// from other workspaces, where the working directory is not the home.
+if ((process.env.TRIAGE_HOME ?? '').trim() === '') process.env.TRIAGE_HOME = process.cwd();
+
 const { runServer, describeBootError } = await import('../src/server/main.ts');
 
 let server;

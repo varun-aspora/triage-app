@@ -9,6 +9,7 @@ import {
   applyProviderEnv,
   configFromRecord,
   deployModeForPreflight,
+  envFileKeyState,
   loadConfig,
   lookupEnv,
   providerEnv,
@@ -145,6 +146,7 @@ describe('defaults with an empty .env', () => {
     expect(c.models.thinkingStrong).toBe('high');
     expect(c.http.port).toBe(3000);
     expect(c.http.allowSlackPost).toBe(false);
+    expect(c.ui.env).toBe('non-production');
     expect(c.runs.priorCases).toBe(false);
     expect(c.code).toEqual({ codegraphBin: 'codegraph', qwBin: 'qw', syncBeforeQuery: true });
     expect({ ...c.git }).toEqual({ protocol: 'ssh', host: 'github.com', org: 'Vance-Club', httpsToken: undefined });
@@ -513,6 +515,46 @@ describe('lookupEnv', () => {
     const fake = { ...fromRecord({}) } as Config;
     expect(() => lookupEnv(fake, 'SSFB_BRO_API_URL')).toThrow(ConfigError);
     expect(() => deployModeForPreflight(fake)).toThrow(ConfigError);
+  });
+});
+
+describe('TRIAGE_UI_ENV', () => {
+  test('production parses', () => {
+    expect(fromRecord({ TRIAGE_UI_ENV: 'production' }).ui.env).toBe('production');
+    expect(fromRecord({ TRIAGE_UI_ENV: 'non-production' }).ui.env).toBe('non-production');
+  });
+
+  test('an unknown value is a ConfigError naming the key', () => {
+    expect(configError(() => fromRecord({ TRIAGE_UI_ENV: 'prod' })).keys).toEqual(['TRIAGE_UI_ENV']);
+  });
+});
+
+describe('envFileKeyState', () => {
+  // Fake values; they only have to stay out of the result.
+  const SECRET = 'postgres://fake-user:fake-pass@db.test/app';
+
+  test('reads the .env as it is on disk now', () => {
+    const home = makeHome('SSFB_HARBOR_DB_URL=\n');
+    const c = loadConfig({ home });
+    expect(envFileKeyState(c, 'SSFB_HARBOR_DB_URL')).toBe('blank');
+    expect(envFileKeyState(c, 'RTL_REMINDER_DB_URL')).toBe('missing');
+    writeFileSync(join(home, '.env'), `SSFB_HARBOR_DB_URL=\nRTL_REMINDER_DB_URL=${SECRET}\n`);
+    const state = envFileKeyState(c, 'RTL_REMINDER_DB_URL');
+    expect(state).toBe('set');
+    expect(JSON.stringify(state)).not.toContain('fake-pass');
+  });
+
+  test('an unreadable .env counts as missing', () => {
+    const home = makeHome('');
+    const c = loadConfig({ home });
+    rmSync(join(home, '.env'));
+    expect(envFileKeyState(c, 'SSFB_HARBOR_DB_URL')).toBe('missing');
+  });
+
+  test('refuses table keys and non-entity names', () => {
+    const c = loadConfig({ home: makeHome('') });
+    expect(configError(() => envFileKeyState(c, 'TRIAGE_HTTP_AUTH_TOKEN')).keys).toEqual(['TRIAGE_HTTP_AUTH_TOKEN']);
+    expect(configError(() => envFileKeyState(c, 'HOME')).keys).toEqual(['HOME']);
   });
 });
 

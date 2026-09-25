@@ -33,6 +33,7 @@ changes, update this file with it.
 - test/contract/**/*.contract.ts (T03, T06, T10; never *.contract.test.ts)
 - evals/promptfoo/classifier/ (T10)
 - scripts/ (bun scripts)
+- web/ (the browser console: Vite + React + TypeScript, built to web/dist and served at /ui by src/http/ui.http.ts; imports only types from src/types, its tests run with `bun run test:web`)
 
 ## Naming
 
