@@ -12,6 +12,7 @@ import { defineSubagent, type SkillDefinition, type SubagentDefinition } from '@
 import { codeWalkerModel } from '../../models.ts';
 import { toolsFor } from '../../tools/index.ts';
 import type { RunId } from '../../types/core.ts';
+import { deployManifestLines } from '../deploy-manifests.ts';
 import { codegraphLimitsSkill, currentKnowledge, frontendRoutingSkill, methodDoc, repoMapSkill } from '../skills.ts';
 import {
   checkRunId,
@@ -68,6 +69,7 @@ export function codeWalkerMounts(runId: RunId, options: { readonly env: Delegate
     '',
     `- Tools mounted: ${tools.map((t) => t.name).join(', ')}.`,
     '- You have no database, API or log tools. If the brief needs runtime data, say so in the reply.',
+    ...deployManifestLines(env.config, env.registry, env.registry.enabledEntities()),
   ].join('\n');
 
   return Object.freeze({

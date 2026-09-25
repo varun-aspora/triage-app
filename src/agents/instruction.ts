@@ -25,6 +25,8 @@ export type MethodOptions = {
   readonly focus?: readonly Entity[];
   /** Registry services per entity, shown in the brief skeleton. */
   readonly services?: Partial<Readonly<Record<Entity, readonly string[]>>>;
+  /** Deploy manifests lines from deployManifestLines, one per enabled entity. */
+  readonly deployManifests?: readonly string[];
   /** Defaults to the knowledge loaded at boot. */
   readonly knowledge?: Knowledge;
 };
@@ -52,7 +54,7 @@ export function methodText(init: TriageInit, options: MethodOptions = {}): strin
   const sections = [
     ...docs,
     FIXED_RULES,
-    runSection(init, entities, focus, ids, window),
+    runSection(init, entities, focus, ids, window, options.deployManifests ?? []),
     briefSection(focus.length > 0 ? focus : entities, ids, window, options.services),
   ];
   return `${sections.join('\n\n')}\n`;
@@ -64,6 +66,7 @@ function runSection(
   focus: readonly Entity[],
   ids: string,
   window: string,
+  deployManifests: readonly string[],
 ): string {
   const entityLine =
     entities.length > 0
@@ -79,6 +82,7 @@ function runSection(
     `- Run id: ${clean(init.request.request_id)}`,
     `- Window: ${window}`,
     `- Enabled entities: ${entityLine}`,
+    ...deployManifests,
     `- Named in the request: ${focusLine}`,
     `- Known ids: ${ids}`,
     `- Tier: ${init.classification.tier_final}`,

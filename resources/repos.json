@@ -9,7 +9,6 @@
   { "repo": "bro", "entities": ["ssfb", "rtl"] },
   { "repo": "audit", "entities": ["ssfb"] },
   { "repo": "shivalik-cbs-go", "entities": ["ssfb"] },
-  { "repo": "prod-ssfb-aspora-argo", "entities": ["ssfb"] },
   { "repo": "workflow-op", "entities": ["ssfb", "rtl"] },
   { "repo": "package-svc", "entities": ["atspl"] },
   { "repo": "pulse-backend", "entities": ["atspl"] },
@@ -23,5 +22,10 @@
   { "repo": "vance-android", "entities": ["ssfb", "atspl", "rtl"] },
   { "repo": "vance-ios", "entities": ["ssfb", "atspl", "rtl"] },
   { "repo": "x-ray", "entities": ["rtl"] },
-  { "repo": "munin", "entities": ["rtl"] }
+  { "repo": "munin", "entities": ["rtl"] },
+  { "repo": "prod-ssfb-aspora-argo", "entities": ["ssfb"] },
+  { "repo": "non-prod-aspora-argo", "entities": ["ssfb"] },
+  { "repo": "prod-envoy-services-aspora-argo", "entities": ["atspl"] },
+  { "repo": "stage-atspl-aspora-argo", "entities": ["atspl"] },
+  { "repo": "k8s-manifests", "entities": ["rtl"] }
 ]

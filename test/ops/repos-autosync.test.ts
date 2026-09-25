@@ -23,7 +23,7 @@ import {
   timerOffReason,
   tryAcquireSyncLock,
 } from '../../src/ops/repos-autosync.ts';
-import type { SyncReport } from '../../src/ops/repos.ts';
+import type { RepoSelection, SyncReport } from '../../src/ops/repos.ts';
 import { testEnvRecord } from '../support/home.ts';
 
 const HOUR = 60 * 60 * 1000;
@@ -353,6 +353,71 @@ describe('syncBeforeRun and runWarnings', () => {
     };
     const warnings = await syncBeforeRun('cli', d);
     expect(warnings[0]?.message).toBe('repo sync did not run (TypeError); this run uses the checkouts as they are');
+  });
+});
+
+describe('syncBeforeRun with infra repos', () => {
+  const INFRA = ['k8s-manifests', 'prod-ssfb-aspora-argo'];
+
+  function recording(report: (sel: RepoSelection) => SyncReport) {
+    const calls: RepoSelection[] = [];
+    const d: AutoSyncDeps = {
+      config: configWith(),
+      runner: createFakeRunner([]),
+      clock: () => T0,
+      syncRepos: async (sel) => {
+        calls.push(sel);
+        return report(sel);
+      },
+    };
+    return { d, calls };
+  }
+
+  test('a fresh record still fetches the infra repos, without an index, and writes no record', async () => {
+    writeState(state({ last_ok_at: new Date(T0).toISOString() }));
+    const before = readFileSync(join(reposDir, SYNC_STATE_FILE), 'utf8');
+    const { d, calls } = recording((sel) => done([...(sel.repos ?? [])]));
+    expect(await syncBeforeRun('cli', d, INFRA)).toEqual([]);
+    expect(calls).toEqual([{ repos: INFRA, index: false }]);
+    expect(readFileSync(join(reposDir, SYNC_STATE_FILE), 'utf8')).toBe(before);
+  });
+
+  test('infra repos the full sync just updated are not fetched again', async () => {
+    const { d, calls } = recording((sel) => (sel.repos === undefined ? done(['harbor', 'k8s-manifests']) : done([...sel.repos])));
+    await syncBeforeRun('cli', d, INFRA);
+    expect(calls).toEqual([{}, { repos: ['prod-ssfb-aspora-argo'], index: false }]);
+  });
+
+  test('a failed infra fetch is a warning on the run', async () => {
+    writeState(state({ last_ok_at: new Date(T0).toISOString() }));
+    const { d } = recording((sel) => done([], [...(sel.repos ?? [])]));
+    const warnings = await syncBeforeRun('cli', d, ['k8s-manifests']);
+    expect(warnings.map((w) => w.message)).toEqual(['repo sync failed for k8s-manifests; those checkouts are as they were']);
+  });
+
+  test('an interface not in TRIAGE_REPOS_SYNC_INTERFACES fetches nothing', async () => {
+    const { d, calls } = recording(() => done([]));
+    const off: AutoSyncDeps = { ...d, config: configWith({ TRIAGE_REPOS_SYNC_INTERFACES: 'none' }) };
+    expect(await syncBeforeRun('cli', off, INFRA)).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  test('the infra fetch waits for another process holding the lock', async () => {
+    writeState(state({ last_ok_at: new Date(T0).toISOString() }));
+    const other = tryAcquireSyncLock(reposDir, () => T0);
+    expect(other).toBeDefined();
+    let slept = 0;
+    const { d, calls } = recording((sel) => done([...(sel.repos ?? [])]));
+    const waiting: AutoSyncDeps = {
+      ...d,
+      sleep: async () => {
+        slept++;
+        other?.release();
+      },
+    };
+    expect(await syncBeforeRun('cli', waiting, ['k8s-manifests'])).toEqual([]);
+    expect(slept).toBe(1);
+    expect(calls).toEqual([{ repos: ['k8s-manifests'], index: false }]);
   });
 });
 

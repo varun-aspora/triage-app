@@ -55,3 +55,10 @@ workflow-op's NRI landing template picks what to show by cohort name (see
 `ssfb-workflow`). The same notes say a parent and child cohort scheme is used,
 so being in the experiment is not the same as getting the screen; check the
 user's membership in both (unverified: the scheme is not documented here).
+
+## Deploy
+
+The app folder is `cohort/` inside the deploy manifests folder your
+instructions name. `base/` holds the deployment and `overlay/` the config per
+region, with shared values in a `common` folder. Check it when the question is
+what runs and with which settings, and cite the file.

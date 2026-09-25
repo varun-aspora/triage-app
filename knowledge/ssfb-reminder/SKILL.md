@@ -64,5 +64,8 @@ sql_select {
 
 ## Deploy
 
-The deploy manifests repo `prod-ssfb-aspora-argo` has a `reminder/` directory
-covering both the API and the worker.
+The app folder is `reminder/` inside the deploy manifests folder your
+instructions name. `base/` holds the deployment and `overlay/` the config per
+region, with shared values in a `common` folder. It covers both the API and
+the worker. Check it when the question is what runs and with which settings,
+and cite the file.

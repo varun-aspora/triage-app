@@ -12,7 +12,12 @@
 //   failing (no access, say) does not make every run sync again; runs are
 //   told which repos failed. A sync where every repo failed (off VPN, no key)
 //   is a failed attempt, and the timer and runs wait RETRY_AFTER_MS before
-//   the next try. A sync of one repo (--repo) records nothing.
+//   the next try. A sync of some repos (--repo, or the infra repos before a
+//   run) records nothing.
+// - Before a run, the deploy manifests repos named by <ENTITY>_INFRA_REPO are
+//   also fetched, whether or not the full sync is due, without a codegraph
+//   index. They take the same lock, so a prod and a stage process sharing
+//   TRIAGE_REPOS_DIR never fetch the same checkout at once.
 // - <reposDir>/.triage-sync.lock/ is held while a sync runs, so the server,
 //   CLI runs and `triage repos sync` never sync at the same time. It records
 //   the pid; a lock whose process is gone, or older than LOCK_STALE_MS, is
@@ -260,7 +265,7 @@ async function runLocked(mode: Mode, deps: AutoSyncDeps, reposDir: string): Prom
         if (!due.due) return { status: 'not_due', due, ...(now !== undefined ? { state: now } : {}) };
       }
       const report = await (deps.syncRepos ?? syncRepos)(mode.sel, deps);
-      if (report.status !== 'done' || mode.sel.repo !== undefined) return { status: 'synced', report };
+      if (report.status !== 'done' || mode.sel.repo !== undefined || mode.sel.repos !== undefined) return { status: 'synced', report };
       const state = stateAfter(report, mode.trigger, new Date(clock()).toISOString(), readSyncState(reposDir));
       await writeFileAtomic(join(reposDir, SYNC_STATE_FILE), `${JSON.stringify(state, null, 2)}\n`);
       return { status: 'synced', report, state };
@@ -308,11 +313,12 @@ export function syncsOn(config: Pick<Config, 'repos'>, iface: Interface): boolea
 }
 
 /**
- * The run step: sync when due and the interface is listed, then turn the
- * outcome into preflight warnings. Never throws for a sync problem; the run
+ * The run step: sync when due and the interface is listed, then fetch the
+ * infra repos the full sync did not just bring up to date, and turn both
+ * outcomes into preflight warnings. Never throws for a sync problem; the run
  * goes on with the checkouts as they are.
  */
-export async function syncBeforeRun(iface: Interface, deps: AutoSyncDeps): Promise<PreflightWarning[]> {
+export async function syncBeforeRun(iface: Interface, deps: AutoSyncDeps, infraRepos: readonly string[] = []): Promise<PreflightWarning[]> {
   if (!syncsOn(deps.config, iface)) return [];
   let result: AutoSyncResult;
   try {
@@ -321,7 +327,22 @@ export async function syncBeforeRun(iface: Interface, deps: AutoSyncDeps): Promi
     deps.signal?.throwIfAborted();
     return [repoWarning(`repo sync did not run (${err instanceof Error ? err.name : 'error'}); this run uses the checkouts as they are`)];
   }
-  return runWarnings(result);
+  const warnings = runWarnings(result);
+  const fresh = result.status === 'synced' && result.report.status === 'done' ? result.report.ok : [];
+  const infra = [...new Set(infraRepos)].filter((r) => !fresh.includes(r));
+  if (infra.length === 0) return warnings;
+  try {
+    warnings.push(...runWarnings(await syncInfra(infra, deps)));
+  } catch (err) {
+    deps.signal?.throwIfAborted();
+    warnings.push(repoWarning(`deploy manifests sync did not run (${err instanceof Error ? err.name : 'error'}); this run uses the checkouts as they are`));
+  }
+  return warnings;
+}
+
+/** Fetches the given infra repos now, waiting for any sync under way. No codegraph index, no state written. */
+export function syncInfra(repos: readonly string[], deps: AutoSyncDeps): Promise<AutoSyncResult> {
+  return start({ trigger: 'run', checkDue: false, wait: true, sel: { repos, index: false } }, deps);
 }
 
 function repoWarning(message: string): PreflightWarning {

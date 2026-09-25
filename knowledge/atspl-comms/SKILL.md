@@ -59,3 +59,10 @@ sql_select {
   params: ["<table_name>"]
 }
 ```
+
+## Deploy
+
+The app folder is `comms/` inside the deploy manifests folder your
+instructions name. `base/` holds the deployment and `overlay/` the config per
+region, with shared values in a `common` folder. Check it when the question is
+what runs and with which settings, and cite the file.

@@ -66,3 +66,10 @@ sql_select {
 - **Wrong or missing number.** A send to the wrong number usually starts
   upstream in phone normalisation in harbor or guardian, not in comms. Look at
   the upstream logs first.
+
+## Deploy
+
+The app folder is `comms/` inside the deploy manifests folder your
+instructions name. `base/` holds the deployment and `overlay/` the config per
+region, with shared values in a `common` folder. Check it when the question is
+what runs and with which settings, and cite the file.

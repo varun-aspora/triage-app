@@ -415,6 +415,22 @@ describe('pre-flight', () => {
     expect(warnings).toContainEqual(repoWarning);
   });
 
+  test('the repo sync gets the entities the request names, so it fetches their deploy manifests', async () => {
+    const seen: (readonly string[] | undefined)[] = [];
+    const h = harness({ config: { mock: false } });
+    const deps: SubmissionDeps = {
+      ...h.deps,
+      repoSync: async ({ entities }) => {
+        seen.push(entities);
+        return [];
+      },
+    };
+    const p = prepared();
+    await runSubmission({ ...p, request: { ...p.request, hints: { ...p.request.hints, entities: ['atspl'] } } }, deps);
+    await runSubmission(prepared({ runId: 'run_submit_no_hints_01' }), deps);
+    expect(seen).toEqual([['atspl'], p.request.hints.entities]);
+  });
+
   test('mock mode does not sync repos', async () => {
     let calls = 0;
     const h = harness({ config: { mock: true } });

@@ -6,18 +6,18 @@ import { fileURLToPath } from 'node:url';
 import { parse } from 'dotenv';
 import { configFromRecord, type Config } from './env.ts';
 import { RegistryError, loadRegistry, type Registry } from './registry.ts';
-import { loadRepos, parseRepos, repoEnum, type RepoPin } from './repos.ts';
+import { infraRepoFor, loadRepos, parseRepos, repoEnum, type RepoPin } from './repos.ts';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const RESOURCES = join(ROOT, 'resources');
 const EXAMPLE: Readonly<Record<string, string>> = parse(readFileSync(join(ROOT, '.env.example'), 'utf8'));
 
-function config(): Config {
-  return configFromRecord({ ...EXAMPLE }, '/triage/home');
+function config(overrides: Readonly<Record<string, string>> = {}): Config {
+  return configFromRecord({ ...EXAMPLE, ...overrides }, '/triage/home');
 }
 
-function registry(): Registry {
-  return loadRegistry(config(), { resourcesDir: RESOURCES });
+function registry(overrides: Readonly<Record<string, string>> = {}): Registry {
+  return loadRegistry(config(overrides), { resourcesDir: RESOURCES });
 }
 
 function registryError(fn: () => unknown): RegistryError {
@@ -137,5 +137,29 @@ describe('repoEnum', () => {
     expect(e.names).toContain('pulse-backend');
     expect(e.names).not.toContain('harbor');
     expect(e.names).not.toContain('vance-android');
+  });
+});
+
+describe('infraRepoFor', () => {
+  const pins = (): readonly RepoPin[] => loadRepos(config(), registry(), { resourcesDir: RESOURCES });
+
+  test('every prod and stage infra repo is pinned for its entity', () => {
+    const stage = { SSFB_INFRA_REPO: 'non-prod-aspora-argo', ATSPL_INFRA_REPO: 'stage-atspl-aspora-argo', RTL_INFRA_REPO: 'k8s-manifests:environments/vance-core/stage/ap-south-1' };
+    for (const r of [registry(), registry(stage)]) {
+      for (const entity of r.entities) expect(infraRepoFor(r, pins(), entity).status).toBe('ok');
+    }
+  });
+
+  test('a repo pinned for another entity is off, naming the key and repo', () => {
+    const r = registry({ ATSPL_INFRA_REPO: 'k8s-manifests' });
+    expect(infraRepoFor(r, pins(), 'atspl')).toEqual({
+      status: 'off',
+      envName: 'ATSPL_INFRA_REPO',
+      reason: 'ATSPL_INFRA_REPO names k8s-manifests, which is not pinned for atspl in resources/repos.json',
+    });
+  });
+
+  test('blank is off', () => {
+    expect(infraRepoFor(registry({ RTL_INFRA_REPO: '' }), pins(), 'rtl')).toMatchObject({ status: 'off', reason: 'RTL_INFRA_REPO is blank' });
   });
 });

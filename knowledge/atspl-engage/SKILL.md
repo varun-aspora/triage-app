@@ -58,3 +58,10 @@ sql_select {
 - **Record missing.** If the user's action is not in its table, search the
   logs for consumer errors in the window: the event may not have been
   consumed.
+
+## Deploy
+
+The app folder is `engage/` inside the deploy manifests folder your
+instructions name. `base/` holds the deployment and `overlay/` the config per
+region, with shared values in a `common` folder. Check it when the question is
+what runs and with which settings, and cite the file.

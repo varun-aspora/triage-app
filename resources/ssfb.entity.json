@@ -87,5 +87,6 @@
   },
   "cbs": { "enabled_flag": "SSFB_CBS_VIA_KUBECTL_ENABLED" },
   "kube": { "context_env": "SSFB_KUBE_CONTEXT", "aws_profile_env": "SSFB_AWS_PROFILE" },
-  "repos_extra": ["shivalik-cbs-go", "go-commons", "java-commons", "prod-ssfb-aspora-argo"]
+  "repos_extra": ["shivalik-cbs-go", "go-commons", "java-commons"],
+  "infra_repo": "SSFB_INFRA_REPO"
 }

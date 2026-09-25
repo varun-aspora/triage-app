@@ -298,3 +298,10 @@ a week.
 logs_search({ service: "rhythm", message: "Api ended with Error", terms: ["cards", "debit"],
   from: "<from>", to: "<to>" })
 ```
+
+## Deploy
+
+The app folder is `rhythm/` inside the deploy manifests folder your
+instructions name. `base/` holds the deployment and `overlay/` the config per
+region, with shared values in a `common` folder. Check it when the question is
+what runs and with which settings, and cite the file.

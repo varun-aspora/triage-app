@@ -417,6 +417,27 @@ describe('syncRepos', () => {
     expect(runner.calls.every((c) => c.argv.includes(b))).toBe(true);
   });
 
+  test('repos limits sync to those pins, and index false runs no codegraph', async () => {
+    makeRepo('a');
+    const b = makeRepo('b');
+    makeRepo('c');
+    const steps = cleanSyncSteps(b, 'main', SHA_B).filter((s) => s.bin !== CG);
+    const { runner, d } = deps(steps, [pin('a', { branch: 'main' }), pin('b', { branch: 'main' }), pin('c', { branch: 'main' })]);
+    const report = await syncRepos({ repos: ['b'], index: false }, d);
+    if (report.status !== 'done') throw new Error('expected done');
+    expect(report.results.map((r) => r.repo)).toEqual(['b']);
+    expect(report.results[0]).toMatchObject({ status: 'ok', action: 'updated', commit: SHA_B });
+    expect(report.results[0]!.index).toBeUndefined();
+    expect(runner.calls.some((c) => c.bin === CG)).toBe(false);
+  });
+
+  test('an unknown name in repos is an error before any git call', async () => {
+    const { runner, d } = deps([], [pin('a'), pin('b')]);
+    const err = await syncRepos({ repos: ['b', 'nope'] }, d).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(UnknownRepoError);
+    expect(runner.calls).toEqual([]);
+  });
+
   test('an unknown --repo is an error that lists the valid names', async () => {
     const { runner, d } = deps([], [pin('a'), pin('b')]);
     const err = await syncRepos({ repo: 'nope' }, d).catch((e: unknown) => e);

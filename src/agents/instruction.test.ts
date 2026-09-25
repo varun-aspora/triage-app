@@ -167,3 +167,13 @@ describe('methodText', () => {
     }
   });
 });
+
+describe('deploy manifests', () => {
+  test('the lines go into the run section after the enabled entities', () => {
+    const line = '- Deploy manifests for rtl: repo k8s-manifests.';
+    const text = methodText(init(), { knowledge, entities: ['rtl'], deployManifests: [line] });
+    const run = text.slice(text.indexOf('## This run'));
+    expect(run.indexOf(line)).toBeGreaterThan(run.indexOf('- Enabled entities:'));
+    expect(run.indexOf(line)).toBeLessThan(run.indexOf('- Named in the request:'));
+  });
+});

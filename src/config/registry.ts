@@ -1,6 +1,7 @@
 // Entity registry: resources/<entity>.entity.json maps each service to the env
 // names that hold its DSN, base URL and credentials, plus Quickwit, CBS, kube
-// and repo structure (HLD §4.2, D5).
+// and repo structure (HLD §4.2, D5), and the key naming this deployment's
+// deploy manifests repo.
 //
 // Rules this module keeps:
 // - Env values are read only through lookupEnv and are held in a closure.
@@ -90,6 +91,8 @@ export const EntityRegistrySchema = v.strictObject({
   cbs: v.optional(v.strictObject({ enabled_flag: RegistryEnvNameSchema })),
   kube: v.strictObject({ context_env: RegistryEnvNameSchema, aws_profile_env: RegistryEnvNameSchema }),
   repos_extra: v.optional(v.array(RepoNameSchema)),
+  /** Env name whose value is `repo` or `repo:path`: the deploy manifests this deployment reads. */
+  infra_repo: v.optional(RegistryEnvNameSchema),
 });
 export type EntityRegistry = v.InferOutput<typeof EntityRegistrySchema>;
 
@@ -131,6 +134,14 @@ export type AuthCapability = Capability & { readonly header: string; readonly sc
 export type FieldEncryptionCapability = Capability & { readonly algorithm: 'aes-siv' };
 export type KubeCapability = { readonly context: Capability; readonly awsProfile: Capability };
 
+/**
+ * The deploy manifests repo from <ENTITY>_INFRA_REPO. `path` is '.' for the
+ * repo root. Not a credential, so nothing is hidden.
+ */
+export type InfraRepoCapability =
+  | { readonly status: 'ok'; readonly envName: string; readonly repo: string; readonly path: string }
+  | { readonly status: 'disabled'; readonly envName: string; readonly reason: 'blank' };
+
 export type QuickwitAuth = 'none' | 'bearer';
 type QuickwitCommon = { readonly status: 'ok'; readonly index: string; readonly maxConcurrency: number; readonly maxHits: number };
 
@@ -144,7 +155,7 @@ export const QUICKWIT_DEFAULT_MAX_CONCURRENCY = 1;
 export const QUICKWIT_DEFAULT_MAX_HITS = 500;
 
 export type CapabilityStatus = 'ok' | 'blank' | 'missing' | 'invalid' | 'disabled';
-export type CapabilityKind = 'db' | 'api' | 'auth' | 'field_encryption' | 'quickwit' | 'cbs' | 'kube_context' | 'aws_profile';
+export type CapabilityKind = 'db' | 'api' | 'auth' | 'field_encryption' | 'quickwit' | 'cbs' | 'kube_context' | 'aws_profile' | 'infra_repo';
 
 export type CapabilityRow = {
   readonly capability: CapabilityKind;
@@ -181,6 +192,8 @@ export type Registry = {
   kube(entity: Entity): KubeCapability;
   /** Service repos then repos_extra, deduplicated. */
   repos(entity: Entity): readonly string[];
+  /** undefined when the registry names no infra_repo key. */
+  infraRepo(entity: Entity): InfraRepoCapability | undefined;
   capabilityReport(entity: Entity): CapabilityReport;
 };
 
@@ -322,7 +335,7 @@ export function envNamesOf(spec: EntityRegistry): readonly string[] {
   }
   const q = spec.quickwit;
   out.push(...defined(q.transport, q.index, q.max_concurrency, q.max_hits, q.http?.url, q.http?.auth, q.http?.token, q.qw?.context));
-  out.push(...defined(spec.cbs?.enabled_flag, spec.kube.context_env, spec.kube.aws_profile_env));
+  out.push(...defined(spec.cbs?.enabled_flag, spec.kube.context_env, spec.kube.aws_profile_env, spec.infra_repo));
   return [...new Set(out)];
 }
 
@@ -361,6 +374,7 @@ function valueProblems(spec: EntityRegistry, look: (name: string) => EnvLookup):
   check(q.max_concurrency, isPositiveInt, 'must be a whole number of at least 1');
   check(q.max_hits, isPositiveInt, 'must be a whole number of at least 1');
   check(spec.cbs?.enabled_flag, (x) => x === 'true' || x === 'false', 'must be true or false');
+  check(spec.infra_repo, (x) => parseInfraRepo(x) !== undefined, INFRA_REPO_FORMAT);
   return out;
 }
 
@@ -439,6 +453,15 @@ function makeRegistry(
       const spec = specOf(entity);
       const fromServices = Object.values(spec.services).flatMap((s) => defined(s.repo));
       return Object.freeze([...new Set([...fromServices, ...(spec.repos_extra ?? [])])]);
+    },
+    infraRepo(entity) {
+      const name = enabledSpec(entity).infra_repo;
+      if (name === undefined) return undefined;
+      const l = look(name);
+      if (l.state !== 'set') return Object.freeze({ status: 'disabled', envName: name, reason: 'blank' });
+      // Validated at load for enabled entities.
+      const parsed = parseInfraRepo(l.value.trim()) as { repo: string; path: string };
+      return Object.freeze({ status: 'ok', envName: name, ...parsed });
     },
     capabilityReport: (entity) => report(specOf(entity), enabledList.includes(entity), look),
   };
@@ -570,7 +593,38 @@ function report(spec: EntityRegistry, enabled: boolean, look: (name: string) => 
 
   single('kube_context', spec.kube.context_env);
   single('aws_profile', spec.kube.aws_profile_env);
+  if (spec.infra_repo !== undefined) {
+    const name = spec.infra_repo;
+    const l = look(name);
+    const bad = l.state === 'set' && parseInfraRepo(l.value.trim()) === undefined;
+    rows.push(Object.freeze({
+      capability: 'infra_repo',
+      envNames: Object.freeze([name]),
+      status: bad ? 'invalid' : l.state === 'set' ? 'ok' : l.state,
+      ...(bad ? { reason: `${name} ${INFRA_REPO_FORMAT}` } : {}),
+    }));
+  }
   return Object.freeze({ entity: spec.entity, enabled, rows: Object.freeze(rows) });
+}
+
+// -------------------------------------------------------------- infra repo
+
+const INFRA_REPO_FORMAT = 'must be <repo> or <repo>:<relative/path>';
+const PATH_SEGMENT = /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
+
+/**
+ * Splits `repo` or `repo:path` on the first ':'. No path, or '.', means the
+ * repo root. The path is relative, with no '.', '..' or empty segments, so it
+ * cannot leave the checkout. undefined when malformed.
+ */
+export function parseInfraRepo(value: string): { readonly repo: string; readonly path: string } | undefined {
+  const at = value.indexOf(':');
+  const repo = at === -1 ? value : value.slice(0, at);
+  const path = at === -1 ? '.' : value.slice(at + 1);
+  if (!v.is(RepoNameSchema, repo)) return undefined;
+  if (path === '.') return Object.freeze({ repo, path });
+  if (!path.split('/').every((seg) => PATH_SEGMENT.test(seg))) return undefined;
+  return Object.freeze({ repo, path });
 }
 
 // ----------------------------------------------------------------- helpers

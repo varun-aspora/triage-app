@@ -64,3 +64,10 @@ answers "not configured for atspl:pulse" and that is a gap to record.
   harbor admin, so check harbor state first, then pulse to harbor
   connectivity in pulse's error logs. Past tickets raised in pulse (for
   example internal review queues) are keyed by the harbor `form_id`.
+
+## Deploy
+
+The app folder is `pulse-backend/` inside the deploy manifests folder your
+instructions name. `base/` holds the deployment and `overlay/` the config per
+region, with shared values in a `common` folder. Check it when the question is
+what runs and with which settings, and cite the file.

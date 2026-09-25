@@ -54,5 +54,13 @@ blaming eventbus.
   look for Kafka lag or a topic mismatch, an HTTP non-2xx, or an SQS
   permission error in the eventbus logs.
 - **Slow delivery under load.** The deployment scales on consumer lag, so
-  check the scaling config in the deploy manifests repo
-  (prod-ssfb-aspora-argo) before blaming throughput.
+  check the scaling config in the deploy manifests repo named in your
+  instructions before blaming throughput.
+
+## Deploy
+
+The app folder is `eventbus/` inside the deploy manifests folder your
+instructions name. `base/` holds the deployment and `overlay/` the config per
+region, with shared values in a `common` folder. Its scaling on consumer lag
+is set here. Check it when the question is what runs and with which settings,
+and cite the file.

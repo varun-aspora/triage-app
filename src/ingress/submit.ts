@@ -65,6 +65,8 @@ import { loadPatterns, matchPattern, type Pattern } from '../classify/patterns.t
 import { applyTierPolicy, toTierDecision, type TierPolicyContext, type TierPolicyResult } from '../classify/policy.ts';
 import type { Config } from '../config/env.ts';
 import { ConfigError } from '../config/errors.ts';
+import type { Registry } from '../config/registry.ts';
+import { infraRepoNames, loadRepos } from '../config/repos.ts';
 import { createExecRunner, type ExecRunner } from '../connectors/exec.ts';
 import { mockPortFromFixtures } from '../connectors/mock.ts';
 import { ConnectorError } from '../connectors/types.ts';
@@ -133,8 +135,15 @@ export type SettleDeps = {
 export type SubmissionDeps = SettleDeps & {
   /** Pre-flight for the request's entities. Not called in mock mode. */
   readonly preflight: (input: { readonly entities?: readonly Entity[]; readonly signal: AbortSignal }) => Promise<Pick<PreflightResult, 'warnings'>>;
-  /** Syncs the repos when due for this interface (D47). Not called in mock mode. Left out: no sync. */
-  readonly repoSync?: (input: { readonly interface: Interface; readonly signal: AbortSignal }) => Promise<readonly PreflightWarning[]>;
+  /**
+   * Syncs the repos when due for this interface (D47), then fetches the
+   * request's deploy manifests repos. Not called in mock mode. Left out: no sync.
+   */
+  readonly repoSync?: (input: {
+    readonly interface: Interface;
+    readonly entities?: readonly Entity[];
+    readonly signal: AbortSignal;
+  }) => Promise<readonly PreflightWarning[]>;
   readonly identity: (
     request: TriageRequest,
     opts: { readonly redactionNames: readonly string[]; readonly signal: AbortSignal },
@@ -217,7 +226,11 @@ export async function runSubmission(prepared: PreparedSubmission, deps: Submissi
           ...(request.hints.entities !== undefined ? { entities: request.hints.entities } : {}),
           signal,
         }),
-        deps.repoSync?.({ interface: request.interface, signal }) ?? [],
+        deps.repoSync?.({
+          interface: request.interface,
+          ...(request.hints.entities !== undefined ? { entities: request.hints.entities } : {}),
+          signal,
+        }) ?? [],
       ]);
       warnings.push(...pf.warnings, ...repos);
     }
@@ -559,7 +572,8 @@ export function submissionDeps(options: SubmissionDepsOptions = {}): SubmissionD
         isTty: options.isTty ?? false,
         signal,
       }),
-    repoSync: ({ interface: iface, signal }) => syncBeforeRun(iface, { config, runner: options.runner ?? createExecRunner(), signal }),
+    repoSync: ({ interface: iface, entities, signal }) =>
+      syncBeforeRun(iface, { config, runner: options.runner ?? createExecRunner(), signal }, infraReposToSync(config, registry, entities)),
     identity: (request, { redactionNames, signal }) =>
       resolveIngressIdentity(request, {
         sql,
@@ -587,6 +601,17 @@ export function submissionDeps(options: SubmissionDepsOptions = {}): SubmissionD
 }
 
 // A refused MODEL_EMBEDDING must not stop runs: embeddings are derived data.
+// The deploy manifests repos for the request's entities (all enabled ones when
+// it names none). A repos.json that does not load means none; the code tools
+// report that problem.
+function infraReposToSync(config: Config, registry: Registry, entities: readonly Entity[] | undefined): readonly string[] {
+  try {
+    return infraRepoNames(registry, loadRepos(config, registry), registry.enabledEntities(entities));
+  } catch {
+    return [];
+  }
+}
+
 function embedderFor(config: Config, fetchImpl: FetchLike | undefined): Embedder | null {
   try {
     return createEmbedder(config, { fetch: fetchImpl ?? ((url, reqInit) => fetch(url, reqInit)) });

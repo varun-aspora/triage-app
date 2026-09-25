@@ -36,6 +36,7 @@ import {
 import { toolsFor } from '../tools/index.ts';
 import { type TriageInit, TriageInitSchema } from '../types/classification.ts';
 import { codeWalkerFor } from './delegates/code-walker.ts';
+import { deployManifestLines } from './deploy-manifests.ts';
 import { type DelegateEnv, investigatorFor } from './delegates/investigator.ts';
 import type { Escalation } from './escalation.ts';
 import { methodText } from './instruction.ts';
@@ -70,7 +71,8 @@ export function Triage({ id }: AgentProps): string {
   useSandbox(rt.sandbox);
 
   const services = Object.fromEntries(plan.entities.map((e) => [e, rt.registry.services(e)]));
-  useInstruction(methodText(init, { entities: plan.entities, focus: plan.focus, services, knowledge: rt.knowledge }));
+  const deployManifests = deployManifestLines(rt.config, rt.registry, plan.entities);
+  useInstruction(methodText(init, { entities: plan.entities, focus: plan.focus, services, deployManifests, knowledge: rt.knowledge }));
 
   const deps = runDepsFor(id, init, rt);
   for (const tool of toolsFor('triage', triageToolContext(id, deps, rt))) useTool(watchFinishReport(id, tool));

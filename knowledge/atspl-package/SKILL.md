@@ -83,3 +83,10 @@ logs_search { service: 'package', terms: ['<customer_id>'], level: 'error' }
   failure is a carrier problem; quote the vendor text and count other
   customers with the same failure in the window. A `DELIVERED` row with an
   inactive address points at the harbor callback side.
+
+## Deploy
+
+The app folder is `package/` inside the deploy manifests folder your
+instructions name. `base/` holds the deployment and `overlay/` the config per
+region, with shared values in a `common` folder. Check it when the question is
+what runs and with which settings, and cite the file.

@@ -55,11 +55,34 @@ service of their own.
 | `shivalik-cbs-go` | library | harbor, rhythm | Go | The CBS client SDK. It is a library, not a deployed service: harbor and rhythm pin it as a versioned module, and harbor and rhythm may pin different versions. |
 | `go-commons` | library | the Go services of all three entities | Go | Shared Go code. No deploy, no database. |
 | `java-commons` | library | eventbus, kyc-service, pulse-backend, workflow-op | Java (Gradle) | Shared Java modules. No deploy, no database. |
-| `prod-ssfb-aspora-argo` | deploy manifests | the Shivalik cluster | YAML (kustomize) | One folder per app, each with a base and an overlay. It answers "is this service deployed on Shivalik, and with what config". The database names and other environment values here are the real ones; the service repos mostly hold placeholders. It indexes as near-empty in the code graph, so search it with `repo_grep` and read it with `repo_read`. |
+| `prod-ssfb-aspora-argo` | deploy manifests | ssfb | YAML (kustomize) | One app folder per service at the root, each with `base/` and `overlay/` (per-region folders, a `common` folder and `infra`). The database names and other environment values here are the real ones; the service repos mostly hold placeholders. |
+| `non-prod-aspora-argo` | deploy manifests | ssfb | YAML (kustomize) | App folders at the root for SSFB and ATSPL services side by side, plus apps with no registry service. `overlay/` has `infra` and `application` (per-region folders and `common`); some apps also have `ephemeral/`. |
+| `prod-envoy-services-aspora-argo` | deploy manifests | atspl | YAML (kustomize) | App folders at the root, laid out as in `prod-ssfb-aspora-argo`. Its default branch is `stage-env`; `main` is old. |
+| `stage-atspl-aspora-argo` | deploy manifests | atspl | YAML (kustomize) | Two cluster folders at the root, one for the ATSPL backend cluster and one for the Shivalik cluster, each with app folders inside. |
+| `k8s-manifests` | deploy manifests | rtl | YAML | One repo for every RTL environment, split into one folder per environment and region under `environments/vance-core/`. Layout inside not surveyed. |
 | `vance-android` | mobile client | all entities | Kotlin | Android app. See the frontend-routing skill for which backend a screen talks to. |
 | `vance-ios` | mobile client | all entities | Swift | iOS app. See the frontend-routing skill. |
 
-Only SSFB has a deploy manifests repo. There is none for ATSPL or RTL.
+Every manifests repo is checked out, but only one repo and folder per entity
+describes the deployment this run belongs to. Your instructions name it in a
+"Deploy manifests for <entity>" line. Read deploys and config from that repo
+and folder only; the others describe a different environment. When the line
+says not configured, record a gap instead of reading another manifests repo.
+The manifests repos index as near-empty in the code graph, so search them with
+`repo_grep` and read them with `repo_read`. They show what is declared, which
+the cluster may not have applied yet, so cite the file you read.
+
+Inside that folder the app folder is named after the deployment, not the repo:
+
+| Service repo | App folder |
+|---|---|
+| `harbor`, `rhythm`, `guardian`, `bro`, `audit`, `eventbus`, `workflow-op`, `pdf-generator`, `canopy`, `engage`, `pulse-backend` | same as the repo |
+| `comms-svc` | `comms` |
+| `cohort-service` | `cohort` (in the ATSPL backend cluster folder: `cohort-service`) |
+| `reminder-service` | `reminder` |
+| `package-svc` | `package` |
+
+RTL app folders are not surveyed yet; list the folder first.
 
 ## Picking a repo
 
@@ -69,7 +92,8 @@ Only SSFB has a deploy manifests repo. There is none for ATSPL or RTL.
   up in the service repo's graph. Make a second call against the library repo.
 - For `workflow-op`, the code is shared by `ssfb:workflow` and `rtl:workflow`.
   Say which copy the evidence came from; the repo cannot tell you.
-- For "is it deployed and with what settings" on Shivalik, search
-  `prod-ssfb-aspora-argo`, not the service repo.
+- For "is it deployed and with what settings", search the deploy manifests
+  repo and folder your instructions name for that entity, not the service
+  repo.
 - Some backends the mobile apps call (user-vault, appserver, canopy) are not in
   any registry and have no repo here.

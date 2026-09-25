@@ -428,6 +428,47 @@ describe('kube and repos', () => {
   });
 });
 
+describe('infra repo', () => {
+  test('.env.example names the prod deploy manifests repos', () => {
+    const r = registry();
+    expect(r.infraRepo('ssfb')).toEqual({ status: 'ok', envName: 'SSFB_INFRA_REPO', repo: 'prod-ssfb-aspora-argo', path: '.' });
+    expect(r.infraRepo('rtl')).toEqual({
+      status: 'ok',
+      envName: 'RTL_INFRA_REPO',
+      repo: 'k8s-manifests',
+      path: 'environments/vance-core/prod/eu-west-2',
+    });
+  });
+
+  test('a stage value is read the same way; repo:. is the repo root', () => {
+    const r = registry({ ATSPL_INFRA_REPO: 'stage-atspl-aspora-argo:.', RTL_INFRA_REPO: 'k8s-manifests:environments/vance-core/stage/ap-south-1' });
+    expect(r.infraRepo('atspl')).toMatchObject({ repo: 'stage-atspl-aspora-argo', path: '.' });
+    expect(r.infraRepo('rtl')).toMatchObject({ repo: 'k8s-manifests', path: 'environments/vance-core/stage/ap-south-1' });
+  });
+
+  test('blank disables it', () => {
+    expect(registry({ SSFB_INFRA_REPO: '' }).infraRepo('ssfb')).toEqual({ status: 'disabled', envName: 'SSFB_INFRA_REPO', reason: 'blank' });
+  });
+
+  test('absent from the .env is a startup error', () => {
+    expect(registryError(() => registry({ RTL_INFRA_REPO: undefined })).keys).toEqual(['RTL_INFRA_REPO']);
+  });
+
+  test.each(['k8s-manifests:../other', 'k8s-manifests:/etc', 'k8s-manifests:a//b', 'k8s-manifests:a/', 'k8s-manifests:', '-x', 'a b', 'k8s-manifests:a/./b'])(
+    '%p is a startup error that does not echo the value',
+    (value) => {
+      const err = registryError(() => registry({ RTL_INFRA_REPO: value }));
+      expect(err.keys).toEqual(['RTL_INFRA_REPO']);
+      if (value.length > 3) expect(err.message).not.toContain(value);
+    },
+  );
+
+  test('the capability report has an infra_repo row', () => {
+    const row = registry().capabilityReport('ssfb').rows.find((x) => x.capability === 'infra_repo');
+    expect(row).toEqual({ capability: 'infra_repo', envNames: ['SSFB_INFRA_REPO'], status: 'ok' });
+  });
+});
+
 describe('registry file checks', () => {
   test('a missing registry file is a RegistryError naming the file', () => {
     const dir = tempResources();

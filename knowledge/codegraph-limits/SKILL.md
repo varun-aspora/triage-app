@@ -38,7 +38,7 @@ below), and to confirm a graph answer against the source before you cite it.
   second call against the library repo and join the two by hand. Every call
   names its repo, and there is no workspace-wide query.
 - **Docs are not indexed.** Markdown and images are left out, so
-  `prod-ssfb-aspora-argo` (manifests only) looks near-empty in the graph.
+  the deploy manifests repos (see repo-map) look near-empty in the graph.
   YAML is also left out (unverified: the old workspace note says YAML is
   excluded, but an index status listing counted YAML files in harbor, so some
   YAML may be indexed as bare file nodes). Use `repo_grep` for manifests,

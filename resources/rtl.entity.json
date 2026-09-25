@@ -52,5 +52,6 @@
     "qw": { "context": "RTL_QW_CONTEXT" }
   },
   "kube": { "context_env": "RTL_KUBE_CONTEXT", "aws_profile_env": "RTL_AWS_PROFILE" },
-  "repos_extra": ["go-commons", "java-commons"]
+  "repos_extra": ["go-commons", "java-commons"],
+  "infra_repo": "RTL_INFRA_REPO"
 }

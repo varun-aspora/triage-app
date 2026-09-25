@@ -133,6 +133,25 @@ For an existing `.env`:
 - `SSFB_QUICKWIT_TRANSPORT=http` switches SSFB logs to HTTP; `.env.example` ships that value.
 - The `TRIAGE_GIT_*` and `TRIAGE_REPOS_SYNC_*` keys can be left out; their defaults apply.
 
+## Follow-ups on 2026-09-25
+
+| Change | Decision |
+|---|---|
+| Five deploy manifests repos pinned; `<ENTITY>_INFRA_REPO` names the one this deployment reads; agents get a "Deploy manifests" line; the repos are fetched before each run; doctor `infra` check | D51 |
+
+Assumptions made, not verified against a real system:
+
+- `non-prod-aspora-argo` is SSFB's stage manifests repo, rooted at `.`, and SSFB only. The owner's table row for SSFB had one field missing; the owner confirmed the reading.
+- The app folders and `base/` + `overlay/` layout in the service notes' Deploy sections and in repo-map come from folder listings of local checkouts of `prod-ssfb-aspora-argo`, `non-prod-aspora-argo`, `prod-envoy-services-aspora-argo` and `stage-atspl-aspora-argo` on 2026-09-25 (names only, no file contents). `k8s-manifests` was not checked out, so the RTL notes have no Deploy section.
+- `prod-envoy-services-aspora-argo` has `stage-env` as its default branch; `main` was last changed in 2026-02. The pin has no branch, so sync follows `stage-env`.
+- `k8s-manifests` has `environments/vance-core/prod/eu-west-2` and `environments/vance-core/stage/ap-south-1`, as the owner's table says. The doctor fails the row when the folder is missing.
+- All five repos live in `TRIAGE_GIT_ORG` on the default branch. None has a `branch` or `remote` in `repos.json`.
+
+For an existing `.env`:
+
+- `SSFB_INFRA_REPO`, `ATSPL_INFRA_REPO` and `RTL_INFRA_REPO` must be added. The registry refuses to start when a key it names is missing; blank turns the line off for that entity. Prod values are in `.env.example`; the stage values are in the comment above each key.
+- Run `triage repos sync` once to clone the four new repos.
+
 ## Commit trailer note
 
 The trailer was pinned in CONVENTIONS.md and plan.json after wave 1 (`74cfcb3`, later `58b12b3`), because implementers had each picked their own model name. Commit T01.3 (`a70343b`) still carries a different co-author line from the rest, and T01.2 (`bb11e37`) was one of the two commits the wave log flagged at the time; on main today only `a70343b` differs. The commits before `58b12b3` also carry a `Claude-Session` line. History was left as is.

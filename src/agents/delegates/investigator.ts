@@ -26,6 +26,7 @@ import { modelForTier } from '../../models.ts';
 import { toolsFor } from '../../tools/index.ts';
 import type { Mount, ToolContext, ToolDeps } from '../../tools/types.ts';
 import { EntitySchema, RunIdSchema, type Entity, type RunId } from '../../types/core.ts';
+import { deployManifestLines } from '../deploy-manifests.ts';
 import { currentKnowledge, methodDoc, serviceSkills, type Knowledge } from '../skills.ts';
 
 /** Thinking level of the deep variant (HLD §1.3). */
@@ -137,6 +138,7 @@ export function investigatorMounts(
     '',
     `- Entity: ${entity}. Your tools already use it; never pass it.`,
     `- Services in the registry: ${services.length > 0 ? services.join(', ') : 'none'}.`,
+    ...deployManifestLines(env.config, env.registry, [entity]),
     ...(notes.missing.length > 0 ? [`- No service notes yet for: ${notes.missing.join(', ')}.`] : []),
     `- Tools mounted: ${tools.map((t) => t.name).join(', ')}.`,
     ...(deep ? ['- You are the deep variant: use the code tools only to explain what the data and logs show.'] : []),

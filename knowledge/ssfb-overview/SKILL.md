@@ -146,5 +146,5 @@ external Kafka, HTTP webhook, SQS. "Service A emitted it but service B never
 saw it" is an eventbus question: find the destination type first, then look
 for Kafka lag or topic mismatch, an HTTP non-2xx, or an SQS permission error in
 its logs. It scales on consumer lag, so check scaling in the deploy manifests
-repo (prod-ssfb-aspora-argo) before blaming throughput. No database is known
+repo named in your instructions before blaming throughput. No database is known
 for it on SSFB, so triage has its logs and code only.

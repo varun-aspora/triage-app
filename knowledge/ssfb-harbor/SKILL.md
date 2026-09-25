@@ -318,7 +318,7 @@ a sliding window per form, then returns "Too many attempts - please contact
 customer support". Concurrent double submits each use a slot. The window in
 the repo defaults (1 hour and 24 hours on two config structs) does not match
 the observed window of about 18 minutes, so check the deployed config in the
-deploy manifests repo (prod-ssfb-aspora-argo) before quoting one.
+deploy manifests repo named in your instructions before quoting one.
 
 ```
 logs_search({ service: "harbor", error: "Too many attempts",
@@ -359,3 +359,10 @@ sql_select({ service: "harbor",
   sql: "SELECT status, provider FROM digital_forms WHERE form_id = $1",
   params: ["<form_id>"] })
 ```
+
+## Deploy
+
+The app folder is `harbor/` inside the deploy manifests folder your
+instructions name. `base/` holds the deployment and `overlay/` the config per
+region, with shared values in a `common` folder. Check it when the question is
+what runs and with which settings, and cite the file.

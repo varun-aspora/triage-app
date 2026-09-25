@@ -298,11 +298,14 @@ type LintRule = {
 };
 
 /**
- * Exact texts that would trip a rule but are allowed: the argo repo name
- * (environment word) and the sim-binding skill path that patterns.json cites
- * as a source_ref (.claude/ directory).
+ * Exact texts that would trip a rule but are allowed: the deploy manifests
+ * repo names (environment word) and the sim-binding skill path that
+ * patterns.json cites as a source_ref (.claude/ directory). The longer names
+ * come first, since each is blanked out in turn.
  */
 export const ALLOWED_TEXT = [
+  'prod-envoy-services-aspora-argo',
+  'non-prod-aspora-argo',
   'prod-ssfb-aspora-argo',
   'triage-shivalik .claude/skills/aspora-harbor-shivalik-sim-binding-issue/SKILL.md',
 ] as const;

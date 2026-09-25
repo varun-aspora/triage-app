@@ -78,5 +78,7 @@ HEAD are allowed.
 
 ## Deploy
 
-The deploy manifests repo `prod-ssfb-aspora-argo` has a `bro/` directory with
-the deployed config.
+The app folder is `bro/` inside the deploy manifests folder your instructions
+name. `base/` holds the deployment and `overlay/` the config per region, with
+shared values in a `common` folder. Check it when the question is what runs
+and with which settings, and cite the file.

@@ -137,3 +137,32 @@ export function repoEnum(registry: Registry, repos: readonly RepoPin[], entities
   }
   return Object.freeze({ names: Object.freeze([...names].sort()), unpinned: Object.freeze(unpinned) });
 }
+
+export type InfraRepoResolution =
+  | { readonly status: 'ok'; readonly envName: string; readonly repo: string; readonly path: string }
+  | { readonly status: 'off'; readonly envName?: string; readonly reason: string };
+
+/**
+ * The deploy manifests repo and folder this deployment reads for an enabled
+ * entity: <ENTITY>_INFRA_REPO, when it is set and names a repo pinned for
+ * that entity in repos.json. Reasons name keys and repos, never other values.
+ */
+export function infraRepoFor(registry: Registry, repos: readonly RepoPin[], entity: Entity): InfraRepoResolution {
+  const cap = registry.infraRepo(entity);
+  if (cap === undefined) return Object.freeze({ status: 'off', reason: `resources/${entity}.entity.json names no infra_repo key` });
+  if (cap.status !== 'ok') return Object.freeze({ status: 'off', envName: cap.envName, reason: `${cap.envName} is blank` });
+  if (!repos.some((p) => p.repo === cap.repo && p.entities.includes(entity))) {
+    return Object.freeze({ status: 'off', envName: cap.envName, reason: `${cap.envName} names ${cap.repo}, which is not pinned for ${entity} in ${REPOS_KEY}` });
+  }
+  return cap;
+}
+
+/** The pinned infra repos for these entities, deduplicated. Entities must be enabled. */
+export function infraRepoNames(registry: Registry, repos: readonly RepoPin[], entities: readonly Entity[]): readonly string[] {
+  const names = new Set<string>();
+  for (const entity of entities) {
+    const r = infraRepoFor(registry, repos, entity);
+    if (r.status === 'ok') names.add(r.repo);
+  }
+  return Object.freeze([...names]);
+}

@@ -46,3 +46,10 @@ logs_search({ service: "audit", level: "error", from: "<from>", to: "<to>" })
   record it as a gap. A missing partition (rows in `events_default`) or an
   unregistered domain are the usual causes in the code, which is a
   code_walker question at most.
+
+## Deploy
+
+The app folder is `audit/` inside the deploy manifests folder your
+instructions name. `base/` holds the deployment and `overlay/` the config per
+region, with shared values in a `common` folder. Check it when the question is
+what runs and with which settings, and cite the file.

@@ -127,9 +127,10 @@ describe('makeTestHome', () => {
       // transport carries no credential in the .env (SSO login lives in the CLI).
       const qw = registry.quickwit(entity);
       if (qw.status === 'ok') expect(qw.transport).toBe('qw');
+      // The infra repo names a local checkout, not a host or credential, so it stays set.
       const report = registry.capabilityReport(entity);
       const okRows = report.rows.filter((r) => r.status === 'ok').map((r) => r.capability);
-      expect(okRows.every((c) => c === 'quickwit')).toBe(true);
+      expect(okRows.every((c) => c === 'quickwit' || c === 'infra_repo')).toBe(true);
     }
   });
 

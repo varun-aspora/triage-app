@@ -29,8 +29,6 @@ progress.
   there is no `error` field. The old notes also mention `workflow-v2` as a
   possible log name (unverified: never confirmed).
 - No admin API is known.
-- The deploy manifests repo `prod-ssfb-aspora-argo` has a `workflow-op/`
-  directory.
 
 ## Tables
 
@@ -146,3 +144,10 @@ user report.
   `$jsonInclude` helpers, which emit raw JSON on purpose.
 - **Landing screen branch never shows.** The cohort name is missing from the
   definition's `cohort_data` `filter_values`. See the NRI landing section.
+
+## Deploy
+
+The app folder is `workflow-op/` inside the deploy manifests folder your
+instructions name. `base/` holds the deployment and `overlay/` the config per
+region, with shared values in a `common` folder. Check it when the question is
+what runs and with which settings, and cite the file.

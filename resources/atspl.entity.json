@@ -45,5 +45,6 @@
     "qw": { "context": "ATSPL_QW_CONTEXT" }
   },
   "kube": { "context_env": "ATSPL_KUBE_CONTEXT", "aws_profile_env": "ATSPL_AWS_PROFILE" },
-  "repos_extra": ["go-commons", "java-commons"]
+  "repos_extra": ["go-commons", "java-commons"],
+  "infra_repo": "ATSPL_INFRA_REPO"
 }

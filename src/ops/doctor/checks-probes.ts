@@ -8,19 +8,24 @@
 // - tunnel: the SSFB DB tunnel status (T11.2).
 // - codegraph: the binary's version and which checkouts have an index (T11.3).
 // - repos: branch drift per pin in resources/repos.json (T11.4).
+// - infra: per entity, the deploy manifests repo <ENTITY>_INFRA_REPO names is
+//   pinned for it, checked out, and has the folder. Local disk only.
 //
 // Network access goes only through the Probes interface (probes.ts). In mock
 // mode the probes answer from fixtures or report skipped, and qw whoami and
 // ssh are not run. Rows name env keys, never their values.
 
+import { existsSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { lookupEnv } from '../../config/env.ts';
 import { RegistryError, loadRegistry, type Registry } from '../../config/registry.ts';
+import { infraRepoFor, loadRepos, type RepoPin } from '../../config/repos.ts';
 import { UnsafeArgError, assertSafeArg, createExecRunner, type ExecResult, type ExecRunner } from '../../connectors/exec.ts';
 import { mockPortFromFixtures, type MockPort } from '../../connectors/mock.ts';
 import type { FetchLike } from '../../connectors/quickwit/http-transport.ts';
 import { createMockLayer } from '../../mock/index.ts';
 import type { Entity } from '../../types/core.ts';
-import { CODEGRAPH_BIN_KEY, codegraphVersion } from '../codegraph.ts';
+import { CODEGRAPH_BIN_KEY, codegraphVersion, resolveRepoDir } from '../codegraph.ts';
 import { repoStatus, type ReposDeps, type ReposStatusReport } from '../repos.ts';
 import { TUNNEL_KEYS, readTunnelConfig, tunnelStatus, type TunnelDeps, type TunnelResult } from '../tunnel.ts';
 import {
@@ -408,6 +413,45 @@ async function reposCheck(ctx: DoctorContext): Promise<DoctorCheck[]> {
   return withId('repos', rows);
 }
 
+// ------------------------------------------------------------------ infra
+
+async function infraCheck(ctx: DoctorContext): Promise<DoctorCheck[]> {
+  const reg = registryOf(ctx);
+  if (!reg.ok) return registrySkipped('infra');
+  const registry = reg.registry;
+  let pins: readonly RepoPin[];
+  try {
+    pins = loadRepos(ctx.config, registry);
+  } catch (err) {
+    if (!(err instanceof RegistryError)) throw err;
+    return withId('infra', [row('skipped', [], 'infra not checked: resources/repos.json did not load')]);
+  }
+  const rows: Row[] = [];
+  for (const entity of registry.enabledEntities()) {
+    const r = infraRepoFor(registry, pins, entity);
+    const keys = r.envName === undefined ? [] : [r.envName];
+    if (r.status !== 'ok') {
+      rows.push(row(r.reason.endsWith('is blank') ? 'disabled' : 'fail', keys, `deploy manifests off: ${r.reason}`, entity));
+      continue;
+    }
+    const dir = resolveRepoDir(r.repo, { config: ctx.config, repos: pins }, pins);
+    if (dir.status !== 'ok') {
+      rows.push(row('disabled', keys, `deploy manifests not checked: ${dir.message}`, entity));
+    } else if (!dir.present) {
+      rows.push(row('warn', keys, `${r.repo}: not checked out; run triage repos sync`, entity));
+    } else if (r.path !== '.' && !isDir(join(dir.dir, r.path))) {
+      rows.push(row('fail', keys, `${r.repo}: has no folder ${r.path}`, entity));
+    } else {
+      rows.push(row('ok', keys, r.path === '.' ? `${r.repo}` : `${r.repo}, folder ${r.path}`, entity));
+    }
+  }
+  return withId('infra', rows);
+}
+
+function isDir(path: string): boolean {
+  return existsSync(path) && statSync(path).isDirectory();
+}
+
 /** The probe checks, in the order the doctor table shows them. */
 export const probeChecks: readonly NamedCheck[] = Object.freeze([
   { id: 'db', run: dbCheck },
@@ -415,4 +459,5 @@ export const probeChecks: readonly NamedCheck[] = Object.freeze([
   { id: 'tunnel', run: tunnelCheck },
   { id: 'codegraph', run: codegraphCheck },
   { id: 'repos', run: reposCheck },
+  { id: 'infra', run: infraCheck },
 ]);

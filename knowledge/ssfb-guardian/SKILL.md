@@ -140,3 +140,10 @@ internal/device_binding/
   model/        GORM models
   vmn/          SMS vendor webhook handling
 ```
+
+## Deploy
+
+The app folder is `guardian/` inside the deploy manifests folder your
+instructions name. `base/` holds the deployment and `overlay/` the config per
+region, with shared values in a `common` folder. Check it when the question is
+what runs and with which settings, and cite the file.

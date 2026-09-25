@@ -609,6 +609,54 @@ describe('tunnel, codegraph and repos', () => {
 
 // ------------------------------------------------------------------ mounted tools
 
+describe('infra check', () => {
+  const infra = probeChecks.find((c) => c.id === 'infra')!;
+
+  function reposDir(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'triage-doctor-infra-'));
+    homes.push(dir);
+    return dir;
+  }
+
+  test('a checked-out repo with the folder is ok; a missing folder is fail naming the key', async () => {
+    const dir = reposDir();
+    mkdirSync(join(dir, 'prod-ssfb-aspora-argo', '.git'), { recursive: true });
+    mkdirSync(join(dir, 'k8s-manifests', 'environments', 'vance-core'), { recursive: true });
+    const config = makeConfig({ TRIAGE_ENTITIES: 'ssfb,rtl', TRIAGE_REPOS_DIR: dir });
+    const out = rows(await runDoctor([infra], { config }), 'infra');
+    expect(out.map((r) => [r.entity, r.status])).toEqual([
+      ['ssfb', 'ok'],
+      ['rtl', 'fail'],
+    ]);
+    expect(out[0]!.message).toBe('prod-ssfb-aspora-argo');
+    expect(out[1]).toMatchObject({ key_names: ['RTL_INFRA_REPO'], message: 'k8s-manifests: has no folder environments/vance-core/prod/eu-west-2' });
+
+    mkdirSync(join(dir, 'k8s-manifests', 'environments', 'vance-core', 'prod', 'eu-west-2'), { recursive: true });
+    const again = rows(await runDoctor([infra], { config: makeConfig({ TRIAGE_ENTITIES: 'ssfb,rtl', TRIAGE_REPOS_DIR: dir }) }), 'infra');
+    expect(again[1]).toMatchObject({ status: 'ok', message: 'k8s-manifests, folder environments/vance-core/prod/eu-west-2' });
+  });
+
+  test('not checked out is a warning; blank is disabled; a repo pinned for another entity is fail', async () => {
+    const dir = reposDir();
+    expect(only(await runDoctor([infra], { config: makeConfig({ TRIAGE_REPOS_DIR: dir }) }), 'infra')).toMatchObject({
+      status: 'warn',
+      message: 'prod-ssfb-aspora-argo: not checked out; run triage repos sync',
+    });
+    expect(only(await runDoctor([infra], { config: makeConfig({ TRIAGE_REPOS_DIR: dir, SSFB_INFRA_REPO: '' }) }), 'infra')).toMatchObject({
+      status: 'disabled',
+      key_names: ['SSFB_INFRA_REPO'],
+    });
+    expect(only(await runDoctor([infra], { config: makeConfig({ TRIAGE_REPOS_DIR: dir, SSFB_INFRA_REPO: 'k8s-manifests' }) }), 'infra')).toMatchObject({
+      status: 'fail',
+      message: 'deploy manifests off: SSFB_INFRA_REPO names k8s-manifests, which is not pinned for ssfb in resources/repos.json',
+    });
+  });
+
+  test('a blank TRIAGE_REPOS_DIR is disabled', async () => {
+    expect(only(await runDoctor([infra], { config: makeConfig() }), 'infra').status).toBe('disabled');
+  });
+});
+
 describe('mounted tools check', () => {
   const CRYPTO_TOOLS = ['encrypt_lookup_value', 'decrypt_fields'];
 

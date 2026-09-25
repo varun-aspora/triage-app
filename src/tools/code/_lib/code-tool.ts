@@ -20,10 +20,11 @@ export const REPOS_DIR_KEY = 'TRIAGE_REPOS_DIR';
 /** The service name on audit lines. */
 export const REPO_SERVICE = 'repo';
 
-// repos.json is read once per config object, so enabled() stays cheap.
+// repos.json is read once per config object, so enabled() and prompt renders stay cheap.
 const pinsByConfig = new WeakMap<Config, readonly RepoPin[] | Error>();
 
-function pinsFor(config: Config, registry: Registry): readonly RepoPin[] | Error {
+/** The repos.json pins for this config, or the error loading them. Cached per config object. */
+export function pinsFor(config: Config, registry: Registry): readonly RepoPin[] | Error {
   let pins = pinsByConfig.get(config);
   if (pins === undefined) {
     try {

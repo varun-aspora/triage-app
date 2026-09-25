@@ -62,5 +62,8 @@ If you only have the idempotency key, filter on `idempotency_key` instead.
 
 ## Deploy
 
-The deploy manifests repo `prod-ssfb-aspora-argo` has a `pdf-generator/`
-directory, with Gotenberg deployed next to it.
+The app folder is `pdf-generator/` inside the deploy manifests folder your
+instructions name. `base/` holds the deployment and `overlay/` the config per
+region, with shared values in a `common` folder. Gotenberg is deployed from
+the same folder. Check it when the question is what runs and with which
+settings, and cite the file.

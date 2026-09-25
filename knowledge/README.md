@@ -111,9 +111,9 @@ The note, in markdown.
   environment variables.
 - **No environment names.** One deployment has one configuration, so a note
   never names an environment, a host, a port, a URL or a connection string.
-  The service and the tool are enough. The one allowed repo name that looks
-  like an environment name is the deploy manifests repo, which the lint
-  allows by name.
+  The service and the tool are enough. The deploy manifests repo names that
+  look like environment names are allowed by name in the lint, and only
+  repo-map names them.
 - **No customer data.** Nothing under `knowledge/` is copied from past case
   folders of the old workspace. Notes come from its `AGENTS.md` files and
   skills, and from the design docs.

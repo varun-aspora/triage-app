@@ -53,6 +53,10 @@ export type ReposDeps = Omit<CodegraphDeps, 'repos'> & {
 export type RepoSelection = {
   /** Limits the operation to this one pin. */
   readonly repo?: string;
+  /** Limits the operation to these pins. Used with repo, the two lists join. */
+  readonly repos?: readonly string[];
+  /** false skips the codegraph index after git. Default true. */
+  readonly index?: boolean;
 };
 
 /** --repo named something that is not in resources/repos.json. */
@@ -79,10 +83,12 @@ export function checkSelection(sel: RepoSelection, deps: ReposDeps): void {
 }
 
 function select(pins: readonly RepoPin[], sel: RepoSelection): readonly RepoPin[] {
-  if (sel.repo === undefined) return pins;
-  const pin = pins.find((p) => p.repo === sel.repo);
-  if (pin === undefined) throw new UnknownRepoError(pins.map((p) => p.repo));
-  return [pin];
+  if (sel.repo === undefined && sel.repos === undefined) return pins;
+  const wanted = new Set([...(sel.repo === undefined ? [] : [sel.repo]), ...(sel.repos ?? [])]);
+  for (const name of wanted) {
+    if (!pins.some((p) => p.repo === name)) throw new UnknownRepoError(pins.map((p) => p.repo));
+  }
+  return pins.filter((p) => wanted.has(p.repo));
 }
 
 function reposDirNotConfigured(deps: ReposDeps): ReposNotConfigured | undefined {
@@ -325,8 +331,8 @@ export type SyncReport =
   | ReposNotConfigured;
 
 /**
- * `triage repos sync`: brings every pin (or the one selected) to its pinned
- * branch and refreshes its codegraph index. Throws UnknownRepoError for an
+ * `triage repos sync`: brings every pin (or the ones selected) to its pinned
+ * branch and refreshes its codegraph index, unless sel.index is false. Throws UnknownRepoError for an
  * unknown selection; every per-repo problem is a result, not a throw.
  */
 export async function syncRepos(sel: RepoSelection, deps: ReposDeps): Promise<SyncReport> {
@@ -337,7 +343,7 @@ export async function syncRepos(sel: RepoSelection, deps: ReposDeps): Promise<Sy
 
   const results = await inPool(chosen, SYNC_JOBS, async (pin) => {
     try {
-      return await syncOne(pin, deps, pins);
+      return await syncOne(pin, deps, pins, sel.index ?? true);
     } catch (e) {
       return finish(pin.repo, { status: 'failed', reason: e instanceof Error ? scrubToken(deps.config, e.message) : 'unexpected error' });
     }
@@ -384,7 +390,7 @@ function finish(repo: string, d: Draft): RepoSyncResult {
   return Object.freeze({ repo, ...d, warnings, line });
 }
 
-async function syncOne(pin: RepoPin, deps: ReposDeps, pins: readonly RepoPin[]): Promise<RepoSyncResult> {
+async function syncOne(pin: RepoPin, deps: ReposDeps, pins: readonly RepoPin[], index: boolean): Promise<RepoSyncResult> {
   // Validate the pin before any git call, so a bad branch or remote runs nothing.
   if (pin.branch !== undefined) git.branchArg(pin.branch);
   const remote = git.remoteArg(remoteFor(pin, deps.config));
@@ -393,8 +399,8 @@ async function syncOne(pin: RepoPin, deps: ReposDeps, pins: readonly RepoPin[]):
   if (r.status !== 'ok') return finish(pin.repo, { status: 'failed', reason: r.message });
 
   try {
-    if (!r.present) return await cloneAndIndex(pin, remote, deps, pins);
-    return await updateAndIndex(pin, r.dir, remote, deps, pins);
+    if (!r.present) return await cloneAndIndex(pin, remote, deps, pins, index);
+    return await updateAndIndex(pin, r.dir, remote, deps, pins, index);
   } catch (e) {
     if (e instanceof StepError) return finish(pin.repo, { status: 'failed', reason: e.message });
     throw e;
@@ -407,6 +413,7 @@ async function updateAndIndex(
   remote: string,
   deps: ReposDeps,
   pins: readonly RepoPin[],
+  index: boolean,
 ): Promise<RepoSyncResult> {
   const status = await mustRun(deps, 'status', git.statusPorcelain(dir), LOCAL_TIMEOUT_MS);
   if (git.isDirty(status)) {
@@ -440,10 +447,10 @@ async function updateAndIndex(
   await mustRun(deps, 'fetch', git.fetchBranch(dir, branch), FETCH_TIMEOUT_MS);
   await mustRun(deps, 'checkout', git.checkoutFetched(dir, branch), LOCAL_TIMEOUT_MS);
   if (pin.branch === undefined) await recordDefault(deps, dir, branch, warnings);
-  return indexAndFinish(pin, dir, branch, 'updated', deps, pins, warnings);
+  return indexAndFinish(pin, dir, branch, 'updated', deps, pins, index, warnings);
 }
 
-async function cloneAndIndex(pin: RepoPin, remote: string, deps: ReposDeps, pins: readonly RepoPin[]): Promise<RepoSyncResult> {
+async function cloneAndIndex(pin: RepoPin, remote: string, deps: ReposDeps, pins: readonly RepoPin[], index: boolean): Promise<RepoSyncResult> {
   const reposDir = deps.config.paths.reposDir as string;
   mkdirSync(reposDir, { recursive: true });
 
@@ -462,7 +469,7 @@ async function cloneAndIndex(pin: RepoPin, remote: string, deps: ReposDeps, pins
   if (!r.present) return finish(pin.repo, { status: 'failed', reason: 'git clone finished but the repo directory is missing' });
   const warnings: string[] = [];
   if (pin.branch === undefined) await recordDefault(deps, r.dir, branch, warnings);
-  return indexAndFinish(pin, r.dir, branch, 'cloned', deps, pins, warnings);
+  return indexAndFinish(pin, r.dir, branch, 'cloned', deps, pins, index, warnings);
 }
 
 /**
@@ -481,17 +488,19 @@ async function indexAndFinish(
   action: 'cloned' | 'updated',
   deps: ReposDeps,
   pins: readonly RepoPin[],
+  index: boolean,
   earlier: readonly string[] = [],
 ): Promise<RepoSyncResult> {
   const warnings: string[] = [...earlier];
   const head = await mustRun(deps, 'rev-parse', git.revParseHead(dir), LOCAL_TIMEOUT_MS);
   const commit = git.parseCommit(head);
+  const done = { action, branch, ...(commit !== undefined ? { commit } : {}) };
+  if (!index) return finish(pin.repo, { status: 'ok', ...done, warnings });
 
   const excludeWarning = addIndexExclude(dir);
   if (excludeWarning !== undefined) warnings.push(excludeWarning);
 
   const idx: CodegraphResult = await codegraphIndex(pin.repo, codegraphDeps(deps, pins));
-  const done = { action, branch, ...(commit !== undefined ? { commit } : {}) };
   switch (idx.status) {
     case 'ok':
       return finish(pin.repo, { status: 'ok', ...done, index: idx.command === 'init' ? 'init' : 'sync', warnings });
