@@ -4,9 +4,11 @@
 //   POST /triage                       -> 202 {run_id} (or {run_id, deduplicated: true})
 //   GET  /triage                       -> {runs: RunSummary[], next_cursor} (filters in run-list.ts)
 //   GET  /triage/:run_id               -> {run_id, status, phase, classification, id_chain, report?,
-//                                          created_at, updated_at, requested_by, submissions, feedback, ...}
+//                                          created_at, updated_at, requested_by, submissions, feedback,
+//                                          block, block_history, ...}
 //   GET  /triage/:run_id/events        -> {events, next, more}; ?after=<next>&limit=<n>, the run's events.jsonl
-//   POST /triage/:run_id/ask           -> 202 {run_id, submission_id}
+//   POST /triage/:run_id/ask           -> 202 {run_id, submission_id}; 409 while the run is blocked
+//   POST /triage/:run_id/resume        -> 202 {run_id, submission_id}; 409 when the run cannot be resumed (D55)
 //   POST /triage/:run_id/feedback      -> 200 {run_id, verdict, count}; any time, not only after the report
 //   POST /triage/:run_id/stop          -> 200 {run_id, stopped_from, aborted, feedback_count, gaps}; 409 when finished
 //   POST /triage/:run_id/post-to-slack -> 403, or 501 when enabled (v1)
@@ -20,6 +22,11 @@
 // hours; a repeat answers with the first run id and starts nothing. The
 // submission then runs in the background inside the server's own Flue
 // runtime. This module never starts a runtime.
+//
+// A follow-up (ask) and a resume answer 202 as soon as Flue accepts the
+// message, with Flue's submission id. A resume is refused with 409 unless the
+// run is blocked, failed after it was dispatched, or stopped: the same rule
+// resumeRun applies, checked here first so nothing starts for a refusal.
 //
 // GET /triage/:run_id passes the whole answer through one more
 // persisted-profile redaction, even though the store holds redacted text only.
@@ -43,7 +50,17 @@ import { MAX_THREAD_FILE_BYTES, type PrepareInput, type PreparedSubmission } fro
 import { SlackFetchError } from '../slack.ts';
 import { SlackPermalinkError } from '../slack-url.ts';
 import { RunNotRunningError, stopRun } from '../stop.ts';
-import { askRun, className, type Dispatcher, type SettleDeps, type SubmissionResult } from '../submit.ts';
+import {
+  askRun,
+  className,
+  resumeRefusal,
+  resumeRun,
+  RunNotResumableError,
+  type Dispatcher,
+  type ResumeInput,
+  type SettleDeps,
+  type SubmissionResult,
+} from '../submit.ts';
 import { findingRefs } from '../../report/finding-refs.ts';
 import { readRunEvents } from '../../runlog/read.ts';
 import { filterRuns, parseListQuery, statusOfPhase, storeQuery } from './run-list.ts';
@@ -52,6 +69,7 @@ import {
   checkIdempotencyKey,
   FeedbackBodySchema,
   parseBody,
+  ResumeBodySchema,
   StopBodySchema,
   TriageBodySchema,
   type TriageBody,
@@ -66,11 +84,14 @@ export const MESSAGES_HINT = 'Send the thread as messages[] in the body instead 
 export const SLACK_POST_DISABLED = 'posting to Slack over HTTP is disabled (TRIAGE_HTTP_ALLOW_SLACK_POST=false)';
 export const SLACK_POST_NOT_IMPLEMENTED = 'posting to Slack over HTTP needs a signed Slack approval, which arrives in v2; use triage post';
 
-/** A follow-up that has been started: dispatched resolves with Flue's submission id. */
+/** A follow-up or a resume that has been started: dispatched resolves with Flue's submission id. */
 export type AskStart = {
   readonly dispatched: Promise<string>;
   readonly settled: Promise<unknown>;
 };
+
+/** What ran in the background when a failure is reported. */
+export type BackgroundWork = 'submission' | 'ask' | 'resume';
 
 export type TriageRouteDeps = {
   readonly store: RunStore;
@@ -80,6 +101,8 @@ export type TriageRouteDeps = {
   readonly submit: (prepared: PreparedSubmission) => Promise<unknown>;
   /** Starts a follow-up. startAsk() builds one from SettleDeps. */
   readonly ask: (runId: RunId, question: string, by: string) => AskStart;
+  /** Sends a blocked, failed or stopped run on (D55). startResume() builds one from SettleDeps. */
+  readonly resume: (runId: RunId, input: ResumeInput) => AskStart;
   /** TRIAGE_HOME, for the feedback eval draft. */
   readonly home: string;
   /** TRIAGE_HTTP_ALLOW_SLACK_POST. */
@@ -92,8 +115,8 @@ export type TriageRouteDeps = {
   readonly runsDir?: string;
   /** Defaults to IDEMPOTENCY_TTL_MS. */
   readonly idempotencyTtlMs?: number;
-  /** A background submission or follow-up failed. Gets the class name only by default. */
-  readonly onBackgroundError?: (runId: string, what: 'submission' | 'ask', err: unknown) => void;
+  /** A background submission, follow-up or resume failed. Gets the class name only by default. */
+  readonly onBackgroundError?: (runId: string, what: BackgroundWork, err: unknown) => void;
 };
 
 export type TriageRouteDepsSource = TriageRouteDeps | (() => TriageRouteDeps | Promise<TriageRouteDeps>);
@@ -188,17 +211,13 @@ export function createTriageRoutes(source: TriageRouteDepsSource): Hono {
     if (!parsed.ok) return invalid(c, parsed.fields);
 
     const deps = await load();
-    if ((await deps.store.getRun(runId)) === null) return notFound(c);
+    const run = await deps.store.getRun(runId);
+    if (run === null) return notFound(c);
+    // A blocked run waits for a resume, which closes its block. A follow-up would leave the block open.
+    if (run.phase === 'blocked') return c.json({ error: 'run is blocked', hint: 'resume it first' }, 409);
 
     const started = deps.ask(runId, parsed.value.question, parsed.value.requested_by);
-    type First = { kind: 'dispatched'; id: string } | { kind: 'settled'; value: unknown } | { kind: 'error'; err: unknown };
-    const first: First = await Promise.race([
-      started.dispatched.then((id): First => ({ kind: 'dispatched', id })),
-      started.settled.then(
-        (value): First => ({ kind: 'settled', value }),
-        (err: unknown): First => ({ kind: 'error', err }),
-      ),
-    ]);
+    const first = await firstOf(started);
     if (first.kind === 'error') {
       if (first.err instanceof RunNotFoundError) return notFound(c);
       if (first.err instanceof IngressInputError) return invalid(c, [first.err.key], first.err.reason);
@@ -206,8 +225,36 @@ export function createTriageRoutes(source: TriageRouteDepsSource): Hono {
     }
     // Still running: report a later failure, never leave it unhandled.
     started.settled.catch((err: unknown) => backgroundError(deps, runId, 'ask', err));
-    const submissionId = first.kind === 'dispatched' ? first.id : submissionIdOf(first.value);
-    return c.json({ run_id: runId, submission_id: submissionId }, 202);
+    return c.json({ run_id: runId, submission_id: submissionIdOf(first) }, 202);
+  });
+
+  app.post('/triage/:run_id/resume', limit, async (c) => {
+    const runId = c.req.param('run_id');
+    if (!v.is(RunIdSchema, runId)) return invalid(c, ['run_id'], 'is not a run id');
+    const body = await readJson(c);
+    if (body === NOT_JSON) return invalid(c, ['body'], 'is not valid JSON');
+    const parsed = parseBody(ResumeBodySchema, body);
+    if (!parsed.ok) return invalid(c, parsed.fields);
+
+    const deps = await load();
+    const run = await deps.store.getRun(runId);
+    if (run === null) return notFound(c);
+    // The check resumeRun makes, made here first so a refusal starts nothing.
+    const refusal = resumeRefusal(run);
+    if (refusal !== null) return notResumable(c, refusal);
+
+    const note = parsed.value.note;
+    const started = deps.resume(runId, { by: parsed.value.requested_by, ...(note !== undefined && note !== '' ? { note } : {}) });
+    const first = await firstOf(started);
+    if (first.kind === 'error') {
+      if (first.err instanceof RunNotFoundError) return notFound(c);
+      // The run moved on between the check above and the resume.
+      if (first.err instanceof RunNotResumableError) return notResumable(c, first.err);
+      if (first.err instanceof IngressInputError) return invalid(c, [first.err.key === 'by' ? 'requested_by' : first.err.key], first.err.reason);
+      throw first.err;
+    }
+    started.settled.catch((err: unknown) => backgroundError(deps, runId, 'resume', err));
+    return c.json({ run_id: runId, submission_id: submissionIdOf(first) }, 202);
   });
 
   app.post('/triage/:run_id/feedback', limit, async (c) => {
@@ -281,6 +328,18 @@ export function startAsk(
   deps: SettleDeps,
   ask: typeof askRun = askRun,
 ): AskStart {
+  const tracked = trackDispatch(deps);
+  return { dispatched: tracked.dispatched, settled: ask(runId, question, by, tracked.deps) };
+}
+
+/** The same for resumeRun (D55): `dispatched` resolves once Flue accepts the resume signal. */
+export function startResume(runId: RunId, input: ResumeInput, deps: SettleDeps, resume: typeof resumeRun = resumeRun): AskStart {
+  const tracked = trackDispatch(deps);
+  return { dispatched: tracked.dispatched, settled: resume(runId, input, tracked.deps) };
+}
+
+/** Wraps the dispatcher so the first dispatch receipt resolves `dispatched`. */
+function trackDispatch(deps: SettleDeps): { readonly deps: SettleDeps; readonly dispatched: Promise<string> } {
   let resolveDispatched!: (id: string) => void;
   const dispatched = new Promise<string>((resolve) => {
     resolveDispatched = resolve;
@@ -300,8 +359,7 @@ export function startAsk(
       };
     },
   };
-  const settled = ask(runId, question, by, { ...deps, dispatcher });
-  return { dispatched, settled };
+  return { deps: { ...deps, dispatcher }, dispatched };
 }
 
 /** The GET answer. Everything but the run id goes through the persisted profile again. */
@@ -321,6 +379,9 @@ export function runView(run: RunRecord): Record<string, unknown> {
     created_at: run.created_at,
     updated_at: run.updated_at,
     ...(run.phase_reason !== undefined ? { phase_reason: run.phase_reason } : {}),
+    // The open block while the run waits on a system that did not answer (D55), and the closed ones.
+    block: run.block ?? null,
+    block_history: run.block_history ?? [],
     ...(request?.requested_by !== undefined ? { requested_by: request.requested_by } : {}),
     ...(request?.interface !== undefined ? { interface: request.interface } : {}),
     // This is the persisted copy, so its p<digits> part is usually masked.
@@ -407,6 +468,23 @@ function notFound(c: Context): Response {
   return c.json({ error: 'run not found' }, 404);
 }
 
+function notResumable(c: Context, err: RunNotResumableError): Response {
+  return c.json({ error: 'run is not resumable', phase: err.phase, hint: err.hint }, 409);
+}
+
+type First = { kind: 'dispatched'; id: string } | { kind: 'settled'; value: unknown } | { kind: 'error'; err: unknown };
+
+/** The dispatch receipt, or the result or error when the reply came first. */
+function firstOf(started: AskStart): Promise<First> {
+  return Promise.race([
+    started.dispatched.then((id): First => ({ kind: 'dispatched', id })),
+    started.settled.then(
+      (value): First => ({ kind: 'settled', value }),
+      (err: unknown): First => ({ kind: 'error', err }),
+    ),
+  ]);
+}
+
 const NOT_JSON = Symbol('not json');
 
 async function readJson(c: Context): Promise<unknown> {
@@ -417,12 +495,13 @@ async function readJson(c: Context): Promise<unknown> {
   }
 }
 
-function submissionIdOf(value: unknown): string | null {
-  const id = (value as Partial<SubmissionResult> | null)?.submission_id;
+function submissionIdOf(first: Exclude<First, { kind: 'error' }>): string | null {
+  if (first.kind === 'dispatched') return first.id;
+  const id = (first.value as Partial<SubmissionResult> | null)?.submission_id;
   return typeof id === 'string' ? id : null;
 }
 
-function backgroundError(deps: TriageRouteDeps, runId: string, what: 'submission' | 'ask', err: unknown): void {
+function backgroundError(deps: TriageRouteDeps, runId: string, what: BackgroundWork, err: unknown): void {
   if (deps.onBackgroundError !== undefined) {
     try {
       deps.onBackgroundError(runId, what, err);

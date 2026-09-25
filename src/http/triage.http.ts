@@ -6,7 +6,7 @@
 // server's own runtime; nothing here starts one.
 
 import { triageRuntime } from '../agents/triage-plan.ts';
-import { createTriageRoutes, startAsk, type TriageRouteDeps } from '../ingress/http/routes.ts';
+import { createTriageRoutes, startAsk, startResume, type TriageRouteDeps } from '../ingress/http/routes.ts';
 import { prepareDeps, prepareRequest } from '../ingress/prepare.ts';
 import { runSubmission, submissionDeps } from '../ingress/submit.ts';
 import type { HttpModule } from './types.ts';
@@ -31,6 +31,7 @@ export function productionDeps(): TriageRouteDeps {
     prepare: (input) => prepareRequest(input, prepareDeps(rt.config, rt.registry)),
     submit: (prepared) => runSubmission(prepared, submission),
     ask: (runId, question, by) => startAsk(runId, question, by, submission),
+    resume: (runId, input) => startResume(runId, input, submission),
     abortRun: (runId) => submission.dispatcher.init(submission.agent, { id: runId }).abort(),
     runsDir: rt.config.paths.runsDir,
   };
