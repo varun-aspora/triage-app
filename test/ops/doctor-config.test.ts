@@ -123,6 +123,37 @@ describe('runDoctor', () => {
     expect(doctorExitCode(await of('fail'))).toBe(1);
   });
 
+  test('rows with no entity come first, then ssfb, atspl, rtl, keeping check order within each', async () => {
+    const row = (id: string, entity?: 'ssfb' | 'atspl' | 'rtl') =>
+      ({ id, ...(entity !== undefined ? { entity } : {}), status: 'ok', key_names: [], message: id }) as DoctorCheck;
+    const report = await runDoctor(
+      [
+        async () => [row('a', 'rtl'), row('b', 'ssfb'), row('c')],
+        async () => [row('d', 'atspl'), row('e'), row('f', 'ssfb'), row('g', 'rtl')],
+      ],
+      { config: makeHome().config },
+    );
+    expect(report.checks.map((c) => `${c.id}:${c.entity ?? '-'}`)).toEqual([
+      'c:-', 'e:-', 'b:ssfb', 'f:ssfb', 'd:atspl', 'a:rtl', 'g:rtl',
+    ]);
+  });
+
+  test("sortBy 'check' groups rows by check id, in the order each id first came in", async () => {
+    const row = (id: string, entity?: 'ssfb' | 'atspl' | 'rtl') =>
+      ({ id, ...(entity !== undefined ? { entity } : {}), status: 'ok', key_names: [], message: id }) as DoctorCheck;
+    const report = await runDoctor(
+      [
+        async () => [row('env', 'rtl'), row('env', 'ssfb'), row('sandbox')],
+        async () => [row('db', 'atspl'), row('env'), row('db', 'ssfb')],
+      ],
+      { config: makeHome().config },
+      { sortBy: 'check' },
+    );
+    expect(report.checks.map((c) => `${c.id}:${c.entity ?? '-'}`)).toEqual([
+      'env:rtl', 'env:ssfb', 'env:-', 'sandbox:-', 'db:atspl', 'db:ssfb',
+    ]);
+  });
+
   test('table has stable columns and row order (snapshot)', async () => {
     const report = await runDoctor(
       [
@@ -488,7 +519,7 @@ describe('no io and stable order', () => {
       expect(a.checks.map((c) => `${c.id}:${c.entity ?? ''}:${c.key_names.join(',')}`)).toEqual(
         b.checks.map((c) => `${c.id}:${c.entity ?? ''}:${c.key_names.join(',')}`),
       );
-      expect([...new Set(a.checks.map((c) => c.id))]).toEqual(['env', 'sandbox', 'models', 'embedding', 'fixtures', 'rules']);
+      expect([...new Set(a.checks.map((c) => c.id))]).toEqual(['sandbox', 'models', 'embedding', 'fixtures', 'env', 'rules']);
       expect(a.checks.some((c) => c.message.startsWith('threw'))).toBe(false);
     } finally {
       globalThis.fetch = original;

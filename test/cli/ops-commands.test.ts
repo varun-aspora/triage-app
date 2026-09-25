@@ -202,6 +202,96 @@ describe('triage doctor', () => {
     expect(r.code).toBe(report.checks.some((c) => c.status === 'fail') ? EXIT.ERROR : EXIT.OK);
   });
 
+  test('--sort-by entity is the default; --sort-by check groups rows by check', async () => {
+    const h = home();
+    const mixed: NamedCheck = {
+      id: 'mixed',
+      run: async () => [
+        { id: 'env', entity: 'ssfb', status: 'ok', key_names: [], message: 'env ssfb' },
+        { id: 'env', status: 'ok', key_names: [], message: 'env none' },
+        { id: 'db', status: 'ok', key_names: [], message: 'db none' },
+      ],
+    };
+    const order = async (...flags: string[]) => {
+      const r = await cli(h.config, [createDoctorCommand({ checks: [mixed], deps: fakeDoctorDeps() })], ['doctor', '--json', ...flags]);
+      return (JSON.parse(r.out) as { checks: DoctorCheck[] }).checks.map((c) => c.message);
+    };
+    expect(await order()).toEqual(['env none', 'db none', 'env ssfb']);
+    expect(await order('--sort-by', 'entity')).toEqual(['env none', 'db none', 'env ssfb']);
+    expect(await order('--sort-by', 'check')).toEqual(['env ssfb', 'env none', 'db none']);
+  });
+
+  test('--sort-by with another value is a usage error', async () => {
+    const h = home();
+    const r = await cli(h.config, [createDoctorCommand({ checks: [okRow], deps: fakeDoctorDeps() })], ['doctor', '--sort-by', 'status']);
+    expect(r.code).not.toBe(EXIT.OK);
+    expect(r.err).toContain('entity, check');
+  });
+
+  test('--check runs only the named checks, repeated or comma-separated', async () => {
+    const h = home();
+    const ran: string[] = [];
+    const named = (id: string): NamedCheck => ({
+      id,
+      run: async () => {
+        ran.push(id);
+        return [{ id, status: 'ok', key_names: [], message: id }];
+      },
+    });
+    const checks = [named('env'), named('db'), named('repos'), named('tools')];
+    const run = async (...flags: string[]) => {
+      ran.length = 0;
+      const r = await cli(h.config, [createDoctorCommand({ checks, deps: fakeDoctorDeps() })], ['doctor', '--json', ...flags]);
+      return { ids: (JSON.parse(r.out) as { checks: DoctorCheck[] }).checks.map((c) => c.id), ran: [...ran] };
+    };
+    expect(await run()).toEqual({ ids: ['env', 'db', 'repos', 'tools'], ran: ['env', 'db', 'repos', 'tools'] });
+    expect(await run('--check', 'repos')).toEqual({ ids: ['repos'], ran: ['repos'] });
+    expect(await run('--check', 'db', '--check', 'repos')).toEqual({ ids: ['db', 'repos'], ran: ['db', 'repos'] });
+    expect(await run('--check', 'tools,env')).toEqual({ ids: ['env', 'tools'], ran: ['env', 'tools'] });
+  });
+
+  test('--check with an unknown id is a usage error listing the known ids, and runs nothing', async () => {
+    const h = home();
+    let ran = 0;
+    const counted: NamedCheck = { id: 'env', run: async () => (ran++, []) };
+    const r = await cli(h.config, [createDoctorCommand({ checks: [counted], deps: fakeDoctorDeps() })], ['doctor', '--check', 'env,nope']);
+    expect(r.code).toBe(EXIT.USAGE);
+    expect(r.err).toContain('unknown check nope; choose from env');
+    expect(ran).toBe(0);
+  });
+
+  test('--errors-only leaves out ok rows but keeps the counts and exit code of the full run', async () => {
+    const h = home();
+    const mixed: NamedCheck = {
+      id: 'mixed',
+      run: async () => (['ok', 'warn', 'fail', 'disabled', 'skipped', 'ok'] as const).map((status) => ({
+        id: 'mixed', status, key_names: [], message: `row ${status}`,
+      })),
+    };
+    const json = await cli(h.config, [createDoctorCommand({ checks: [mixed], deps: fakeDoctorDeps() })], ['doctor', '--errors-only', '--json']);
+    const report = JSON.parse(json.out) as { checks: DoctorCheck[]; counts: Record<string, number> };
+    expect(report.checks.map((c) => c.status)).toEqual(['warn', 'fail', 'disabled', 'skipped']);
+    expect(report.counts).toEqual({ ok: 2, warn: 1, fail: 1, disabled: 1, skipped: 1 });
+    expect(json.code).toBe(EXIT.ERROR);
+    const text = await cli(h.config, [createDoctorCommand({ checks: [okRow], deps: fakeDoctorDeps() })], ['doctor', '--errors-only']);
+    expect(text.code).toBe(EXIT.OK);
+    expect(text.out).not.toContain('fake ok');
+    expect(text.out).toContain('1 ok, 0 warn, 0 fail');
+  });
+
+  test('--list-checks prints the check ids and runs nothing', async () => {
+    const h = home();
+    let ran = 0;
+    const counted = (id: string): NamedCheck => ({ id, run: async () => (ran++, []) });
+    const checks = [counted('env'), counted('db'), counted('db'), counted('tools')];
+    const text = await cli(h.config, [createDoctorCommand({ checks, deps: fakeDoctorDeps() })], ['doctor', '--list-checks']);
+    expect(text.code).toBe(EXIT.OK);
+    expect(text.out).toBe('env\ndb\ntools\n');
+    const json = await cli(h.config, [createDoctorCommand({ checks, deps: fakeDoctorDeps() })], ['doctor', '--list-checks', '--json']);
+    expect(JSON.parse(json.out)).toEqual({ checks: ['env', 'db', 'tools'] });
+    expect(ran).toBe(0);
+  });
+
   test('a registry that does not load still gives a report', async () => {
     const h = home();
     writeFileSync(join(h.home, 'resources', 'ssfb.entity.json'), '{ not json');

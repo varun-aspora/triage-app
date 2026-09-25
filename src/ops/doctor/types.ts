@@ -25,7 +25,11 @@ export type DoctorCheck = {
 };
 
 export type DoctorReport = {
-  /** Rows in check order, then in the order each check returned them. */
+  /**
+   * Sorted by entity (the default): rows with no entity first, then ssfb,
+   * atspl, rtl. Sorted by check: rows grouped by check id, in check order.
+   * Within a group, rows keep check order, then the order each check returned them.
+   */
   readonly checks: readonly DoctorCheck[];
   readonly counts: Readonly<Record<DoctorStatus, number>>;
 };

@@ -8,6 +8,7 @@
 
 import { ConfigError } from '../../config/errors.ts';
 import { RegistryError } from '../../config/registry.ts';
+import { ENTITIES } from '../../types/core.ts';
 import {
   DOCTOR_STATUSES,
   type CheckFn,
@@ -19,11 +20,47 @@ import {
   type NamedCheck,
 } from './types.ts';
 
-export async function runDoctor(checks: readonly CheckInput[], ctx: DoctorContext): Promise<DoctorReport> {
-  const named = flatten(checks);
+export const DOCTOR_SORTS = ['entity', 'check'] as const;
+export type DoctorSort = (typeof DOCTOR_SORTS)[number];
+
+export type RunDoctorOptions = {
+  /** 'entity' (the default) or 'check'; see DoctorReport.checks. */
+  readonly sortBy?: DoctorSort;
+  /** Run only the checks with these ids. Every check runs when left out. */
+  readonly only?: readonly string[];
+};
+
+export async function runDoctor(checks: readonly CheckInput[], ctx: DoctorContext, options: RunDoctorOptions = {}): Promise<DoctorReport> {
+  const all = flatten(checks);
+  const named = options.only === undefined ? all : all.filter((c) => options.only?.includes(c.id));
   const results = await Promise.all(named.map((check) => runOne(check, ctx)));
-  const rows = Object.freeze(results.flat());
-  return Object.freeze({ checks: rows, counts: countRows(rows) });
+  const rows = results.flat();
+  const sorted = options.sortBy === 'check' ? sortByCheck(rows) : sortByEntity(rows);
+  const frozen = Object.freeze(sorted);
+  return Object.freeze({ checks: frozen, counts: countRows(frozen) });
+}
+
+// Both sorts are stable, so rows keep the order they came in within each group.
+
+// Rows with no entity first, then ENTITIES order.
+function sortByEntity(rows: DoctorCheck[]): DoctorCheck[] {
+  const rank = (c: DoctorCheck): number => (c.entity === undefined ? -1 : ENTITIES.indexOf(c.entity));
+  return rows.sort((a, b) => rank(a) - rank(b));
+}
+
+// Rows grouped by check id, the groups in the order their first row came in.
+function sortByCheck(rows: DoctorCheck[]): DoctorCheck[] {
+  const first = new Map<string, number>();
+  rows.forEach((c, i) => {
+    if (!first.has(c.id)) first.set(c.id, i);
+  });
+  const rank = (c: DoctorCheck): number => first.get(c.id) as number;
+  return rows.sort((a, b) => rank(a) - rank(b));
+}
+
+/** The ids of the checks, in run order, once each. */
+export function doctorCheckIds(checks: readonly CheckInput[]): string[] {
+  return [...new Set(flatten(checks).map((c) => c.id))];
 }
 
 /** 1 when any row is fail, else 0. */
