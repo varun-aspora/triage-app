@@ -106,6 +106,16 @@ export function localDefaultBranch(dir: string): readonly string[] {
   return at(dir, 'symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD');
 }
 
+/**
+ * Records the branch as origin's default (refs/remotes/origin/HEAD), for
+ * localDefaultBranch to read. A single-branch clone never sets it, so sync
+ * writes it after it has asked origin with ls-remote.
+ */
+export function recordDefaultBranch(dir: string, branch: string): readonly string[] {
+  const b = branchArg(branch);
+  return at(dir, 'symbolic-ref', 'refs/remotes/origin/HEAD', `refs/remotes/origin/${b}`);
+}
+
 /** Shallow single-branch clone of one branch into <reposDir>/<repo>. */
 export function cloneBranch(reposDir: string, remote: string, branch: string, repo: string): readonly string[] {
   return at(

@@ -439,6 +439,7 @@ async function updateAndIndex(
 
   await mustRun(deps, 'fetch', git.fetchBranch(dir, branch), FETCH_TIMEOUT_MS);
   await mustRun(deps, 'checkout', git.checkoutFetched(dir, branch), LOCAL_TIMEOUT_MS);
+  if (pin.branch === undefined) await recordDefault(deps, dir, branch, warnings);
   return indexAndFinish(pin, dir, branch, 'updated', deps, pins, warnings);
 }
 
@@ -459,7 +460,18 @@ async function cloneAndIndex(pin: RepoPin, remote: string, deps: ReposDeps, pins
   const r = resolveRepoDir(pin.repo, deps, pins);
   if (r.status !== 'ok') return finish(pin.repo, { status: 'failed', reason: r.message });
   if (!r.present) return finish(pin.repo, { status: 'failed', reason: 'git clone finished but the repo directory is missing' });
-  return indexAndFinish(pin, r.dir, branch, 'cloned', deps, pins);
+  const warnings: string[] = [];
+  if (pin.branch === undefined) await recordDefault(deps, r.dir, branch, warnings);
+  return indexAndFinish(pin, r.dir, branch, 'cloned', deps, pins, warnings);
+}
+
+/**
+ * Saves the default branch sync just read from origin, so the offline status
+ * check can compare against it. A failure is a warning: the checkout is fine.
+ */
+async function recordDefault(deps: ReposDeps, dir: string, branch: string, warnings: string[]): Promise<void> {
+  const r = await runGit(deps, git.recordDefaultBranch(dir, branch), LOCAL_TIMEOUT_MS);
+  if (!succeeded(r)) warnings.push(`could not record the default branch locally: ${failure('symbolic-ref', r)}`);
 }
 
 async function indexAndFinish(

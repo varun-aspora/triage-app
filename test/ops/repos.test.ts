@@ -91,6 +91,9 @@ describe('git argv builders', () => {
     expect(git.remoteDefaultBranch(dir)).toEqual(['-C', dir, 'ls-remote', '--symref', 'origin', 'HEAD']);
     expect(git.localDefaultBranch(dir)).toEqual(['-C', dir, 'symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']);
     expect(git.remoteDefaultBranchOf('/r', REMOTE)).toEqual(['-C', '/r', 'ls-remote', '--symref', REMOTE, 'HEAD']);
+    expect(git.recordDefaultBranch(dir, 'develop')).toEqual([
+      '-C', dir, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/develop',
+    ]);
     expect(git.cloneBranch('/r', REMOTE, 'release/1.2', 'harbor')).toEqual([
       '-C', '/r', 'clone', '--branch', 'release/1.2', '--single-branch', '--depth=1', '--no-tags', '--', REMOTE, 'harbor',
     ]);
@@ -100,7 +103,7 @@ describe('git argv builders', () => {
     const all = [
       git.revParseHead(dir), git.currentBranch(dir), git.statusPorcelain(dir), git.fetchBranch(dir, 'main'),
       git.checkoutFetched(dir, 'main'), git.remoteDefaultBranch(dir), git.localDefaultBranch(dir),
-      git.cloneBranch('/r', REMOTE, 'main', 'harbor'),
+      git.recordDefaultBranch(dir, 'main'), git.cloneBranch('/r', REMOTE, 'main', 'harbor'),
     ];
     for (const argv of all) expect(argv).not.toContain('pull');
   });
@@ -190,20 +193,46 @@ describe('syncRepos', () => {
     expect(readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8')).toContain('.codegraph/\n');
   });
 
-  test('branch absent in the pin gives a default-branch lookup, then that branch is used', async () => {
+  test('branch absent in the pin gives a default-branch lookup, then that branch is used and recorded', async () => {
     const dir = makeRepo('harbor');
     const steps: FakeStep[] = [
       { bin: GIT, argv: git.remoteDefaultBranch(dir), result: { stdout: `ref: refs/heads/develop\tHEAD\n${SHA_B}\tHEAD\n` } },
+      { bin: GIT, argv: git.recordDefaultBranch(dir, 'develop') },
       ...cleanSyncSteps(dir, 'develop', SHA_B),
     ];
     const { runner, d } = deps(steps, [pin('harbor')]);
     const report = await syncRepos({}, d);
     if (report.status !== 'done') throw new Error('expected done');
     const subcommands = runner.calls.map((c) => c.argv[c.bin === GIT ? 2 : 0]);
-    expect(subcommands).toEqual(['status', 'remote', 'ls-remote', 'fetch', 'checkout', 'rev-parse', 'sync']);
+    expect(subcommands).toEqual(['status', 'remote', 'ls-remote', 'fetch', 'checkout', 'symbolic-ref', 'rev-parse', 'sync']);
     expect(runner.calls[3]!.argv).toEqual(git.fetchBranch(dir, 'develop'));
     expect(runner.calls[4]!.argv).toEqual(git.checkoutFetched(dir, 'develop'));
-    expect(report.results[0]).toMatchObject({ status: 'ok', branch: 'develop' });
+    expect(runner.calls[5]!.argv).toEqual(git.recordDefaultBranch(dir, 'develop'));
+    expect(report.results[0]).toMatchObject({ status: 'ok', branch: 'develop', warnings: [] });
+  });
+
+  test('a failure to record the default branch is a warning, not a failed sync', async () => {
+    const dir = makeRepo('harbor');
+    const steps: FakeStep[] = [
+      { bin: GIT, argv: git.remoteDefaultBranch(dir), result: { stdout: `ref: refs/heads/develop\tHEAD\n` } },
+      { bin: GIT, argv: git.recordDefaultBranch(dir, 'develop'), result: { exitCode: 128 } },
+      ...cleanSyncSteps(dir, 'develop', SHA_B),
+    ];
+    const { d } = deps(steps, [pin('harbor')]);
+    const report = await syncRepos({}, d);
+    if (report.status !== 'done') throw new Error('expected done');
+    expect(report.results[0]).toMatchObject({
+      status: 'ok',
+      branch: 'develop',
+      warnings: ['could not record the default branch locally: git symbolic-ref exited with code 128'],
+    });
+  });
+
+  test('a pinned branch is not recorded as the default', async () => {
+    const dir = makeRepo('harbor');
+    const { runner, d } = deps(cleanSyncSteps(dir, 'main', SHA_A), [pin('harbor', { branch: 'main' })]);
+    await syncRepos({}, d);
+    expect(runner.calls.some((c) => c.argv.includes('symbolic-ref'))).toBe(false);
   });
 
   test('a default branch that is not a plain name fails the repo before fetch', async () => {
@@ -297,13 +326,14 @@ describe('syncRepos', () => {
           return {};
         },
       },
+      { bin: GIT, argv: git.recordDefaultBranch(dir, 'trunk') },
       { bin: GIT, argv: git.revParseHead(dir), result: { stdout: `${SHA_A}\n` } },
       { bin: CG, argv: ['init', dir] },
     ];
     const { runner, d } = deps(steps, [pin('harbor', { remote: REMOTE })]);
     const report = await syncRepos({}, d);
     if (report.status !== 'done') throw new Error('expected done');
-    expect(runner.calls.map((c) => c.argv[c.bin === GIT ? 2 : 0])).toEqual(['ls-remote', 'clone', 'rev-parse', 'init']);
+    expect(runner.calls.map((c) => c.argv[c.bin === GIT ? 2 : 0])).toEqual(['ls-remote', 'clone', 'symbolic-ref', 'rev-parse', 'init']);
     expect(report.results[0]).toMatchObject({ status: 'ok', action: 'cloned', branch: 'trunk' });
   });
 
