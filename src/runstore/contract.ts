@@ -10,9 +10,12 @@
 import assert from 'node:assert/strict';
 import { redactPersisted, type Persisted } from '../gate/redact.ts';
 import type { EntityFindings, CodeFindings } from '../types/findings.ts';
+import type { InputRequest, InputResolution, InputResolutionStatus } from '../types/input-request.ts';
 import type { Report } from '../types/report.ts';
 import type { TriageRequest } from '../types/request.ts';
 import {
+  InputRequestNotOpenError,
+  InputRequestOpenError,
   RunNotFoundError,
   RunStoreError,
   RunStoreRedactionError,
@@ -162,6 +165,22 @@ export function sampleReport(runId: string, statement: string, status: Report['s
   };
 }
 
+export function sampleInputRequest(questionId: string): InputRequest {
+  return {
+    question_id: questionId,
+    kind: 'provide',
+    question: 'Which transfer is this about: the one on 2 Sep for 5,000 or the one on 3 Sep for 12,000?',
+    why: 'Two transfers match the thread and their outcomes differ.',
+    options: ['2 Sep, 5,000', '3 Sep, 12,000'],
+    free_text: true,
+    asked_at: AT,
+  };
+}
+
+export function sampleResolution(status: InputResolutionStatus, resolvedAt = AT): InputResolution {
+  return { status, resolved_at: resolvedAt, resolved_by: 'ops-reviewer' };
+}
+
 export function sampleFeedback(verdict: FeedbackVerdict, givenAt: string): Feedback {
   return { verdict, given_by: 'ops-reviewer', given_at: givenAt, interface: 'cli' };
 }
@@ -270,6 +289,88 @@ export const runStoreContract: readonly ContractCase[] = [
       assert.equal(run.worker_pid, 4242);
       assert.ok(Date.parse(run.updated_at) > Date.parse(run.created_at));
       await assert.rejects(() => store.setPhase(RUN_A, 'nonsense' as never), (err: unknown) => err instanceof RunStoreError);
+    },
+  },
+  {
+    name: 'putInputRequest opens one question and moves the run to needs_input; a second one is refused',
+    async run(store, clock) {
+      await newRun(store, RUN_A);
+      await store.setPhase(RUN_A, 'investigating', { worker_pid: 4242, reason: 'x' });
+      clock.advance(HOUR);
+      await store.putInputRequest(RUN_A, p(sampleInputRequest('q1')));
+      const run = await store.getRun(RUN_A);
+      assert.ok(run);
+      assert.equal(run.phase, 'needs_input');
+      assert.equal(run.phase_reason, undefined);
+      assert.equal(run.worker_pid, 4242);
+      assert.deepEqual(run.input_request, sampleInputRequest('q1'));
+      assert.deepEqual(run.input_history, []);
+      assert.equal(run.updated_at, new Date(clock.now()).toISOString());
+      await assert.rejects(
+        () => store.putInputRequest(RUN_A, p(sampleInputRequest('q2'))),
+        (err: unknown) => err instanceof InputRequestOpenError && err.questionId === 'q1',
+      );
+      await assert.rejects(
+        () => store.putInputRequest(RUN_B, p(sampleInputRequest('q1'))),
+        (err: unknown) => err instanceof RunNotFoundError,
+      );
+      // A run that has not asked anything has no open question and no history.
+      await newRun(store, RUN_C);
+      const fresh = await store.getRun(RUN_C);
+      assert.equal(fresh?.input_request, null);
+      assert.deepEqual(fresh?.input_history, []);
+    },
+  },
+  {
+    name: 'resolveInputRequest closes the open question into the history and leaves the phase alone',
+    async run(store, clock) {
+      await newRun(store, RUN_A);
+      await store.putInputRequest(RUN_A, p(sampleInputRequest('q1')));
+      const notOpen = (err: unknown) => err instanceof InputRequestNotOpenError;
+      await assert.rejects(() => store.resolveInputRequest(RUN_A, 'q2', p(sampleResolution('answered'))), notOpen);
+      await store.setPhase(RUN_A, 'dispatched', { worker_pid: 99 });
+      clock.advance(HOUR);
+      const at = new Date(clock.now()).toISOString();
+      await store.resolveInputRequest(RUN_A, 'q1', p(sampleResolution('answered', at)));
+      const run = await store.getRun(RUN_A);
+      assert.ok(run);
+      assert.equal(run.input_request, null);
+      assert.equal(run.phase, 'dispatched');
+      assert.equal(run.worker_pid, 99);
+      assert.deepEqual(run.input_history, [{ ...sampleInputRequest('q1'), ...sampleResolution('answered', at) }]);
+      await assert.rejects(() => store.resolveInputRequest(RUN_A, 'q1', p(sampleResolution('skipped'))), notOpen);
+      // The next question keeps the history.
+      await store.putInputRequest(RUN_A, p(sampleInputRequest('q2')));
+      await store.resolveInputRequest(RUN_A, 'q2', p(sampleResolution('skipped')));
+      const again = await store.getRun(RUN_A);
+      assert.equal(again?.input_request, null);
+      assert.deepEqual(
+        again?.input_history.map((r) => [r.question_id, r.status]),
+        [
+          ['q1', 'answered'],
+          ['q2', 'skipped'],
+        ],
+      );
+      await assert.rejects(() => store.resolveInputRequest(RUN_B, 'q1', p(sampleResolution('answered'))), (err: unknown) => err instanceof RunNotFoundError);
+      await assert.rejects(() => store.resolveInputRequest(RUN_A, 'not an id', p(sampleResolution('answered'))), (err: unknown) => err instanceof RunStoreError);
+    },
+  },
+  {
+    name: 'an answer submission keeps the question id and the answer text',
+    async run(store) {
+      await newRun(store, RUN_A);
+      const seq = await store.addSubmission(RUN_A, p({ kind: 'answer' as const, question_id: 'q1', answer: 'the second transfer' }));
+      assert.equal(seq, 1);
+      const skipped = await store.addSubmission(RUN_A, p({ kind: 'answer' as const, question_id: 'q2' }));
+      assert.equal(skipped, 2);
+      const run = await store.getRun(RUN_A);
+      assert.ok(run);
+      assert.equal(run.submissions[0]?.kind, 'answer');
+      assert.equal(run.submissions[0]?.question_id, 'q1');
+      assert.equal(run.submissions[0]?.answer, 'the second transfer');
+      assert.equal(run.submissions[1]?.question_id, 'q2');
+      assert.equal(run.submissions[1]?.answer, undefined);
+      assert.equal(run.submissions[0]?.report, null);
     },
   },
   {
@@ -585,6 +686,34 @@ export const runStoreContract: readonly ContractCase[] = [
         'email',
         SYNTHETIC_EMAIL,
       );
+      await rejectsRedaction(
+        () =>
+          store.putInputRequest(
+            RUN_A,
+            tampered(sampleInputRequest('q1'), (r) => {
+              r.question = `is it the number ending ${SYNTHETIC_PHONE}?`;
+            }),
+          ),
+        'phone',
+        SYNTHETIC_PHONE,
+      );
+      assert.equal((await store.getRun(RUN_A))?.input_request, null);
+      await store.putInputRequest(RUN_A, p(sampleInputRequest('q1')));
+      await rejectsRedaction(
+        () =>
+          store.resolveInputRequest(
+            RUN_A,
+            'q1',
+            tampered(sampleResolution('answered'), (r) => {
+              r.resolved_by = SYNTHETIC_EMAIL;
+            }),
+          ),
+        'email',
+        SYNTHETIC_EMAIL,
+      );
+      assert.equal((await store.getRun(RUN_A))?.input_request?.question_id, 'q1');
+      await store.resolveInputRequest(RUN_A, 'q1', p(sampleResolution('skipped')));
+      await store.setPhase(RUN_A, 'created');
       await rejectsRedaction(
         () =>
           store.putReport(

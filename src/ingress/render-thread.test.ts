@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { TriageRequest } from '../types/request.ts';
-import { renderAsk, renderThread } from './render-thread.ts';
+import { renderAnswer, renderAsk, renderThread } from './render-thread.ts';
 
 const PAN = '4111111111111111';
 const ACCOUNT = '918020012345678';
@@ -70,5 +70,41 @@ describe('renderAsk', () => {
     expect(body).not.toContain(PAN);
     expect(body).toContain(ACCOUNT);
     expect(body).toContain('finish_report');
+  });
+});
+
+describe('renderAnswer', () => {
+  const q = { question_id: 'q1', question: 'Which transfer: the one on 2 Sep or the one on 3 Sep?' };
+
+  test('an answer names who answered, quotes the question, keeps the account number and masks a PAN', () => {
+    const text = renderAnswer(q, { skip: false, answer: `card ${PAN} on account ${ACCOUNT}`, by: 'ops-reviewer', ids: {}, gaps: [] });
+    expect(text).toContain('Answer from ops-reviewer to your question q1 ("Which transfer: the one on 2 Sep or the one on 3 Sep?"):');
+    expect(text).not.toContain(PAN);
+    expect(text).toContain(ACCOUNT);
+    expect(text).toContain('call finish_report with the report');
+    expect(text).not.toContain('Ids they gave');
+    expect(text).not.toContain('Identity lookups');
+  });
+
+  test('a skip says so and asks for the gap', () => {
+    const text = renderAnswer(q, { skip: true, answer: '', by: 'ops-reviewer', ids: {}, gaps: [] });
+    expect(text).toContain('ops-reviewer skipped your question q1 ("Which transfer');
+    expect(text).toContain('list the open question under gaps');
+    expect(text).not.toContain('call finish_report with the report');
+  });
+
+  test('verified ids and identity gaps are listed, and a long question is cut', () => {
+    const long = { question_id: 'q2', question: `${'x'.repeat(200)}\n  y` };
+    const text = renderAnswer(long, {
+      skip: false,
+      answer: 'yes',
+      by: 'ops',
+      ids: { form_id: 'f-1', customer_id: 'c-1' },
+      gaps: ['identity lookup unreachable: ssfb:harbor'],
+    });
+    expect(text).toContain('Ids they gave, resolved by the identity step and in scope: customer_id = c-1, form_id = f-1.');
+    expect(text).toContain('Identity lookups: identity lookup unreachable: ssfb:harbor.');
+    expect(text).toContain(`${'x'.repeat(120)}…`);
+    expect(text).not.toContain('x'.repeat(121));
   });
 });

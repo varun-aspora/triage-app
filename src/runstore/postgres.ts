@@ -59,6 +59,14 @@ import {
   type Submission,
   type SubmissionInput,
 } from './types.ts';
+import { assertQuestionId, InputRequestNotOpenError, InputRequestOpenError } from './types.ts';
+import {
+  InputRequestSchema,
+  InputResolutionSchema,
+  ResolvedInputRequestSchema,
+  type InputRequest,
+  type InputResolution,
+} from '../types/input-request.ts';
 
 /** The parts of the shared pg runner the provider uses. */
 export type PgStoreRunner = Pick<PgRunner, 'query' | 'transaction'>;
@@ -169,9 +177,18 @@ SET classification = $2::jsonb, id_chain = $3::jsonb, category = $4::text, subca
 WHERE run_id = $1
 RETURNING run_id`,
 
+  putInputRequest: `UPDATE triage.runs
+SET input_request = $2::jsonb, phase = 'needs_input', phase_reason = NULL, updated_at = $3::timestamptz
+WHERE run_id = $1 AND input_request IS NULL
+RETURNING run_id`,
+  resolveInputRequest: `UPDATE triage.runs
+SET input_history = input_history || jsonb_build_array(input_request || $3::jsonb), input_request = NULL, updated_at = $4::timestamptz
+WHERE run_id = $1 AND input_request->>'question_id' = $2::text
+RETURNING run_id`,
+
   nextSubmissionSeq: 'SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM triage.submissions WHERE run_id = $1',
-  insertSubmission: `INSERT INTO triage.submissions (run_id, seq, kind, question, created_at)
-VALUES ($1, $2, $3, $4::text, $5::timestamptz)`,
+  insertSubmission: `INSERT INTO triage.submissions (run_id, seq, kind, question, created_at, question_id, answer)
+VALUES ($1, $2, $3, $4::text, $5::timestamptz, $6::text, $7::text)`,
 
   nextEvidenceVersion:
     'SELECT COALESCE(MAX(version), 0) + 1 AS version FROM triage.evidence WHERE run_id = $1 AND key = $2',
@@ -198,11 +215,12 @@ RETURNING run_id`,
   clearExpiredKeys: 'DELETE FROM triage.idempotency WHERE expires_at <= $1::timestamptz RETURNING key_sha256',
   dropKeysForRun: 'DELETE FROM triage.idempotency WHERE run_id = $1',
 
-  getRun: `SELECT run_id, schema_version, created_at, updated_at, phase, phase_reason, worker_pid, request, classification
+  getRun: `SELECT run_id, schema_version, created_at, updated_at, phase, phase_reason, worker_pid, request, classification,
+  input_request, input_history
 FROM triage.runs WHERE run_id = $1`,
   latestEvidence: `SELECT DISTINCT ON (key) key, version, findings FROM triage.evidence
 WHERE run_id = $1 ORDER BY key, version DESC`,
-  submissions: `SELECT s.seq, s.kind, s.question, s.created_at, r.report, r.report_md
+  submissions: `SELECT s.seq, s.kind, s.question, s.question_id, s.answer, s.created_at, r.report, r.report_md
 FROM triage.submissions s LEFT JOIN triage.reports r ON r.run_id = s.run_id AND r.seq = s.seq
 WHERE s.run_id = $1 ORDER BY s.seq`,
   feedback: 'SELECT body FROM triage.feedback WHERE run_id = $1 ORDER BY id',
@@ -388,6 +406,29 @@ class PostgresRunStore implements RunStore {
     if (rows.length === 0) throw new RunNotFoundError(id);
   }
 
+  async putInputRequest(runId: RunId, request: Persisted<InputRequest>): Promise<void> {
+    const id = assertRunId(runId);
+    const value = parseRecord(InputRequestSchema, assertPersisted(request, 'input request'), 'input request');
+    const rows = await this.#runner.query(SQL.putInputRequest, [id, JSON.stringify(value), this.#iso()]);
+    if (rows.length > 0) return;
+    // No row updated: the run is missing, or a question is already open.
+    const [run] = await this.#runner.query(SQL.getRun, [id]);
+    if (run === undefined) throw new RunNotFoundError(id);
+    const open = run.input_request === null || run.input_request === undefined ? null : (fromJson(run.input_request, 'input request') as InputRequest);
+    throw new InputRequestOpenError(id, open?.question_id ?? '?');
+  }
+
+  async resolveInputRequest(runId: RunId, questionId: string, resolution: Persisted<InputResolution>): Promise<void> {
+    const id = assertRunId(runId);
+    assertQuestionId(questionId);
+    const value = parseRecord(InputResolutionSchema, assertPersisted(resolution, 'input resolution'), 'input resolution');
+    const rows = await this.#runner.query(SQL.resolveInputRequest, [id, questionId, JSON.stringify(value), this.#iso()]);
+    if (rows.length > 0) return;
+    const exists = await this.#runner.query(SQL.runExists, [id]);
+    if (exists.length === 0) throw new RunNotFoundError(id);
+    throw new InputRequestNotOpenError(id, questionId);
+  }
+
   // ---------------------------------------------------------------- submissions and reports
 
   async addSubmission(runId: RunId, submission: Persisted<SubmissionInput>): Promise<number> {
@@ -398,7 +439,15 @@ class PostgresRunStore implements RunStore {
       await this.#requireRun(tx.query, SQL.lockRun, id);
       const [row] = await tx.query(SQL.nextSubmissionSeq, [id]);
       const seq = toInt(row?.seq, 'submission seq');
-      await tx.query(SQL.insertSubmission, [id, seq, input.kind, input.question ?? null, this.#iso()]);
+      await tx.query(SQL.insertSubmission, [
+        id,
+        seq,
+        input.kind,
+        input.question ?? null,
+        this.#iso(),
+        input.question_id ?? null,
+        input.answer ?? null,
+      ]);
       return seq;
     });
   }
@@ -591,10 +640,14 @@ class PostgresRunStore implements RunStore {
 
     const submissions: Submission[] = (await query(SQL.submissions, [id])).map((row) => {
       const question = optText(row.question);
+      const questionId = optText(row.question_id);
+      const answer = optText(row.answer);
       const report = row.report === null || row.report === undefined ? null : (fromJson(row.report, 'report') as Report);
       return {
         kind: parseRecord(SubmissionInputSchema.entries.kind, row.kind, 'submission kind'),
         ...(question !== undefined ? { question } : {}),
+        ...(questionId !== undefined ? { question_id: questionId } : {}),
+        ...(answer !== undefined ? { answer } : {}),
         seq: toInt(row.seq, 'submission seq'),
         created_at: toIso(row.created_at, 'submission time'),
         report,
@@ -626,6 +679,12 @@ class PostgresRunStore implements RunStore {
     const classification = run.classification === null || run.classification === undefined
       ? null
       : (fromJson(run.classification, 'classification') as ClassificationRecord);
+    const inputRequest = run.input_request === null || run.input_request === undefined
+      ? null
+      : parseRecord(InputRequestSchema, fromJson(run.input_request, 'input request'), 'input request');
+    const inputHistory = run.input_history === null || run.input_history === undefined
+      ? []
+      : parseRecord(v.array(ResolvedInputRequestSchema), fromJson(run.input_history, 'input history'), 'input history');
     return {
       run_id: String(run.run_id),
       schema_version: toInt(run.schema_version, 'schema version'),
@@ -634,6 +693,8 @@ class PostgresRunStore implements RunStore {
       phase: parseRecord(RunPhaseSchema, run.phase, 'phase'),
       ...(reason !== undefined ? { phase_reason: reason } : {}),
       ...(pid !== undefined ? { worker_pid: pid } : {}),
+      input_request: inputRequest,
+      input_history: inputHistory,
       request: fromJson(run.request, 'request') as TriageRequest,
       classification,
       evidence,

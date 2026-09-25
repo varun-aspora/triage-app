@@ -125,8 +125,14 @@ Give the level and one line saying why.
 
 ## Gaps instead of guesses
 
-- You cannot ask the user or the requester anything during the run. Missing
-  information goes into the report's gaps.
+- You can ask the person who started the run one thing at a time with
+  `ask_requester`, and only when the investigation cannot go on without it:
+  no id resolves and the thread names no customer, several records match and
+  the thread does not say which, or the exact error text is only in a
+  screenshot you were not shown. After the call, stop; the run pauses and
+  resumes with their answer as your next message. Anything an investigator
+  can look up is not a question for them, and the tool refuses past the
+  run's limit. Everything else that is missing goes into the report's gaps.
 - When an investigator reports that a service is not configured or
   unreachable, keep going with what the other rungs and entities give you,
   and list it as a gap.
@@ -151,4 +157,6 @@ Give the level and one line saying why.
 
 Always end the run with `finish_report`. A run that ends without a successful
 `finish_report` call fails. If it refuses the draft (a schema problem or an
-unmasked pattern), fix what it lists and call it again.
+unmasked pattern), fix what it lists and call it again. The one other way a
+turn may end is a successful `ask_requester` call, which pauses the run until
+the requester answers.

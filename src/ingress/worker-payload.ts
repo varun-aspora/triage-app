@@ -2,16 +2,19 @@
 // process. It travels only over the child's stdin, never on argv or disk, so
 // the raw thread in a submit payload is never stored anywhere (D43).
 //
-// Two kinds:
+// Three kinds:
 // - submit: the prepared TriageRequest for a new run, plus the names ingress
 //   collected for redaction (they ride next to the request, not inside it, so
 //   the run store never receives them).
 // - ask: a follow-up question on an existing run.
+// - answer: the answer to the question a run is waiting on (or a skip), with
+//   any ids the person gave for the ingress identity step (P6 §4.5).
 //
 // Error messages name the failing field and what was expected. They never
 // quote the received value, since it can be customer data.
 import * as v from 'valibot';
-import { NonEmptyStringSchema, RunIdSchema } from '../types/core.ts';
+import { KnownIdsSchema, NonEmptyStringSchema, RunIdSchema } from '../types/core.ts';
+import { QuestionIdSchema } from '../types/input-request.ts';
 import { TriageRequestSchema } from '../types/request.ts';
 
 /** Upper bound on what decodePayload reads. Attachments travel as refs, so this is generous. */
@@ -40,7 +43,24 @@ export const AskPayloadSchema = v.strictObject({
 });
 export type AskPayload = v.InferOutput<typeof AskPayloadSchema>;
 
-export const WorkerPayloadSchema = v.variant('kind', [SubmitPayloadSchema, AskPayloadSchema]);
+export const AnswerPayloadSchema = v.pipe(
+  v.strictObject({
+    kind: v.literal('answer'),
+    run_id: RunIdSchema,
+    question_id: QuestionIdSchema,
+    answer: v.optional(NonEmptyStringSchema),
+    skip: v.optional(v.literal(true)),
+    ids: v.optional(KnownIdsSchema),
+    by: NonEmptyStringSchema,
+  }),
+  v.forward(
+    v.check((p) => (p.skip === true) !== (p.answer !== undefined), 'must be given, or skip must be true, not both'),
+    ['answer'],
+  ),
+);
+export type AnswerPayload = v.InferOutput<typeof AnswerPayloadSchema>;
+
+export const WorkerPayloadSchema = v.variant('kind', [SubmitPayloadSchema, AskPayloadSchema, AnswerPayloadSchema]);
 export type WorkerPayload = v.InferOutput<typeof WorkerPayloadSchema>;
 
 /** A payload that is not valid JSON, too large, or fails the schema. */

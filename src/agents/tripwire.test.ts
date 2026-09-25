@@ -125,6 +125,7 @@ describe('allowlist', () => {
     const { config, registry } = fullHome();
     expect(allowedToolNames({ config, registry })).toEqual([
       'activate_skill',
+      'ask_requester',
       'bash',
       'cbs_call',
       'code_explore',

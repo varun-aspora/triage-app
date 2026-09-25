@@ -39,6 +39,8 @@ function record(runId: string, phase: RunPhase, report: unknown = null): RunReco
     created_at: '2026-09-24T00:00:00.000Z',
     updated_at: '2026-09-24T00:00:00.000Z',
     phase,
+    input_request: null,
+    input_history: [],
     request: {} as RunRecord['request'],
     classification: {
       decision: { category: 'payment_stuck', tier_final: 'mid' } as unknown as NonNullable<RunRecord['classification']>['decision'],

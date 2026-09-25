@@ -70,6 +70,13 @@ import {
   type SubmissionInput,
   type SubmissionMeta,
 } from './types.ts';
+import { assertQuestionId, InputRequestNotOpenError, InputRequestOpenError } from './types.ts';
+import {
+  InputRequestSchema,
+  InputResolutionSchema,
+  type InputRequest,
+  type InputResolution,
+} from '../types/input-request.ts';
 
 export type FolderRunStoreOptions = {
   /** TRIAGE_RUNS_DIR, absolute. */
@@ -250,6 +257,47 @@ class FolderRunStore implements RunStore {
         phase,
         ...(detail.reason !== undefined ? { phase_reason: detail.reason } : {}),
         ...((detail.worker_pid ?? meta.worker_pid) !== undefined ? { worker_pid: detail.worker_pid ?? meta.worker_pid } : {}),
+        ...inputFields(meta),
+      };
+      await writeFileAtomic(join(this.#dir(runId), 'meta.json'), json(next));
+    });
+  }
+
+  async putInputRequest(runId: RunId, request: Persisted<InputRequest>): Promise<void> {
+    const value = parseRecord(InputRequestSchema, assertPersisted(request, 'input request'), 'input request');
+    await serial(this.#lock(runId), async () => {
+      const meta = await this.#requireRun(runId);
+      if (meta.input_request !== undefined) throw new InputRequestOpenError(runId, meta.input_request.question_id);
+      const next: RunMeta = {
+        schema_version: meta.schema_version,
+        run_id: meta.run_id,
+        created_at: meta.created_at,
+        updated_at: this.#iso(),
+        phase: 'needs_input',
+        ...(meta.worker_pid !== undefined ? { worker_pid: meta.worker_pid } : {}),
+        input_request: value,
+        ...(meta.input_history !== undefined ? { input_history: meta.input_history } : {}),
+      };
+      await writeFileAtomic(join(this.#dir(runId), 'meta.json'), json(next));
+    });
+  }
+
+  async resolveInputRequest(runId: RunId, questionId: string, resolution: Persisted<InputResolution>): Promise<void> {
+    assertQuestionId(questionId);
+    const value = parseRecord(InputResolutionSchema, assertPersisted(resolution, 'input resolution'), 'input resolution');
+    await serial(this.#lock(runId), async () => {
+      const meta = await this.#requireRun(runId);
+      const open = meta.input_request;
+      if (open === undefined || open.question_id !== questionId) throw new InputRequestNotOpenError(runId, questionId);
+      const next: RunMeta = {
+        schema_version: meta.schema_version,
+        run_id: meta.run_id,
+        created_at: meta.created_at,
+        updated_at: this.#iso(),
+        phase: meta.phase,
+        ...(meta.phase_reason !== undefined ? { phase_reason: meta.phase_reason } : {}),
+        ...(meta.worker_pid !== undefined ? { worker_pid: meta.worker_pid } : {}),
+        input_history: [...(meta.input_history ?? []), { ...open, ...value }],
       };
       await writeFileAtomic(join(this.#dir(runId), 'meta.json'), json(next));
     });
@@ -563,6 +611,8 @@ class FolderRunStore implements RunStore {
       phase: meta.phase,
       ...(meta.phase_reason !== undefined ? { phase_reason: meta.phase_reason } : {}),
       ...(meta.worker_pid !== undefined ? { worker_pid: meta.worker_pid } : {}),
+      input_request: meta.input_request ?? null,
+      input_history: meta.input_history ?? [],
       request,
       classification: classification ?? null,
       evidence: await this.#evidence(runId),
@@ -696,4 +746,12 @@ export function createFolderRunStore(opts: FolderRunStoreOptions): RunStore {
 /** The folder store at TRIAGE_RUNS_DIR, with idempotency claims under TRIAGE_DATA_DIR. */
 export function folderRunStoreFromConfig(config: Config, opts: { now?: () => number } = {}): RunStore {
   return new FolderRunStore({ runsDir: config.paths.runsDir, dataDir: config.paths.dataDir, ...opts });
+}
+
+/** The input request fields of a meta record, carried over by every rewrite that is not about them. */
+function inputFields(meta: RunMeta): Pick<RunMeta, 'input_request' | 'input_history'> {
+  return {
+    ...(meta.input_request !== undefined ? { input_request: meta.input_request } : {}),
+    ...(meta.input_history !== undefined ? { input_history: meta.input_history } : {}),
+  };
 }

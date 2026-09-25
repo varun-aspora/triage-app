@@ -127,10 +127,10 @@ describe('per-mount and per-entity membership', () => {
     }
   });
 
-  test('the triage mount holds resolve_identity, note_evidence and finish_report only', () => {
+  test('the triage mount holds ask_requester, resolve_identity, note_evidence and finish_report only', () => {
     for (const h of [plain, allOn]) {
       const set = names(toolsFor('triage', ctxFrom(h, null)));
-      expect(set).toEqual(sorted(['finish_report', 'note_evidence', 'resolve_identity']));
+      expect(set).toEqual(sorted(['ask_requester', 'finish_report', 'note_evidence', 'resolve_identity']));
     }
   });
 

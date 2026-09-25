@@ -37,7 +37,7 @@ const home = contractHome(fake);
 let narrow: ContractHome | undefined;
 let b: Booted;
 
-const TRIAGE_TOOLS = ['finish_report', 'note_evidence', 'resolve_identity'];
+const TRIAGE_TOOLS = ['ask_requester', 'finish_report', 'note_evidence', 'resolve_identity'];
 // The sets T06.6 asserts, with the SSFB flags off (the test home leaves them blank).
 const BASE_TOOLS = ['http_call', 'logs_search', 'note_evidence', 'sql_select'];
 const CODE_TOOLS = ['code_explore', 'code_impact', 'code_node', 'repo_grep', 'repo_read'];

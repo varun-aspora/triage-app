@@ -1,6 +1,6 @@
 # Proposals under discussion (2026-09-23)
 
-Five additions raised after the HLD answers. Each file holds the research report, the adversarial critique, and the questions the owner must answer. Nothing here is decided; outcomes go into docs/05-decisions.md as new D-entries.
+Five additions raised after the HLD answers, and P6 from the owner review of the built v1 (2026-09-25). Each file holds the research, the critique where one was run, and the questions the owner must answer. Nothing here is decided; outcomes go into docs/05-decisions.md as new D-entries.
 
 | # | Proposal | Critic verdict | Decisions touched |
 |---|---|---|---|
@@ -9,3 +9,4 @@ Five additions raised after the HLD answers. Each file holds the research report
 | [P3](P3-sandbox.md) | Sandboxed execution: local default, pluggable E2B/Daytona/Modal | **decided → D45** (2026-09-23) | D2, D3, D4, D11, D17, D19, D23, D24, D27, D29, D32, D35, D38, D41 |
 | [P4](P4-self-learning.md) | Self-learning from past runs and cases | sound_with_changes | D2, D5, D9, D16, D19, D23, D24, D25, D27, D29, D37, D38, D39, D41 |
 | [P5](P5-gh-cli.md) | Standardise on gh CLI for GitHub; repo clone/sync | sound_with_changes | D37, D11, D2, D32, D5, D20, D41, D19, D27 |
+| [P6](P6-mid-run-input.md) | Mid-run input: relay a blocked run to the person and resume it | **decided → D53** (2026-09-25, CLI only; no critic pass) | D13, D17, D22, D24, D25, D26, D28, D32, D35, D39, D43 |

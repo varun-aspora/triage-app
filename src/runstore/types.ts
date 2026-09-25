@@ -32,6 +32,15 @@ import {
 import type { CodeFindings, EntityFindings } from '../types/findings.ts';
 import type { IdChain } from '../types/id-chain.ts';
 import type { Report } from '../types/report.ts';
+import {
+  InputRequestSchema,
+  InputResolutionSchema,
+  QuestionIdSchema,
+  ResolvedInputRequestSchema,
+  type InputRequest,
+  type InputResolution,
+  type ResolvedInputRequest,
+} from '../types/input-request.ts';
 import type { TriageRequest } from '../types/request.ts';
 
 export type { Persisted } from '../gate/redact.ts';
@@ -48,6 +57,8 @@ export const RUN_PHASES = [
   'classifying',
   'dispatched',
   'investigating',
+  // Paused on a question for the requester (P6 §4.3). Not terminal; nothing runs.
+  'needs_input',
   'completed',
   'failed',
 ] as const;
@@ -78,6 +89,10 @@ export const RunMetaSchema = v.object({
   phase: RunPhaseSchema,
   phase_reason: v.optional(v.string()),
   worker_pid: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1))),
+  /** The open question, while the run waits for the requester. */
+  input_request: v.optional(InputRequestSchema),
+  /** Closed questions with their resolutions, oldest first. */
+  input_history: v.optional(v.array(ResolvedInputRequestSchema)),
 });
 export type RunMeta = v.InferOutput<typeof RunMetaSchema>;
 
@@ -99,11 +114,15 @@ export type EvidenceRecord = {
   readonly findings: Findings;
 };
 
-export const SUBMISSION_KINDS = ['initial', 'ask'] as const;
+export const SUBMISSION_KINDS = ['initial', 'ask', 'answer'] as const;
 export const SubmissionInputSchema = v.object({
   kind: v.picklist(SUBMISSION_KINDS),
   // The follow-up question of a `triage ask`, persisted profile.
   question: v.optional(v.string()),
+  // An 'answer' submission: the input request it resolves and, unless it
+  // was skipped, the answer text (persisted profile).
+  question_id: v.optional(QuestionIdSchema),
+  answer: v.optional(v.string()),
 });
 export type SubmissionInput = v.InferOutput<typeof SubmissionInputSchema>;
 
@@ -199,6 +218,10 @@ export type RunRecord = {
   readonly phase: RunPhase;
   readonly phase_reason?: string;
   readonly worker_pid?: number;
+  /** The open question while the phase is needs_input; null otherwise. */
+  readonly input_request: InputRequest | null;
+  /** Closed questions, oldest first. */
+  readonly input_history: readonly ResolvedInputRequest[];
   readonly request: TriageRequest;
   readonly classification: ClassificationRecord | null;
   /** Latest version per key. */
@@ -247,6 +270,18 @@ export interface RunStore {
   /** Adds a submission and returns its seq, starting at 1. */
   addSubmission(runId: RunId, submission: Persisted<SubmissionInput>): Promise<number>;
   setPhase(runId: RunId, phase: RunPhase, detail?: PhaseDetail): Promise<void>;
+  /**
+   * Opens a question for the requester and moves the run to phase
+   * needs_input, clearing the phase reason. Throws InputRequestOpenError
+   * while another question is open.
+   */
+  putInputRequest(runId: RunId, request: Persisted<InputRequest>): Promise<void>;
+  /**
+   * Closes the open question with that id: it joins the history with the
+   * resolution. The phase is left as it is; the caller moves it. Throws
+   * InputRequestNotOpenError when no open question has that id.
+   */
+  resolveInputRequest(runId: RunId, questionId: string, resolution: Persisted<InputResolution>): Promise<void>;
   putClassification(runId: RunId, record: Persisted<ClassificationRecord>): Promise<void>;
   /** Stores a new version of the findings for the key and returns it (1, 2, ...). */
   putEvidence(runId: RunId, key: EvidenceKey, findings: Persisted<Findings>): Promise<number>;
@@ -288,6 +323,30 @@ export class RunNotFoundError extends RunStoreError {
   }
 }
 
+/** putInputRequest while a question is open. */
+export class InputRequestOpenError extends RunStoreError {
+  override name = 'InputRequestOpenError';
+  readonly runId: string;
+  readonly questionId: string;
+  constructor(runId: string, questionId: string) {
+    super(`run ${runId} is already waiting on question ${questionId}`);
+    this.runId = runId;
+    this.questionId = questionId;
+  }
+}
+
+/** resolveInputRequest for a question that is not the open one. */
+export class InputRequestNotOpenError extends RunStoreError {
+  override name = 'InputRequestNotOpenError';
+  readonly runId: string;
+  readonly questionId: string;
+  constructor(runId: string, questionId: string) {
+    super(`run ${runId} has no open question ${questionId}`);
+    this.runId = runId;
+    this.questionId = questionId;
+  }
+}
+
 /**
  * The persisted-profile check found something unmasked. The message and the
  * fields carry pattern names and JSON paths only, never the matched text.
@@ -316,6 +375,11 @@ export function assertPersisted<T>(value: Persisted<T>, what: string): T {
   const check = checkEgress(inner);
   if (!check.ok) throw new RunStoreRedactionError(what, check.unmasked, check.paths);
   return inner;
+}
+
+export function assertQuestionId(questionId: string): string {
+  if (!v.is(QuestionIdSchema, questionId)) throw new RunStoreError('invalid question id');
+  return questionId;
 }
 
 /** A plain-text field the store writes that is not a Persisted value (phase reason). */

@@ -152,6 +152,29 @@ For an existing `.env`:
 - `SSFB_INFRA_REPO`, `ATSPL_INFRA_REPO` and `RTL_INFRA_REPO` must be added. The registry refuses to start when a key it names is missing; blank turns the line off for that entity. Prod values are in `.env.example`; the stage values are in the comment above each key.
 - Run `triage repos sync` once to clone the four new repos.
 
+### Mid-run input (P6, D53)
+
+| Change | Decision |
+|---|---|
+| `ask_requester` on the Triage root; `needs_input` phase and input requests in both run stores (`0002_input_requests.sql`); `answerRun` and the `triage.input_answer` signal; `triage input`; `run`/`wait` ask at a terminal; `status` shows the question; `ask` refuses while one is open; `TRIAGE_MAX_ASKS_PER_RUN`; the run's id chain mirrored into persistent state | D53 |
+
+Departures from the P6 design, all the owner's scope (CLI only):
+
+- No HTTP/web or Slack adapter. `GET /triage/:run_id` shows a parked run as `status: running` with `phase: needs_input`; `POST .../ask` is not refused while a question is open.
+- No `do` requests (they wait for the D32 answer) and no deadline for an unanswered question (`triage input --skip` is the manual one).
+- No ingress-time ask when a thread carries no id; the run asks mid-run instead.
+
+Assumptions made, not verified against a real system:
+
+- Flue 2.0.8 delivers a `kind: 'signal'` message to an idle conversation as a new response with the full history, and `useDelivery()` in the root's render sees that signal's `attributes`. The contract test `test/contract/agents/input.contract.ts` drives this through the runtime with the fake model; no real model has asked a question yet.
+- A response that ends on `ask_requester` settles `completed` from Flue's point of view; the pipeline tells it apart by the run's phase after the read. If a tool ever moves the phase to `needs_input` before the pipeline writes `investigating`, the parked state would be missed; the tool runs during the read, after that write.
+- Whether current models ask only when blocked, rather than instead of investigating, is not measured. The tool description and the method text say when to ask; an eval for over-asking is not written.
+
+For an existing `.env`:
+
+- `TRIAGE_MAX_ASKS_PER_RUN` can be left out; the default (2) applies. `0` leaves the tool unmounted.
+- A postgres run store gets `0002_input_requests.sql` on the next start; the folder store needs nothing.
+
 ### Model catalog refresh
 
 Flue 2.0.8 pins pi-ai `^0.83.0`, whose bundled catalog has no `gpt-6-*` and no `claude-opus-5-5`, so those specs failed at `resolveModel`. pi-ai's `refreshModels()` only works for providers built with a `fetchModels`, and its built-in `anthropic` and `openai` providers are static.

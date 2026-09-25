@@ -53,6 +53,8 @@ function fakeRunStore(): FakeStore {
     addSubmission: unused,
     setPhase: unused,
     putClassification: unused,
+    putInputRequest: unused,
+    resolveInputRequest: unused,
     putReport: unused,
     putFeedback: unused,
     claimIdempotencyKey: unused,

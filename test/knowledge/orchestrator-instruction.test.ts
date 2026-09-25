@@ -43,6 +43,7 @@ const ORCHESTRATOR_NAMES = [
   'resolve_identity',
   'note_evidence',
   'finish_report',
+  'ask_requester',
   'task',
   'activate_skill',
   'investigate_<entity>',
@@ -261,8 +262,13 @@ describe('orchestrator.md', () => {
     expect(text).toMatch(/A human reads the report .* outside the agent/);
   });
 
-  test('does not ask anyone mid-run', () => {
-    expect(orchestrator.replace(/\s+/g, ' ')).toContain('You cannot ask the user or the requester anything during the run');
+  test('asks the requester only through ask_requester, only when blocked, and stops after', () => {
+    const flat = orchestrator.replace(/\s+/g, ' ');
+    expect(flat).toContain('one thing at a time with `ask_requester`');
+    expect(flat).toContain('only when the investigation cannot go on without it');
+    expect(flat).toContain('After the call, stop');
+    expect(flat).toContain('Anything an investigator can look up is not a question for them');
+    expect(flat).not.toContain('You cannot ask the user or the requester anything');
   });
 });
 

@@ -61,6 +61,8 @@ function runRecord(o: { report?: Report | null; source?: TriageRequest['source']
     created_at: '2026-09-20T10:00:00.000Z',
     updated_at: '2026-09-20T10:15:00.000Z',
     phase: 'completed',
+    input_request: null,
+    input_history: [],
     request: {
       request_id: RUN_ID,
       interface: 'cli',

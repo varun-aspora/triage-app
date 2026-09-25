@@ -48,6 +48,8 @@ export type Config = {
   readonly budgets: {
     readonly maxToolCallsPerRun: number;
     readonly maxTasksPerRun: number;
+    /** Questions to the requester per run (ask_requester); 0 leaves the tool unmounted. */
+    readonly maxAsksPerRun: number;
     readonly maxResponseBytesPerCall: number;
     readonly maxBytesPerRun: number;
     readonly runTimeoutMs: number;
@@ -172,6 +174,7 @@ export function configFromRecord(
     budgets: {
       maxToolCallsPerRun: r.requiredInt('TRIAGE_MAX_TOOL_CALLS_PER_RUN'),
       maxTasksPerRun: r.requiredInt('TRIAGE_MAX_TASKS_PER_RUN'),
+      maxAsksPerRun: r.requiredInt('TRIAGE_MAX_ASKS_PER_RUN'),
       maxResponseBytesPerCall: r.requiredInt('TRIAGE_MAX_RESPONSE_BYTES_PER_CALL'),
       maxBytesPerRun: r.requiredInt('TRIAGE_MAX_BYTES_PER_RUN'),
       runTimeoutMs: r.requiredInt('TRIAGE_RUN_TIMEOUT_MS'),

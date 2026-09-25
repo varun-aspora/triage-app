@@ -28,6 +28,7 @@
 
 import type { AgentResponseToolCall, SandboxFactory, ThinkingLevel } from '@flue/runtime';
 import type { ToolDefinition } from '@flue/runtime/tool';
+import * as v from 'valibot';
 import { type Config, loadConfig } from '../config/env.ts';
 import { KEY_BY_NAME } from '../config/keys.ts';
 import { loadRegistry, type Registry } from '../config/registry.ts';
@@ -41,6 +42,7 @@ import { modelForTier, thinkingForTier } from '../models.ts';
 import { getRunStore } from '../runstore/index.ts';
 import type { RunStore } from '../runstore/types.ts';
 import { createToolDeps, type ToolConnectors } from '../tools/_lib/context.ts';
+import { ASK_REQUESTER } from '../tools/ask-requester.tool.ts';
 import {
   type CommitReader,
   commitReaderFor,
@@ -51,6 +53,8 @@ import {
 import type { ToolContext, ToolDeps } from '../tools/types.ts';
 import type { TriageInit } from '../types/classification.ts';
 import { ENTITIES, type Entity, type Interface, type RunId, type Tier } from '../types/core.ts';
+import { type IdChain, IdChainSchema } from '../types/id-chain.ts';
+import { INPUT_ANSWER_CHAIN_ATTR, INPUT_ANSWER_SIGNAL } from '../types/input-request.ts';
 import { CODE_WALKER_NAME } from './delegates/code-walker.ts';
 import { investigatorName } from './delegates/investigator.ts';
 import { type Escalation, type EscalationSnapshot, escalationFor, releaseEscalation } from './escalation.ts';
@@ -171,12 +175,13 @@ export type FinishStep =
 /**
  * What to do at a would-stop point. retries is the persisted finish_retries.
  * A written report ends the response and resets the count, so a follow-up
- * submission on the same run gets its own signal. The first miss signals
- * once; the next miss fails.
+ * submission on the same run gets its own signal; so does an opened question
+ * for the requester (calledAsk), which parks the run in needs_input. The
+ * first miss signals once; the next miss fails.
  */
-export function finishDecision(retries: number, calledFinish: boolean): FinishStep {
+export function finishDecision(retries: number, calledFinish: boolean, calledAsk = false): FinishStep {
   const used = Number.isInteger(retries) && retries > 0 ? retries : 0;
-  if (calledFinish) return { kind: 'done', retries: 0 };
+  if (calledFinish || calledAsk) return { kind: 'done', retries: 0 };
   if (used < MAX_FINISH_SIGNALS) return { kind: 'signal', retries: used + 1 };
   return { kind: 'fail', retries: used };
 }
@@ -197,10 +202,38 @@ export function calledFinish(toolCalls: readonly AgentResponseToolCall[], report
   return reportWritten && toolCalls.some((c) => c.tool === FINISH_REPORT && !c.isError);
 }
 
+/** True when this response has an ask_requester call that did not throw and the watched tool saw it open a question. */
+export function calledAsk(toolCalls: readonly AgentResponseToolCall[], askOpened: boolean): boolean {
+  return askOpened && toolCalls.some((c) => c.tool === ASK_REQUESTER && !c.isError);
+}
+
 const reportsWritten = new Set<RunId>();
+const asksOpened = new Set<RunId>();
 
 export function reportWrittenFor(runId: RunId): boolean {
   return reportsWritten.has(runId);
+}
+
+/** True when ask_requester opened a question for the run in this process. */
+export function askOpenedFor(runId: RunId): boolean {
+  return asksOpened.has(runId);
+}
+
+/**
+ * The verified id chain an answer brings along (answerRun puts it in the
+ * signal's attributes), or null for any other delivery or a malformed one.
+ */
+export function answerChainOf(delivery: unknown): IdChain | null {
+  const d = delivery as { kind?: unknown; type?: unknown; attributes?: Readonly<Record<string, string>> } | null | undefined;
+  if (d?.kind !== 'signal' || d.type !== INPUT_ANSWER_SIGNAL) return null;
+  const raw = d.attributes?.[INPUT_ANSWER_CHAIN_ATTR];
+  if (raw === undefined) return null;
+  try {
+    const parsed = v.safeParse(IdChainSchema, JSON.parse(raw));
+    return parsed.success ? parsed.output : null;
+  } catch {
+    return null;
+  }
 }
 
 function isOkEnvelope(result: unknown): boolean {
@@ -208,15 +241,20 @@ function isOkEnvelope(result: unknown): boolean {
   return output?.status === 'ok';
 }
 
-/** Wraps finish_report so an ok result marks the run's report as written. Other tools pass through. */
+/**
+ * Wraps the two tools that may end a response: an ok finish_report marks the
+ * run's report as written, an ok ask_requester marks a question as opened.
+ * Other tools pass through.
+ */
 export function watchFinishReport(runId: RunId, tool: ToolDefinition): ToolDefinition {
-  if (tool.name !== FINISH_REPORT) return tool;
+  const marks = tool.name === FINISH_REPORT ? reportsWritten : tool.name === ASK_REQUESTER ? asksOpened : undefined;
+  if (marks === undefined) return tool;
   const run = tool.run.bind(tool) as (context: never) => unknown;
   return {
     ...tool,
     async run(context: never) {
       const result = await run(context);
-      if (isOkEnvelope(result)) reportsWritten.add(runId);
+      if (isOkEnvelope(result)) marks.add(runId);
       return result;
     },
   } as ToolDefinition;
@@ -409,6 +447,8 @@ export function lazyRunStore(config: Pick<Config, 'db'>, load: () => Promise<Run
     addSubmission: async (...a) => (await store()).addSubmission(...a),
     setPhase: async (...a) => (await store()).setPhase(...a),
     putClassification: async (...a) => (await store()).putClassification(...a),
+    putInputRequest: async (...a) => (await store()).putInputRequest(...a),
+    resolveInputRequest: async (...a) => (await store()).resolveInputRequest(...a),
     putEvidence: async (...a) => (await store()).putEvidence(...a),
     putReport: async (...a) => (await store()).putReport(...a),
     putFeedback: async (...a) => (await store()).putFeedback(...a),
@@ -428,7 +468,7 @@ export function lazyRunStore(config: Pick<Config, 'db'>, load: () => Promise<Run
  * as the same object afterwards. The triage mount's extra fields are set
  * here: initialData, the UsageReader over runUsage and the CommitReader.
  */
-export function runDepsFor(runId: RunId, init: TriageInit, rt: TriageRuntime = triageRuntime()): ToolDeps {
+export function runDepsFor(runId: RunId, init: TriageInit, rt: TriageRuntime = triageRuntime(), savedChain?: IdChain): ToolDeps {
   const cached = runDeps.get(runId);
   if (cached !== undefined) return cached;
   runInterfaces.set(runId, init.request.interface);
@@ -437,7 +477,9 @@ export function runDepsFor(runId: RunId, init: TriageInit, rt: TriageRuntime = t
     config: rt.config,
     registry: rt.registry,
     interface: init.request.interface,
-    idChain: init.id_chain,
+    // The chain a previous submission left in persistent state wins over the
+    // one ingress resolved at creation: it holds everything added since.
+    idChain: savedChain ?? init.id_chain,
     connectors: rt.connectors,
     runStore: rt.runStore,
     redactionNames: init.redaction_names ?? [],
@@ -469,6 +511,7 @@ export function settleRun(runId: RunId): void {
   runDeps.delete(runId);
   runInterfaces.delete(runId);
   reportsWritten.delete(runId);
+  asksOpened.delete(runId);
   releaseEscalation(runId);
   releaseFinishReport(runId);
   installedTripwire()?.forgetRun(runId);
