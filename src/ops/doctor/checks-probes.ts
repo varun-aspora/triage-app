@@ -167,7 +167,15 @@ async function dbRow(probes: Probes, requireReadonly: boolean, entity: Entity, s
   if (role.status === 'failed') {
     return row('warn', [key], `${service}: SELECT 1 ok through ${key}; the read-only role check failed (${role.code}): ${role.message}`, entity);
   }
-  if (!role.value) return row('ok', [key], `${service}: SELECT 1 ok through ${key}; the role is read-only${fromFixture(role)}`, entity);
+  if (!role.value.writable) return row('ok', [key], `${service}: SELECT 1 ok through ${key}; the role is read-only${fromFixture(role)}`, entity);
+  if (role.value.reader) {
+    return row(
+      'ok',
+      [key],
+      `${service}: SELECT 1 ok through ${key}; the server is a read replica (pg_is_in_recovery), so the role's write grants cannot be used${fromFixture(role)}`,
+      entity,
+    );
+  }
   if (requireReadonly) {
     return row(
       'fail',

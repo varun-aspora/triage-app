@@ -1,21 +1,26 @@
 // Read-only role check for the SQL connector (D33, Q6, Q23).
 //
-// The check asks Postgres whether the connected role holds INSERT, UPDATE or
-// DELETE on any user table. It is one fixed statement and runs inside the
-// same BEGIN READ ONLY / SET LOCAL wrapper as every other call, so the check
+// The check asks Postgres two things in one fixed statement: whether the
+// server is a replica (pg_is_in_recovery()), and whether the connected role
+// holds INSERT, UPDATE or DELETE on any user table. It runs inside the same
+// BEGIN READ ONLY / SET LOCAL wrapper as every other call, so the check
 // itself can never write.
 //
-// Policy: the check runs once per env var name per process. A writable role
-// is a warning by default, which the tool and doctor can surface. With
-// TRIAGE_REQUIRE_READONLY_DB_ROLE=true it blocks real calls with
-// readonly_role_required. The connector in pg-client.ts wires this in; this
-// file holds the statement, the cache and the policy.
+// Policy: the check runs once per env var name per process. A replica cannot
+// write whatever the role's grants are, so a reader passes without a warning
+// or a block. On a primary, a writable role is a warning by default, which
+// the tool and doctor can surface; with TRIAGE_REQUIRE_READONLY_DB_ROLE=true
+// it blocks real calls with readonly_role_required. The server is asked
+// rather than the host name matched: the DSN often points at a local tunnel
+// port, and an Aurora reader endpoint routes to the writer when the cluster
+// has no replicas. The connector in pg-client.ts wires this in; this file
+// holds the statement, the cache and the policy.
 import type { Entity } from '../../types/core.ts';
 import { ConnectorError, type ConnectorContext, type EnvVarName } from '../types.ts';
 
 /** The one statement the role check runs. Trusted constant, no parameters. */
 export const ROLE_CHECK_SQL = [
-  'SELECT coalesce(bool_or(',
+  'SELECT pg_is_in_recovery() AS reader, coalesce(bool_or(',
   "  has_table_privilege(c.oid, 'INSERT')",
   "  OR has_table_privilege(c.oid, 'UPDATE')",
   "  OR has_table_privilege(c.oid, 'DELETE')",
@@ -28,7 +33,10 @@ export const ROLE_CHECK_SQL = [
 ].join('\n');
 
 export type RoleCheck = {
+  /** The role holds INSERT, UPDATE or DELETE on some user table. */
   readonly writable: boolean;
+  /** The server is a replica (pg_is_in_recovery()), so it cannot write whatever the role holds. */
+  readonly reader: boolean;
   readonly target_env: EnvVarName;
 };
 
@@ -70,13 +78,15 @@ export class RoleCheckCache {
 /** The cache every connector uses unless it is given its own (tests do). */
 export const processRoleCache = new RoleCheckCache();
 
-/** Reads the writable flag from the role check's single row. Anything else is an error, not a guess. */
-export function parseRoleCheckRows(rows: readonly Record<string, unknown>[]): boolean {
-  const writable = rows.length === 1 ? rows[0]?.['writable'] : undefined;
-  if (typeof writable !== 'boolean') {
+/** Reads the two flags from the role check's single row. Anything else is an error, not a guess. */
+export function parseRoleCheckRows(rows: readonly Record<string, unknown>[]): { writable: boolean; reader: boolean } {
+  const row = rows.length === 1 ? rows[0] : undefined;
+  const writable = row?.['writable'];
+  const reader = row?.['reader'];
+  if (typeof writable !== 'boolean' || typeof reader !== 'boolean') {
     throw new ConnectorError('refused', 'the read-only role check returned an unexpected result');
   }
-  return writable;
+  return { writable, reader };
 }
 
 export function writableRoleWarning(entity: Entity, service: string, target_env: EnvVarName): string {
@@ -98,9 +108,10 @@ export type RolePolicy = {
   /** Runs the check now, without the cache and without applying the policy. */
   checkReadOnlyRole(ctx: ConnectorContext, entity: Entity, service: string): Promise<RoleCheck>;
   /**
-   * Runs the check once per env var name, then applies the policy: throws
-   * readonly_role_required when the role can write and the policy blocks,
-   * otherwise returns the outcome with a warning when the role can write.
+   * Runs the check once per env var name, then applies the policy: a replica
+   * passes; on a primary it throws readonly_role_required when the role can
+   * write and the policy blocks, otherwise returns the outcome with a warning
+   * when the role can write.
    */
   enforceRolePolicy(ctx: ConnectorContext, entity: Entity, service: string): Promise<RolePolicyOutcome>;
 };
@@ -115,7 +126,9 @@ export function createRolePolicy(options: RolePolicyOptions): RolePolicy {
   async function enforceRolePolicy(ctx: ConnectorContext, entity: Entity, service: string): Promise<RolePolicyOutcome> {
     const envName = options.envNameOf(entity, service);
     const check = await cache.get(envName, () => options.runCheck(ctx, entity, service));
-    if (!check.writable) return Object.freeze({ writable: false, target_env: check.target_env });
+    if (!check.writable || check.reader) {
+      return Object.freeze({ writable: check.writable, reader: check.reader, target_env: check.target_env });
+    }
     if (options.requireReadonlyRole) {
       throw new ConnectorError(
         'readonly_role_required',
@@ -125,6 +138,7 @@ export function createRolePolicy(options: RolePolicyOptions): RolePolicy {
     }
     return Object.freeze({
       writable: true,
+      reader: false,
       target_env: check.target_env,
       warning: writableRoleWarning(entity, service, check.target_env),
     });

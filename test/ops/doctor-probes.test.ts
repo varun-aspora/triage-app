@@ -17,6 +17,7 @@ import {
   DOCTOR_SQL,
   createRealProbes,
   probeKey,
+  type DbRole,
   type ProbeResult,
   type Probes,
 } from '../../src/ops/doctor/probes.ts';
@@ -79,7 +80,7 @@ const QW_CLI = { SSFB_QUICKWIT_TRANSPORT: 'qw', SSFB_QUICKWIT_INDEX: 'logs-v1', 
 
 type FakeProbeAnswers = {
   readonly select?: ProbeResult<true>;
-  readonly writable?: ProbeResult<boolean>;
+  readonly writable?: ProbeResult<DbRole>;
   readonly live?: ProbeResult<true>;
   readonly tcp?: ProbeResult<boolean>;
 };
@@ -169,7 +170,7 @@ function spySql() {
 describe('db check with fake probes', () => {
   test('a writable role is a warning by default and names the env key, never the DSN', async () => {
     const config = makeConfig({ ...realMode, SSFB_HARBOR_DB_URL: HARBOR_DSN });
-    const probes = fakeProbes({ select: OK_TRUE, writable: { status: 'ok', value: true, transport: 'real' } });
+    const probes = fakeProbes({ select: OK_TRUE, writable: { status: 'ok', value: { writable: true, reader: false }, transport: 'real' } });
     const r = only(await run({ config, probes }), 'db');
     expect(r.status).toBe('warn');
     expect(r.entity).toBe('ssfb');
@@ -182,7 +183,7 @@ describe('db check with fake probes', () => {
 
   test('with TRIAGE_REQUIRE_READONLY_DB_ROLE=true a writable role is fail naming the entity', async () => {
     const config = makeConfig({ ...realMode, SSFB_HARBOR_DB_URL: HARBOR_DSN, TRIAGE_REQUIRE_READONLY_DB_ROLE: 'true' });
-    const probes = fakeProbes({ select: OK_TRUE, writable: { status: 'ok', value: true, transport: 'real' } });
+    const probes = fakeProbes({ select: OK_TRUE, writable: { status: 'ok', value: { writable: true, reader: false }, transport: 'real' } });
     const r = only(await run({ config, probes }), 'db');
     expect(r.status).toBe('fail');
     expect(r.message).toContain('real mode blocked for ssfb');
@@ -192,8 +193,17 @@ describe('db check with fake probes', () => {
 
   test('a read-only role is ok', async () => {
     const config = makeConfig({ ...realMode, SSFB_HARBOR_DB_URL: HARBOR_DSN, TRIAGE_REQUIRE_READONLY_DB_ROLE: 'true' });
-    const probes = fakeProbes({ select: OK_TRUE, writable: { status: 'ok', value: false, transport: 'real' } });
+    const probes = fakeProbes({ select: OK_TRUE, writable: { status: 'ok', value: { writable: false, reader: false }, transport: 'real' } });
     expect(only(await run({ config, probes }), 'db').status).toBe('ok');
+  });
+
+  test('a writable role on a read replica is ok, even with TRIAGE_REQUIRE_READONLY_DB_ROLE=true', async () => {
+    const config = makeConfig({ ...realMode, SSFB_HARBOR_DB_URL: HARBOR_DSN, TRIAGE_REQUIRE_READONLY_DB_ROLE: 'true' });
+    const probes = fakeProbes({ select: OK_TRUE, writable: { status: 'ok', value: { writable: true, reader: true }, transport: 'real' } });
+    const r = only(await run({ config, probes }), 'db');
+    expect(r.status).toBe('ok');
+    expect(r.message).toContain('read replica');
+    expect(r.key_names).toEqual(['SSFB_HARBOR_DB_URL']);
   });
 
   test('an unreachable DB is a warning with a tunnel hint, and the check does not throw', async () => {
@@ -255,6 +265,17 @@ describe('db check over the real SQL connector with a fake pg pool', () => {
     for (const c of pg.clients) expect(c.queries[0]?.text).toBe('BEGIN READ ONLY');
     // No values are bound: both statements are constants.
     for (const q of pg.clients.flatMap((c) => c.queries)) expect(q.values ?? []).toEqual([]);
+  });
+
+  test('a writable role on a replica passes the connector policy and the doctor row', async () => {
+    const config = makeConfig({ ...realMode, SSFB_HARBOR_DB_URL: HARBOR_DSN, TRIAGE_REQUIRE_READONLY_DB_ROLE: 'true' });
+    const pg = fakePg({ writable: true, reader: true });
+    const { registry, probes } = realProbes(config, pg);
+    const r = only(await runDoctor([probeChecks[0]!], { config, registry, probes }), 'db');
+    expect(r.status).toBe('ok');
+    expect(r.message).toContain('read replica');
+    const data = pg.clients.flatMap((c) => c.queries.map((q) => q.text)).filter((t) => !WRAPPER.test(t));
+    expect(data).toContain(DOCTOR_SELECT_ONE_SQL);
   });
 
   test('a writable role blocked by policy still counts as reachable and gives fail', async () => {
@@ -353,6 +374,16 @@ describe('mock-mode probes', () => {
     const r = only(await runDoctor([probeChecks[0]!], m.ctx), 'db');
     expect(r.status).toBe('fail');
     expect(r.message).toContain('real mode blocked for ssfb');
+    zeroRealCalls(m);
+  });
+
+  test('a writable-role fixture with reader: true is ok', async () => {
+    const m = mockCtx({ TRIAGE_REQUIRE_READONLY_DB_ROLE: 'true' });
+    m.fixtures.add('doctor_probe', { entity: 'ssfb', probe: 'doctor|db_select_one|ssfb|SSFB_HARBOR_DB_URL' }, { reachable: true });
+    m.fixtures.add('doctor_probe', { entity: 'ssfb', probe: 'doctor|db_writable|ssfb|SSFB_HARBOR_DB_URL' }, { writable: true, reader: true });
+    const r = only(await runDoctor([probeChecks[0]!], m.ctx), 'db');
+    expect(r.status).toBe('ok');
+    expect(r.message).toContain('read replica');
     zeroRealCalls(m);
   });
 

@@ -35,6 +35,8 @@ export const DOCTOR_SQL: readonly string[] = Object.freeze([DOCTOR_SELECT_ONE_SQ
 export const PROBE_NAMES = ['db_select_one', 'db_writable', 'quickwit_http_live', 'tcp'] as const;
 export type ProbeName = (typeof PROBE_NAMES)[number];
 
+export type DbRole = { readonly writable: boolean; readonly reader: boolean };
+
 export const PROBE_TIMEOUTS = Object.freeze({ tcpMs: 1_500, httpMs: 10_000 });
 
 export type ProbeFailureCode = 'unreachable' | 'timeout' | 'refused' | 'not_configured' | 'error';
@@ -47,8 +49,11 @@ export type ProbeResult<T> =
 export interface Probes {
   /** Runs SELECT 1 against entity:service. ok means the database answered. */
   dbSelectOne(entity: Entity, service: string): Promise<ProbeResult<true>>;
-  /** Whether the role behind entity:service can INSERT, UPDATE or DELETE on some user table. */
-  dbWritable(entity: Entity, service: string): Promise<ProbeResult<boolean>>;
+  /**
+   * Whether the role behind entity:service can INSERT, UPDATE or DELETE on
+   * some user table, and whether the server is a replica (pg_is_in_recovery()).
+   */
+  dbWritable(entity: Entity, service: string): Promise<ProbeResult<DbRole>>;
   /** GET <ENTITY>_QUICKWIT_URL/health/livez. Never a search, count or histogram. */
   quickwitHttpLive(entity: Entity): Promise<ProbeResult<true>>;
   /** Whether host:port accepts a TCP connection. */
@@ -94,7 +99,7 @@ export type MockProbesOptions = {
 /**
  * Fixture results:
  *   db_select_one       { reachable: boolean }
- *   db_writable         { writable: boolean }
+ *   db_writable         { writable: boolean, reader?: boolean }   reader defaults to false
  *   quickwit_http_live  { live: boolean }
  *   tcp                 { open: boolean }
  */
@@ -125,10 +130,16 @@ export function createMockProbes(options: MockProbesOptions): Probes {
       if (r.status !== 'ok') return r as ProbeResult<never>;
       return r.value ? okResult(true as const, 'mock') : failed('unreachable', `the fixture says the database behind ${key} is unreachable`, 'mock');
     },
-    async dbWritable(entity: Entity, service: string): Promise<ProbeResult<boolean>> {
+    async dbWritable(entity: Entity, service: string): Promise<ProbeResult<DbRole>> {
       const key = dbKeyName(registry, entity, service);
       if (key === undefined) return noDb(entity, service);
-      return field(await answer('db_writable', entity, key), 'writable', probeKey('db_writable', entity, key));
+      const probeName = probeKey('db_writable', entity, key);
+      const found = await answer('db_writable', entity, key);
+      const r = field(found, 'writable', probeName);
+      if (r.status !== 'ok') return r as ProbeResult<never>;
+      const reader = (found.status === 'ok' ? (found.value as Record<string, unknown> | null)?.['reader'] : undefined) ?? false;
+      if (typeof reader !== 'boolean') return failed('error', `the doctor_probe fixture for ${probeName} has a non-boolean reader`, 'mock');
+      return okResult({ writable: r.value, reader }, 'mock');
     },
     async quickwitHttpLive(entity: Entity): Promise<ProbeResult<true>> {
       const key = quickwitUrlKey(registry, entity);
@@ -232,10 +243,10 @@ export function createRealProbes(options: RealProbesOptions): Probes {
     }
   }
 
-  async function dbWritable(entity: Entity, service: string): Promise<ProbeResult<boolean>> {
+  async function dbWritable(entity: Entity, service: string): Promise<ProbeResult<DbRole>> {
     try {
       const check = await sql.checkReadOnlyRole(context(), entity, service);
-      return okResult(check.writable, 'real');
+      return okResult({ writable: check.writable, reader: check.reader }, 'real');
     } catch (err) {
       return dbFailure(err);
     }

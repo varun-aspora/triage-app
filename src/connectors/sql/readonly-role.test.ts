@@ -83,6 +83,7 @@ describe('the role check statement', () => {
     expect(ROLE_CHECK_SQL).toContain('bool_or(');
     for (const priv of ['INSERT', 'UPDATE', 'DELETE']) expect(ROLE_CHECK_SQL).toContain(`has_table_privilege(c.oid, '${priv}')`);
     expect(ROLE_CHECK_SQL).toContain("n.nspname <> 'information_schema'");
+    expect(ROLE_CHECK_SQL).toContain('pg_is_in_recovery() AS reader');
     expect(ROLE_CHECK_SQL.startsWith('SELECT')).toBe(true);
     expect(ROLE_CHECK_SQL).not.toContain(';');
     expect(ROLE_CHECK_SQL).not.toContain('$');
@@ -91,7 +92,7 @@ describe('the role check statement', () => {
   test('runs inside BEGIN READ ONLY with both SET LOCAL timeouts, then COMMIT', async () => {
     const { pg, connector } = setup();
     const check = await connector.checkReadOnlyRole(ctxOf(), 'atspl', 'package');
-    expect(check).toEqual({ writable: false, target_env: envVarName('ATSPL_PACKAGE_DB_URL') });
+    expect(check).toEqual({ writable: false, reader: false, target_env: envVarName('ATSPL_PACKAGE_DB_URL') });
     const [client] = pg.roleClients();
     expect(client!.queries.map((q) => q.text)).toEqual([
       'BEGIN READ ONLY',
@@ -107,10 +108,12 @@ describe('the role check statement', () => {
 
   test('an unexpected result is an error, not a guess', () => {
     expect(() => parseRoleCheckRows([])).toThrow(ConnectorError);
-    expect(() => parseRoleCheckRows([{ writable: 't' }])).toThrow(ConnectorError);
-    expect(() => parseRoleCheckRows([{ writable: true }, { writable: false }])).toThrow(ConnectorError);
-    expect(parseRoleCheckRows([{ writable: true }])).toBe(true);
-    expect(parseRoleCheckRows([{ writable: false }])).toBe(false);
+    expect(() => parseRoleCheckRows([{ reader: false, writable: 't' }])).toThrow(ConnectorError);
+    expect(() => parseRoleCheckRows([{ reader: 'f', writable: true }])).toThrow(ConnectorError);
+    expect(() => parseRoleCheckRows([{ writable: true }])).toThrow(ConnectorError);
+    expect(() => parseRoleCheckRows([{ reader: false, writable: true }, { reader: false, writable: false }])).toThrow(ConnectorError);
+    expect(parseRoleCheckRows([{ reader: false, writable: true }])).toEqual({ writable: true, reader: false });
+    expect(parseRoleCheckRows([{ reader: true, writable: true }])).toEqual({ writable: true, reader: true });
   });
 
   test('a blank DB env var is not_configured and nothing is checked', async () => {
@@ -172,6 +175,18 @@ describe('policy', () => {
       const out = await connector.runSelect(ctxOf(), input());
       expect(out.role_warning).toBeUndefined();
       expect(out.transport).toBe('real');
+    }
+  });
+
+  test('a writable role on a replica passes without a warning, even with the require flag on', async () => {
+    for (const require of [false, true]) {
+      const { pg, connector } = setup({ require, fake: { writable: true, reader: true } });
+      const policy = await connector.enforceRolePolicy(ctxOf(), 'atspl', 'package');
+      expect(policy).toEqual({ writable: true, reader: true, target_env: envVarName('ATSPL_PACKAGE_DB_URL') });
+      const out = await connector.runSelect(ctxOf(), input());
+      expect(out.role_warning).toBeUndefined();
+      expect(out.transport).toBe('real');
+      expect(pg.selectClients()).toHaveLength(1);
     }
   });
 
@@ -255,7 +270,7 @@ describe('createRolePolicy on its own', () => {
   const target_env = envVarName('ATSPL_PACKAGE_DB_URL');
 
   test('warns, blocks and caches as configured', async () => {
-    const runCheck = mock(async (): Promise<RoleCheck> => ({ writable: true, target_env }));
+    const runCheck = mock(async (): Promise<RoleCheck> => ({ writable: true, reader: false, target_env }));
     const warn = createRolePolicy({ requireReadonlyRole: false, runCheck, envNameOf: () => target_env, cache: new RoleCheckCache() });
     const first = await warn.enforceRolePolicy(ctxOf(), 'atspl', 'package');
     await warn.enforceRolePolicy(ctxOf(), 'atspl', 'package');
@@ -272,7 +287,7 @@ describe('createRolePolicy on its own', () => {
     await expect(cache.get('X_DB_URL', () => Promise.reject(new Error('down')))).rejects.toThrow('down');
     await Promise.resolve();
     expect(cache.has('X_DB_URL')).toBe(false);
-    const ok = await cache.get('X_DB_URL', async () => ({ writable: false, target_env }));
+    const ok = await cache.get('X_DB_URL', async () => ({ writable: false, reader: false, target_env }));
     expect(ok.writable).toBe(false);
     expect(cache.has('X_DB_URL')).toBe(true);
   });

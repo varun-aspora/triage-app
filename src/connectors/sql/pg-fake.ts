@@ -1,7 +1,7 @@
 // A scripted pg pool for the SQL connector tests. It never opens a socket:
 // every query is recorded per checked-out client and answered by the
-// respond() hook. Role check statements answer from `writable` unless
-// respond() handles them.
+// respond() hook. Role check statements answer from `writable` and `reader`
+// unless respond() handles them.
 import type { PgClientLike, PgPoolConfig, PgPoolFactory, PgPoolLike, PgQuery, PgQueryResult } from './pg-client.ts';
 import { ROLE_CHECK_SQL } from './readonly-role.ts';
 
@@ -18,6 +18,8 @@ export type FakePgOptions = {
   readonly respond?: Respond;
   /** The role check answer. Default false. */
   readonly writable?: boolean | (() => boolean);
+  /** The role check's pg_is_in_recovery() answer. Default false (a primary). */
+  readonly reader?: boolean;
   /** Makes connect() wait on this promise first. */
   readonly connectGate?: () => Promise<void>;
   /** Makes connect() reject with this error. */
@@ -62,7 +64,12 @@ export function fakePg(options: FakePgOptions = {}): FakePg {
         log.queries.push(query);
         const scripted = await options.respond?.(query, log);
         if (scripted !== undefined) return scripted;
-        if (query.text === ROLE_CHECK_SQL) return { rows: [{ writable: writable() }], fields: [{ name: 'writable' }] };
+        if (query.text === ROLE_CHECK_SQL) {
+          return {
+            rows: [{ reader: options.reader === true, writable: writable() }],
+            fields: [{ name: 'reader' }, { name: 'writable' }],
+          };
+        }
         return { rows: [] };
       },
       release(destroy) {

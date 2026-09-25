@@ -471,7 +471,7 @@ export function createSqlConnector(options: SqlConnectorOptions): SqlConnector {
     const plan = rolePlan();
     try {
       const result = await execute(poolFor(t, where), plan, [], ctx.signal);
-      return Object.freeze({ writable: parseRoleCheckRows(result.rows), target_env: t.envName });
+      return Object.freeze({ ...parseRoleCheckRows(result.rows), target_env: t.envName });
     } catch (err) {
       throw toConnectorError(err, where, t.envName, secrets);
     }
