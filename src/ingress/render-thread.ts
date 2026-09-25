@@ -1,5 +1,6 @@
-// The text of the first message the Triage orchestrator receives, and of a
-// `triage ask` follow-up (LLD 04 §2.4, D24).
+// The text of the first message the Triage orchestrator receives, of a
+// `triage ask` follow-up, and of the answer to a question the run asked
+// (LLD 04 §2.4, D24, P6 §4.3).
 //
 // Both are built from the in-memory request and then passed through the
 // model-facing redaction profile as a whole: PAN, card numbers, passports,
@@ -8,6 +9,8 @@
 // with them. The persisted-profile copy of the request travels separately,
 // in initialData.
 import { redactModelFacing } from '../gate/redact.ts';
+import { KNOWN_ID_KEYS, type KnownIds } from '../types/core.ts';
+import type { InputRequest } from '../types/input-request.ts';
 import type { TriageRequest } from '../types/request.ts';
 
 /** What happened to the request's screenshots on the way to the dispatch. */
@@ -52,6 +55,42 @@ export function renderAsk(question: string, by: string): string {
       'Answer it from the evidence you have, investigate further if needed, and call finish_report with the updated report.',
     ].join('\n'),
   );
+}
+
+export type AnswerRender = {
+  readonly skip: boolean;
+  /** Empty with skip. */
+  readonly answer: string;
+  readonly by: string;
+  /** Ids the person gave, after the ingress identity step. */
+  readonly ids: Partial<KnownIds>;
+  /** Identity gaps, such as an unreachable database. */
+  readonly gaps: readonly string[];
+};
+
+/** The answer to a question the run asked, or the skip, model-facing profile. */
+export function renderAnswer(request: Pick<InputRequest, 'question_id' | 'question'>, a: AnswerRender): string {
+  const lines: string[] = [];
+  if (a.skip) {
+    lines.push(
+      `${a.by} skipped your question ${request.question_id} (${quoted(request.question)}).`,
+      '',
+      'Continue without it: finish with what you have and list the open question under gaps.',
+    );
+  } else {
+    lines.push(`Answer from ${a.by} to your question ${request.question_id} (${quoted(request.question)}):`, a.answer);
+  }
+  const ids = KNOWN_ID_KEYS.flatMap((key) => (a.ids[key] === undefined ? [] : [`${key} = ${a.ids[key]}`]));
+  if (ids.length > 0) lines.push('', `Ids they gave, resolved by the identity step and in scope: ${ids.join(', ')}.`);
+  if (a.gaps.length > 0) lines.push('', `Identity lookups: ${a.gaps.join('; ')}.`);
+  if (!a.skip) lines.push('', 'Continue the triage with this. Investigate further if needed and call finish_report with the report.');
+  return redactModelFacing(lines.join('\n'));
+}
+
+// The stored question, on one line and short enough to quote back.
+function quoted(question: string): string {
+  const flat = question.replace(/\s+/g, ' ').trim();
+  return `"${flat.length > 120 ? `${flat.slice(0, 120)}…` : flat}"`;
 }
 
 function imageNote(images: RenderImages): string[] {

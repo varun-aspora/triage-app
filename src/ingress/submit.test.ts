@@ -21,6 +21,8 @@ import { RunNotFoundError, type RunStore } from '../runstore/types.ts';
 import { type Classification, type TriageInit, TriageInitSchema } from '../types/classification.ts';
 import type { Tier } from '../types/core.ts';
 import type { IdChain } from '../types/id-chain.ts';
+import { INPUT_ANSWER_CHAIN_ATTR, INPUT_ANSWER_SIGNAL } from '../types/input-request.ts';
+import { sampleInputRequest } from '../runstore/contract.ts';
 import type { Attachment } from '../types/request.ts';
 import type { IngressIdentity } from './identity.ts';
 import { buildTriageRequest, IngressInputError, type TriageInput } from './normalise.ts';
@@ -34,6 +36,9 @@ import {
   type SubmissionDeps,
   SubmissionReadTimeoutError,
   submissionDeps,
+  answerRun,
+  RunNotWaitingError,
+  SubmissionInputError,
 } from './submit.ts';
 import { makeTestHome } from '../../test/support/home.ts';
 
@@ -803,5 +808,145 @@ describe('submissionDeps in mock mode', () => {
     } finally {
       home.cleanup();
     }
+  });
+});
+
+// ------------------------------------------------------------------ questions for the requester
+
+describe('needs_input and answerRun', () => {
+  const question = () => sampleInputRequest('q1');
+
+  /** A stored run parked on q1, the way ask_requester leaves it. */
+  async function parked(h: Harness): Promise<void> {
+    await h.store.createRun(RUN_ID, redactPersisted(prepared().request, { names: [NAME] }));
+    await h.store.addSubmission(RUN_ID, redactPersisted({ kind: 'initial' as const }));
+    await h.store.putInputRequest(RUN_ID, redactPersisted(question()));
+  }
+
+  test('a response that ended on ask_requester settles as needs_input: phase kept, nothing embedded', async () => {
+    // The tool runs during the read, after the phase went to investigating.
+    let h!: Harness;
+    h = harness({
+      read: async () => {
+        await h.store.putInputRequest(RUN_ID, redactPersisted(question()));
+        return { text: 'waiting', submissionId: 'sub-1', data: {} };
+      },
+    });
+    const result = await runSubmission(prepared(), h.deps);
+    expect(result.status).toBe('needs_input');
+    expect(result.input_request?.question_id).toBe('q1');
+    expect(result.gaps).toEqual([]);
+    expect(h.events).not.toContain('embedRun');
+    expect(h.events).not.toContain('phase:completed');
+    expect(h.events).not.toContain('phase:failed');
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('needs_input');
+    expect(run?.report).toBeNull();
+  });
+
+  test('answerRun closes the question, records an answer submission and resumes the run with a signal', async () => {
+    const h = harness();
+    await parked(h);
+    const result = await answerRun(RUN_ID, { answer: 'the one on 3 Sep for 12,000', by: 'ops-reviewer' }, h.deps);
+    expect(result.status).toBe('completed');
+    expect(result.submission_seq).toBe(2);
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('completed');
+    expect(run?.input_request).toBeNull();
+    expect(run?.input_history.map((r) => [r.question_id, r.status, r.resolved_by])).toEqual([['q1', 'answered', 'ops-reviewer']]);
+    expect(run?.submissions[1]).toMatchObject({ kind: 'answer', question_id: 'q1', answer: 'the one on 3 Sep for 12,000' });
+    expect(h.flue.inits[0]?.options).toEqual({ id: RUN_ID });
+    const d = h.flue.dispatches[0]!;
+    expect(d.keys).not.toContain('initialData');
+    const msg = d.message as { kind: string; type: string; body: string; attributes: Record<string, string> };
+    expect(msg.kind).toBe('signal');
+    expect(msg.type).toBe(INPUT_ANSWER_SIGNAL);
+    expect(msg.attributes).toEqual({ question_id: 'q1' });
+    expect(msg.body).toContain('Answer from ops-reviewer to your question q1');
+    expect(msg.body).toContain('the one on 3 Sep for 12,000');
+    expect(h.events.filter((e) => e === 'embedRun')).toHaveLength(1);
+  });
+
+  test('a skip resumes the run without an answer and says so', async () => {
+    const h = harness();
+    await parked(h);
+    const result = await answerRun(RUN_ID, { skip: true, by: 'ops-reviewer' }, h.deps);
+    expect(result.status).toBe('completed');
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.input_history[0]?.status).toBe('skipped');
+    expect(run?.submissions[1]).toMatchObject({ kind: 'answer', question_id: 'q1' });
+    expect(run?.submissions[1]?.answer).toBeUndefined();
+    const body = bodyOf(h);
+    expect(body).toContain('skipped your question q1');
+    expect(body).toContain('list the open question under gaps');
+  });
+
+  test('refuses a run that is not waiting, another question, an unknown run and bad input, dispatching nothing', async () => {
+    const h = harness();
+    await expect(answerRun(RUN_ID, { answer: 'x', by: 'ops' }, h.deps)).rejects.toBeInstanceOf(RunNotFoundError);
+    await parked(h);
+    await expect(answerRun(RUN_ID, { question_id: 'q2', answer: 'x', by: 'ops' }, h.deps)).rejects.toBeInstanceOf(RunNotWaitingError);
+    await expect(answerRun(RUN_ID, { answer: '  ', by: 'ops' }, h.deps)).rejects.toBeInstanceOf(IngressInputError);
+    await expect(answerRun(RUN_ID, { answer: 'x', skip: true, by: 'ops' }, h.deps)).rejects.toBeInstanceOf(IngressInputError);
+    await expect(answerRun(RUN_ID, { answer: 'x', by: ' ' }, h.deps)).rejects.toBeInstanceOf(IngressInputError);
+    await expect(answerRun(RUN_ID, { question_id: 'first', answer: 'x', by: 'ops' }, h.deps)).rejects.toBeInstanceOf(IngressInputError);
+    await expect(answerRun('not a run id!', { answer: 'x', by: 'ops' }, h.deps)).rejects.toBeInstanceOf(IngressInputError);
+    expect(h.flue.dispatches).toHaveLength(0);
+    expect((await h.store.getRun(RUN_ID))?.input_request?.question_id).toBe('q1');
+    // Once answered, a second answer finds nothing to answer.
+    await answerRun(RUN_ID, { answer: 'x', by: 'ops' }, h.deps);
+    await expect(answerRun(RUN_ID, { answer: 'again', by: 'ops' }, h.deps)).rejects.toBeInstanceOf(RunNotWaitingError);
+    expect(h.flue.dispatches).toHaveLength(1);
+  });
+
+  test('ids go through the identity step and ride in the signal, verified; the stored copy is masked', async () => {
+    const seen: unknown[] = [];
+    const chain: IdChain = {
+      ids: { customer_id: 'cust-answer-1', account_number: ACCOUNT },
+      hops: [{ from: 'customer_id', to: 'account_number', source: 'ssfb:rhythm.customer_account_mappings', status: 'resolved', taken_at: NOW.toISOString() }],
+      basic_state: [],
+    };
+    const h = harness({
+      identity: async (...args: unknown[]) => {
+        seen.push(args[0]);
+        return { id_chain: chain, basic_state: [], gaps: ['identity lookup unreachable: ssfb:harbor'] };
+      },
+    });
+    await parked(h);
+    const result = await answerRun(
+      RUN_ID,
+      { answer: `it is the account ${ACCOUNT}`, ids: { customer_id: 'cust-answer-1' }, by: 'ops' },
+      h.deps,
+    );
+    expect(result.status).toBe('completed');
+    expect(seen).toEqual([{ request_id: RUN_ID, interface: 'cli', messages: [], hints: { ids: { customer_id: 'cust-answer-1' } } }]);
+    const msg = h.flue.dispatches[0]!.message as { body: string; attributes: Record<string, string> };
+    expect(JSON.parse(msg.attributes[INPUT_ANSWER_CHAIN_ATTR]!)).toEqual(chain);
+    expect(msg.attributes.question_id).toBe('q1');
+    expect(msg.body).toContain('customer_id = cust-answer-1');
+    expect(msg.body).toContain(`account_number = ${ACCOUNT}`);
+    expect(msg.body).toContain('Identity lookups: identity lookup unreachable: ssfb:harbor');
+    // The model sees the account number; the run store never does.
+    expect(msg.body).toContain(ACCOUNT);
+    expect(JSON.stringify(await h.store.getRun(RUN_ID))).not.toContain(ACCOUNT);
+
+    // An identity step that cannot run leaves an empty chain and a gap; a loud one is passed on.
+    const g = harness({
+      identity: async () => {
+        throw new Error('boom');
+      },
+    });
+    await parked(g);
+    await answerRun(RUN_ID, { answer: 'x', ids: { customer_id: 'c-2' }, by: 'ops' }, g.deps);
+    const gm = g.flue.dispatches[0]!.message as { body: string; attributes: Record<string, string> };
+    expect(JSON.parse(gm.attributes[INPUT_ANSWER_CHAIN_ATTR]!)).toEqual({ ids: {}, hops: [], basic_state: [] });
+    expect(gm.body).toContain('identity step did not run (Error)');
+
+    // Without an identity step in the deps, ids cannot be verified.
+    const n = harness();
+    await parked(n);
+    const { identity: _identity, ...noIdentity } = n.deps;
+    await expect(answerRun(RUN_ID, { answer: 'x', ids: { customer_id: 'c' }, by: 'ops' }, noIdentity)).rejects.toBeInstanceOf(SubmissionInputError);
+    expect(n.flue.dispatches).toHaveLength(0);
   });
 });

@@ -64,6 +64,8 @@ Read the `status` field of the JSON:
 - `timeout` (exit 3): the run is still going. Run the same `triage wait`
   command again. A timeout never stops the run. Tell the user the `phase` in
   one short line now and then, not after every poll.
+- `needs_input` (exit 4): the run is paused on a question only the user can
+  answer. Go to step 2a, then wait again.
 - `failed` or `stalled` (exit 1): tell the user the `reason` and stop. Do not
   start a new run unless they ask.
 
@@ -72,6 +74,27 @@ instead of a `status`; show the message to the user and stop.
 
 For progress without waiting, `triage status <run_id> --json` shows the phase,
 tier and submission count.
+
+### 2a. When the run asks a question
+
+The JSON carries `input_request` with `question`, `why`, `options` and
+`free_text`. Put the question to the user as it is, with its options: in
+Claude Code use the AskUserQuestion tool with the options as the choices
+and free text allowed; in other agents ask in plain text. Then send their
+answer to the run and wait again:
+
+```sh
+triage input <run_id> "<the user's answer, in their words>" --requested-by '<user email or Slack id>' --json
+triage wait <run_id> --timeout 90 --json
+```
+
+- Never answer for the user and never guess. If they cannot answer, run
+  `triage input <run_id> --skip --json`; the report lists the question under
+  its gaps.
+- If the answer names an id (a customer id, an account number, a form id),
+  pass it as well with `--ids key=value`, so the run can verify it before it
+  is used.
+- A run may ask more than once. Each time, ask the user and send the answer.
 
 ## 3. Show the report
 

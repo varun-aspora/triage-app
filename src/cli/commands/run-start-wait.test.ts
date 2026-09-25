@@ -16,9 +16,9 @@ import { redactPersisted } from '../../gate/redact.ts';
 import { WorkerSpawnError } from '../../ingress/detach.ts';
 import { prepareDeps, prepareRequest, type PrepareInput, type PreparedSubmission } from '../../ingress/prepare.ts';
 import { SlackFetchError, THREAD_FILE_HINT } from '../../ingress/slack.ts';
-import type { SubmissionResult } from '../../ingress/submit.ts';
+import type { AnswerInput, SubmissionResult } from '../../ingress/submit.ts';
 import type { WorkerPayload } from '../../ingress/worker-payload.ts';
-import { sampleClassification, sampleReport, SYNTHETIC_PHONE } from '../../runstore/contract.ts';
+import { sampleClassification, sampleInputRequest, sampleReport, SYNTHETIC_PHONE } from '../../runstore/contract.ts';
 import { createRunStore } from '../../runstore/index.ts';
 import type { RunPhase, RunRecord, RunStore } from '../../runstore/types.ts';
 import type { Entity } from '../../types/core.ts';
@@ -26,7 +26,9 @@ import { commands as generatedCommands } from '../command-modules.gen.ts';
 import { buildProgram, runCli } from '../index.ts';
 import {
   AskOutputSchema,
+  EXIT_NEEDS_INPUT,
   EXIT_WAIT_TIMEOUT,
+  InputOutputSchema,
   StartOutputSchema,
   StatusOutputSchema,
   WaitOutputSchema,
@@ -35,6 +37,7 @@ import { parseRequestArgs, UsageError } from '../lib/request-args.ts';
 import { EXIT } from '../output.ts';
 import type { CliCommand, CliContext } from '../types.ts';
 import { createAskCommand } from './ask.command.ts';
+import { createInputCommand } from './input.command.ts';
 import { createRunCommand } from './run.command.ts';
 import { createStartCommand, type PrepareFn } from './start.command.ts';
 import { createStatusCommand } from './status.command.ts';
@@ -73,7 +76,7 @@ type Run = { code: number; out: string; err: string };
 async function cli(
   cmds: readonly CliCommand[],
   argv: readonly string[],
-  o: { config?: () => Config; stdin?: Readable } = {},
+  o: { config?: () => Config; stdin?: Readable; isTTY?: boolean } = {},
 ): Promise<Run> {
   let out = '';
   let err = '';
@@ -85,7 +88,7 @@ async function cli(
       stdout: { write: (s: string) => (out += s) },
       stderr: { write: (s: string) => (err += s) },
       stdin: o.stdin ?? Readable.from([]),
-      isTTY: false,
+      isTTY: o.isTTY ?? false,
     },
     deps: {},
   };
@@ -161,8 +164,8 @@ function jsonLine(out: string): unknown {
   return JSON.parse(lines[0] as string);
 }
 
-/** A store fake that answers getRun from a script and records every call by name. */
-function scriptedStore(records: readonly (RunRecord | null)[]): { store: RunStore; calls: string[] } {
+/** A store fake that answers getRun from a script and records every call by name; `allow` names other methods that may be called (they do nothing). */
+function scriptedStore(records: readonly (RunRecord | null)[], allow: readonly string[] = []): { store: RunStore; calls: string[] } {
   const calls: string[] = [];
   let i = 0;
   const store = new Proxy({} as RunStore, {
@@ -170,6 +173,7 @@ function scriptedStore(records: readonly (RunRecord | null)[]): { store: RunStor
       if (name === 'then') return undefined;
       return async () => {
         calls.push(name);
+        if (allow.includes(name)) return undefined;
         if (name !== 'getRun') throw new Error(`${name} must not be called`);
         const r = records[Math.min(i, records.length - 1)] ?? null;
         i++;
@@ -948,5 +952,307 @@ describe('config comes only from TRIAGE_HOME', () => {
         defaultRequestedBy: fixedUser,
       });
     }
+  });
+});
+
+// ------------------------------------------------------------------ questions for the requester
+
+describe('a run waiting on a question', () => {
+  const question = () => sampleInputRequest('q1');
+
+  /** A real stored run parked on q1, the way ask_requester leaves it. */
+  async function parked(h: TestHome): Promise<RunStore> {
+    const store = await seed(h, { phase: 'investigating', pid: 4242 });
+    await store.putInputRequest(RUN_ID, redactPersisted(question()));
+    return store;
+  }
+
+  test('status reports needs_input with the question, whether or not a worker is alive', async () => {
+    const h = home();
+    await parked(h);
+    for (const alive of [true, false]) {
+      const r = await cli([createStatusCommand({ isAlive: () => alive })], ['status', RUN_ID, '--json'], { config: () => h.config });
+      expect(r.code).toBe(EXIT.OK);
+      const doc = jsonLine(r.out) as { status: string; phase: string; input_request?: { question_id: string } };
+      expect(v.is(StatusOutputSchema, doc)).toBe(true);
+      expect(doc.status).toBe('needs_input');
+      expect(doc.phase).toBe('needs_input');
+      expect(doc.input_request?.question_id).toBe('q1');
+    }
+    const human = await cli([createStatusCommand({ isAlive: () => false })], ['status', RUN_ID], { config: () => h.config });
+    expect(human.code).toBe(EXIT.OK);
+    expect(human.out).toContain('needs an answer');
+    expect(human.out).toContain('1. 2 Sep, 5,000');
+    expect(human.out).toContain(`triage input ${RUN_ID}`);
+  });
+
+  test('wait without a terminal prints the question, exits 4 and starts nothing', async () => {
+    const h = home();
+    await parked(h);
+    const spy = spawnSpy();
+    const r = await cli([createWaitCommand({ spawn: spy.spawn, isAlive: () => false })], ['wait', RUN_ID, '--json'], { config: () => h.config });
+    expect(r.code).toBe(EXIT_NEEDS_INPUT);
+    expect(r.code).toBe(4);
+    const doc = jsonLine(r.out) as { status: string; phase: string; input_request: { question_id: string; options: string[] } };
+    expect(v.is(WaitOutputSchema, doc)).toBe(true);
+    expect(doc.status).toBe('needs_input');
+    expect(doc.phase).toBe('needs_input');
+    expect(doc.input_request.options).toEqual(['2 Sep, 5,000', '3 Sep, 12,000']);
+    expect(spy.calls).toHaveLength(0);
+
+    const human = await cli([createWaitCommand({ spawn: spy.spawn, isAlive: () => false })], ['wait', RUN_ID], { config: () => h.config });
+    expect(human.code).toBe(4);
+    expect(human.out).toContain('needs an answer');
+    expect(human.out).toContain(`triage input ${RUN_ID} "<answer>"`);
+    expect(spy.calls).toHaveLength(0);
+    expect((await (await createRunStore(h.config)).getRun(RUN_ID))?.phase).toBe('needs_input');
+  });
+
+  test('wait at a terminal asks, starts the worker with the answer and keeps waiting', async () => {
+    const report = { ...sampleReport(RUN_ID, 'the second transfer bounced') };
+    const { store, calls } = scriptedStore(
+      [
+        record('needs_input', { input_request: question() }),
+        record('dispatched', { worker_pid: 5151 }),
+        record('completed', { worker_pid: 5151, report, report_md: '# report' }),
+      ],
+      ['setPhase'],
+    );
+    const spy = spawnSpy(5151);
+    const prompts: string[] = [];
+    const answers = ['', '2'];
+    const cmd = createWaitCommand({
+      openStore: async () => store,
+      isAlive: () => true,
+      spawn: spy.spawn,
+      prompt: () => async (q) => {
+        prompts.push(q);
+        return answers.shift() ?? null;
+      },
+      defaultRequestedBy: fixedUser,
+      sleep: async () => undefined,
+    });
+    const h = home();
+    const r = await cli([cmd], ['wait', RUN_ID], { config: () => h.config, isTTY: true });
+    expect(r.code).toBe(EXIT.OK);
+    expect(r.out).toContain('needs an answer');
+    expect(r.out).toContain('answered question q1');
+    expect(r.out).toContain('# report');
+    // The blank line asked again; the number picked the second option.
+    expect(prompts).toHaveLength(2);
+    expect(spy.calls).toEqual([{ kind: 'answer', run_id: RUN_ID, question_id: 'q1', by: 'ops-reviewer', answer: '3 Sep, 12,000' }]);
+    expect(calls).toEqual(['getRun', 'setPhase', 'getRun', 'getRun']);
+  });
+
+  test('wait at a terminal: s skips, --requested-by names the answerer, EOF prints how to answer later', async () => {
+    const report = { ...sampleReport(RUN_ID, 'x') };
+    const { store } = scriptedStore(
+      [record('needs_input', { input_request: question() }), record('completed', { report, report_md: '# report' })],
+      ['setPhase'],
+    );
+    const spy = spawnSpy(5151);
+    const cmd = createWaitCommand({
+      openStore: async () => store,
+      isAlive: () => true,
+      spawn: spy.spawn,
+      prompt: () => async () => 's',
+      defaultRequestedBy: fixedUser,
+      sleep: async () => undefined,
+    });
+    const r = await cli([cmd], ['wait', RUN_ID, '--requested-by', 'lead@example.test'], { config: () => home().config, isTTY: true });
+    expect(r.code).toBe(EXIT.OK);
+    expect(r.out).toContain('skipped question q1');
+    expect(spy.calls).toEqual([{ kind: 'answer', run_id: RUN_ID, question_id: 'q1', by: 'lead@example.test', skip: true }]);
+
+    const { store: eof } = scriptedStore([record('needs_input', { input_request: question() })]);
+    const quiet = spawnSpy();
+    const e = await cli(
+      [createWaitCommand({ openStore: async () => eof, isAlive: () => true, spawn: quiet.spawn, prompt: () => async () => null, defaultRequestedBy: fixedUser })],
+      ['wait', RUN_ID],
+      { config: () => home().config, isTTY: true },
+    );
+    expect(e.code).toBe(4);
+    expect(quiet.calls).toHaveLength(0);
+    expect(e.out).toContain(`triage input ${RUN_ID}`);
+  });
+
+  test('ask refuses a run waiting on a question and points at input', async () => {
+    const h = home();
+    await parked(h);
+    const spy = spawnSpy();
+    const r = await cli([createAskCommand({ spawn: spy.spawn, defaultRequestedBy: fixedUser, isAlive: () => false })], ['ask', RUN_ID, 'why?'], {
+      config: () => h.config,
+    });
+    expect(r.code).toBe(EXIT.ERROR);
+    expect(r.err).toContain('waiting for an answer to question q1');
+    expect(r.err).toContain(`triage input ${RUN_ID}`);
+    expect(spy.calls).toHaveLength(0);
+  });
+
+  test('input starts one worker with the answer payload, records its pid and prints the JSON shape', async () => {
+    const h = home();
+    await parked(h);
+    const spy = spawnSpy(6161);
+    const r = await cli(
+      [createInputCommand({ spawn: spy.spawn, defaultRequestedBy: fixedUser })],
+      ['input', RUN_ID, '  the one on 3 Sep  ', '--ids', 'customer_id=CUST-0042', '--json'],
+      { config: () => h.config },
+    );
+    expect(r.code).toBe(EXIT.OK);
+    const doc = jsonLine(r.out);
+    expect(v.is(InputOutputSchema, doc)).toBe(true);
+    expect(doc).toEqual({ run_id: RUN_ID, question_id: 'q1', submission_id: 2, skipped: false });
+    expect(spy.calls).toEqual([
+      { kind: 'answer', run_id: RUN_ID, question_id: 'q1', by: 'ops-reviewer', answer: 'the one on 3 Sep', ids: { customer_id: 'CUST-0042' } },
+    ]);
+    const run = await (await createRunStore(h.config)).getRun(RUN_ID);
+    expect(run?.phase).toBe('dispatched');
+    expect(run?.worker_pid).toBe(6161);
+    // The question itself is closed by the worker (answerRun), not here.
+    expect(run?.input_request?.question_id).toBe('q1');
+  });
+
+  test('input --skip, --question and --requested-by', async () => {
+    const h = home();
+    await parked(h);
+    const spy = spawnSpy(6262);
+    const r = await cli(
+      [createInputCommand({ spawn: spy.spawn, defaultRequestedBy: fixedUser })],
+      ['input', RUN_ID, '--skip', '--question', 'q1', '--requested-by', 'lead@example.test'],
+      { config: () => h.config },
+    );
+    expect(r.code).toBe(EXIT.OK);
+    expect(r.out).toContain('skipped question q1');
+    expect(r.out).toContain(`triage wait ${RUN_ID}`);
+    expect(spy.calls).toEqual([{ kind: 'answer', run_id: RUN_ID, question_id: 'q1', by: 'lead@example.test', skip: true }]);
+  });
+
+  test('input refuses bad input, an unknown run, a run that is not waiting and another question, starting nothing', async () => {
+    const h = home();
+    const spy = spawnSpy();
+    const cmd = () => createInputCommand({ spawn: spy.spawn, defaultRequestedBy: fixedUser });
+    const cfg = { config: () => h.config };
+    expect((await cli([cmd()], ['input', RUN_ID], cfg)).code).toBe(EXIT.USAGE);
+    expect((await cli([cmd()], ['input', RUN_ID, 'x', '--skip'], cfg)).code).toBe(EXIT.USAGE);
+    expect((await cli([cmd()], ['input', RUN_ID, 'x', '--question', 'first'], cfg)).code).toBe(EXIT.USAGE);
+    expect((await cli([cmd()], ['input', RUN_ID, 'x', '--ids', 'shoe_size=9'], cfg)).code).toBe(EXIT.USAGE);
+    expect((await cli([cmd()], ['input', OTHER_RUN, 'x'], cfg)).code).toBe(EXIT.ERROR);
+    await seed(h, { phase: 'completed', report: true });
+    const notWaiting = await cli([cmd()], ['input', RUN_ID, 'x'], cfg);
+    expect(notWaiting.code).toBe(EXIT.ERROR);
+    expect(notWaiting.err).toContain('is not waiting for an answer');
+    const store = await createRunStore(h.config);
+    await store.putInputRequest(RUN_ID, redactPersisted(question()));
+    const other = await cli([cmd()], ['input', RUN_ID, 'x', '--question', 'q2'], cfg);
+    expect(other.code).toBe(EXIT.ERROR);
+    expect(other.err).toContain('waiting on question q1, not q2');
+    expect(spy.calls).toHaveLength(0);
+    expect((await store.getRun(RUN_ID))?.phase).toBe('needs_input');
+
+    const failing = spawnSpy(1, new WorkerSpawnError('EAGAIN'));
+    const f = await cli([createInputCommand({ spawn: failing.spawn, defaultRequestedBy: fixedUser })], ['input', RUN_ID, 'x'], cfg);
+    expect(f.code).toBe(EXIT.ERROR);
+    expect((await store.getRun(RUN_ID))?.phase).toBe('needs_input');
+  });
+
+  test('the worker calls answerRun with the answer payload; a parked result is not a failure', async () => {
+    const h = home();
+    await parked(h);
+    const calls: unknown[][] = [];
+    const worker = createWorkerCommand({
+      boot: async () => undefined,
+      deps: () => ({}) as never,
+      pid: () => 999,
+      runSubmission: async () => {
+        throw new Error('runSubmission must not be called');
+      },
+      askRun: async () => {
+        throw new Error('askRun must not be called');
+      },
+      answerRun: async (...args) => {
+        calls.push(args.slice(0, 2));
+        return { run_id: RUN_ID, status: 'needs_input', submission_seq: 2, submission_id: 's2', input_request: question(), gaps: [] };
+      },
+    });
+    const payload = { kind: 'answer', run_id: RUN_ID, question_id: 'q1', answer: 'the second', ids: { customer_id: 'CUST-1' }, by: 'ops-reviewer' };
+    const r = await cli([worker], ['__worker', RUN_ID], { config: () => h.config, stdin: Readable.from([JSON.stringify(payload)]) });
+    expect(r.code).toBe(EXIT.OK);
+    expect(calls).toEqual([[RUN_ID, { question_id: 'q1', answer: 'the second', ids: { customer_id: 'CUST-1' }, by: 'ops-reviewer' }]]);
+    expect((await (await createRunStore(h.config)).getRun(RUN_ID))?.worker_pid).toBe(999);
+    // Both an answer and skip, or neither, is refused before anything runs.
+    for (const bad of [{ answer: 'x', skip: true }, {}]) {
+      const stdin = Readable.from([JSON.stringify({ kind: 'answer', run_id: RUN_ID, question_id: 'q1', by: 'ops-reviewer', ...bad })]);
+      const b = await cli([worker], ['__worker', RUN_ID], { config: () => h.config, stdin });
+      expect(b.code).toBe(EXIT.USAGE);
+    }
+    expect(calls).toHaveLength(1);
+  });
+
+  /** `triage run` with a fake pipeline that parks the run once, and a fake answerRun that finishes it. */
+  function runHarness(h: TestHome) {
+    const order: string[] = [];
+    const answers: AnswerInput[] = [];
+    const submitParked = async (p: PreparedSubmission): Promise<SubmissionResult> => {
+      order.push('submit');
+      const store = await createRunStore(h.config);
+      await store.createRun(p.run_id, redactPersisted(p.request, { names: [...p.redaction_names] }));
+      await store.addSubmission(p.run_id, redactPersisted({ kind: 'initial' as const }));
+      await store.putInputRequest(p.run_id, redactPersisted(question()));
+      return { run_id: p.run_id, status: 'needs_input', submission_seq: 1, submission_id: 's1', input_request: question(), gaps: [] };
+    };
+    const answer = async (runId: string, input: AnswerInput): Promise<SubmissionResult> => {
+      order.push('answer');
+      answers.push(input);
+      const store = await createRunStore(h.config);
+      await store.resolveInputRequest(runId, 'q1', redactPersisted({ status: 'answered', resolved_at: '2026-09-20T10:00:00.000Z', resolved_by: input.by }));
+      const seq = await store.addSubmission(runId, redactPersisted({ kind: 'answer' as const, question_id: 'q1', answer: input.answer ?? '' }));
+      await store.putReport(
+        runId,
+        seq,
+        redactPersisted(sampleReport(runId, 'the payout is waiting on the bank')),
+        redactPersisted('# Triage report\n\nthe payout is waiting on the bank\n'),
+      );
+      await store.setPhase(runId, 'completed');
+      return { run_id: runId, status: 'completed', submission_seq: seq, submission_id: 's2', gaps: [] };
+    };
+    const cmd = (prompt: () => Promise<string | null>): CliCommand =>
+      createRunCommand({
+        boot: async () => {
+          order.push('boot');
+        },
+        prepare: async (input, config, registry: Registry) => {
+          order.push('prepare');
+          return prepareRequest(input, { ...prepareDeps(config, registry), newId: () => RUN_ID });
+        },
+        submit: submitParked,
+        answer,
+        prompt: () => prompt,
+        defaultRequestedBy: fixedUser,
+      });
+    return { cmd, order, answers };
+  }
+
+  test('run at a terminal asks, resumes in process and prints the report', async () => {
+    const h = home();
+    const t = runHarness(h);
+    const r = await cli([t.cmd(async () => '1')], ['run', '--text', TEXT], { config: () => h.config, isTTY: true });
+    expect(r.code).toBe(EXIT.OK);
+    expect(t.order).toEqual(['boot', 'prepare', 'submit', 'answer']);
+    expect(t.answers).toEqual([{ question_id: 'q1', answer: '2 Sep, 5,000', by: 'ops-reviewer' }]);
+    expect(r.out).toContain('needs an answer');
+    expect(r.out).toContain('# Triage report');
+  });
+
+  test('run without a terminal prints the question in the wait shape and exits 4', async () => {
+    const h = home();
+    const t = runHarness(h);
+    const r = await cli([t.cmd(async () => null)], ['run', '--text', TEXT, '--json'], { config: () => h.config });
+    expect(r.code).toBe(4);
+    const doc = jsonLine(r.out) as { status: string; phase: string; input_request: { question_id: string } };
+    expect(v.is(WaitOutputSchema, doc)).toBe(true);
+    expect(doc).toMatchObject({ run_id: RUN_ID, status: 'needs_input', phase: 'needs_input' });
+    expect(doc.input_request.question_id).toBe('q1');
+    expect(t.order).toEqual(['boot', 'prepare', 'submit']);
+    expect((await (await createRunStore(h.config)).getRun(RUN_ID))?.phase).toBe('needs_input');
   });
 });

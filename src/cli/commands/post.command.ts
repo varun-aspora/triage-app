@@ -14,7 +14,6 @@
 // With TRIAGE_MOCK_MODE=true (the default) the reviewer comes from fixtures
 // and the post goes to an in-memory sink; nothing reaches Slack. Under --json
 // the text is shown on stderr and stdout carries one JSON document.
-import { createInterface } from 'node:readline';
 import type { Config } from '../../config/env.ts';
 import { createJsonlAuditSink, type AuditSink } from '../../gate/audit-sink.ts';
 import { requireApproval } from '../../report/approval.ts';
@@ -29,6 +28,7 @@ import {
 import { createRunStore } from '../../runstore/index.ts';
 import type { RunStore } from '../../runstore/types.ts';
 import { EXIT, printError, printHuman, printJson } from '../output.ts';
+import { linePrompt } from '../lib/prompt.ts';
 import type { CliCommand, CliIo } from '../types.ts';
 
 /** Asks the y/N question and resolves to the answer line, or null when input has ended. */
@@ -177,17 +177,4 @@ function defaultClient(fetchFn: FetchLike | undefined): (config: Config) => Slac
 
 function defaultAudit(config: Config): AuditSink {
   return createJsonlAuditSink({ auditLogPath: config.paths.auditLog, runsDir: config.paths.runsDir });
-}
-
-function linePrompt(io: CliIo, write: (text: string) => void): Confirm {
-  return async (question) => {
-    const rl = createInterface({ input: io.stdin, crlfDelay: Infinity, terminal: false });
-    try {
-      write(question);
-      const next = await rl[Symbol.asyncIterator]().next();
-      return next.done === true ? null : String(next.value);
-    } finally {
-      rl.close();
-    }
-  };
 }

@@ -9,6 +9,8 @@
 //   - an unknown run_id (exit 1, 'run not found');
 //   - a run that is still going, since the store tracks one phase per run
 //     (exit 1; a stalled run may be asked again);
+//   - a run waiting on a question: that is answered with `triage input`,
+//     not asked around (exit 1);
 //   - an empty question or a bad run_id (exit 2).
 //
 // After the worker starts, the phase is set to dispatched with the worker's
@@ -70,6 +72,11 @@ export function createAskCommand(options: AskCommandOptions = {}): CliCommand {
       const status = runStatusOf(run, isAlive);
       if (status === 'running') {
         printError(io, json, 'ERROR', `run ${runId} is still going (phase ${run.phase}); wait for it before asking`);
+        return EXIT.ERROR;
+      }
+      if (status === 'needs_input') {
+        const qid = run.input_request?.question_id ?? '?';
+        printError(io, json, 'ERROR', `run ${runId} is waiting for an answer to question ${qid}; answer it with: triage input ${runId} "<answer>" (or --skip)`);
         return EXIT.ERROR;
       }
       const submissionId = run.submissions.length + 1;

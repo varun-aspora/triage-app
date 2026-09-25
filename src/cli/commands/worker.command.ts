@@ -5,6 +5,7 @@
 // runtime and runs the work:
 //   submit -> runSubmission(prepared, deps)
 //   ask    -> askRun(run_id, question, by, deps)
+//   answer -> answerRun(run_id, {question_id, answer | skip, ids, by}, deps)
 //
 // The parent ignores this process's stdout and stderr, so the outcome lives
 // in the run store: runSubmission and askRun record completed or failed, and
@@ -18,6 +19,7 @@ import type { Config } from '../../config/env.ts';
 import { redactPersisted } from '../../gate/redact.ts';
 import { WORKER_COMMAND } from '../../ingress/detach.ts';
 import {
+  answerRun,
   askRun,
   className,
   runSubmission,
@@ -39,6 +41,7 @@ export type WorkerCommandOptions = {
   readonly deps?: (config: Config) => SubmissionDeps;
   readonly runSubmission?: typeof runSubmission;
   readonly askRun?: typeof askRun;
+  readonly answerRun?: typeof answerRun;
   /** This process's pid. Defaults to process.pid. */
   readonly pid?: () => number;
 };
@@ -59,6 +62,7 @@ export function createWorkerCommand(options: WorkerCommandOptions = {}): CliComm
   const depsOf = options.deps ?? (() => submissionDeps({ isTty: false }));
   const submit = options.runSubmission ?? runSubmission;
   const ask = options.askRun ?? askRun;
+  const answer = options.answerRun ?? answerRun;
   const pidOf = options.pid ?? (() => process.pid);
   return {
     path: ['worker'],
@@ -97,16 +101,30 @@ export function createWorkerCommand(options: WorkerCommandOptions = {}): CliComm
       try {
         await boot();
         const deps = depsOf(config);
-        result =
-          payload.kind === 'submit'
-            ? await submit({ run_id: runId, request: payload.request, redaction_names: payload.redaction_names ?? [] }, deps)
-            : await ask(runId, payload.question, payload.by, deps);
+        if (payload.kind === 'submit') {
+          result = await submit({ run_id: runId, request: payload.request, redaction_names: payload.redaction_names ?? [] }, deps);
+        } else if (payload.kind === 'ask') {
+          result = await ask(runId, payload.question, payload.by, deps);
+        } else {
+          result = await answer(
+            runId,
+            {
+              question_id: payload.question_id,
+              ...(payload.answer !== undefined ? { answer: payload.answer } : {}),
+              ...(payload.skip === true ? { skip: true } : {}),
+              ...(payload.ids !== undefined ? { ids: payload.ids } : {}),
+              by: payload.by,
+            },
+            deps,
+          );
+        }
       } catch (err) {
         await store.setPhase(runId, 'failed', { reason: className(err) }).catch(() => undefined);
         printError(io, json, 'ERROR', `run ${runId} failed: ${className(err)}`);
         return EXIT.ERROR;
       }
-      return result.status === 'completed' ? EXIT.OK : EXIT.ERROR;
+      // A run parked on a question is not a failure.
+      return result.status === 'failed' ? EXIT.ERROR : EXIT.OK;
     },
   };
 }
@@ -133,8 +151,8 @@ async function recordPid(
   }
   const run = await store.getRun(runId);
   if (run === null) return `run not found: ${runId}`;
-  // `triage ask` writes the same phase and pid once the spawn returns, so the
-  // order of the two writes does not matter.
+  // `triage ask` and `triage input` write the same phase and pid once the
+  // spawn returns, so the order of the two writes does not matter.
   await store.setPhase(runId, 'dispatched', { worker_pid: pid });
   return true;
 }

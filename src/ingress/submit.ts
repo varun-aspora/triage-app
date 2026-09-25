@@ -44,7 +44,20 @@
 // askRun(run_id, question, by, deps) adds a follow-up submission on the same
 // Flue instance, without initialData, and settles it the same way.
 //
-// The CLI and the HTTP routes both submit through these two functions.
+// A response can also end on ask_requester (P6 §4.3): the tool stores the
+// question and moves the run to needs_input, and read() returns as for a
+// completed response. dispatchAndSettle checks the store after the read and
+// reports status needs_input with the question instead of completed; the
+// phase is left as the tool set it and nothing is embedded yet.
+//
+// answerRun(run_id, input, deps) is the way back: it closes the open
+// question with who answered (or skipped) and when, and dispatches the
+// answer as a triage.input_answer signal on the same instance. Ids the
+// person gave go through the ingress identity step first, and the resulting
+// chain rides in the signal's attributes, where the root merges it into the
+// run's scope (D26). Free text never widens scope.
+//
+// The CLI and the HTTP routes both submit through these functions.
 // submissionDeps() builds the production deps from the Triage runtime.
 import { readFile } from 'node:fs/promises';
 import {
@@ -89,13 +102,14 @@ import {
   type TriageInit,
   TriageInitSchema,
 } from '../types/classification.ts';
-import { type Entity, type Interface, RunIdSchema, type RunId, type Tier } from '../types/core.ts';
+import { type Entity, type Interface, type KnownIds, RunIdSchema, type RunId, type Tier } from '../types/core.ts';
 import type { IdChain } from '../types/id-chain.ts';
+import { INPUT_ANSWER_CHAIN_ATTR, INPUT_ANSWER_SIGNAL, type InputRequest, QuestionIdSchema } from '../types/input-request.ts';
 import type { Attachment, TriageRequest } from '../types/request.ts';
-import { type IngressIdentity, resolveIngressIdentity } from './identity.ts';
+import { type IngressIdentity, NO_IDS_GAP, resolveIngressIdentity } from './identity.ts';
 import { IngressInputError } from './normalise.ts';
 import type { PreparedSubmission } from './prepare.ts';
-import { renderAsk, renderThread, type RenderImages } from './render-thread.ts';
+import { renderAnswer, renderAsk, renderThread, type RenderImages } from './render-thread.ts';
 
 // ------------------------------------------------------------------ types
 
@@ -130,6 +144,8 @@ export type SettleDeps = {
   readonly onEvent?: AgentReadOptions['onEvent'];
   /** How long read() may wait. Default: run timeout x attempts, plus a minute. */
   readonly readTimeoutMs?: number;
+  /** Clock for the answer's resolution time. Defaults to the system clock. */
+  readonly now?: () => Date;
 };
 
 export type SubmissionDeps = SettleDeps & {
@@ -141,7 +157,7 @@ export type SubmissionDeps = SettleDeps & {
    */
   readonly repoSync?: (input: { readonly interface: Interface; readonly signal: AbortSignal }) => Promise<readonly PreflightWarning[]>;
   readonly identity: (
-    request: TriageRequest,
+    request: Pick<TriageRequest, 'request_id' | 'interface' | 'messages' | 'hints'>,
     opts: { readonly redactionNames: readonly string[]; readonly signal: AbortSignal },
   ) => Promise<IngressIdentity>;
   readonly classify: (input: ClassifyInput, signal: AbortSignal) => Promise<Classification>;
@@ -159,7 +175,7 @@ export type SubmissionDeps = SettleDeps & {
   readonly readAttachment: (bytesRef: string, signal: AbortSignal) => Promise<Uint8Array>;
 };
 
-export type SubmissionStatus = 'completed' | 'failed';
+export type SubmissionStatus = 'completed' | 'failed' | 'needs_input';
 
 export type SubmissionResult = {
   readonly run_id: RunId;
@@ -172,6 +188,8 @@ export type SubmissionResult = {
   readonly reply_text?: string;
   /** The error class name, when failed. */
   readonly error?: string;
+  /** The question the run paused on, when needs_input. */
+  readonly input_request?: InputRequest;
   /** Things that did not happen after the settle, such as embeddings. */
   readonly gaps: readonly string[];
 };
@@ -187,6 +205,18 @@ export class SubmissionReadTimeoutError extends Error {
 /** The prepared submission does not hold together. A programming error. */
 export class SubmissionInputError extends Error {
   override readonly name = 'SubmissionInputError';
+}
+
+/** answerRun on a run that is not waiting for an answer, or not on that question. */
+export class RunNotWaitingError extends Error {
+  override readonly name = 'RunNotWaitingError';
+  readonly runId: string;
+  readonly questionId?: string;
+  constructor(runId: string, questionId?: string) {
+    super(questionId === undefined ? `run ${runId} is not waiting for an answer` : `run ${runId} is not waiting on question ${questionId}`);
+    this.runId = runId;
+    if (questionId !== undefined) this.questionId = questionId;
+  }
 }
 
 /** Extra wait on top of the run's own deadline before read() gives up. */
@@ -311,6 +341,82 @@ export async function askRun(runId: string, question: string, by: string, deps: 
   return dispatchAndSettle(runId, { kind: 'ask', question: question.trim() }, { message }, { id: runId }, deps);
 }
 
+// ------------------------------------------------------------------ answer
+
+export type AnswerInput = {
+  /** Defaults to the open question. */
+  readonly question_id?: string;
+  /** Left out with skip. */
+  readonly answer?: string;
+  readonly skip?: boolean;
+  /** Ids the person gave; resolved by the ingress identity step before they join the run's scope. */
+  readonly ids?: Partial<KnownIds>;
+  /** Who answered: an email, a Slack user id or the OS user. */
+  readonly by: string;
+};
+
+/** answerRun needs the settle deps, plus the identity step when ids are given. */
+export type AnswerDeps = SettleDeps & { readonly identity?: SubmissionDeps['identity'] };
+
+/** The answer to the question a run is waiting on: closes it and resumes the run as a new submission. */
+export async function answerRun(runId: string, input: AnswerInput, deps: AnswerDeps): Promise<SubmissionResult> {
+  if (!v.is(RunIdSchema, runId)) throw new IngressInputError('run_id', 'is not a run id');
+  const by = typeof input.by === 'string' ? input.by.trim() : '';
+  if (by === '') throw new IngressInputError('by', 'is required');
+  const skip = input.skip === true;
+  const answer = typeof input.answer === 'string' ? input.answer.trim() : '';
+  if (skip && answer !== '') throw new IngressInputError('answer', 'must be empty with skip');
+  if (!skip && answer === '') throw new IngressInputError('answer', 'is empty');
+  if (input.question_id !== undefined && !v.is(QuestionIdSchema, input.question_id)) throw new IngressInputError('question_id', 'is not a question id');
+
+  const run = await deps.store.getRun(runId);
+  if (run === null) throw new RunNotFoundError(runId);
+  const open = run.input_request;
+  if (open === null) throw new RunNotWaitingError(runId);
+  const questionId = input.question_id ?? open.question_id;
+  if (questionId !== open.question_id) throw new RunNotWaitingError(runId, questionId);
+
+  const signal = deps.signal ?? new AbortController().signal;
+  const ids = input.ids ?? {};
+  let chain: IdChain | undefined;
+  const gaps: string[] = [];
+  if (Object.keys(ids).length > 0) {
+    if (deps.identity === undefined) throw new SubmissionInputError('ids need the identity step in the deps');
+    const identity = await identityStep(
+      { request_id: runId, interface: run.request.interface, messages: [], hints: { ids } },
+      [],
+      deps as Pick<SubmissionDeps, 'identity'>,
+      signal,
+    );
+    chain = identity.id_chain;
+    gaps.push(...identity.gaps.filter((g) => g !== NO_IDS_GAP));
+  }
+
+  const now = deps.now ?? (() => new Date());
+  await deps.store.resolveInputRequest(
+    runId,
+    questionId,
+    redactPersisted({ status: skip ? 'skipped' : 'answered', resolved_at: now().toISOString(), resolved_by: by }),
+  );
+
+  const message: DeliveredMessage = {
+    kind: 'signal',
+    type: INPUT_ANSWER_SIGNAL,
+    body: renderAnswer(open, { skip, answer, by, ids: chain?.ids ?? {}, gaps }),
+    attributes: {
+      question_id: questionId,
+      ...(chain !== undefined ? { [INPUT_ANSWER_CHAIN_ATTR]: JSON.stringify(chain) } : {}),
+    },
+  };
+  return dispatchAndSettle(
+    runId,
+    { kind: 'answer', question_id: questionId, ...(skip ? {} : { answer }) },
+    { message },
+    { id: runId },
+    deps,
+  );
+}
+
 // ------------------------------------------------------------------ settle
 
 async function dispatchAndSettle(
@@ -344,6 +450,7 @@ async function dispatchAndSettle(
   let status: SubmissionStatus;
   let replyText: string | undefined;
   let error: string | undefined;
+  let inputRequest: InputRequest | undefined;
   try {
     const reply = await handle.read(receipt, {
       signal: readSignal,
@@ -363,10 +470,20 @@ async function dispatchAndSettle(
     error = failureReason(cause);
   }
 
+  if (status === 'completed') {
+    // The response may have ended on ask_requester: then the run is parked on
+    // the question the tool stored, not done.
+    const run = await store.getRun(runId);
+    if (run !== null && run.phase === 'needs_input' && run.input_request !== null) {
+      status = 'needs_input';
+      inputRequest = run.input_request;
+    }
+  }
   if (status === 'completed') await store.setPhase(runId, 'completed');
-  else await store.setPhase(runId, 'failed', { reason: error ?? 'Error' });
+  else if (status === 'failed') await store.setPhase(runId, 'failed', { reason: error ?? 'Error' });
 
-  const gaps = await embedAfterSettle(deps, runId);
+  // A parked run is embedded when it settles for real, like any other.
+  const gaps = status === 'needs_input' ? [] : await embedAfterSettle(deps, runId);
   return Object.freeze({
     run_id: runId,
     status,
@@ -374,6 +491,7 @@ async function dispatchAndSettle(
     submission_id: receipt.submissionId,
     ...(replyText !== undefined ? { reply_text: replyText } : {}),
     ...(error !== undefined ? { error } : {}),
+    ...(inputRequest !== undefined ? { input_request: inputRequest } : {}),
     gaps: Object.freeze(gaps),
   });
 }
@@ -401,9 +519,9 @@ export function defaultReadTimeoutMs(config: SubmissionConfig): number {
 const LOUD_IDENTITY_ERRORS: ReadonlySet<string> = new Set(['FixtureMissError', 'IngressIdentityError']);
 
 async function identityStep(
-  request: TriageRequest,
+  request: Pick<TriageRequest, 'request_id' | 'interface' | 'messages' | 'hints'>,
   names: readonly string[],
-  deps: SubmissionDeps,
+  deps: Pick<SubmissionDeps, 'identity'>,
   signal: AbortSignal,
 ): Promise<IngressIdentity> {
   try {
