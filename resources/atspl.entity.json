@@ -15,6 +15,24 @@
       "quickwit_service": "pulse-backend",
       "repo": "pulse-backend",
       "note": "service:pulse returns no hits; the log service is pulse-backend"
+    },
+    "canopy": {
+      "db": "ATSPL_CANOPY_DB_URL",
+      "quickwit_service": "canopy-service",
+      "repo": "canopy",
+      "note": "support touchpoints and user support flows. Deployed as canopy-service; log service name is unverified"
+    },
+    "comms": {
+      "db": "ATSPL_COMMS_DB_URL",
+      "quickwit_service": "comms-service",
+      "repo": "comms-svc",
+      "note": "deployed as comms-service; log service name is unverified. The repo is Vance-Club/comms, formerly comms-svc"
+    },
+    "engage": {
+      "db": "ATSPL_ENGAGE_DB_URL",
+      "quickwit_service": "engage-service",
+      "repo": "engage",
+      "note": "ATSPL only. Deployed as engage-service; log service name is unverified"
     }
   },
   "quickwit_fields": ["service", "level", "message", "error", "raw_message", "timestamp", "x-req-id", "x-txn-id"],

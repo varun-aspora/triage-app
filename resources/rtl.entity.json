@@ -22,6 +22,24 @@
       "quickwit_service": "kyc-service",
       "repo": "kyc-service",
       "note": "log service name is unverified"
+    },
+    "canopy": {
+      "db": "RTL_CANOPY_DB_URL",
+      "quickwit_service": "canopy-service",
+      "repo": "canopy",
+      "note": "support touchpoints and user support flows. Deployed as canopy-service; log service name is unverified"
+    },
+    "cohort": {
+      "db": "RTL_COHORT_DB_URL",
+      "quickwit_service": "cohort-service",
+      "repo": "cohort-service",
+      "note": "the same repo also deploys cohort-evaluator-service on this cluster; log service name is unverified"
+    },
+    "comms": {
+      "db": "RTL_COMMS_DB_URL",
+      "quickwit_service": "comms-service",
+      "repo": "comms-svc",
+      "note": "deployed as comms-service; log service name is unverified. The repo is Vance-Club/comms, formerly comms-svc"
     }
   },
   "quickwit_fields": ["service", "level", "message", "error", "raw_message", "timestamp"],

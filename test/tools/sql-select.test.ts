@@ -209,7 +209,7 @@ describe('sql_select: schema', () => {
         .sort();
       expect(picklist(toolModule.create(ctx, 'investigator'))).toEqual(expected);
     }
-    expect(picklist(toolModule.create(makeToolContext({ entity: 'atspl' }), 'investigator'))).toEqual(['package', 'pulse']);
+    expect(picklist(toolModule.create(makeToolContext({ entity: 'atspl' }), 'investigator'))).toEqual(['canopy', 'comms', 'engage', 'package', 'pulse']);
     const ssfb = picklist(toolModule.create(makeToolContext({ entity: 'ssfb' }), 'investigator'));
     expect(ssfb).toContain('harbor');
     expect(ssfb).not.toContain('package');

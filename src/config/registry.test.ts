@@ -108,8 +108,8 @@ describe('shipped registries', () => {
       'harbor', 'rhythm', 'guardian', 'comms', 'workflow', 'cohort',
       'pdfgen', 'reminder', 'bro', 'eventbus', 'audit', 'finacle',
     ]);
-    expect(r.services('atspl')).toEqual(['package', 'pulse']);
-    expect(r.services('rtl')).toEqual(['workflow', 'banking', 'kyc']);
+    expect(r.services('atspl')).toEqual(['package', 'pulse', 'canopy', 'comms', 'engage']);
+    expect(r.services('rtl')).toEqual(['workflow', 'banking', 'kyc', 'canopy', 'cohort', 'comms']);
   });
 
   test('ATSPL log service strings come from the qw survey', () => {
@@ -191,7 +191,7 @@ describe('TRIAGE_ENTITIES', () => {
     expect(() => r.quickwit('atspl')).toThrow(RegistryError);
     expect(() => r.kube('atspl')).toThrow(RegistryError);
     // Structure stays readable.
-    expect(r.services('rtl')).toEqual(['workflow', 'banking', 'kyc']);
+    expect(r.services('rtl')).toEqual(['workflow', 'banking', 'kyc', 'canopy', 'cohort', 'comms']);
   });
 });
 
