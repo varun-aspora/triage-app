@@ -106,15 +106,17 @@ export class SuiteBudget {
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
 /**
- * Cost metadata for a model spec. ollama is local and free. Other models come
- * from the runtime registry or the pi-ai catalog; a model without cost
- * metadata makes the meter throw rather than run uncapped.
+ * Cost metadata for a model spec. ollama is local and faux is a fake, so both
+ * are free. faux is not looked up: the runtime registry holds whichever faux
+ * provider registered last in the process, which may not list the model.
+ * Other models come from the runtime registry or the pi-ai catalog; a model
+ * without cost metadata makes the meter throw rather than run uncapped.
  */
 export function defaultCostModel(spec: string): CostModel {
   const parsed = parseSpec(spec);
   const provider = parsed?.provider ?? '';
   const id = parsed?.modelId ?? spec;
-  if (provider === 'ollama') return { provider, id, cost: { ...ZERO_COST } };
+  if (provider === 'ollama' || provider === FAUX_PROVIDER) return { provider, id, cost: { ...ZERO_COST } };
   const meta = lookupModel(spec) as Partial<CostModel> | undefined;
   return { provider, id, cost: meta?.cost as CostModel['cost'] };
 }

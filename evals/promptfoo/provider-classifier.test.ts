@@ -17,6 +17,7 @@ import {
   ClassifierProvider,
   SuiteBudget,
   caseVars,
+  defaultCostModel,
   withClassifierModel,
   type ClassifierProviderDeps,
 } from './provider-classifier.ts';
@@ -204,6 +205,12 @@ describe('model per provider', () => {
 });
 
 describe('cost cap', () => {
+  test('faux models are free without a registry lookup, whichever faux provider registered last', () => {
+    const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    expect(defaultCostModel('faux/classifier')).toEqual({ provider: 'faux', id: 'classifier', cost: zero });
+    expect(defaultCostModel('faux/not-listed-anywhere')).toEqual({ provider: 'faux', id: 'not-listed-anywhere', cost: zero });
+  });
+
   async function oneCallCost(c: EvalCase): Promise<number> {
     const budget = new SuiteBudget(undefined);
     outputOf(await run(provider('faux/classifier', { budget, costModel: PRICED }), c));
