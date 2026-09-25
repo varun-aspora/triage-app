@@ -219,6 +219,41 @@ Known gaps:
 - A verdict given before the report has no eval draft; a later report does not create one for it. The next verdict on the finished run does.
 - The Steps panel reads the whole file on every poll.
 
+### Blocked runs and resume (D55, 2026-09-26)
+
+| Change | Decision |
+|---|---|
+| `blocked` phase (not terminal) and status; `block` and `block_history` on the run, `RunStore.putBlock` and `resolveBlock`; `markStopped` closes an open block as `cancelled`; a submission of kind `resume` with `block_id` and `note`; migration `0003_blocks.sql` | D55 |
+| `src/tools/_lib/connector-failures.ts`: the tool pipeline records every "did not answer" outcome per run (system, tool, code, time); `stop_blocked` on the Triage root, checked against that record, refused while a question or block is open, egress check with refuse semantics on the reason; the finish check treats it as a valid end; one instruction line | D55 |
+| `resumeRun` and `resumeRefusal` (`src/ingress/submit.ts`), the `triage.resume` signal (`renderResume`), settle status `blocked` with nothing embedded, `blocked` and `resume` lines in the step log | D55 |
+| `triage resume <run_id> [message]`; `triage ask` refuses a blocked run; `status`, `wait` and `run` show the block, exit 6 (`EXIT_BLOCKED`); `triage logs --follow` settles on blocked | D55 |
+| `POST /triage/:run_id/resume` (202, 404, 400, 409 with the phase and a hint); `POST .../ask` answers 409 on a blocked run; `block` and `block_history` on `GET /triage/:run_id`; list status `blocked` | D55 |
+| Console: the blocked view with the block panel and the Resume form (name, multi-line message), the same form on the failed and stopped views when the run has a submission, earlier blocks, a `waiting` step state | D55 |
+| `test/contract/agents/blocked.contract.ts`: park, resume on the same conversation, a refused stop, a failed-after-dispatch resume, with the fake model | D55 |
+
+A Postgres run store gets `0003_blocks.sql` on the next start; the folder store needs nothing. Shared edits: `src/runstore/types.ts`, `src/types/block.ts` (new), `src/cli/lib/output-schemas.ts`, `src/ingress/http/run-list.ts`, `src/ingress/worker-payload.ts`, the console enums.
+
+Built as a workflow, one agent per subject (store; tools and ingress; CLI, HTTP, console and the contract test), after the shared edits. Checked in mock mode on 2026-09-26: typecheck clean; `bun run test` 5144 pass; `bun run test:web` 88 pass; `bun run test:contract` 173 pass; `bun run ci` all steps passed.
+
+Deviations from the spec, kept:
+
+- `triage resume` does not write phase `dispatched` after the spawn, unlike `triage ask`: `resumeRun` refuses every non-blocked, non-terminal phase, so the worker would refuse the run the CLI had just marked. The worker records its pid while keeping the phase and reason, and the command polls the store (250 ms, 30 s cap) until the worker has taken the run over, so a `triage wait` right after never sees the old state. It exits 1 if the worker dies first. The worker also pre-checks `resumeRefusal` before it writes, so two resumes started within seconds cannot clobber each other.
+- `resumeRun` closes an open block whenever one exists, not only in phase `blocked`, so a run that failed right after `stop_blocked` stored its record is not wedged. A stopped run with no submission is refused like a failed one.
+- The resume message (`note` in the store and the API, up to 4,000 characters, multi-line) is a positional argument on the CLI and a text box on the console; the signal shows it as "Message from <person>" and tells the model to take it into account.
+- Console: Cancel stays available on a blocked run; follow-up polling stops once the newer submission exists and the run is no longer running; a blocked run that already has a report keeps the report view with the block panel on top.
+- The contract test records the connector failure itself: in mock mode the resolver answers from fixtures or reports a miss and cannot raise a connector error.
+
+Assumptions made, not verified against a real system:
+
+- The per-run failure record lives in the process that ran the tools. After a crash, a run recovered by another process has no record, so `stop_blocked` is refused there and the model finishes with gaps, as before D55.
+- A resume into a system that is still down blocks again on the next "did not answer"; nothing probes the system first.
+- `stop_blocked` is only as good as the model's judgement of "cannot go on"; the recorded-failure check stops it from citing a system that answered, not from blocking on one that did not matter.
+
+Known gaps:
+
+- No deadline for a blocked run (as for questions, D53).
+- The Ollama keyless auth in `src/models.ts` still resolves to an empty credential, so a run on an `ollama/*` tier fails at the first model call (`No API key for provider: ollama`, seen on 2026-09-25). Not part of D55; a placeholder key fixes it.
+
 ## Commit trailer note
 
 The trailer was pinned in CONVENTIONS.md and plan.json after wave 1 (`74cfcb3`, later `58b12b3`), because implementers had each picked their own model name. Commit T01.3 (`a70343b`) still carries a different co-author line from the rest, and T01.2 (`bb11e37`) was one of the two commits the wave log flagged at the time; on main today only `a70343b` differs. The commits before `58b12b3` also carry a `Claude-Session` line. History was left as is.
