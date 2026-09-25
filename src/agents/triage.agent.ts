@@ -15,15 +15,21 @@
 // The choices themselves live in triage-plan.ts, which is unit tested.
 //
 // Persistent state: plan, evidence_index and escalation (mirrored from the
-// run's escalation store in the callbacks) and finish_retries. useAgentFinish
-// appends triage.finish_required once when no report was written, and throws
-// on the next miss, so the submission settles failed with the evidence kept.
+// run's escalation store in the callbacks), finish_retries and id_chain (the
+// run's chain as the last response left it, so ids added mid-run survive
+// the next submission and a new process). useAgentFinish appends
+// triage.finish_required once when neither finish_report nor ask_requester
+// ended the response, and throws on the next miss, so the submission
+// settles failed with the evidence kept. A successful ask_requester parks
+// the run in needs_input (P6 §4.3); the answer arrives as a signal whose
+// attributes may carry ids the requester gave, verified by ingress.
 
 import '../models.ts';
 import {
   type AgentProps,
   useAgentFinish,
   useAgentStart,
+  useDelivery,
   useInitialData,
   useInstruction,
   useModel,
@@ -33,8 +39,10 @@ import {
   useSubagent,
   useTool,
 } from '@flue/runtime';
+import { mergeIdChains, widenIdChain } from '../tools/_lib/context.ts';
 import { toolsFor } from '../tools/index.ts';
 import { type TriageInit, TriageInitSchema } from '../types/classification.ts';
+import type { IdChain } from '../types/id-chain.ts';
 import { codeWalkerFor } from './delegates/code-walker.ts';
 import { deployManifestLines } from './deploy-manifests.ts';
 import { type DelegateEnv, investigatorFor } from './delegates/investigator.ts';
@@ -42,6 +50,9 @@ import type { Escalation } from './escalation.ts';
 import { methodText } from './instruction.ts';
 import { frontendRoutingSkill, overviewSkill, patternsSkill } from './skills.ts';
 import {
+  answerChainOf,
+  askOpenedFor,
+  calledAsk,
   calledFinish,
   durabilityAtImport,
   type EvidenceIndexEntry,
@@ -74,7 +85,10 @@ export function Triage({ id }: AgentProps): string {
   const deployManifests = deployManifestLines(rt.config, rt.registry, plan.entities);
   useInstruction(methodText(init, { entities: plan.entities, focus: plan.focus, services, deployManifests, knowledge: rt.knowledge }));
 
-  const deps = runDepsFor(id, init, rt);
+  const [savedChain, setSavedChain] = usePersistentState<IdChain | null>('id_chain', null);
+  const deps = runDepsFor(id, init, rt, savedChain ?? undefined);
+  const answered = answerChainOf(useDelivery());
+  if (answered !== null) widenIdChain(deps, mergeIdChains(deps.idChain(), answered));
   for (const tool of toolsFor('triage', triageToolContext(id, deps, rt))) useTool(watchFinishReport(id, tool));
 
   const env: DelegateEnv = { config: rt.config, registry: rt.registry, deps, knowledge: rt.knowledge };
@@ -111,9 +125,20 @@ export function Triage({ id }: AgentProps): string {
     mirror();
   });
 
+  // Writes only when the chain grew, so a quiet turn adds no state records.
+  const syncChain = (): void => {
+    const chain = deps.idChain();
+    if (JSON.stringify(chain) !== JSON.stringify(savedChain)) setSavedChain(chain);
+  };
+
   useAgentFinish((ctx) => {
     mirror();
-    const step = finishDecision(retries, calledFinish(ctx.response.toolCalls, reportWrittenFor(id)));
+    syncChain();
+    const step = finishDecision(
+      retries,
+      calledFinish(ctx.response.toolCalls, reportWrittenFor(id)),
+      calledAsk(ctx.response.toolCalls, askOpenedFor(id)),
+    );
     if (step.kind === 'done') {
       if (retries !== step.retries) setRetries(step.retries);
       settleRun(id);

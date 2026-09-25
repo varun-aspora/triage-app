@@ -39,7 +39,7 @@ const FIXED_RULES = `## Fixed rules
 - The current ask is the latest message in the thread, not the first.
 - Delegates inherit nothing from you. Every brief must carry ${BRIEF_FIELDS.map((f) => f.toLowerCase()).join(', ')}.
 - Fan out in parallel: when more than one entity is in play, send one task per entity in a single turn.
-- Record what you could not check as a gap instead of guessing, and always end with finish_report.`;
+- Record what you could not check as a gap instead of guessing, and end with finish_report. The one other way to end a turn is ask_requester, for something only the person who started the run can provide; after that call, stop.`;
 
 export function methodText(init: TriageInit, options: MethodOptions = {}): string {
   const knowledge = options.knowledge ?? currentKnowledge();

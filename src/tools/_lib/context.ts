@@ -183,6 +183,21 @@ export function widenIdChain(deps: ToolDeps, next: IdChain): IdChain {
 }
 
 /**
+ * base with extra's ids added (extra wins) and extra's hops and state items
+ * appended when base does not already hold them. Pure; nothing is widened.
+ */
+export function mergeIdChains(base: IdChain, extra: IdChain): IdChain {
+  const keys = (list: readonly unknown[]): Set<string> => new Set(list.map((x) => JSON.stringify(x)));
+  const hops = keys(base.hops);
+  const state = keys(base.basic_state);
+  return {
+    ids: { ...base.ids, ...extra.ids },
+    hops: [...base.hops, ...extra.hops.filter((h) => !hops.has(JSON.stringify(h)))],
+    basic_state: [...base.basic_state, ...extra.basic_state.filter((s) => !state.has(JSON.stringify(s)))],
+  };
+}
+
+/**
  * The scope set for the next call. Reads deps.idChain() every time, so the
  * pipeline always sees the current chain. Deps built by createToolDeps keep
  * every id that was ever in scope; other deps (tests) derive it from the chain.

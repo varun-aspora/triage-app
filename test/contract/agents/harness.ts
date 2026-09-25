@@ -17,7 +17,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Context, FauxResponseFactory, Message } from '@earendil-works/pi-ai';
-import { type AgentReply, init } from '@flue/runtime';
+import { type AgentReply, type DeliveredMessageInput, init } from '@flue/runtime';
 import { start, type Flue } from '@flue/runtime/node';
 import * as v from 'valibot';
 import { redactPersisted } from '../../../src/gate/redact.ts';
@@ -188,7 +188,7 @@ export async function runTriage(
   Triage: Booted['Triage'],
   runId: string,
   initialData: unknown,
-  message = 'Triage this report.',
+  message: DeliveredMessageInput = 'Triage this report.',
 ): Promise<RunResult> {
   const agent = init(Triage, { id: runId });
   const tools: string[] = [];

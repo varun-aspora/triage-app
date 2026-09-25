@@ -87,6 +87,7 @@ export const KEYS: readonly KeySpec[] = [
   // Per-run budgets
   { name: 'TRIAGE_MAX_TOOL_CALLS_PER_RUN', type: 'int', group: 'budgets', default: '120', min: 1 },
   { name: 'TRIAGE_MAX_TASKS_PER_RUN', type: 'int', group: 'budgets', default: '12', min: 0 },
+  { name: 'TRIAGE_MAX_ASKS_PER_RUN', type: 'int', group: 'budgets', default: '2', min: 0 },
   { name: 'TRIAGE_MAX_RESPONSE_BYTES_PER_CALL', type: 'int', group: 'budgets', default: '1048576', min: 1 },
   { name: 'TRIAGE_MAX_BYTES_PER_RUN', type: 'int', group: 'budgets', default: '20971520', min: 1 },
   { name: 'TRIAGE_RUN_TIMEOUT_MS', type: 'int', group: 'budgets', default: '900000', min: 1 },

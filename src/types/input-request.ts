@@ -57,5 +57,9 @@ export const InputResolutionSchema = v.object({
 });
 export type InputResolution = v.InferOutput<typeof InputResolutionSchema>;
 
+/** The signal type answerRun dispatches to resume a run, and the attribute that carries verified ids. */
+export const INPUT_ANSWER_SIGNAL = 'triage.input_answer';
+export const INPUT_ANSWER_CHAIN_ATTR = 'id_chain';
+
 export const ResolvedInputRequestSchema = v.object({ ...InputRequestSchema.entries, ...InputResolutionSchema.entries });
 export type ResolvedInputRequest = v.InferOutput<typeof ResolvedInputRequestSchema>;

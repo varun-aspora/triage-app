@@ -368,6 +368,13 @@ export function createFinishReportTool(ctx: ToolContext, options: FinishReportOp
     const record = await deps.runStore.getRun(ctx.runId);
     if (record === null) throw new RunNotFoundError(ctx.runId);
     signal?.throwIfAborted();
+    if (record.input_request !== null) {
+      const qid = record.input_request.question_id;
+      return refuse(
+        `Refused: question ${qid} to the requester is still open. Stop now; the run resumes with their answer, and finish_report works then.`,
+        `input request ${qid} open`,
+      );
+    }
 
     // 3. Escalation.
     const facts = runFacts(init, record, draft);

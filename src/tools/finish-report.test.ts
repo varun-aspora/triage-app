@@ -151,6 +151,8 @@ function memoryStore(runId: string): MemoryStore {
         classification: state.classification,
         evidence: state.evidence,
         submissions: [{ seq: 1, kind: 'initial', created_at: CREATED_AT, report: null, report_md: null }],
+        input_request: null,
+        input_history: [],
         report: null,
         report_md: null,
         feedback: [],

@@ -7,16 +7,22 @@ import type { ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
 import { ConfigError } from '../config/errors.ts';
 import type { RunStore } from '../runstore/types.ts';
-import { widenIdChain } from '../tools/_lib/context.ts';
+import { mergeIdChains, widenIdChain } from '../tools/_lib/context.ts';
+import { ASK_REQUESTER } from '../tools/ask-requester.tool.ts';
 import { FINISH_REPORT, synthesisPassesFor } from '../tools/finish-report.tool.ts';
 import { toolsFor } from '../tools/index.ts';
 import { type TriageInit, TriageInitSchema } from '../types/classification.ts';
 import { ENTITIES, type Entity, type Tier } from '../types/core.ts';
+import type { IdChain } from '../types/id-chain.ts';
+import { INPUT_ANSWER_CHAIN_ATTR, INPUT_ANSWER_SIGNAL } from '../types/input-request.ts';
 import { makeTestHome, REPO_ROOT, type TestHome } from '../../test/support/home.ts';
 import { escalationFor } from './escalation.ts';
 import { rootAgents } from './index.ts';
 import { type Knowledge, loadKnowledge } from './skills.ts';
 import {
+  answerChainOf,
+  askOpenedFor,
+  calledAsk,
   calledFinish,
   configureTriageRuntime,
   defaultDurability,
@@ -288,13 +294,13 @@ describe('triagePlan: entities, delegates and skills', () => {
 // ------------------------------------------------------------------ mount and deps
 
 describe('the triage mount', () => {
-  test('toolsFor(triage) holds resolve_identity, note_evidence and finish_report only', () => {
+  test('toolsFor(triage) holds ask_requester, resolve_identity, note_evidence and finish_report only', () => {
     const h = home();
     useTestRuntime(h);
     const runId = nextRunId();
     const deps = runDepsFor(runId, init({ runId }));
     const names = toolsFor('triage', triageToolContext(runId, deps)).map((t) => t.name).sort();
-    expect(names).toEqual(['finish_report', 'note_evidence', 'resolve_identity']);
+    expect(names).toEqual(['ask_requester', 'finish_report', 'note_evidence', 'resolve_identity']);
     for (const io of ['sql_select', 'http_call', 'logs_search']) expect(names).not.toContain(io);
     settleRun(runId);
   });
@@ -599,5 +605,101 @@ describe('triage.agent.ts', () => {
     const mod = await import('./triage.agent.ts');
     const capitalized = Object.keys(mod).filter((k) => /^[A-Z]/.test(k));
     expect(capitalized).toEqual(['Triage']);
+  });
+});
+
+// ------------------------------------------------------------------ ask_requester and the answer
+
+describe('ask_requester as a valid end of a response', () => {
+  const call = (tool: string, isError = false): AgentResponseToolCall => ({ tool, isError });
+
+  function stopTool(name: string, status: string): ToolDefinition {
+    return {
+      name,
+      description: 'test tool',
+      input: v.object({}),
+      output: undefined,
+      run: async () => ({ output: { status, taken_at: '2026-09-23T10:00:00.000Z' } }),
+    } as unknown as ToolDefinition;
+  }
+
+  test('finishDecision is done when a question was opened, and the count resets', () => {
+    expect(finishDecision(0, false, true)).toEqual({ kind: 'done', retries: 0 });
+    expect(finishDecision(1, false, true)).toEqual({ kind: 'done', retries: 0 });
+    expect(finishDecision(0, true, true)).toEqual({ kind: 'done', retries: 0 });
+    expect(finishDecision(0, false, false)).toEqual({ kind: 'signal', retries: 1 });
+    expect(finishDecision(1, false)).toEqual({ kind: 'fail', retries: 1 });
+  });
+
+  test('calledAsk needs an ok ask_requester call that the watched tool saw open a question', async () => {
+    const runId = nextRunId();
+    expect(calledAsk([call(ASK_REQUESTER)], false)).toBe(false);
+    expect(calledAsk([call(ASK_REQUESTER, true)], true)).toBe(false);
+    expect(calledAsk([call('task'), call(FINISH_REPORT)], true)).toBe(false);
+
+    const tool = watchFinishReport(runId, stopTool(ASK_REQUESTER, 'ok'));
+    expect(askOpenedFor(runId)).toBe(false);
+    await tool.run({} as never);
+    expect(askOpenedFor(runId)).toBe(true);
+    expect(calledAsk([call(ASK_REQUESTER)], askOpenedFor(runId))).toBe(true);
+    // The two marks are separate: an opened question is not a written report.
+    expect(reportWrittenFor(runId)).toBe(false);
+    settleRun(runId);
+    expect(askOpenedFor(runId)).toBe(false);
+  });
+
+  test('a refused or throwing ask_requester does not count, and other tools pass through unwrapped', async () => {
+    const runId = nextRunId();
+    await watchFinishReport(runId, stopTool(ASK_REQUESTER, 'refused')).run({} as never);
+    expect(askOpenedFor(runId)).toBe(false);
+    const failing = { ...stopTool(ASK_REQUESTER, 'ok'), run: async () => Promise.reject(new Error('boom')) };
+    await expect(watchFinishReport(runId, failing as ToolDefinition).run({} as never)).rejects.toThrow('boom');
+    expect(askOpenedFor(runId)).toBe(false);
+    const other = stopTool('note_evidence', 'ok');
+    expect(watchFinishReport(runId, other)).toBe(other);
+  });
+
+  test('answerChainOf reads a chain from an input answer signal only', () => {
+    const chain: IdChain = { ids: { customer_id: 'c-1' }, hops: [], basic_state: [] };
+    const attributes = { question_id: 'q1', [INPUT_ANSWER_CHAIN_ATTR]: JSON.stringify(chain) };
+    expect(answerChainOf({ kind: 'signal', type: INPUT_ANSWER_SIGNAL, body: 'x', attributes })).toEqual(chain);
+    expect(answerChainOf({ kind: 'signal', type: 'triage.finish_required', body: 'x', attributes })).toBeNull();
+    expect(answerChainOf({ kind: 'user', body: 'x' })).toBeNull();
+    expect(answerChainOf({ kind: 'signal', type: INPUT_ANSWER_SIGNAL, body: 'x' })).toBeNull();
+    expect(answerChainOf({ kind: 'signal', type: INPUT_ANSWER_SIGNAL, body: 'x', attributes: { question_id: 'q1' } })).toBeNull();
+    expect(answerChainOf({ kind: 'signal', type: INPUT_ANSWER_SIGNAL, body: 'x', attributes: { [INPUT_ANSWER_CHAIN_ATTR]: '{not json' } })).toBeNull();
+    expect(answerChainOf({ kind: 'signal', type: INPUT_ANSWER_SIGNAL, body: 'x', attributes: { [INPUT_ANSWER_CHAIN_ATTR]: '{"ids":{}}' } })).toBeNull();
+    expect(answerChainOf(null)).toBeNull();
+    expect(answerChainOf(undefined)).toBeNull();
+  });
+
+  test('mergeIdChains adds ids (the answer wins) and appends hops and state it does not hold yet', () => {
+    const hop = { from: 'customer_id' as const, to: 'account_id' as const, source: 'ssfb:rhythm.customer_account_mappings', status: 'resolved' as const, taken_at: '2026-09-23T10:00:00.000Z' };
+    const item = { item: 'harbor_customer_state', value: 'ACTIVE', taken_at: '2026-09-23T10:00:00.000Z', source: 'ssfb:harbor.customer' };
+    const base: IdChain = { ids: { customer_id: 'c-1', account_id: 'a-1' }, hops: [hop], basic_state: [item] };
+    const extra: IdChain = { ids: { account_id: 'a-2', form_id: 'f-1' }, hops: [hop, { ...hop, to: 'form_id' }], basic_state: [item, { ...item, item: 'account_form_status_v2', value: 'SIGNED' }] };
+    const merged = mergeIdChains(base, extra);
+    expect(merged.ids).toEqual({ customer_id: 'c-1', account_id: 'a-2', form_id: 'f-1' });
+    expect(merged.hops).toHaveLength(2);
+    expect(merged.basic_state.map((s) => s.item)).toEqual(['harbor_customer_state', 'account_form_status_v2']);
+    // Pure: the inputs are untouched.
+    expect(base.hops).toHaveLength(1);
+    expect(extra.ids.customer_id).toBeUndefined();
+  });
+
+  test('runDepsFor seeds the chain from a saved one when given, on the first render of the run only', () => {
+    const h = home();
+    useTestRuntime(h);
+    const runId = nextRunId();
+    const data = init({ runId });
+    const saved: IdChain = { ...data.id_chain, ids: { ...data.id_chain.ids, form_id: 'form-saved-1' } };
+    const deps = runDepsFor(runId, data, undefined, saved);
+    expect(deps.idChain().ids.form_id).toBe('form-saved-1');
+    // Cached: a later render without the saved chain gets the same deps.
+    expect(runDepsFor(runId, data)).toBe(deps);
+    settleRun(runId);
+    const fresh = runDepsFor(runId, data);
+    expect(fresh.idChain().ids.form_id).toBeUndefined();
+    settleRun(runId);
   });
 });
