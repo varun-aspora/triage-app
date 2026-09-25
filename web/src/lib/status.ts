@@ -20,7 +20,7 @@ export function runStatusTone(status: RunStatus): StatusLook {
     case 'failed':
       return { tone: 'rust', icon: 'x' };
     case 'running':
-      return { tone: 'info', icon: 'spinner' };
+      return { tone: 'amber', icon: 'spinner' };
   }
 }
 
@@ -42,12 +42,13 @@ export function doctorStatusTone(status: DoctorStatus): StatusLook {
   }
 }
 
+/** Skipped is amber, not muted, because a skipped repo is usually a checkout with local changes. */
 export function syncResultTone(status: 'ok' | 'skipped' | 'failed'): StatusLook {
   switch (status) {
     case 'ok':
       return { tone: 'neutral', icon: 'check' };
     case 'skipped':
-      return { tone: 'muted', icon: 'dash' };
+      return { tone: 'amber', icon: 'alert' };
     case 'failed':
       return { tone: 'rust', icon: 'x' };
   }
