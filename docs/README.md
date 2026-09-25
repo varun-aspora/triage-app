@@ -1,6 +1,6 @@
 # triage-app design docs
 
-Status: **v1 implementation landed on 2026-09-24**, verification pending the owner's review. All 12 tickets and 101 sub-tickets of the plan are on main. The implementation plan is [09-implementation-plan.md](09-implementation-plan.md), with the machine-readable version in [plan/plan.json](plan/plan.json). What was built, where it departs from these docs and the questions still open for the owner are in [10-implementation-notes.md](10-implementation-notes.md). Read in order.
+Status: **v1 implementation landed on 2026-09-24**, verification pending the owner's review; mid-run input (P6, D52) added on 2026-09-25, CLI only. All 12 tickets and 101 sub-tickets of the plan are on main. The implementation plan is [09-implementation-plan.md](09-implementation-plan.md), with the machine-readable version in [plan/plan.json](plan/plan.json). What was built, where it departs from these docs and the questions still open for the owner are in [10-implementation-notes.md](10-implementation-notes.md). Read in order.
 
 | Doc | What |
 |---|---|

@@ -7,7 +7,7 @@
 | Area | What ships | Decisions |
 |---|---|---|
 | Runtime | Flue 2.x agent service on Node, Bun for scripts, one `.env` per deployment, `TRIAGE_DEPLOY_MODE=local\|server` read only by pre-flight | D1, D4, D18, D32 |
-| Ingress | CLI (`run`, `start`, `wait`, `status`, `ask`, `post`, `feedback`, `doctor`, `preflight`, `tunnel`, `repos sync`, `fixtures review`, `evals`), HTTP API (polling only, bearer auth, no Slack post by default), Claude Code / Codex skill that drives the CLI | D12, D25, D28 |
+| Ingress | CLI (`run`, `start`, `wait`, `status`, `ask`, `input`, `post`, `feedback`, `doctor`, `preflight`, `tunnel`, `repos sync`, `fixtures review`, `evals`), HTTP API (polling only, bearer auth, no Slack post by default), Claude Code / Codex skill that drives the CLI | D12, D25, D28, D52 |
 | Identity and classification | Deterministic ID-chain resolution in ingress, classifier on a configurable model, deterministic tier policy including the image-capable fallback | D9, D22, D36 |
 | Orchestration | `Triage` root agent, `investigate_<entity>` and `_deep` per enabled entity, `code_walker` on CodeGraph, deterministic escalation and strong-model synthesis; one Flue sandbox (`virtual` default, `e2b`/`daytona` by config) inherited by all delegates | D3, D10, D11, D23, D45 |
 | Entities | SSFB, ATSPL, RTL, each with DBs, admin APIs (GET-only by default), Quickwit over `qw` or HTTP per entity; SSFB adds statement and reversal tools, AES-SIV field encrypt/decrypt, and `cbs_call` behind its flag | D5, D14, D21, D29, D34, D40, D44 |
@@ -15,6 +15,7 @@
 | Mock and fixtures | Mock mode default on, strict misses, fixtures promoted by a human | D19, D27 |
 | Output | Report JSON + Markdown with `status`, `cx_answer`, `suggested_fix` (commands for a human, never executed) | D35 |
 | Approval | `TRIAGE_APPROVAL_MODE=cli`; Slack post only after confirmation | D13, D39 |
+| Mid-run input | `ask_requester` on the root, the `needs_input` phase, answers through `triage run`, `triage wait` and `triage input`, `TRIAGE_MAX_ASKS_PER_RUN`; CLI only | D52 |
 | Persistence | Flue DB on sqlite or Postgres; run store on the same DSN with pgvector, or folder provider on sqlite; embeddings on `MODEL_EMBEDDING`; `TRIAGE_PRIOR_CASES` off by default | D38, D43 |
 | Evals | `bun test` unit, Vitest contract tests with the fake model, promptfoo classifier suite | D42 |
 | Ops | Doctor, pre-flight, `resources/repos.json` pinned branches | D32, D37 |
@@ -26,6 +27,7 @@
 | promptfoo full-Triage suite (suite 2) | recorded fixtures exist from real runs | D42 |
 | Prior-case retrieval switched on | an eval shows it helps | D43 |
 | Slack bot ingress with Yes / No / Comment approval buttons | after v1 is in use | D17, D39 |
+| HTTP/web and Slack adapters for a run's question; `do` requests (a step on the host); a deadline for unanswered questions | the web UI and the Slack bot; the D32 answer | D52 |
 | Batch / cohort status mode | a request for it | D17 |
 | Self-learning proposals (`triage learn`) | proposal P4 decided | pending |
 | Repo test and lint runs in the sandbox | a case needs it; needs a remote backend with the repo staged | D45 |
