@@ -126,6 +126,8 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'ANTHROPIC_API_KEY', type: 'string', group: 'providers', secret: true },
   { name: 'OPENAI_API_KEY', type: 'string', group: 'providers', secret: true },
   { name: 'OPENROUTER_API_KEY', type: 'string', group: 'providers', secret: true },
+  // Read only by src/decisions/ for direct TypeSafe calls; never copied into process.env.
+  { name: 'TYPESAFE_API_KEY', type: 'string', group: 'providers', secret: true },
   { name: 'OLLAMA_BASE_URL', type: 'string', group: 'providers' },
 
   // Evals (D42)

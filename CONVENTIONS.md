@@ -18,6 +18,7 @@ changes, update this file with it.
 - src/tools/**/<name>.tool.ts (one tool per file; T05 entity, code and evidence tools, T06.9 finish_report)
 - src/agents/<name>.agent.ts (root agents with 'use agent') and src/agents/delegates/ (plain modules without the directive; T06)
 - src/classify/ (T06)
+- src/decisions/ (decision models: provider-neutral questions and answers, decide(), and one adapter per vendor under providers/; only providers/ imports a vendor SDK)
 - src/ingress/ (T07)
 - src/server/ (HTTP server boot, T07.10)
 - src/http/**/<name>.http.ts (T07)
