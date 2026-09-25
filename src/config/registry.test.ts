@@ -203,6 +203,28 @@ describe('missing and blank keys', () => {
     expect(err.message).toContain('RTL_KYC_DB_URL');
   });
 
+  test('under http, <ENTITY>_QW_CONTEXT may be absent from the .env', () => {
+    const q = registry({ SSFB_QUICKWIT_TRANSPORT: 'http', SSFB_QW_CONTEXT: undefined }).quickwit('ssfb');
+    expect(q.status === 'ok' && q.transport).toBe('http');
+  });
+
+  test('under qw, an absent <ENTITY>_QW_CONTEXT is a startup error', () => {
+    const err = registryError(() => registry({ SSFB_QUICKWIT_TRANSPORT: 'qw', SSFB_QW_CONTEXT: undefined }));
+    expect(err.keys).toEqual(['SSFB_QW_CONTEXT']);
+  });
+
+  test('under qw, the http url, auth and token keys may be absent from the .env', () => {
+    const q = registry({ ATSPL_QUICKWIT_URL: undefined, ATSPL_QUICKWIT_AUTH: undefined, ATSPL_QUICKWIT_TOKEN: undefined }).quickwit('atspl');
+    expect(q.status === 'ok' && q.transport).toBe('qw');
+  });
+
+  test('with the transport blank or invalid, every quickwit key stays required', () => {
+    for (const transport of ['', 'grpc']) {
+      const err = registryError(() => registry({ SSFB_QUICKWIT_TRANSPORT: transport, SSFB_QW_CONTEXT: undefined }));
+      expect(err.keys).toContain('SSFB_QW_CONTEXT');
+    }
+  });
+
   test('the same key absent for a disabled entity is no error', () => {
     const r = registry({ TRIAGE_ENTITIES: 'ssfb,atspl', RTL_KYC_DB_URL: undefined, RTL_BANKING_API_URL: undefined });
     const rows = r.capabilityReport('rtl').rows;

@@ -264,7 +264,7 @@ export function buildRegistry(config: Config, docs: readonly { file: string; doc
 
   for (const entity of enabled) {
     const spec = specs.get(entity) as EntityRegistry;
-    for (const name of envNamesOf(spec)) {
+    for (const name of requiredEnvNamesOf(spec, look)) {
       if (look(name).state === 'missing') {
         problems.push({ key: name, reason: `is referenced by resources/${registryFile(entity)} but absent from the .env` });
       }
@@ -324,6 +324,27 @@ export function envNamesOf(spec: EntityRegistry): readonly string[] {
   out.push(...defined(q.transport, q.index, q.max_concurrency, q.max_hits, q.http?.url, q.http?.auth, q.http?.token, q.qw?.context));
   out.push(...defined(spec.cbs?.enabled_flag, spec.kube.context_env, spec.kube.aws_profile_env));
   return [...new Set(out)];
+}
+
+/**
+ * The env names that must be present in the .env: every referenced name
+ * except the keys of the Quickwit transport that is not in use (qw.context
+ * under http; http.url, http.auth and http.token under qw). With the
+ * transport unset, blank or invalid, every name stays required.
+ */
+function requiredEnvNamesOf(spec: EntityRegistry, look: (name: string) => EnvLookup): readonly string[] {
+  const q = spec.quickwit;
+  const l = look(q.transport);
+  const transport = l.state === 'set' ? l.value.trim() : undefined;
+  let active = q;
+  if (transport === 'http' && q.qw !== undefined) {
+    const { qw: _unused, ...rest } = q;
+    active = rest;
+  } else if (transport === 'qw' && q.http !== undefined) {
+    const { http: _unused, ...rest } = q;
+    active = rest;
+  }
+  return active === q ? envNamesOf(spec) : envNamesOf({ ...spec, quickwit: active });
 }
 
 // Keys with a fixed format must be well formed when set. Blank is allowed.
