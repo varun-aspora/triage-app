@@ -427,7 +427,6 @@ export const SSFB_EXTRA_TOOLS = [
 export const CODE_TOOLS = [
   'code_explore',
   'code_node',
-  'code_callers',
   'code_impact',
   'repo_read',
   'repo_grep',

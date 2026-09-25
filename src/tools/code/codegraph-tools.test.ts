@@ -25,7 +25,6 @@ import type { RunStore } from '../../runstore/types.ts';
 import { type ToolEnvelope, ToolEnvelopeSchema } from '../../types/tool-result.ts';
 import { createToolDeps } from '../_lib/context.ts';
 import type { Mount, ToolContext, ToolModule } from '../types.ts';
-import { toolModule as callers } from './code-callers.tool.ts';
 import { toolModule as explore } from './code-explore.tool.ts';
 import { toolModule as impact } from './code-impact.tool.ts';
 import { toolModule as node } from './code-node.tool.ts';
@@ -38,7 +37,6 @@ const COMMIT = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
 const TOOLS: readonly { module: ToolModule; command: CodeQueryCommand; field: 'query' | 'symbol'; value: string }[] = [
   { module: explore, command: 'explore', field: 'query', value: 'transfer reversal webhook' },
   { module: node, command: 'node', field: 'symbol', value: 'TransferService.Reverse' },
-  { module: callers, command: 'callers', field: 'symbol', value: 'ReverseTransfer' },
   { module: impact, command: 'impact', field: 'symbol', value: 'ReverseTransfer' },
 ];
 
@@ -172,7 +170,7 @@ function data(env: ToolEnvelope): Record<string, unknown> {
 
 describe('module shape', () => {
   test('four tools, mounted on code_walker and investigator_deep, named after their files', () => {
-    expect(TOOLS.map((t) => t.module.name)).toEqual(['code_explore', 'code_node', 'code_callers', 'code_impact']);
+    expect(TOOLS.map((t) => t.module.name)).toEqual(['code_explore', 'code_node', 'code_impact']);
     for (const { module } of TOOLS) {
       expect([...module.mounts]).toEqual(['code_walker', 'investigator_deep']);
       expect(module.entities).toBe('all');
@@ -351,7 +349,7 @@ describe('deny: query and symbol charset', () => {
       expect(runner.calls).toHaveLength(0);
       expect(runner.unscripted).toHaveLength(0);
       expect(connector.syncs).toHaveLength(0);
-      expect(audit.lines.map((l) => l.decision)).toEqual(['deny', 'deny', 'deny', 'deny']);
+      expect(audit.lines.map((l) => l.decision)).toEqual(TOOLS.map(() => 'deny'));
     });
   }
 
@@ -418,13 +416,13 @@ describe('sync once per repo per run', () => {
     const runner = createFakeRunner([
       syncStep(dir),
       queryStep(dir, 'explore', 'q', 'a\n'),
-      queryStep(dir, 'callers', 'ReverseTransfer', 'b\n'),
+      queryStep(dir, 'impact', 'ReverseTransfer', 'b\n'),
       gitStep(dir),
     ]);
     const connector = counting(createCodegraphConnector({ config: world.config, runner }));
     const { ctx } = makeRun(world, connector);
     await call(explore.create(ctx, 'code_walker'), { repo: 'harbor', query: 'q' });
-    await call(callers.create(ctx, 'code_walker'), { repo: 'harbor', symbol: 'ReverseTransfer' });
+    await call(impact.create(ctx, 'code_walker'), { repo: 'harbor', symbol: 'ReverseTransfer' });
 
     expect(connector.syncs).toEqual(['harbor']);
     expect(connector.guards).toBe(1);
@@ -503,7 +501,7 @@ function writeFixture(world: World, repo: string, command: CodeQueryCommand, que
 describe('mock mode', () => {
   test('answers from the fixture keyed by repo, command and query, with no exec and no sync', async () => {
     const world = makeWorld({ mock: true });
-    writeFixture(world, 'harbor', 'callers', 'ReverseTransfer', {
+    writeFixture(world, 'harbor', 'impact', 'ReverseTransfer', {
       output: 'internal/transfer/handler.go:88 HandleReversal\n',
       truncated: false,
       commit: COMMIT,
@@ -513,10 +511,10 @@ describe('mock mode', () => {
     const { ctx, audit } = makeRun(world, connector);
 
     // Surrounding spaces normalise to the same key.
-    const out = data(await call(callers.create(ctx, 'code_walker'), { repo: 'harbor', symbol: ' ReverseTransfer ' }));
+    const out = data(await call(impact.create(ctx, 'code_walker'), { repo: 'harbor', symbol: ' ReverseTransfer ' }));
     expect(out).toMatchObject({
       repo: 'harbor',
-      command: 'callers',
+      command: 'impact',
       commit: COMMIT,
       output: 'internal/transfer/handler.go:88 HandleReversal\n',
     });
@@ -588,7 +586,7 @@ describe('not configured', () => {
     const world = makeWorld({ env: { TRIAGE_REPOS_DIR: '' } });
     const runner = createFakeRunner([]);
     const { ctx, audit } = makeRun(world, createCodegraphConnector({ config: world.config, runner }));
-    const env = await call(callers.create(ctx, 'code_walker'), { repo: 'harbor', symbol: 'X' });
+    const env = await call(impact.create(ctx, 'code_walker'), { repo: 'harbor', symbol: 'X' });
     expect(env.output).toMatchObject({ status: 'not_configured', message: 'not configured for code:harbor' });
     expect(audit.lines[0]?.target).toBe('TRIAGE_REPOS_DIR');
     expect(runner.calls).toHaveLength(0);

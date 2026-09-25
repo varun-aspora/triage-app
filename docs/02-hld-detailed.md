@@ -22,7 +22,7 @@ flowchart TB
         TRI["Triage (root agent, 'use agent')<br/>useModel(tier → MODEL_TIER_*)<br/>initialData schema: request + classification + id_chain<br/>tools: resolve_identity, note_evidence, finish_report (harness)<br/>instruction: method + output format (always on)<br/>skills: <entity>-overview, patterns<br/>subagents: investigate_<entity>, investigate_<entity>_deep, code_walker"]
         INV["investigate_<entity> (delegate, per enabled entity)<br/>entity + run_id fixed by closure; inherits tier model<br/>tools: logs_search, sql_select, http_call,<br/>note_evidence; SSFB adds get_account_statement,<br/>detect_silent_reversals, cbs_call (flag)<br/>skills: <entity>-<service> notes"]
         DEEP["investigate_<entity>_deep (delegate)<br/>same factory, model = MODEL_TIER_STRONG,<br/>plus code tools"]
-        CW["code_walker (delegate, MODEL_CODE_WALKER)<br/>tools: code_explore, code_node, code_callers,<br/>code_impact, repo_read, repo_grep, note_evidence<br/>skills: repo-map, codegraph-limits"]
+        CW["code_walker (delegate, MODEL_CODE_WALKER)<br/>tools: code_explore, code_node,<br/>code_impact, repo_read, repo_grep, note_evidence<br/>skills: repo-map, codegraph-limits"]
     end
 
     subgraph Gate["src/gate (pure, unit-tested, no I/O)"]
@@ -100,7 +100,7 @@ Same factory with `model: MODEL_TIER_STRONG`, thinking `high`, plus the code too
 ### 1.4 `code_walker` (delegate)
 
 - **Model**: `MODEL_CODE_WALKER` (blank = strong).
-- **Tools**: `code_explore`, `code_node`, `code_callers`, `code_impact` (CodeGraph CLI via `execFile`), `repo_read`, `repo_grep` (path-jailed), `note_evidence`.
+- **Tools**: `code_explore`, `code_node`, `code_impact` (CodeGraph CLI via `execFile`; no `code_callers`, D49), `repo_read`, `repo_grep` (path-jailed), `note_evidence`.
 - **Skills**: `repo-map` (entity → repos, languages, shared libs, cbs-go is a library), `codegraph-limits` ("graph output is not evidence; no cross-repo edges; YAML and docs not indexed").
 - **Returns**: `CodeFindings {claims: [{repo, file, lines, what_it_shows}], matches_known_pattern?, confidence}`.
 
@@ -129,7 +129,7 @@ All `defineTool` with a Valibot object input and envelope output. Every I/O tool
 | `encrypt_lookup_value` | any investigator whose entity has a service with `field_encryption` and its key set (SSFB: harbor, rhythm; D48) | `{service, value, kind: phone \| email \| cif}`; `service` lists only services with a key | AES-SIV (deterministic) with the key from env, so the ciphertext can be used as a `$n` param in `sql_select` against encrypted columns such as `customer.external_reference_id` or the phone fields; the key never leaves the tool | ciphertext string |
 | `decrypt_fields` | same condition | `{service, values: string[]}` (max 20) | AES-SIV decrypt of column values the investigator already fetched; output passes through the **model-facing** redaction profile (PAN/passport masked, phone visible) and is masked again on persist by `note_evidence`; audit line records count, never plaintext | plaintext strings |
 | `cbs_call` | `investigate_ssfb`, only when the flag is on | `{path, method?, body?}` | same `rules.ts` evaluation with `service: finacle` (GET by default; POST only where a rule allows it); `path` must match `^/[A-Za-z0-9/_.\-]+$` (no query string, no `..`); `execFile('ssh', fixedArgs)` runs a **fixed** remote script from stdin, and the path, body and token travel as stdin data lines, never as remote argv and never through `sh -c`; the in-pod hop is the same shape; token minted on the bastion and cached under `.data/cache`; k8s coordinates from env | body |
-| `code_explore` / `code_node` / `code_callers` / `code_impact` | code_walker, deep | `{repo: enum, …}` | `execFile(CODEGRAPH_BIN, [...,'-p', repoPath, '--', query])`; repo enum from registries; query charset-checked; optional sync once per repo per run; output cap | CLI output |
+| `code_explore` / `code_node` / `code_impact` | code_walker, deep | `{repo: enum, …}` | `execFile(CODEGRAPH_BIN, [...,'-p', repoPath, '--', query])`; repo enum from registries; query charset-checked; optional sync once per repo per run; output cap | CLI output |
 | `repo_read` / `repo_grep` | code_walker, deep | `{repo: enum, path, range?}` / `{repo, pattern, glob?}` | realpath jail under `TRIAGE_REPOS_DIR/<repo>` with symlinks resolved first; `.git/` and dotfiles excluded; `repo_grep` is implemented in-process over the jailed tree (no external grep binary, so no option injection); size and match caps like Flue's built-ins | text |
 | `note_evidence` | all | `EntityFindings \| CodeFindings` | schema; persisted profile redaction; writes `evidence/<entity or code>.json` | evidence id |
 | `finish_report` | Triage (`harness: true`) | `Report` draft | schema; if `escalation.triggered` and tier ≠ strong, runs `harness.prompt(synthesisPrompt, {model: MODEL_TIER_STRONG, result: ReportSchema})` over the evidence folder and uses that result; egress redaction with check semantics; writes `report.md` + `report.json` | ack or refusal listing unmasked patterns |

@@ -250,6 +250,10 @@ Append-only. When a decision is reversed, add a new entry that supersedes it; do
 - **Not covered**: java-commons `EncryptionService` (AES-GCM, random IV, `ENC:v1:` prefix). No in-scope service uses it, and a random IV rules out lookups by ciphertext; it would be a decrypt-only algorithm in the registry's `field_encryption.algorithm` if a service needs it.
 - **Rejected**: one pair of tools per service (the tool list grows with every service and the descriptions repeat); a `service` that accepts any registry service and fails at call time (the model would pick services that cannot work); keeping the tools SSFB-scoped while making them per service (ATSPL or RTL would need code changes to add one).
 
+### D49. Three CodeGraph tools, not four: `code_callers` is dropped (2026-09-24; refines D11)
+- **Chosen**: `code_explore`, `code_node` and `code_impact`, plus `repo_grep` and `repo_read`. `codegraph node` already prints a symbol's callers and callees, and `codegraph impact` covers callers of callers, so `code_callers` overlapped both and was one more near-identical tool to choose from. This is the set triage-shivalik used through the codegraph MCP server. One tool per distinct action stays, as in Claude Code (Grep, Glob, Read), Cursor and codegraph's own MCP server; each tool is a short file over `codegraph-tool.ts`, which is the repo's one-file-per-tool convention.
+- **Rejected**: one `code_query` tool with a `command` enum (it hides the choice in a parameter and blurs the descriptions); keeping `code_callers` (no case found where `code_node` or `code_impact` would not answer it).
+
 ## Assumptions (explicit; each needs your confirmation or correction)
 
 | # | Assumption | Basis | If wrong |

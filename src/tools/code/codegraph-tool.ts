@@ -1,6 +1,7 @@
-// Shared build for the four CodeGraph tools (code_explore, code_node,
-// code_callers, code_impact; D11, HLD 02 §1.4 and §2). Each *.tool.ts file
-// calls codeToolModule() with its command and texts.
+// Shared build for the three CodeGraph tools (code_explore, code_node,
+// code_impact; D11, D49, HLD 02 §1.4 and §2). Each *.tool.ts file calls
+// codeToolModule() with its command and texts. There is no code_callers:
+// code_node already shows a symbol's callers and callees (D49).
 //
 // - Input is { repo, <query|symbol> }. repo is a picklist of names from
 //   resources/repos.json, never a path. Entity and run id come from the

@@ -73,8 +73,8 @@ const SAME: readonly AnyCase[] = [
   },
   {
     kind: 'code_query',
-    a: { repo: 'harbor', command: 'callers', query: 'ReverseTransfer' },
-    b: { query: ' ReverseTransfer ', command: 'callers', repo: 'harbor' },
+    a: { repo: 'harbor', command: 'node', query: 'ReverseTransfer' },
+    b: { query: ' ReverseTransfer ', command: 'node', repo: 'harbor' },
   },
 ];
 

@@ -39,7 +39,6 @@ const T05_TOOLS = [
   'cbs_call',
   'code_explore',
   'code_node',
-  'code_callers',
   'code_impact',
   'repo_read',
   'repo_grep',

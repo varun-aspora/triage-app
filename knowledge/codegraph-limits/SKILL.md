@@ -21,7 +21,6 @@ run.
 |---|---|---|
 | `code_explore` | A flow or an area in plain words, such as "sim binding form submission". Returns the relevant source, call paths and blast radius. | Markdown text, not JSON. |
 | `code_node` | One symbol with its callers and callees, or one file with line numbers. | Text, not JSON. |
-| `code_callers` | Who calls a given symbol. | A list of call sites. |
 | `code_impact` | What a change to a given symbol would reach. | A list of affected symbols and files. |
 | `repo_read` | A file, or a line range of it. | Text. |
 | `repo_grep` | A pattern across a repo, optionally narrowed by a path glob. | Matches with file and line. |

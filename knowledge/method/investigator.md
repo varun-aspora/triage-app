@@ -107,10 +107,10 @@ These exist on the SSFB investigator only, and some only when configured:
 
 ## Deep variant: code tools
 
-If you have `code_explore`, `code_node`, `code_callers`, `code_impact`,
-`repo_read` and `repo_grep`, use them only to explain what the data and logs
-show. Start with CodeGraph (`code_explore`, then `code_node` or
-`code_callers`); fall back to `repo_grep` for literal error text or log labels.
+If you have `code_explore`, `code_node`, `code_impact`, `repo_read` and
+`repo_grep`, use them only to explain what the data and logs show. Start with
+CodeGraph (`code_explore`, then `code_node` for a symbol and its callers); fall
+back to `repo_grep` for literal error text or log labels.
 Graph output points you somewhere; it is not evidence. Read the lines with
 `repo_read` and cite repo, file and lines in an evidence item with source
 `code`.

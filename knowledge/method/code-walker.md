@@ -19,8 +19,8 @@ The `repo` input is picked from a fixed list, and paths are relative to the
 repo root.
 
 1. **CodeGraph first.** `code_explore` finds the area for a query. `code_node`
-   shows a symbol's source and edges. `code_callers` shows who calls a symbol.
-   `code_impact` shows what a change to a symbol would reach.
+   shows a symbol's source, its callers and its callees. `code_impact` shows
+   what a change to a symbol would reach, callers of callers included.
 2. **`repo_grep` as the fallback**, for literal strings CodeGraph does not
    index well: an error message, a log label, a route path, a config key. Use
    it also when CodeGraph has no index for the repo or no edge where you expect

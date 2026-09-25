@@ -28,7 +28,7 @@ const RUN = 'run_delegates_0001';
 // Not a real key: enabled() only checks that the value is non-blank, and no tool runs here.
 const FAKE_ENC_KEY = 'QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB';
 
-const CODE_TOOLS = ['code_callers', 'code_explore', 'code_impact', 'code_node', 'repo_grep', 'repo_read'];
+const CODE_TOOLS = ['code_explore', 'code_impact', 'code_node', 'repo_grep', 'repo_read'];
 const BASE_TOOLS = ['http_call', 'logs_search', 'note_evidence', 'sql_select'];
 const SSFB_ALWAYS = ['detect_silent_reversals', 'get_account_statement'];
 const SSFB_FLAGGED = ['cbs_call', 'decrypt_fields', 'encrypt_lookup_value'];

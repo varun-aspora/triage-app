@@ -30,7 +30,7 @@ const SSFB_CRYPTO = ['decrypt_fields', 'encrypt_lookup_value'];
 // Scoped to ssfb in their module. The crypto tools serve any entity with a field-encryption service (D48).
 const SSFB_SCOPED = [...SSFB_ALWAYS, 'cbs_call'];
 const SSFB_ONLY = [...SSFB_SCOPED, ...SSFB_CRYPTO];
-const CODE_TOOLS = ['code_callers', 'code_explore', 'code_impact', 'code_node', 'repo_grep', 'repo_read'];
+const CODE_TOOLS = ['code_explore', 'code_impact', 'code_node', 'repo_grep', 'repo_read'];
 const MOUNTS: readonly Mount[] = ['triage', 'investigator', 'investigator_deep', 'code_walker'];
 
 const names = (tools: readonly ToolDefinition[]): string[] => tools.map((t) => t.name).sort();
@@ -113,7 +113,7 @@ describe('per-mount and per-entity membership', () => {
     for (const m of allToolModules.filter((x) => x.entities !== 'all')) expect(m.entities).toEqual(['ssfb']);
   });
 
-  test.each([...ENTITIES])('the %s deep set is its investigator set plus the six code tools', (entity) => {
+  test.each([...ENTITIES])('the %s deep set is its investigator set plus the five code tools', (entity) => {
     for (const h of [plain, allOn]) {
       const base = names(toolsFor('investigator', ctxFrom(h, entity)));
       expect(names(toolsFor('investigator_deep', ctxFrom(h, entity)))).toEqual(sorted([...base, ...CODE_TOOLS]));
@@ -134,7 +134,7 @@ describe('per-mount and per-entity membership', () => {
     }
   });
 
-  test('code_walker holds the six code tools and note_evidence', () => {
+  test('code_walker holds the five code tools and note_evidence', () => {
     for (const h of [plain, allOn]) {
       expect(names(toolsFor('code_walker', ctxFrom(h, null)))).toEqual(sorted([...CODE_TOOLS, 'note_evidence']));
     }

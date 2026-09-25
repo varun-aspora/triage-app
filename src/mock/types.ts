@@ -141,7 +141,7 @@ export type FieldCryptoKey = v.InferOutput<typeof FieldCryptoKeySchema>;
 
 // One CodeGraph query (T05.10). Code is not per entity, so these fixtures sit
 // under the 'global' entity folder.
-export const CODE_QUERY_COMMANDS = ['explore', 'node', 'callers', 'impact'] as const;
+export const CODE_QUERY_COMMANDS = ['explore', 'node', 'impact'] as const;
 export const CodeQueryCommandSchema = v.picklist(CODE_QUERY_COMMANDS);
 export type CodeQueryCommand = v.InferOutput<typeof CodeQueryCommandSchema>;
 
