@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import type { WorkerPayload } from '../../ingress/worker-payload.ts';
-import { sampleInputRequest } from '../../runstore/contract.ts';
+import { sampleBlock, sampleInputRequest } from '../../runstore/contract.ts';
 import type { InputRequest } from '../../types/input-request.ts';
-import { answerHint, askAtTerminal, questionLines, startAnswer } from './input-request.ts';
+import { answerHint, askAtTerminal, blockLines, copyBlock, questionLines, resumeHint, startAnswer } from './input-request.ts';
 
 const RUN_ID = '01JINPUTLIBAAAAAAAAAAAAAAA';
 
@@ -91,5 +91,31 @@ describe('startAnswer', () => {
     expect(skipped.submission_id).toBe(5);
     // Empty ids are left out of the payload.
     expect(spawned[1]).toEqual({ kind: 'answer', run_id: RUN_ID, question_id: 'q2', by: 'ops', skip: true });
+  });
+});
+
+describe('blockLines, resumeHint and copyBlock', () => {
+  test('names the systems, the reason, each failure with its time, and since when', () => {
+    const block = sampleBlock('b1', ['ssfb:harbor', 'global:codegraph']);
+    const lines = blockLines(RUN_ID, block);
+    expect(lines[0]).toBe(`run ${RUN_ID} is blocked (b1): ssfb:harbor and global:codegraph did not answer`);
+    expect(lines).toContain(`  ${block.reason}`);
+    expect(lines).toContain('  recorded failures:');
+    expect(lines).toContain(`    ${block.failures[0]?.at}  ssfb:harbor  sql_select: unreachable`);
+    expect(lines).toContain(`    ${block.failures[1]?.at}  global:codegraph  sql_select: unreachable`);
+    expect(lines.at(-1)).toBe(`  blocked since ${block.blocked_at}`);
+    expect(resumeHint(RUN_ID)).toEqual([`resume with: triage resume ${RUN_ID} ["<what was fixed, and anything new to consider>"]`]);
+  });
+
+  test('three systems are listed with commas, no failures means no failures block, and the copy shares nothing', () => {
+    const block = { ...sampleBlock('b2', ['a:x', 'b:y', 'c:z']), failures: [] };
+    const lines = blockLines(RUN_ID, block);
+    expect(lines[0]).toContain('a:x, b:y and c:z did not answer');
+    expect(lines.join('\n')).not.toContain('recorded failures');
+    const original = sampleBlock('b3');
+    const copy = copyBlock(original);
+    expect(copy).toEqual(original);
+    expect(copy.systems).not.toBe(original.systems);
+    expect(copy.failures[0]).not.toBe(original.failures[0]);
   });
 });

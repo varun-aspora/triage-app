@@ -1,12 +1,15 @@
 // A run's open question at the terminal, and the answer on its way back
 // (P6 §4.4, §4.5). Shared by `triage wait`, `triage run` and `triage input`.
+// The block a run is parked on (D55), the question's sibling, is rendered
+// here too, for `triage status`, `triage wait` and `triage run`.
 //
-// The question record is presentation-neutral; this file is the CLI's
-// rendering of it. Answering from the terminal spawns the same detached
-// worker `triage ask` uses, with an answer payload, and records its pid so
-// a `triage wait` right after does not call the run stalled.
+// The question and block records are presentation-neutral; this file is the
+// CLI's rendering of them. Answering from the terminal spawns the same
+// detached worker `triage ask` uses, with an answer payload, and records its
+// pid so a `triage wait` right after does not call the run stalled.
 import type { WorkerPayload } from '../../ingress/worker-payload.ts';
 import type { RunStore } from '../../runstore/types.ts';
+import type { BlockRecord } from '../../types/block.ts';
 import type { KnownIds } from '../../types/core.ts';
 import type { InputRequest } from '../../types/input-request.ts';
 import type { LineReader } from './prompt.ts';
@@ -104,4 +107,33 @@ export async function startAnswer(
     skipped: input.answer.kind === 'skip',
     pid,
   };
+}
+
+// ------------------------------------------------------------------ blocks (D55)
+
+/** The block as the terminal shows it: the systems, the reason, each recorded failure and since when. */
+export function blockLines(runId: string, block: BlockRecord): string[] {
+  const lines = [`run ${runId} is blocked (${block.block_id}): ${listed(block.systems)} did not answer`, '', `  ${block.reason}`];
+  if (block.failures.length > 0) {
+    lines.push('', '  recorded failures:');
+    for (const f of block.failures) lines.push(`    ${f.at}  ${f.system}  ${f.tool}: ${f.code}`);
+  }
+  lines.push('', `  blocked since ${block.blocked_at}`);
+  return lines;
+}
+
+/** How to send the run on once the system answers again. */
+export function resumeHint(runId: string): string[] {
+  return [`resume with: triage resume ${runId} ["<what was fixed, and anything new to consider>"]`];
+}
+
+/** A copy of the block for output, so a printer never hands out the store's record. */
+export function copyBlock(block: BlockRecord): BlockRecord {
+  return { ...block, systems: [...block.systems], failures: block.failures.map((f) => ({ ...f })) };
+}
+
+// "a", "a and b", "a, b and c".
+function listed(items: readonly string[]): string {
+  if (items.length <= 1) return items.join('');
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
 }

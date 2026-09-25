@@ -4,18 +4,20 @@
 // Runs a triage in this process and blocks until it settles: bootRuntime,
 // prepareRequest, runSubmission, then the report from the run store. The
 // human form prints report.md; --json prints {run_id, status, report?,
-// reason?, input_request?} in the same shape as `triage wait --json`. Exit 0
-// when the run completed, 1 when it failed, 4 when it stopped on a question
-// for the requester (P6 §4.5). With a terminal and no --json the question is
-// asked here and the run resumed in this process (answerRun), as often as
-// it asks. For coding agents whose shell tools time out, use `triage start`
-// and `triage wait` instead (D28).
+// reason?, input_request?, block?} in the same shape as `triage wait --json`.
+// Exit 0 when the run completed, 1 when it failed, 4 when it stopped on a
+// question for the requester (P6 §4.5), 5 when a person stopped it, 6 when it
+// blocked on a system that did not answer (D55; `triage resume` sends it on).
+// With a terminal and no --json the question is asked here and the run
+// resumed in this process (answerRun), as often as it asks. For coding agents
+// whose shell tools time out, use `triage start` and `triage wait` instead
+// (D28).
 import type { Config } from '../../config/env.ts';
 import { loadRegistry, type Registry } from '../../config/registry.ts';
 import type { PreparedSubmission } from '../../ingress/prepare.ts';
 import { type AnswerInput, answerRun, runSubmission, submissionDeps, type SubmissionResult } from '../../ingress/submit.ts';
 import { RunStoppedError } from '../../runstore/types.ts';
-import { askAtTerminal } from '../lib/input-request.ts';
+import { askAtTerminal, copyBlock } from '../lib/input-request.ts';
 import type { WaitOutput } from '../lib/output-schemas.ts';
 import { type LineReader, linePrompt } from '../lib/prompt.ts';
 import { configureRequestArgs, parseRequestArgs, reportInputError } from '../lib/request-args.ts';
@@ -121,6 +123,9 @@ export function createRunCommand(options: RunCommandOptions = {}): CliCommand {
           phase: run?.phase ?? 'needs_input',
           ...(result.input_request !== undefined ? { input_request: { ...result.input_request, options: [...result.input_request.options] } } : {}),
         };
+      } else if (result.status === 'blocked') {
+        const block = result.block ?? run?.block ?? null;
+        out = { run_id: result.run_id, status: 'blocked', phase: run?.phase ?? 'blocked', ...(block !== null ? { block: copyBlock(block) } : {}) };
       } else {
         out = { run_id: result.run_id, status: 'failed', reason: run?.phase_reason ?? result.error ?? 'unknown failure' };
       }

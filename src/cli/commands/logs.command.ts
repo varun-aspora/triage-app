@@ -73,7 +73,7 @@ export function createLogsCommand(options: LogsCommandOptions = {}): CliCommand 
         if (page.more) continue;
         if (opts.follow !== true) return EXIT.OK;
         const run = await store.getRun(runId);
-        const settled = run === null || isTerminalPhase(run.phase) || run.phase === 'needs_input';
+        const settled = run === null || isTerminalPhase(run.phase) || run.phase === 'needs_input' || run.phase === 'blocked';
         if (settled) {
           // One more read picks up lines queued just before the settle.
           const last = await readRunEvents(config.paths.runsDir, runId, { after });

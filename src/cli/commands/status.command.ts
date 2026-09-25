@@ -1,12 +1,13 @@
 // triage status <run_id> [--json]
 //
 // Prints {run_id, status, phase, tier_final, submissions, preflight_warnings,
-// input_request?} from the run store. status is the phase folded into
-// running, completed or failed, plus 'needs_input' (parked on a question for
-// the requester; the worker is gone by design, P6 §4.5) and 'stalled': the
-// phase is not terminal and the worker pid recorded on the run is no longer
-// alive, so nothing will finish the run. Crash recovery is not built in v1;
-// the caller reruns.
+// input_request?, block?} from the run store. status is the phase folded into
+// running, completed, failed or stopped, plus 'needs_input' (parked on a
+// question for the requester; the worker is gone by design, P6 §4.5),
+// 'blocked' (parked on a system that did not answer, D55; `triage resume`
+// sends it on) and 'stalled': the phase is not terminal and the worker pid
+// recorded on the run is no longer alive, so nothing will finish the run.
+// Crash recovery is not built in v1; the caller reruns.
 //
 // runStatusOf and pidAlive are shared with wait and ask.
 import * as v from 'valibot';
@@ -14,7 +15,7 @@ import type { Config } from '../../config/env.ts';
 import { createRunStore } from '../../runstore/index.ts';
 import { isTerminalPhase, type RunRecord, type RunStore } from '../../runstore/types.ts';
 import { RunIdSchema } from '../../types/core.ts';
-import { answerHint, questionLines } from '../lib/input-request.ts';
+import { answerHint, blockLines, copyBlock, questionLines, resumeHint } from '../lib/input-request.ts';
 import { emitJson, StatusOutputSchema, type RunStatus, type StatusOutput } from '../lib/output-schemas.ts';
 import { EXIT, printError, printHuman } from '../output.ts';
 import type { CliCommand, CliIo } from '../types.ts';
@@ -41,6 +42,7 @@ export function runStatusOf(run: Pick<RunRecord, 'phase' | 'worker_pid'>, isAliv
   if (run.phase === 'failed') return 'failed';
   if (run.phase === 'stopped') return 'stopped';
   if (run.phase === 'needs_input') return 'needs_input';
+  if (run.phase === 'blocked') return 'blocked';
   if (run.worker_pid !== undefined && !isAlive(run.worker_pid)) return 'stalled';
   return 'running';
 }
@@ -56,6 +58,7 @@ export function statusOutput(run: RunRecord, isAlive: PidChecker): StatusOutput 
     submissions: run.submissions.length,
     preflight_warnings: (run.classification?.preflight_warnings ?? []).map((w) => ({ ...w })),
     ...(run.input_request !== null ? { input_request: { ...run.input_request, options: [...run.input_request.options] } } : {}),
+    ...(run.block !== null ? { block: copyBlock(run.block) } : {}),
   };
 }
 
@@ -109,6 +112,7 @@ export function createStatusCommand(options: StatusCommandOptions = {}): CliComm
           ...(out.status === 'needs_input' && out.input_request !== undefined
             ? ['', ...questionLines(out.run_id, out.input_request), '', ...answerHint(out.run_id)]
             : []),
+          ...(out.status === 'blocked' && out.block !== undefined ? ['', ...blockLines(out.run_id, out.block), '', ...resumeHint(out.run_id)] : []),
           ...(out.preflight_warnings.length === 0
             ? []
             : ['pre-flight warnings:', ...out.preflight_warnings.map((w) => `  - ${w.entity !== undefined ? `${w.entity} ` : ''}${w.step}: ${w.message}`)]),

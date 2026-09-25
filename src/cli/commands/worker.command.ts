@@ -1,4 +1,5 @@
-// triage __worker <run_id>   (hidden; started by `triage start` and `triage ask`)
+// triage __worker <run_id>   (hidden; started by `triage start`, `triage ask`,
+// `triage input` and `triage resume`)
 //
 // Reads the payload from stdin (never argv or disk), records this process's
 // pid on the run so `triage status` can tell a stalled run, starts the Flue
@@ -6,11 +7,15 @@
 //   submit -> runSubmission(prepared, deps)
 //   ask    -> askRun(run_id, question, by, deps)
 //   answer -> answerRun(run_id, {question_id, answer | skip, ids, by}, deps)
+//   resume -> resumeRun(run_id, {by, note}, deps)
 //
 // The parent ignores this process's stdout and stderr, so the outcome lives
 // in the run store: runSubmission and askRun record completed or failed, and
 // any error they do not record (a failed runtime start, for example) is
-// recorded here as failed with the error class name.
+// recorded here as failed with the error class name. One exception: a resume
+// that finds the run already sent on (another resume got there first, or the
+// run moved on since `triage resume` checked it) leaves the run as that other
+// process has it.
 //
 // The command path is ['worker'] because command paths must be plain
 // kebab-case words; configure() renames it to __worker and hides it from help.
@@ -22,6 +27,9 @@ import {
   answerRun,
   askRun,
   className,
+  resumeRefusal,
+  resumeRun,
+  RunNotResumableError,
   runSubmission,
   submissionDeps,
   type SubmissionDeps,
@@ -42,6 +50,7 @@ export type WorkerCommandOptions = {
   readonly runSubmission?: typeof runSubmission;
   readonly askRun?: typeof askRun;
   readonly answerRun?: typeof answerRun;
+  readonly resumeRun?: typeof resumeRun;
   /** This process's pid. Defaults to process.pid. */
   readonly pid?: () => number;
 };
@@ -63,6 +72,7 @@ export function createWorkerCommand(options: WorkerCommandOptions = {}): CliComm
   const submit = options.runSubmission ?? runSubmission;
   const ask = options.askRun ?? askRun;
   const answer = options.answerRun ?? answerRun;
+  const resume = options.resumeRun ?? resumeRun;
   const pidOf = options.pid ?? (() => process.pid);
   return {
     path: ['worker'],
@@ -105,7 +115,7 @@ export function createWorkerCommand(options: WorkerCommandOptions = {}): CliComm
           result = await submit({ run_id: runId, request: payload.request, redaction_names: payload.redaction_names ?? [] }, deps);
         } else if (payload.kind === 'ask') {
           result = await ask(runId, payload.question, payload.by, deps);
-        } else {
+        } else if (payload.kind === 'answer') {
           result = await answer(
             runId,
             {
@@ -117,25 +127,39 @@ export function createWorkerCommand(options: WorkerCommandOptions = {}): CliComm
             },
             deps,
           );
+        } else {
+          result = await resume(runId, { by: payload.by, ...(payload.note !== undefined ? { note: payload.note } : {}) }, deps);
         }
       } catch (err) {
         // A stop is what a person asked for, not a failure.
         if (err instanceof RunStoppedError) return EXIT.OK;
-        await store.setPhase(runId, 'failed', { reason: className(err) }).catch(() => undefined);
+        // The run was sent on by someone else between the check and the
+        // resume: it is theirs now, and not failed.
+        if (err instanceof RunNotResumableError) {
+          printError(io, json, 'ERROR', err.message);
+          return EXIT.ERROR;
+        }
+        // A resume is the one write allowed past a stop, so a resume that
+        // could not start leaves the stopped run failed, where the next
+        // `triage wait` shows it.
+        await store
+          .setPhase(runId, 'failed', { reason: className(err), ...(payload.kind === 'resume' ? { resume: true } : {}) })
+          .catch(() => undefined);
         printError(io, json, 'ERROR', `run ${runId} failed: ${className(err)}`);
         return EXIT.ERROR;
       }
-      // A run parked on a question, or stopped, is not a failure.
+      // A run parked on a question or on a system that did not answer, or
+      // stopped, is not a failure.
       return result.status === 'failed' ? EXIT.ERROR : EXIT.OK;
     },
   };
 }
 
 /**
- * Records the worker pid on the run, keeping its phase. A submit payload
- * creates the run when `triage start` did not (a no-op otherwise) and is
- * refused when the run has already moved past 'created'. An ask payload needs
- * an existing run. Returns true, or the reason it refused.
+ * Records the worker pid on the run. A submit payload creates the run when
+ * `triage start` did not (a no-op otherwise) and is refused when the run has
+ * already moved past 'created'. The other payloads need an existing run.
+ * Returns true, or the reason it refused.
  */
 async function recordPid(
   store: Pick<RunStore, 'getRun' | 'createRun' | 'setPhase'>,
@@ -153,6 +177,21 @@ async function recordPid(
   }
   const run = await store.getRun(runId);
   if (run === null) return `run not found: ${runId}`;
+  if (payload.kind === 'resume') {
+    // resumeRun decides from the stored phase whether the run can go on
+    // (blocked, or failed or stopped after it was dispatched), so the phase
+    // and its reason are kept here and dispatchAndSettle moves them on. A
+    // run that is not resumable any more (another resume got there first)
+    // is refused before its pid is overwritten.
+    const refusal = resumeRefusal(run);
+    if (refusal !== null) return refusal.message;
+    await store.setPhase(runId, run.phase, {
+      worker_pid: pid,
+      resume: true,
+      ...(run.phase_reason !== undefined ? { reason: run.phase_reason } : {}),
+    });
+    return true;
+  }
   // `triage ask` and `triage input` write the same phase and pid once the
   // spawn returns, so the order of the two writes does not matter. A
   // follow-up resumes a stopped run.
