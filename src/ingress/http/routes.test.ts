@@ -1,10 +1,14 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Agent, AgentReply, InitOptions } from '@flue/runtime';
 import { FeedbackError, type FeedbackDeps, type FeedbackInput, type FeedbackResult } from '../../report/feedback.ts';
-import type { RunPhase, RunRecord, RunStore } from '../../runstore/types.ts';
+import { redactPersisted } from '../../gate/redact.ts';
+import { sampleClassification, sampleFeedback, sampleRequest } from '../../runstore/contract.ts';
+import { createFolderRunStore } from '../../runstore/folder.ts';
+import type { RunPhase, RunQuery, RunRecord, RunStore, RunSummary } from '../../runstore/types.ts';
 import type { RunId } from '../../types/core.ts';
 import { prepareRequest, type PrepareDeps, type PrepareInput, type PreparedSubmission } from '../prepare.ts';
 import { SlackFetchError, type SlackThread, type SlackThreadRef } from '../slack.ts';
@@ -56,18 +60,26 @@ function record(runId: string, phase: RunPhase, report: unknown = null): RunReco
   };
 }
 
-type FakeStore = RunStore & { claims: Map<string, string>; calls: string[] };
+type FakeStore = RunStore & { claims: Map<string, string>; calls: string[]; listQueries: RunQuery[] };
 
-function fakeStore(runs: Record<string, RunRecord> = {}): FakeStore {
+function fakeStore(runs: Record<string, RunRecord> = {}, summaries: RunSummary[] = []): FakeStore {
   const claims = new Map<string, string>();
   const calls: string[] = [];
+  const listQueries: RunQuery[] = [];
   const impl = {
     claims,
     calls,
+    listQueries,
     provider: 'folder',
     async getRun(runId: string) {
       calls.push('getRun');
       return runs[runId] ?? null;
+    },
+    // Filters nothing itself, so the tests see exactly what the route drops.
+    async listRuns(query: RunQuery = {}) {
+      calls.push('listRuns');
+      listQueries.push(query);
+      return query.limit === undefined ? [...summaries] : summaries.slice(0, query.limit);
     },
     async claimIdempotencyKey(key: string, runId: string, ttlMs: number) {
       calls.push('claimIdempotencyKey');
@@ -104,9 +116,11 @@ type Harness = {
   app: ReturnType<typeof createTriageRoutes>;
 };
 
-function harness(over: Partial<TriageRouteDeps> & { runs?: Record<string, RunRecord> } = {}): Harness {
-  const { runs, ...rest } = over;
-  const store = fakeStore(runs);
+function harness(
+  over: Partial<TriageRouteDeps> & { runs?: Record<string, RunRecord>; summaries?: RunSummary[] } = {},
+): Harness {
+  const { runs, summaries, ...rest } = over;
+  const store = fakeStore(runs, summaries);
   const prepared: PrepareInput[] = [];
   const submitted: PreparedSubmission[] = [];
   const asks: [string, string, string][] = [];
@@ -394,6 +408,253 @@ describe('GET /triage/:run_id', () => {
     const digits = '01J8Z3123456789012345678AB';
     expect(runView(record(digits, 'failed')).run_id).toBe(digits);
     expect(runView(record(digits, 'failed')).status).toBe('failed');
+  });
+});
+
+describe('GET /triage/:run_id detail fields', () => {
+  const AT1 = '2026-09-24T00:00:00.000Z';
+  const AT2 = '2026-09-24T00:05:00.000Z';
+
+  function detailRecord(over: Partial<RunRecord> = {}): RunRecord {
+    const base = record(RUN_A, 'investigating');
+    return {
+      ...base,
+      updated_at: AT2,
+      phase_reason: 'waiting on a delegate',
+      request: {
+        interface: 'slack',
+        requested_by: 'U0TESTUSER',
+        source: { kind: 'slack', channel_id: 'C0TEST', thread_ts: '1695460000.123456', permalink: PERMALINK },
+      } as unknown as RunRecord['request'],
+      classification: {
+        decision: {
+          proposed: { category: 'transfer_out', current_ask: `why can ${SYNTHETIC_PHONE} not send money` },
+          tier_final: 'mid',
+        } as unknown as NonNullable<RunRecord['classification']>['decision'],
+        id_chain: { hops: [] } as unknown as NonNullable<RunRecord['classification']>['id_chain'],
+        preflight_warnings: [{ entity: 'rtl', step: 'db', message: 'database not configured' }],
+      },
+      evidence: {
+        code: { key: 'code', version: 1, findings: {} as never },
+        ssfb: { key: 'ssfb', version: 2, findings: {} as never },
+      },
+      submissions: [
+        { seq: 1, kind: 'initial', created_at: AT1, report: null, report_md: null },
+        { seq: 2, kind: 'ask', question: `is ${SYNTHETIC_PHONE} linked?`, created_at: AT2, report: null, report_md: null },
+      ],
+      feedback: [
+        { verdict: 'partial', actual_root_cause: 'the payout was on hold', given_by: 'ops-a', given_at: AT1, interface: 'http' },
+        { verdict: 'correct', given_by: 'ops-b', given_at: AT2, interface: 'cli' },
+      ],
+      ...over,
+    };
+  }
+
+  async function getJson(runs: Record<string, RunRecord>): Promise<{ text: string; json: Record<string, unknown> }> {
+    const res = await harness({ runs }).app.request(`/triage/${RUN_A}`);
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    return { text, json: JSON.parse(text) as Record<string, unknown> };
+  }
+
+  test('returns every new field, in the documented shapes', async () => {
+    const { json } = await getJson({ [RUN_A]: detailRecord() });
+    expect(json.run_id).toBe(RUN_A);
+    expect(json.status).toBe('running');
+    expect(json.created_at).toBe(AT1);
+    expect(json.updated_at).toBe(AT2);
+    expect(json.phase_reason).toBe('waiting on a delegate');
+    expect(json.requested_by).toBe('U0TESTUSER');
+    expect(json.interface).toBe('slack');
+    expect(typeof json.permalink).toBe('string');
+    expect(json.preflight_warnings).toEqual([{ entity: 'rtl', step: 'db', message: 'database not configured' }]);
+    // EVIDENCE_KEYS order, not insertion order.
+    expect(json.evidence).toEqual([
+      { key: 'ssfb', version: 2 },
+      { key: 'code', version: 1 },
+    ]);
+    const subs = json.submissions as Record<string, unknown>[];
+    expect(subs.map((s) => [s.seq, s.kind, s.created_at, s.has_report])).toEqual([
+      [1, 'initial', AT1, false],
+      [2, 'ask', AT2, false],
+    ]);
+    expect('question' in (subs[0] as object)).toBe(false);
+    expect(json.feedback).toEqual([
+      { verdict: 'partial', actual_root_cause: 'the payout was on hold', given_by: 'ops-a', given_at: AT1, interface: 'http' },
+      { verdict: 'correct', given_by: 'ops-b', given_at: AT2, interface: 'cli' },
+    ]);
+    expect('report' in json).toBe(false);
+    expect('report_md' in json).toBe(false);
+  });
+
+  test('a synthetic phone in current_ask and in a submission question comes back masked', async () => {
+    const { text, json } = await getJson({ [RUN_A]: detailRecord() });
+    expect(text).not.toContain(SYNTHETIC_PHONE);
+    expect(json.current_ask).toContain('****3210');
+    const subs = json.submissions as { question?: string }[];
+    expect(subs[1]?.question).toContain('****3210');
+  });
+
+  test("the report's current_ask wins over the classifier's, and report_md comes with the report", async () => {
+    const report = { status: 'resolved', request: { current_ask: 'where is the refund', requested_by: 'ops' } };
+    const run = detailRecord({
+      phase: 'completed',
+      report: report as unknown as RunRecord['report'],
+      report_md: '# Report\n\nThe refund is on its way.',
+      submissions: [{ seq: 1, kind: 'initial', created_at: AT1, report: report as unknown as RunRecord['report'], report_md: '# r' }],
+    });
+    const { json } = await getJson({ [RUN_A]: run });
+    expect(json.status).toBe('completed');
+    expect(json.current_ask).toBe('where is the refund');
+    expect(json.report_md).toBe('# Report\n\nThe refund is on its way.');
+    expect((json.submissions as { has_report: boolean }[])[0]?.has_report).toBe(true);
+  });
+
+  test('a non-slack source has no permalink; a bare record still renders', async () => {
+    const text = detailRecord({
+      request: { interface: 'cli', requested_by: 'ops', source: { kind: 'text' } } as unknown as RunRecord['request'],
+    });
+    const { json } = await getJson({ [RUN_A]: text });
+    expect('permalink' in json).toBe(false);
+    expect(json.interface).toBe('cli');
+
+    const bare = runView(record(RUN_A, 'created'));
+    expect(bare.current_ask).toBeNull();
+    expect(bare.evidence).toEqual([]);
+    expect(bare.submissions).toEqual([]);
+    expect(bare.feedback).toEqual([]);
+    expect('permalink' in bare).toBe(false);
+    expect('phase_reason' in bare).toBe(false);
+  });
+});
+
+// ------------------------------------------------------------------ GET /triage
+
+describe('GET /triage', () => {
+  const T1 = '2026-09-24T10:00:00.000Z';
+  const T2 = '2026-09-24T09:00:00.000Z';
+  const summary = (run_id: string, created_at: string, over: Partial<RunSummary> = {}): RunSummary => ({
+    run_id,
+    created_at,
+    updated_at: created_at,
+    phase: 'completed',
+    submissions: 1,
+    ...over,
+  });
+  // Store order: created_at desc, run_id desc.
+  const rows = [
+    summary(RUN_B, T1, { phase: 'investigating' }),
+    summary(RUN_A, T1, { category: 'transfer_out', tier_final: 'mid', report_status: 'resolved', feedback_verdict: 'correct' }),
+    summary(UNKNOWN_RUN, T2, { phase: 'failed', submissions: 0 }),
+  ];
+
+  test('200 {runs, next_cursor}; the store gets limit + 1 when nothing is filtered here', async () => {
+    const h = harness({ summaries: rows });
+    const res = await h.app.request('/triage');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ runs: rows, next_cursor: null });
+    expect(h.store.listQueries).toEqual([{ limit: 51 }]);
+  });
+
+  test('store-side filters are passed down with limit + 1', async () => {
+    const h = harness({ summaries: rows });
+    const res = await h.app.request('/triage?phase=completed&category=transfer_out&since=2026-09-01T00:00:00.000Z&limit=5');
+    expect(res.status).toBe(200);
+    expect(h.store.listQueries).toEqual([
+      { phase: 'completed', category: 'transfer_out', since: new Date('2026-09-01T00:00:00.000Z'), limit: 6 },
+    ]);
+  });
+
+  test.each([['status=running'], ['feedback=none'], [`cursor=${encodeURIComponent(`${T1},${RUN_B}`)}`]])(
+    'with %s the store gets no limit and the route filters',
+    async (qs) => {
+      const h = harness({ summaries: rows });
+      const res = await h.app.request(`/triage?${qs}&limit=1`);
+      expect(res.status).toBe(200);
+      expect(h.store.listQueries).toHaveLength(1);
+      expect('limit' in (h.store.listQueries[0] as object)).toBe(false);
+    },
+  );
+
+  test('status and feedback filters drop rows', async () => {
+    const h = harness({ summaries: rows });
+    const running = (await (await h.app.request('/triage?status=running')).json()) as { runs: RunSummary[] };
+    expect(running.runs.map((r) => r.run_id)).toEqual([RUN_B]);
+    const none = (await (await h.app.request('/triage?feedback=none')).json()) as { runs: RunSummary[] };
+    expect(none.runs.map((r) => r.run_id)).toEqual([RUN_B, UNKNOWN_RUN]);
+  });
+
+  test('next_cursor walks two pages', async () => {
+    const h = harness({ summaries: rows });
+    const first = (await (await h.app.request('/triage?limit=2')).json()) as { runs: RunSummary[]; next_cursor: string | null };
+    expect(first.runs.map((r) => r.run_id)).toEqual([RUN_B, RUN_A]);
+    expect(first.next_cursor).toBe(`${T1},${RUN_A}`);
+    const second = (await (
+      await h.app.request(`/triage?limit=2&cursor=${encodeURIComponent(first.next_cursor as string)}`)
+    ).json()) as { runs: RunSummary[]; next_cursor: string | null };
+    expect(second.runs.map((r) => r.run_id)).toEqual([UNKNOWN_RUN]);
+    expect(second.next_cursor).toBeNull();
+  });
+
+  test.each([
+    ['status', 'status=done'],
+    ['phase', 'phase=sleeping'],
+    ['phase', 'status=running&phase=completed'],
+    ['category', 'category=nope'],
+    ['feedback', 'feedback=maybe'],
+    ['since', 'since=yesterday'],
+    ['cursor', 'cursor=nocomma'],
+    ['limit', 'limit=0'],
+    ['limit', 'limit=201'],
+  ])('a bad %s (%s) -> 400 naming it; the store is not read', async (field, qs) => {
+    const h = harness({ summaries: rows });
+    const res = await h.app.request(`/triage?${qs}`);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; fields: string[]; reason?: string };
+    expect(body.error).toBe('invalid request');
+    expect(body.fields).toEqual([field]);
+    expect(h.store.listQueries).toHaveLength(0);
+  });
+
+  test('with the folder store: filters and the detail view end to end', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'triage-list-'));
+    try {
+      let now = Date.parse('2026-09-24T08:00:00.000Z');
+      const store = createFolderRunStore({ runsDir: join(root, 'runs'), dataDir: join(root, 'data'), now: () => now });
+      const make = async (id: RunId, phase: RunPhase) => {
+        await store.createRun(id, redactPersisted(sampleRequest(id)));
+        await store.setPhase(id, phase);
+        now += 60_000;
+      };
+      await make(RUN_A, 'completed');
+      await make(RUN_B, 'investigating');
+      await make(UNKNOWN_RUN, 'failed');
+      await store.putClassification(RUN_A, redactPersisted(sampleClassification()));
+      await store.addSubmission(RUN_A, redactPersisted({ kind: 'initial' as const }));
+      await store.putFeedback(RUN_A, redactPersisted(sampleFeedback('wrong', '2026-09-24T09:00:00.000Z')));
+
+      const h = harness({ store });
+      const all = (await (await h.app.request('/triage')).json()) as { runs: RunSummary[]; next_cursor: string | null };
+      expect(all.runs.map((r) => r.run_id)).toEqual([UNKNOWN_RUN, RUN_B, RUN_A]);
+      expect(all.next_cursor).toBeNull();
+
+      const wrong = (await (await h.app.request('/triage?feedback=wrong')).json()) as { runs: RunSummary[] };
+      expect(wrong.runs.map((r) => [r.run_id, r.category, r.submissions])).toEqual([[RUN_A, 'transfer_out', 1]]);
+      const running = (await (await h.app.request('/triage?status=running')).json()) as { runs: RunSummary[] };
+      expect(running.runs.map((r) => r.run_id)).toEqual([RUN_B]);
+      const byCategory = (await (await h.app.request('/triage?category=onboarding')).json()) as { runs: RunSummary[] };
+      expect(byCategory.runs).toEqual([]);
+
+      const detail = (await (await h.app.request(`/triage/${RUN_A}`)).json()) as Record<string, unknown>;
+      expect(detail.requested_by).toBe('ops-reviewer');
+      expect(detail.interface).toBe('cli');
+      expect('permalink' in detail).toBe(false);
+      expect(detail.current_ask).toBe('why is the transfer stuck');
+      expect((detail.submissions as { seq: number; kind: string }[]).map((s) => [s.seq, s.kind])).toEqual([[1, 'initial']]);
+      expect((detail.feedback as { verdict: string }[]).map((f) => f.verdict)).toEqual(['wrong']);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
