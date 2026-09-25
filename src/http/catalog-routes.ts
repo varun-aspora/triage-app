@@ -298,10 +298,9 @@ export function createCatalogRoutes(deps: CatalogRouteDeps): Hono {
       files.push({ path: `knowledge/${guideName}/${SKILL_FILE}`, action: 'created' });
     }
     const entityPath = join(resourcesDir, `${e}.entity.json`);
-    let entityWritten = false;
+    let entityMode: number | undefined;
     try {
-      await replaceIfUnchanged(entityPath, doc.text, next.text);
-      entityWritten = true;
+      entityMode = await replaceIfUnchanged(entityPath, doc.text, next.text);
       files.push({ path: doc.label, action: 'updated' });
       if (nextPins !== undefined) {
         await replaceIfUnchanged(join(resourcesDir, REPOS_FILE), pinsFile.text, formatPins(nextPins));
@@ -311,7 +310,7 @@ export function createCatalogRoutes(deps: CatalogRouteDeps): Hono {
       // Put back what this request changed so the next boot sees the files
       // as they were, then report. Best effort: a failure here leaves the
       // original error as the one reported.
-      if (entityWritten) await writeFileAtomic(entityPath, doc.text).catch(() => {});
+      if (entityMode !== undefined) await writeKeepingMode(entityPath, doc.text, entityMode).catch(() => {});
       if (guideDir !== undefined) await removeGuideFile(guideDir);
       if (err instanceof FileChangedError) return c.json({ error: FILE_CHANGED }, 409);
       throw err;
@@ -448,12 +447,13 @@ async function removeGuideFile(dir: string): Promise<void> {
 }
 
 /**
- * Replaces path with next if it still holds expected. The re-read narrows,
+ * Replaces path with next if it still holds expected, and returns the mode
+ * it kept so a rollback can restore it too. The re-read narrows,
  * but cannot close, the window for an edit made by hand between the read
  * and the rename; a lock the operator's editor does not take would not
  * close it either.
  */
-async function replaceIfUnchanged(path: string, expected: string, next: string): Promise<void> {
+async function replaceIfUnchanged(path: string, expected: string, next: string): Promise<number> {
   let current: string;
   try {
     current = await readFile(path, 'utf8');
@@ -463,8 +463,13 @@ async function replaceIfUnchanged(path: string, expected: string, next: string):
   }
   if (current !== expected) throw new FileChangedError('file changed');
   const mode = (await stat(path)).mode & 0o777;
-  await writeFileAtomic(path, next);
-  // The temp file behind the rename is 0600; keep the file's own mode.
+  await writeKeepingMode(path, next, mode);
+  return mode;
+}
+
+/** Writes path atomically with the given mode. The temp file behind the rename is 0600. */
+async function writeKeepingMode(path: string, text: string, mode: number): Promise<void> {
+  await writeFileAtomic(path, text);
   await chmod(path, mode);
 }
 

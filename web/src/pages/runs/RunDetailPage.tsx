@@ -84,8 +84,12 @@ export default function RunDetailPage() {
     reload();
   };
 
-  if (data.status === 'running') return <RunningView run={data} refreshError={refreshError} />;
-  if (data.status === 'failed') return <FailedView run={data} refreshError={refreshError} />;
+  // A stored report means a submission already finished, so a running or
+  // failed status here is a follow-up: keep the report and forms in view.
+  if (data.report === undefined) {
+    if (data.status === 'running') return <RunningView run={data} refreshError={refreshError} />;
+    if (data.status === 'failed') return <FailedView run={data} refreshError={refreshError} />;
+  }
   return (
     <CompletedView
       run={data}
@@ -249,16 +253,31 @@ function CompletedView({
 
   const askForm = <AskForm runId={run.run_id} reports={reports} onAsked={onAsked} />;
   const feedbackForm = <FeedbackForm runId={run.run_id} onSaved={onFeedback} />;
-  const askNotice = askInFlight ? (
-    <Notice variant="info" title="Follow-up in progress">
-      The new report version shows here when it is ready. This page checks every few seconds.
-    </Notice>
-  ) : null;
+  let askNotice: ReactNode = null;
+  if (run.status === 'failed') {
+    askNotice = (
+      <Notice variant="warn" title="The last follow-up failed">
+        Reason: <span className="mono">{run.phase_reason ?? 'not recorded'}</span>. The report below is from before it. You can ask again.
+      </Notice>
+    );
+  } else if (run.status === 'running' || askInFlight) {
+    askNotice = (
+      <Notice variant="info" title="Follow-up running">
+        {run.status === 'running' && (
+          <>
+            Phase: <span className="mono">{run.phase}</span>.{' '}
+          </>
+        )}
+        The new report version shows here when it is ready. This page checks every few seconds.
+      </Notice>
+    );
+  }
 
   return (
     <>
       <RunHeader run={run} />
       {refreshError}
+      {askNotice}
       <Tabs
         label="Run"
         active={tab}
@@ -281,7 +300,6 @@ function CompletedView({
         ) : (
           <div className="runs-cols">
             <div className="runs-main">
-              {askNotice}
               <CxAnswerSection cx={report.cx_answer} />
               <RootCauseSection report={report} />
               <TimelineSection items={report.timeline} />
@@ -303,7 +321,6 @@ function CompletedView({
 
       {tab === 'asks' && (
         <div className="runs-main" style={{ maxWidth: 880 }}>
-          {askNotice}
           <Panel title="Follow-ups" description="Questions asked after the first report. Each one that finishes adds a report version.">
             {asks.length === 0 ? (
               <p className="hint" style={{ margin: 0 }}>

@@ -68,6 +68,15 @@ export default function RunsListPage() {
   };
 
   const filtered = status !== undefined || category !== undefined || feedback !== undefined || created !== 'any';
+  // The default range is a filter too, so an empty page cannot tell 'no runs
+  // at all' from 'none in range' on its own. One unfiltered row settles it.
+  const emptyFiltered = filtered && data !== undefined && data.runs.length === 0 && stack.length === 0;
+  const anyRun = useApi(
+    (signal) => (emptyFiltered ? listRuns({ limit: 1 }, { signal }).then((r) => r.runs.length > 0) : Promise.resolve(true)),
+    [emptyFiltered, filterKey],
+  );
+  const noRunsAtAll = !filtered || (emptyFiltered && anyRun.data === false);
+  const probing = emptyFiltered && anyRun.loading;
 
   return (
     <>
@@ -159,7 +168,9 @@ export default function RunsListPage() {
         ) : null
       ) : data.runs.length === 0 && stack.length === 0 ? (
         <Panel padded={false}>
-          {filtered ? (
+          {probing ? (
+            <Loading label="Loading runs…" />
+          ) : !noRunsAtAll ? (
             <EmptyState title="No runs match these filters">Try a longer time range or clear a filter.</EmptyState>
           ) : (
             <EmptyState
