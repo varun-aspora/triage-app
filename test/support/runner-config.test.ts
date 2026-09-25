@@ -113,9 +113,9 @@ describe('vitest.config.ts', () => {
 });
 
 describe('package.json scripts', () => {
-  test('gen runs before typecheck, build and contract tests, and on install', () => {
+  test('gen runs before typecheck, build and contract tests, and on install, followed by the bin links', () => {
     expect(pkg.scripts.gen).toBe('bun scripts/gen-indexes.ts');
-    expect(pkg.scripts.postinstall).toBe('bun run gen');
+    expect(pkg.scripts.postinstall).toBe('bun run gen && bun scripts/link-bins.ts');
     for (const name of ['typecheck', 'build', 'test:contract']) {
       expect(pkg.scripts[name]).toStartWith('bun run gen && ');
     }

@@ -10,7 +10,7 @@
   },
   "scripts": {
     "gen": "bun scripts/gen-indexes.ts",
-    "postinstall": "bun run gen",
+    "postinstall": "bun run gen && bun scripts/link-bins.ts",
     "test": "bun test ./src ./test ./scripts ./integrations",
     "test:contract": "bun run gen && vitest run",
     "typecheck": "bun run gen && bun run typecheck:raw",
