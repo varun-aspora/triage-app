@@ -249,6 +249,11 @@ describe('registered providers', () => {
     expect(models.acceptsImages('ollama/qwen3:8b')).toBe(false);
   });
 
+  test('the ollama provider resolves a placeholder key, which openai-completions requires', async () => {
+    const auth = models.ollamaProvider('http://localhost:11434/v1', ['qwen3:8b']).auth.apiKey;
+    expect(await auth?.resolve({} as never)).toEqual({ auth: { apiKey: 'ollama' } });
+  });
+
   test('registerProviders does nothing when OLLAMA_BASE_URL is blank', () => {
     const spy = spySetProvider();
     expect(models.registerProviders(cfg({ ...BASE, OLLAMA_BASE_URL: '' }))).toBe(false);
