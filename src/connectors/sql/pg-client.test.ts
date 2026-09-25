@@ -204,6 +204,49 @@ describe('rollback and release', () => {
   });
 });
 
+describe('a socket that closes under a query', () => {
+  test('the client is listened to while it is checked out, and not after', async () => {
+    const { pg, connector } = setup();
+    await connector.runSelect(ctxOf(), input());
+    expect(pg.clients.length).toBeGreaterThan(0);
+    for (const client of pg.clients) {
+      expect(client.errorListeners.slice(0, -1).every((n) => n === 1)).toBe(true);
+      expect(client.errorListeners.at(-1)).toBe(0);
+    }
+  });
+
+  test('gives unreachable, sends no ROLLBACK, discards the client and leaves no listener behind', async () => {
+    const { pg, connector } = setup({}, { fake: { drop: (q) => q.text.startsWith('SELECT * FROM') } });
+    const err = await failure(connector.runSelect(ctxOf(), input()));
+    expect(err.code).toBe('unreachable');
+    expect(err.message).toBe('atspl:package: the connection to ATSPL_PACKAGE_DB_URL dropped');
+    expectNoSecret(everyForm(err));
+    const [select] = pg.selectClients();
+    expect(select!.queries.map((q) => q.text)).not.toContain('ROLLBACK');
+    expect(select!.releases).toHaveLength(1);
+    expect((select!.releases[0] as Error).message).toBe('Connection terminated unexpectedly');
+    expect(select!.errorListeners.at(-1)).toBe(0);
+    expect(pg.outstanding()).toBe(0);
+  });
+
+  test('the pool is usable after a drop', async () => {
+    let once = false;
+    const { pg, connector } = setup({}, {
+      fake: {
+        drop: (q) => {
+          if (once || !q.text.startsWith('SELECT * FROM')) return false;
+          once = true;
+          return true;
+        },
+      },
+    });
+    await failure(connector.runSelect(ctxOf(), input()));
+    await connector.runSelect(ctxOf(), input());
+    expect(pg.outstanding()).toBe(0);
+    expect(pg.selectClients().at(-1)?.releases).toEqual([undefined]);
+  });
+});
+
 describe('pool', () => {
   test('carries -c default_transaction_read_only=on in the pg config and leaves the DSN as it is', async () => {
     const { pg, connector } = setup();

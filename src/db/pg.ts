@@ -16,6 +16,9 @@ type Rows = Record<string, unknown>[];
 export type PgClientLike = {
   query(text: string, params?: PostgresParameter[]): Promise<{ rows: Rows }>;
   release(err?: Error | boolean): void;
+  /** pg's PoolClient is an EventEmitter. A fake may leave these out. */
+  on?(event: 'error', listener: (err: Error) => void): unknown;
+  off?(event: 'error', listener: (err: Error) => void): unknown;
 };
 
 export type PgPoolLike = {
@@ -73,7 +76,16 @@ export function createPgRunner(dsn: string, deps: PgRunnerDeps = {}): PgRunner {
     query,
     async transaction<T>(fn: (tx: { query: PostgresQuery }) => Promise<T>): Promise<T> {
       const client = await pool.connect();
+      // pg-pool listens for 'error' on a client only while it is idle, and pg
+      // emits it on the client when the socket closes under a query. With no
+      // listener Node ends the process. The query in flight rejects on its
+      // own; this listener only remembers the error so the client is
+      // discarded on release.
       let broken: Error | undefined;
+      const onError = (err: Error): void => {
+        broken ??= err;
+      };
+      client.on?.('error', onError);
       try {
         await client.query('BEGIN');
         const result = await fn({
@@ -86,10 +98,11 @@ export function createPgRunner(dsn: string, deps: PgRunnerDeps = {}): PgRunner {
           await client.query('ROLLBACK');
         } catch (rollbackErr) {
           // The connection is in an unknown state; tell pg to discard it.
-          broken = rollbackErr instanceof Error ? rollbackErr : new Error('rollback failed');
+          broken ??= rollbackErr instanceof Error ? rollbackErr : new Error('rollback failed');
         }
         throw err;
       } finally {
+        client.off?.('error', onError);
         client.release(broken);
       }
     },

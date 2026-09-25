@@ -2,6 +2,7 @@
 // test injects a pool factory that records calls.
 
 import { describe, expect, test } from 'bun:test';
+import { EventEmitter } from 'node:events';
 import { ConfigError } from '../config/errors.ts';
 import {
   createPgRunner,
@@ -22,9 +23,19 @@ type FakePool = PgPoolLike & {
   ended: number;
   connects: number;
   errorListeners: number;
+  /** The client's 'error' listener count at each client query, in order. */
+  clientListeners: number[];
+  clients: EventEmitter[];
 };
 
-function fakePool(opts: { failOn?: string } = {}): { pool: FakePool; factory: PoolFactory; options: PgPoolOptions[] } {
+/** pg's words for a socket that closed under a query. */
+const DROPPED = 'Connection terminated unexpectedly';
+
+// Clients are EventEmitters like pg's. dropOn closes the socket under that
+// query the way pg reports it: 'error' on the client from a macrotask, then
+// the query rejects. Without a listener on the client that emit is an
+// uncaught exception, which is the crash under test.
+function fakePool(opts: { failOn?: string; dropOn?: string } = {}): { pool: FakePool; factory: PoolFactory; options: PgPoolOptions[] } {
   const options: PgPoolOptions[] = [];
   let clientSeq = 0;
   const pool: FakePool = {
@@ -33,6 +44,8 @@ function fakePool(opts: { failOn?: string } = {}): { pool: FakePool; factory: Po
     ended: 0,
     connects: 0,
     errorListeners: 0,
+    clientListeners: [],
+    clients: [],
     async query(text, params) {
       pool.calls.push({ on: 'pool', text, params });
       return { rows: [{ via: 'pool' }] };
@@ -40,16 +53,31 @@ function fakePool(opts: { failOn?: string } = {}): { pool: FakePool; factory: Po
     async connect(): Promise<PgClientLike> {
       pool.connects += 1;
       const id = `client${++clientSeq}`;
-      return {
-        async query(text, params) {
+      let dead = false;
+      const client: PgClientLike & EventEmitter = Object.assign(new EventEmitter(), {
+        query(text: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }> {
           pool.calls.push({ on: id, text, params });
-          if (opts.failOn !== undefined && text === opts.failOn) throw new Error(`${text} failed`);
-          return { rows: [{ via: id }] };
+          pool.clientListeners.push(client.listenerCount('error'));
+          if (dead) return Promise.reject(new Error('Client has encountered a connection error and is not queryable'));
+          if (opts.dropOn !== undefined && text === opts.dropOn) {
+            dead = true;
+            return new Promise((_, reject) =>
+              setImmediate(() => {
+                const err = new Error(DROPPED);
+                client.emit('error', err);
+                reject(err);
+              }),
+            );
+          }
+          if (opts.failOn !== undefined && text === opts.failOn) return Promise.reject(new Error(`${text} failed`));
+          return Promise.resolve({ rows: [{ via: id }] });
         },
-        release(err) {
+        release(err?: Error | boolean) {
           pool.released.push(err);
         },
-      };
+      });
+      pool.clients.push(client);
+      return client;
     },
     async end() {
       pool.ended += 1;
@@ -141,6 +169,24 @@ describe('createPgRunner', () => {
     ).rejects.toThrow('original');
     expect(pool.released).toHaveLength(1);
     expect(pool.released[0]).toBeInstanceOf(Error);
+  });
+
+  test('listens on the client only while it is checked out', async () => {
+    const { pool, factory } = fakePool();
+    const runner = createPgRunner(DSN, { poolFactory: factory });
+    await runner.transaction(async (tx) => tx.query('SELECT 1'));
+    expect(pool.clientListeners).toEqual([1, 1, 1]);
+    expect(pool.clients[0]?.listenerCount('error')).toBe(0);
+  });
+
+  test('a socket that closes mid-transaction rejects the call, discards the client and leaves no listener behind', async () => {
+    const { pool, factory } = fakePool({ dropOn: 'SELECT 1' });
+    const runner = createPgRunner(DSN, { poolFactory: factory });
+    await expect(runner.transaction(async (tx) => tx.query('SELECT 1'))).rejects.toThrow(DROPPED);
+    expect(pool.calls.map((c) => c.text)).toEqual(['BEGIN', 'SELECT 1', 'ROLLBACK']);
+    expect(pool.released).toHaveLength(1);
+    expect((pool.released[0] as Error).message).toBe(DROPPED);
+    expect(pool.clients[0]?.listenerCount('error')).toBe(0);
   });
 
   test('close() ends the pool once', async () => {

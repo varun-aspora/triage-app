@@ -11,9 +11,12 @@
 //
 // Any other shape is refused before a client is checked out. All statements
 // run on one checked-out client; any failure after that sends ROLLBACK and
-// releases the client. Postgres enforces READ ONLY server-side whatever the
-// role can do, and the same statements are accepted on a hot-standby reader,
-// so primaries and readers share this code path.
+// releases the client. A socket that closes under a query is reported by pg
+// as an 'error' event on the client as well as a rejected query; the client
+// is listened to while it is checked out, so that event ends the call, not
+// the process, and the client is discarded. Postgres enforces READ ONLY
+// server-side whatever the role can do, and the same statements are accepted
+// on a hot-standby reader, so primaries and readers share this code path.
 //
 // Pools: one lazy, bounded pg.Pool per env var name. The pool config carries
 // options '-c default_transaction_read_only=on' as a separate field; the DSN
@@ -66,6 +69,9 @@ export interface PgClientLike {
   query(query: PgQuery): Promise<PgQueryResult>;
   /** A truthy argument destroys the connection instead of returning it to the pool. */
   release(destroy?: Error | boolean): void;
+  /** pg's PoolClient is an EventEmitter. A fake may leave these out. */
+  on?(event: 'error', listener: (err: Error) => void): unknown;
+  off?(event: 'error', listener: (err: Error) => void): unknown;
 }
 
 /** The part of a pg.Pool the connector uses. */
@@ -213,6 +219,8 @@ const NETWORK_CODES = new Set([
   'EAI_AGAIN',
   'EPIPE',
 ]);
+/** pg's own words for a socket that closed under a query, and for a client it then refuses to use. */
+const CONNECTION_LOST = /^(Connection terminated|Client has encountered a connection error)/;
 const SQLSTATE = /^[0-9A-Z]{5}$/;
 const MAX_MESSAGE = 300;
 
@@ -263,6 +271,7 @@ export function mapPgError(err: unknown, where: string, envName: EnvVarName, sec
     return new ConnectorError('refused', `${where}: query failed (${code}): ${scrub(pgMessage, secrets)}`);
   }
   if (NETWORK_CODES.has(code)) return new ConnectorError('unreachable', `${where}: could not reach ${envName} (${code})`);
+  if (CONNECTION_LOST.test(pgMessage)) return new ConnectorError('unreachable', `${where}: the connection to ${envName} dropped`);
   return new ConnectorError('unreachable', `${where}: the call through ${envName} failed`);
 }
 
@@ -433,6 +442,19 @@ export function createSqlConnector(options: SqlConnectorOptions): SqlConnector {
   ): Promise<PgQueryResult> {
     signal.throwIfAborted();
     const client = await checkout(pool, signal);
+    // pg-pool listens for 'error' on a client only while it is idle, and pg
+    // emits it on the client when the socket closes under a query. With no
+    // listener Node ends the process. The query in flight rejects on its
+    // own; this listener only marks the client so release() discards it.
+    let dropped: Error | undefined;
+    const onError = (err: Error): void => {
+      dropped ??= err;
+    };
+    client.on?.('error', onError);
+    const release = (destroy?: Error): void => {
+      client.off?.('error', onError);
+      client.release(destroy ?? dropped);
+    };
     let data: PgQueryResult | undefined;
     try {
       for (let i = 0; i < plan.length; i++) {
@@ -444,18 +466,23 @@ export function createSqlConnector(options: SqlConnectorOptions): SqlConnector {
     } catch (err) {
       if (err instanceof AbortedError || signal.aborted) {
         await bounded(pool.cancel?.(client), CLEANUP_WAIT_MS);
-        client.release(new Error('sql call aborted'));
+        release(new Error('sql call aborted'));
         throw new AbortedError();
+      }
+      if (dropped !== undefined) {
+        // The socket is gone: nothing to roll back, and the client is discarded.
+        release();
+        throw err;
       }
       try {
         await client.query({ text: 'ROLLBACK' });
-        client.release();
+        release();
       } catch {
-        client.release(new Error('rollback failed'));
+        release(new Error('rollback failed'));
       }
       throw err;
     }
-    client.release();
+    release();
     return data as PgQueryResult;
   }
 
