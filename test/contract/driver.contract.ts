@@ -21,6 +21,8 @@ import {
 } from '../../src/evals/driver.ts';
 import { EvalHomeError } from '../../src/evals/home.ts';
 import { createFakeModel, type FakeModel, finish, text, toolCall } from '../../src/mock/fake-model.ts';
+import { flushRunEventLog } from '../../src/runlog/event-log.ts';
+import { readRunEvents } from '../../src/runlog/read.ts';
 import { ReportSchema } from '../../src/types/report.ts';
 import { REPO_ROOT } from '../support/home.ts';
 import { brief, evalHome, findings, reportDraft } from './eval-support.ts';
@@ -140,6 +142,29 @@ describe('runCase', () => {
     expect(checkNoRealIo(result.audit)).toEqual({ ok: true, offending: [] });
     expect(result.fixture_misses).toBe(0);
     expect(result.cost_usd).toBe(0);
+  });
+
+  test('the run event log has the pipeline steps and the Flue events of the root and the delegate', async () => {
+    await flushRunEventLog();
+    const runsDir = evalRuntime()?.config.paths.runsDir;
+    if (runsDir === undefined) throw new Error('no eval runtime');
+    const page = await readRunEvents(runsDir, result.run_id, { limit: 5000 });
+    const seen = new Set(page.events.map((e) => `${e.source}:${e.type}`));
+    for (const t of ['run_created', 'phase', 'identity', 'classifier', 'classification', 'dispatch', 'settled']) expect(seen).toContain(`pipeline:${t}`);
+    for (const t of ['submission_running', 'turn_request', 'turn', 'message_end', 'tool_start', 'tool', 'task_start', 'task', 'submission_settled']) {
+      expect(seen).toContain(`flue:${t}`);
+    }
+    // Deltas are dropped.
+    expect([...seen].some((t) => t.endsWith('_delta'))).toBe(false);
+    // The delegate's tool call is there with its name and result.
+    const notes = page.events.filter((e) => e.type === 'tool' && (e.data as { toolName?: string }).toolName === 'note_evidence');
+    expect(notes.length).toBeGreaterThan(0);
+    // The system prompt is written in full once per session, not on every turn.
+    const prompts = page.events.filter((e) => e.type === 'turn_request' && (e.data as any).request?.input?.systemPrompt !== undefined);
+    const turns = page.events.filter((e) => e.type === 'turn_request');
+    expect(prompts.length).toBeLessThan(turns.length);
+    const settled = page.events.find((e) => e.type === 'settled');
+    expect(settled?.data).toMatchObject({ status: 'completed' });
   });
 
   test('the classifier, the root and the delegate all drew from the script', () => {

@@ -21,7 +21,7 @@
 import { spawnWorker } from '../../ingress/detach.ts';
 import type { RunRecord } from '../../runstore/types.ts';
 import { answerHint, askAtTerminal, questionLines, startAnswer } from '../lib/input-request.ts';
-import { EXIT_NEEDS_INPUT, EXIT_WAIT_TIMEOUT, emitJson, WaitOutputSchema, type WaitOutput } from '../lib/output-schemas.ts';
+import { EXIT_NEEDS_INPUT, EXIT_STOPPED, EXIT_WAIT_TIMEOUT, emitJson, WaitOutputSchema, type WaitOutput } from '../lib/output-schemas.ts';
 import { type LineReader, linePrompt } from '../lib/prompt.ts';
 import { requestedByOf } from '../lib/request-args.ts';
 import { EXIT, printError, printHuman } from '../output.ts';
@@ -65,6 +65,7 @@ export function settledOutput(run: RunRecord, isAlive: PidChecker): WaitOutput |
     return { run_id: run.run_id, status, ...(run.report !== null ? { report: { ...run.report } } : {}) };
   }
   if (status === 'failed') return { run_id: run.run_id, status, reason: run.phase_reason ?? 'unknown failure' };
+  if (status === 'stopped') return { run_id: run.run_id, status, reason: run.phase_reason ?? 'stopped' };
   if (status === 'stalled') return { run_id: run.run_id, status, reason: STALLED_REASON, phase: run.phase };
   if (status === 'needs_input') {
     return {
@@ -94,7 +95,9 @@ export function printWaitResult(
         ? EXIT_WAIT_TIMEOUT
         : out.status === 'needs_input'
           ? EXIT_NEEDS_INPUT
-          : EXIT.ERROR;
+          : out.status === 'stopped'
+            ? EXIT_STOPPED
+            : EXIT.ERROR;
   if (json) {
     emitJson(io, WaitOutputSchema, out);
     return code;
@@ -105,6 +108,9 @@ export function printWaitResult(
       break;
     case 'failed':
       printError(io, false, 'ERROR', `run ${out.run_id} failed: ${out.reason ?? 'unknown failure'}`);
+      break;
+    case 'stopped':
+      printHuman(io, `run ${out.run_id} was stopped. Ask a follow-up to resume it: triage ask ${out.run_id} "<question>"`);
       break;
     case 'stalled':
       printError(io, false, 'ERROR', `run ${out.run_id} stalled in phase ${out.phase ?? 'unknown'}: ${out.reason ?? STALLED_REASON}`);

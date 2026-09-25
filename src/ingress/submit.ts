@@ -57,6 +57,14 @@
 // chain rides in the signal's attributes, where the root merges it into the
 // run's scope (D26). Free text never widens scope.
 //
+// A run can be stopped from another process (src/ingress/stop.ts). While a
+// run works, the pipeline reads the store every STOP_POLL_MS; once the phase
+// is stopped it aborts its own steps and, after dispatch, the Flue instance.
+// The store refuses phase writes on a stopped run (setPhase returns false),
+// which catches a stop that lands between two polls. A stop before dispatch
+// makes runSubmission throw RunStoppedError; after dispatch the result has
+// status stopped. A follow-up (askRun) resumes a stopped run.
+//
 // The CLI and the HTTP routes both submit through these functions.
 // submissionDeps() builds the production deps from the Triage runtime.
 import { readFile } from 'node:fs/promises';
@@ -92,9 +100,17 @@ import { netTcpConnect } from '../ops/doctor/probes.ts';
 import { runPreflight, type PreflightResult } from '../ops/preflight.ts';
 import { syncBeforeRun } from '../ops/repos-autosync.ts';
 import type { TcpProbe } from '../ops/tunnel.ts';
+import { logRunEvent, setRunRedactionNames } from '../runlog/event-log.ts';
 import { embedRun as defaultEmbedRun } from '../runstore/embed-run.ts';
 import { priorCasesFor, type PriorCasesResult } from '../runstore/prior-cases.ts';
-import { RunNotFoundError, type RunStore, type SubmissionInput } from '../runstore/types.ts';
+import {
+  type PhaseDetail,
+  RunNotFoundError,
+  type RunPhase,
+  RunStoppedError,
+  type RunStore,
+  type SubmissionInput,
+} from '../runstore/types.ts';
 import {
   type Classification,
   type PreflightWarning,
@@ -144,6 +160,8 @@ export type SettleDeps = {
   readonly onEvent?: AgentReadOptions['onEvent'];
   /** How long read() may wait. Default: run timeout x attempts, plus a minute. */
   readonly readTimeoutMs?: number;
+  /** How often the store is read for a stop. Default STOP_POLL_MS; 0 turns the check off. */
+  readonly stopPollMs?: number;
   /** Clock for the answer's resolution time. Defaults to the system clock. */
   readonly now?: () => Date;
 };
@@ -175,7 +193,7 @@ export type SubmissionDeps = SettleDeps & {
   readonly readAttachment: (bytesRef: string, signal: AbortSignal) => Promise<Uint8Array>;
 };
 
-export type SubmissionStatus = 'completed' | 'failed' | 'needs_input';
+export type SubmissionStatus = 'completed' | 'failed' | 'needs_input' | 'stopped';
 
 export type SubmissionResult = {
   readonly run_id: RunId;
@@ -222,6 +240,9 @@ export class RunNotWaitingError extends Error {
 /** Extra wait on top of the run's own deadline before read() gives up. */
 export const READ_GRACE_MS = 60_000;
 
+/** How often a working run reads the store for a stop from another process. */
+export const STOP_POLL_MS = 2000;
+
 const IMAGE_MIME = /^image\/(png|jpeg|gif|webp)$/;
 const NO_IMAGES_REASON = 'the model for this tier does not accept images';
 
@@ -233,40 +254,56 @@ export async function runSubmission(prepared: PreparedSubmission, deps: Submissi
   if (!v.is(RunIdSchema, runId)) throw new SubmissionInputError('run_id is not a run id');
   if (request.request_id !== runId) throw new SubmissionInputError('run_id must equal request.request_id');
   const names = [...prepared.redaction_names];
-  const signal = deps.signal ?? new AbortController().signal;
   const store = deps.store;
 
   const persistedRequest = redactPersisted(request, { names });
   await store.createRun(runId, persistedRequest);
+  setRunRedactionNames(runId, names);
+  logRunEvent(runId, 'run_created', {
+    interface: request.interface,
+    messages: request.messages.length,
+    attachments: request.attachments.length,
+    hints: request.hints,
+  });
 
+  const watch = watchStop(store, runId, deps.stopPollMs);
+  const signal = AbortSignal.any([deps.signal ?? new AbortController().signal, watch.signal]);
   let initialData: TriageInit;
   let images: DeliveredAttachment[];
   let render: RenderImages;
   try {
     const warnings: PreflightWarning[] = [];
 
-    await store.setPhase(runId, 'preflight');
+    await advance(store, runId, 'preflight');
     if (!deps.config.mock.enabled) {
       // Every enabled entity, not only the ones the request names: the names
       // are where the agent starts, and it may brief any enabled entity.
+      const started = Date.now();
       const [pf, repos] = await Promise.all([
         deps.preflight({ signal }),
         deps.repoSync?.({ interface: request.interface, signal }) ?? [],
       ]);
       warnings.push(...pf.warnings, ...repos);
+      logRunEvent(runId, 'preflight', { durationMs: Date.now() - started, warnings: pf.warnings, repo_sync: repos });
+    } else {
+      logRunEvent(runId, 'preflight', { skipped: 'mock mode' });
     }
 
-    await store.setPhase(runId, 'identity');
+    await advance(store, runId, 'identity');
+    const identityStarted = Date.now();
     const identity = await identityStep(request, names, deps, signal);
     warnings.push(...identity.gaps.map((message) => warning('identity', message)));
+    logRunEvent(runId, 'identity', { durationMs: Date.now() - identityStarted, id_chain: identity.id_chain, gaps: identity.gaps });
 
     const loaded = await loadImages(request.attachments, deps, signal);
     if (loaded.failed > 0) {
       warnings.push(warning('attachments', `${loaded.failed} screenshot(s) could not be read and were left out`));
     }
 
-    await store.setPhase(runId, 'classifying');
+    await advance(store, runId, 'classifying');
+    const classifyStarted = Date.now();
     const classification = await classifyStep(request, identity, loaded.images, names, deps, signal);
+    logRunEvent(runId, 'classifier', { durationMs: Date.now() - classifyStarted, classification });
     const patterns = await loadKnownPatterns(deps, warnings);
     const matched = withPatternMatch(classification, request, patterns, deps);
     const policy = deps.policy ?? applyTierPolicy;
@@ -297,6 +334,7 @@ export async function runSubmission(prepared: PreparedSubmission, deps: Submissi
       runId,
       redactPersisted({ decision, id_chain: identity.id_chain, preflight_warnings: warnings }, { names }),
     );
+    logRunEvent(runId, 'classification', { decision, warnings, prior_cases: priorCases?.length ?? null });
 
     initialData = v.parse(TriageInitSchema, {
       // The persisted copy, with the run id put back: the persisted profile
@@ -309,9 +347,13 @@ export async function runSubmission(prepared: PreparedSubmission, deps: Submissi
       ...(priorCases !== undefined ? { prior_cases: priorCases } : {}),
     });
   } catch (err) {
+    watch.dispose();
+    // A stop aborts the step that was running; whatever it threw, the run was stopped.
+    if (watch.signal.aborted || err instanceof RunStoppedError) throw new RunStoppedError(runId);
     await recordFailed(store, runId, err);
     throw err;
   }
+  watch.dispose();
 
   const message: DeliveredMessage = {
     kind: 'user',
@@ -432,26 +474,36 @@ async function dispatchAndSettle(
   let seq: number;
   let handle: AgentHandle;
   let receipt: Awaited<ReturnType<AgentHandle['dispatch']>>;
+  let investigating: boolean;
   try {
     seq = await store.addSubmission(runId, redactPersisted(submission));
-    await store.setPhase(runId, 'dispatched');
+    // Only a follow-up may move a stopped run on.
+    await advance(store, runId, 'dispatched', submission.kind === 'ask' ? { resume: true } : {});
     handle = deps.dispatcher.init(deps.agent, initOptions);
     receipt = await handle.dispatch(request);
-    await store.setPhase(runId, 'investigating');
+    logRunEvent(runId, 'dispatch', { submission_seq: seq, kind: submission.kind, submission_id: receipt.submissionId });
+    investigating = (await setPhaseLogged(store, runId, 'investigating')) !== false;
   } catch (err) {
+    if (err instanceof RunStoppedError) throw err;
     await recordFailed(store, runId, err);
     throw err;
   }
 
+  const watch = watchStop(store, runId, deps.stopPollMs, () => handle.abort());
+  // Stopped between the dispatch and the phase write.
+  if (!investigating) watch.trip();
   const timeoutMs = deps.readTimeoutMs ?? defaultReadTimeoutMs(deps.config);
   const timeout = AbortSignal.timeout(timeoutMs);
-  const readSignal = AbortSignal.any([callerSignal, timeout]);
+  const readSignal = AbortSignal.any([callerSignal, timeout, watch.signal]);
 
   let status: SubmissionStatus;
   let replyText: string | undefined;
   let error: string | undefined;
   let inputRequest: InputRequest | undefined;
+  let readError: unknown;
   try {
+    // Stopped before the read began: the abort is on its way, there is nothing to wait for.
+    if (watch.signal.aborted) throw watch.signal.reason;
     const reply = await handle.read(receipt, {
       signal: readSignal,
       ...(deps.onEvent !== undefined ? { onEvent: deps.onEvent } : {}),
@@ -460,15 +512,24 @@ async function dispatchAndSettle(
     replyText = reply.text;
   } catch (err) {
     // The caller stopped waiting. The run goes on and stays readable.
-    if (callerSignal.aborted) throw err;
-    let cause = err;
-    if (timeout.aborted) {
-      cause = new SubmissionReadTimeoutError(timeoutMs);
-      await handle.abort().catch(() => undefined);
+    if (callerSignal.aborted) {
+      watch.dispose();
+      throw err;
     }
-    status = 'failed';
-    error = failureReason(cause);
+    readError = err;
+    if (watch.signal.aborted) {
+      status = 'stopped';
+    } else {
+      let cause = err;
+      if (timeout.aborted) {
+        cause = new SubmissionReadTimeoutError(timeoutMs);
+        await handle.abort().catch(() => undefined);
+      }
+      status = 'failed';
+      error = failureReason(cause);
+    }
   }
+  watch.dispose();
 
   if (status === 'completed') {
     // The response may have ended on ask_requester: then the run is parked on
@@ -479,11 +540,26 @@ async function dispatchAndSettle(
       inputRequest = run.input_request;
     }
   }
-  if (status === 'completed') await store.setPhase(runId, 'completed');
-  else if (status === 'failed') await store.setPhase(runId, 'failed', { reason: error ?? 'Error' });
+  // A refused write means a stop landed first (an abort from another
+  // process settles the read as failed): the stop wins.
+  if (status === 'completed' && (await setPhaseLogged(store, runId, 'completed')) === false) status = 'stopped';
+  if (status === 'failed' && (await setPhaseLogged(store, runId, 'failed', { reason: error ?? 'Error' })) === false) {
+    status = 'stopped';
+    error = undefined;
+  }
 
-  // A parked run is embedded when it settles for real, like any other.
-  const gaps = status === 'needs_input' ? [] : await embedAfterSettle(deps, runId);
+  // A parked run is embedded when it settles for real, like any other. A
+  // stopped one is not embedded.
+  const gaps = status === 'needs_input' || status === 'stopped' ? [] : await embedAfterSettle(deps, runId);
+  logRunEvent(runId, 'settled', {
+    submission_seq: seq,
+    submission_id: receipt.submissionId,
+    status,
+    ...(error !== undefined ? { error } : {}),
+    ...(readError !== undefined ? { read_error: readError } : {}),
+    ...(replyText !== undefined ? { reply_text: replyText } : {}),
+    gaps,
+  });
   return Object.freeze({
     run_id: runId,
     status,
@@ -505,6 +581,70 @@ async function embedAfterSettle(deps: SettleDeps, runId: RunId): Promise<string[
     // embedRun does not throw by contract; this keeps a broken one from failing the run.
     return [`embeddings skipped (${className(err)})`];
   }
+}
+
+// ------------------------------------------------------------------ stop
+
+type StopWatch = {
+  /** Aborted with RunStoppedError once the run is seen stopped. */
+  readonly signal: AbortSignal;
+  /** Acts as if the stop had just been seen. */
+  trip(): void;
+  dispose(): void;
+};
+
+/**
+ * Reads the store every intervalMs until disposed. When the phase is
+ * stopped it aborts the signal and calls onStop once (after dispatch, the
+ * Flue abort). A failed read is skipped; the next tick tries again.
+ */
+function watchStop(store: RunStore, runId: RunId, intervalMs = STOP_POLL_MS, onStop?: () => Promise<void>): StopWatch {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let reading = false;
+  const dispose = (): void => {
+    if (timer !== undefined) clearInterval(timer);
+    timer = undefined;
+  };
+  const trip = (): void => {
+    if (controller.signal.aborted) return;
+    dispose();
+    logRunEvent(runId, 'stop_seen', { aborting_agent: onStop !== undefined });
+    controller.abort(new RunStoppedError(runId));
+    if (onStop !== undefined) void onStop().catch(() => undefined);
+  };
+  if (intervalMs > 0) {
+    timer = setInterval(() => {
+      if (reading) return;
+      reading = true;
+      store
+        .getRun(runId)
+        .then(
+          (run) => {
+            if (run?.phase === 'stopped') trip();
+          },
+          () => undefined,
+        )
+        .finally(() => {
+          reading = false;
+        });
+    }, intervalMs);
+    // A pending check never keeps the process alive.
+    timer.unref?.();
+  }
+  return { signal: controller.signal, trip, dispose };
+}
+
+/** setPhase that throws RunStoppedError when the store refuses the write because the run was stopped. */
+async function advance(store: RunStore, runId: RunId, phase: RunPhase, detail: PhaseDetail = {}): Promise<void> {
+  if ((await setPhaseLogged(store, runId, phase, detail)) === false) throw new RunStoppedError(runId);
+}
+
+/** store.setPhase plus a 'phase' line in the run's event log. */
+async function setPhaseLogged(store: RunStore, runId: RunId, phase: RunPhase, detail: PhaseDetail = {}): Promise<boolean> {
+  const written = await store.setPhase(runId, phase, detail);
+  logRunEvent(runId, 'phase', { phase, ...detail, ...(written === false ? { refused: 'the run was stopped' } : {}) });
+  return written !== false;
 }
 
 export function defaultReadTimeoutMs(config: SubmissionConfig): number {
@@ -627,6 +767,8 @@ function failureReason(err: unknown): string {
 }
 
 async function recordFailed(store: RunStore, runId: RunId, err: unknown): Promise<void> {
+  // The whole error, stack included, goes to the event log; the store keeps the class name only.
+  logRunEvent(runId, 'failed', { error: err });
   try {
     await store.setPhase(runId, 'failed', { reason: className(err) });
   } catch {

@@ -14,6 +14,7 @@ import type { Config } from '../../config/env.ts';
 import { loadRegistry, type Registry } from '../../config/registry.ts';
 import type { PreparedSubmission } from '../../ingress/prepare.ts';
 import { type AnswerInput, answerRun, runSubmission, submissionDeps, type SubmissionResult } from '../../ingress/submit.ts';
+import { RunStoppedError } from '../../runstore/types.ts';
 import { askAtTerminal } from '../lib/input-request.ts';
 import type { WaitOutput } from '../lib/output-schemas.ts';
 import { type LineReader, linePrompt } from '../lib/prompt.ts';
@@ -81,28 +82,37 @@ export function createRunCommand(options: RunCommandOptions = {}): CliCommand {
         return code;
       }
 
-      let result = await submit(prepared, { isTty: io.isTTY });
-      // A question for the requester is asked right here when someone is at
-      // the terminal; the answer resumes the run in this process.
-      while (result.status === 'needs_input' && result.input_request !== undefined && io.isTTY && !json) {
-        const write = (text: string): void => void io.stdout.write(text);
-        const reply = await askAtTerminal(write, result.run_id, result.input_request, prompt(io, write));
-        if (reply === null) break;
-        result = await answer(
-          result.run_id,
-          {
-            question_id: result.input_request.question_id,
-            ...(reply.kind === 'skip' ? { skip: true } : { answer: reply.answer }),
-            by: prepared.request.requested_by,
-          },
-          { isTty: io.isTTY },
-        );
+      let result: SubmissionResult | { readonly run_id: string; readonly status: 'stopped' };
+      try {
+        result = await submit(prepared, { isTty: io.isTTY });
+        // A question for the requester is asked right here when someone is at
+        // the terminal; the answer resumes the run in this process.
+        while (result.status === 'needs_input' && result.input_request !== undefined && io.isTTY && !json) {
+          const write = (text: string): void => void io.stdout.write(text);
+          const reply = await askAtTerminal(write, result.run_id, result.input_request, prompt(io, write));
+          if (reply === null) break;
+          result = await answer(
+            result.run_id,
+            {
+              question_id: result.input_request.question_id,
+              ...(reply.kind === 'skip' ? { skip: true } : { answer: reply.answer }),
+              by: prepared.request.requested_by,
+            },
+            { isTty: io.isTTY },
+          );
+        }
+      } catch (err) {
+        // Stopped from another shell or the console before the agent started.
+        if (!(err instanceof RunStoppedError)) throw err;
+        result = { run_id: prepared.run_id, status: 'stopped' };
       }
       const store = await openStore(config);
       const run = await store.getRun(result.run_id);
 
       let out: WaitOutput;
-      if (result.status === 'completed') {
+      if (result.status === 'stopped') {
+        out = { run_id: result.run_id, status: 'stopped', reason: run?.phase_reason ?? 'stopped' };
+      } else if (result.status === 'completed') {
         out = { run_id: result.run_id, status: 'completed', ...(run?.report != null ? { report: { ...run.report } } : {}) };
       } else if (result.status === 'needs_input') {
         out = {

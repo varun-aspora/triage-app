@@ -33,10 +33,12 @@ import {
   RUNSTORE_SCHEMA_VERSION,
   RunPhaseSchema,
   RunNotFoundError,
+  RunStoppedError,
   RunStoreError,
   RunSummarySchema,
   SubmissionInputSchema,
   assertClean,
+  isTerminalPhase,
   assertEvidenceKey,
   assertPersisted,
   assertRunId,
@@ -166,9 +168,10 @@ ON CONFLICT (run_id) DO NOTHING`,
   lockRun: 'SELECT run_id FROM triage.runs WHERE run_id = $1 FOR UPDATE',
   runExists: 'SELECT run_id FROM triage.runs WHERE run_id = $1',
 
+  // A run in phase $7 (stopped) stays there unless $6 (resume) is set.
   setPhase: `UPDATE triage.runs
 SET phase = $2, phase_reason = $3::text, worker_pid = COALESCE($4::integer, worker_pid), updated_at = $5::timestamptz
-WHERE run_id = $1
+WHERE run_id = $1 AND (phase <> $7::text OR $6::boolean)
 RETURNING run_id`,
 
   putClassification: `UPDATE triage.runs
@@ -179,11 +182,19 @@ RETURNING run_id`,
 
   putInputRequest: `UPDATE triage.runs
 SET input_request = $2::jsonb, phase = 'needs_input', phase_reason = NULL, updated_at = $3::timestamptz
-WHERE run_id = $1 AND input_request IS NULL
+WHERE run_id = $1 AND input_request IS NULL AND phase <> 'stopped'
 RETURNING run_id`,
   resolveInputRequest: `UPDATE triage.runs
 SET input_history = input_history || jsonb_build_array(input_request || $3::jsonb), input_request = NULL, updated_at = $4::timestamptz
 WHERE run_id = $1 AND input_request->>'question_id' = $2::text
+RETURNING run_id`,
+
+  phaseForUpdate: 'SELECT phase FROM triage.runs WHERE run_id = $1 FOR UPDATE',
+  markStopped: `UPDATE triage.runs
+SET phase = $5::text, phase_reason = $2::text, updated_at = $3::timestamptz,
+  input_history = CASE WHEN input_request IS NULL THEN input_history ELSE input_history || jsonb_build_array(input_request || $4::jsonb) END,
+  input_request = NULL
+WHERE run_id = $1
 RETURNING run_id`,
 
   nextSubmissionSeq: 'SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM triage.submissions WHERE run_id = $1',
@@ -373,7 +384,7 @@ class PostgresRunStore implements RunStore {
     await this.#runner.query(SQL.createRun, [id, RUNSTORE_SCHEMA_VERSION, now, 'created', JSON.stringify(value)]);
   }
 
-  async setPhase(runId: RunId, phase: RunPhase, detail: PhaseDetail = {}): Promise<void> {
+  async setPhase(runId: RunId, phase: RunPhase, detail: PhaseDetail = {}): Promise<boolean> {
     const id = assertRunId(runId);
     parseRecord(RunPhaseSchema, phase, 'phase');
     if (detail.reason !== undefined) assertClean(detail.reason, 'phase reason');
@@ -384,8 +395,29 @@ class PostgresRunStore implements RunStore {
       detail.reason ?? null,
       detail.worker_pid ?? null,
       this.#iso(),
+      detail.resume === true,
+      'stopped',
     ]);
-    if (rows.length === 0) throw new RunNotFoundError(id);
+    if (rows.length > 0) return true;
+    // No row updated: the run is missing, or stopped.
+    const exists = await this.#runner.query(SQL.runExists, [id]);
+    if (exists.length === 0) throw new RunNotFoundError(id);
+    return false;
+  }
+
+  async markStopped(runId: RunId, reason: string, resolution: Persisted<InputResolution>): Promise<RunPhase | null> {
+    const id = assertRunId(runId);
+    assertClean(reason, 'phase reason');
+    const value = parseRecord(InputResolutionSchema, assertPersisted(resolution, 'input resolution'), 'input resolution');
+    return this.#runner.transaction(async (tx) => {
+      // The row lock keeps a settle in another process from landing between the read and the write.
+      const [row] = await tx.query(SQL.phaseForUpdate, [id]);
+      if (row === undefined) throw new RunNotFoundError(id);
+      const phase = parseRecord(RunPhaseSchema, row.phase, 'phase');
+      if (isTerminalPhase(phase)) return null;
+      await tx.query(SQL.markStopped, [id, reason, this.#iso(), JSON.stringify(value), 'stopped']);
+      return phase;
+    });
   }
 
   async putClassification(runId: RunId, record: Persisted<ClassificationRecord>): Promise<void> {
@@ -411,9 +443,10 @@ class PostgresRunStore implements RunStore {
     const value = parseRecord(InputRequestSchema, assertPersisted(request, 'input request'), 'input request');
     const rows = await this.#runner.query(SQL.putInputRequest, [id, JSON.stringify(value), this.#iso()]);
     if (rows.length > 0) return;
-    // No row updated: the run is missing, or a question is already open.
+    // No row updated: the run is missing, stopped, or a question is already open.
     const [run] = await this.#runner.query(SQL.getRun, [id]);
     if (run === undefined) throw new RunNotFoundError(id);
+    if (run.phase === 'stopped') throw new RunStoppedError(id);
     const open = run.input_request === null || run.input_request === undefined ? null : (fromJson(run.input_request, 'input request') as InputRequest);
     throw new InputRequestOpenError(id, open?.question_id ?? '?');
   }

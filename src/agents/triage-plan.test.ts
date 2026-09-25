@@ -128,6 +128,7 @@ function fakeStore(): RunStore & { calls: string[] } {
     setPhase: record('setPhase'),
     putClassification: record('putClassification'),
     putInputRequest: record('putInputRequest'),
+    markStopped: record('markStopped'),
     resolveInputRequest: record('resolveInputRequest'),
     putEvidence: record('putEvidence'),
     putReport: record('putReport'),

@@ -22,7 +22,10 @@ import {
   SuggestedFixSection,
   TimelineSection,
 } from './ReportSections.tsx';
-import { AskForm, FeedbackForm, SlackPostPanel } from './RunForms.tsx';
+import { AskForm, SlackPostPanel } from './RunForms.tsx';
+import { StepsPanel } from './RunSteps.tsx';
+import { VerdictPanel } from './RunVerdict.tsx';
+import { verdictLabel } from './verdict-logic.ts';
 import { ClassificationPanel, CostPanel, Dash, EvidencePanel, IdChainPanel, KV, PhaseStepper, RunHeader } from './RunParts.tsx';
 import { askPending, deriveInvestigators, inferFailure, investigatorLook, permalinkHref, runningSteps } from './run-logic.ts';
 import './runs.css';
@@ -87,8 +90,10 @@ export default function RunDetailPage() {
   // A stored report means a submission already finished, so a running or
   // failed status here is a follow-up: keep the report and forms in view.
   if (data.report === undefined) {
-    if (data.status === 'running') return <RunningView run={data} refreshError={refreshError} />;
-    if (data.status === 'failed') return <FailedView run={data} refreshError={refreshError} />;
+    if (data.status === 'running') return <RunningView run={data} refreshError={refreshError} onChanged={reload} />;
+    if (data.status === 'failed' || data.status === 'stopped') {
+      return <FailedView run={data} refreshError={refreshError} onChanged={reload} onAsked={onAsked} />;
+    }
   }
   return (
     <CompletedView
@@ -113,7 +118,7 @@ function useNow(ms: number): number {
   return now;
 }
 
-function RunningView({ run, refreshError }: { run: RunDetail; refreshError: ReactNode }) {
+function RunningView({ run, refreshError, onChanged }: { run: RunDetail; refreshError: ReactNode; onChanged: () => void }) {
   const now = useNow(1000);
   const investigators = deriveInvestigators(run);
   return (
@@ -148,7 +153,9 @@ function RunningView({ run, refreshError }: { run: RunDetail; refreshError: Reac
               </p>
             </div>
           </Panel>
+          <VerdictPanel run={run} onSaved={onChanged} />
           <PreflightWarnings run={run} />
+          <StepsPanel runId={run.run_id} live />
         </div>
         {(run.id_chain !== null || run.classification !== null) && (
           <aside className="runs-side">
@@ -163,8 +170,26 @@ function RunningView({ run, refreshError }: { run: RunDetail; refreshError: Reac
 
 // ------------------------------------------------------------------ failed
 
-function FailedView({ run, refreshError }: { run: RunDetail; refreshError: ReactNode }) {
-  const guess = inferFailure(run);
+function FailedView({
+  run,
+  refreshError,
+  onChanged,
+  onAsked,
+}: {
+  run: RunDetail;
+  refreshError: ReactNode;
+  onChanged: () => void;
+  onAsked: () => void;
+}) {
+  const stopped = run.status === 'stopped';
+  const failure = inferFailure(run);
+  const guess = stopped
+    ? {
+        ...failure,
+        title: 'The run was stopped',
+        hint: 'Someone stopped it before it finished. Ask a follow-up to start it again on what it has found so far.',
+      }
+    : failure;
   const hasSide = run.id_chain !== null || run.classification !== null;
   return (
     <>
@@ -184,13 +209,17 @@ function FailedView({ run, refreshError }: { run: RunDetail; refreshError: React
                   Reason: <span className="mono">{run.phase_reason ?? 'not recorded'}</span>
                 </p>
                 <p className="hint">{guess.hint}</p>
-                <p className="hint">
-                  The stored thread is redacted, so this run cannot be repeated as it was. Start a new run with the original thread.
-                </p>
+                {!stopped && (
+                  <p className="hint">
+                    The stored thread is redacted, so this run cannot be repeated as it was. Start a new run with the original thread.
+                  </p>
+                )}
                 <div style={{ display: 'flex', gap: 12, margin: '16px 0 0', flexWrap: 'wrap' }}>
-                  <LinkButton to="/doctor" icon="doctor">
-                    Open Doctor
-                  </LinkButton>
+                  {!stopped && (
+                    <LinkButton to="/doctor" icon="doctor">
+                      Open Doctor
+                    </LinkButton>
+                  )}
                   <LinkButton to="/runs/new" variant="primary" icon="plus">
                     Start a new run
                   </LinkButton>
@@ -198,7 +227,10 @@ function FailedView({ run, refreshError }: { run: RunDetail; refreshError: React
               </div>
             </div>
           </Panel>
+          {stopped && <AskForm runId={run.run_id} reports={0} onAsked={onAsked} />}
+          <VerdictPanel run={run} onSaved={onChanged} />
           <PreflightWarnings run={run} />
+          <StepsPanel runId={run.run_id} live={false} />
         </div>
         {hasSide && (
           <aside className="runs-side">
@@ -231,7 +263,7 @@ function PreflightWarnings({ run }: { run: RunDetail }) {
 
 // ------------------------------------------------------------------ completed
 
-type TabId = 'report' | 'asks' | 'feedback' | 'request';
+type TabId = 'report' | 'asks' | 'feedback' | 'steps' | 'request';
 
 function CompletedView({
   run,
@@ -252,9 +284,15 @@ function CompletedView({
   const report = run.report;
 
   const askForm = <AskForm runId={run.run_id} reports={reports} onAsked={onAsked} />;
-  const feedbackForm = <FeedbackForm runId={run.run_id} onSaved={onFeedback} />;
+  const feedbackForm = <VerdictPanel run={run} onSaved={onFeedback} />;
   let askNotice: ReactNode = null;
-  if (run.status === 'failed') {
+  if (run.status === 'stopped') {
+    askNotice = (
+      <Notice variant="warn" title="The run was stopped">
+        The report below is from before it was stopped. Ask a follow-up to start it again.
+      </Notice>
+    );
+  } else if (run.status === 'failed') {
     askNotice = (
       <Notice variant="warn" title="The last follow-up failed">
         Reason: <span className="mono">{run.phase_reason ?? 'not recorded'}</span>. The report below is from before it. You can ask again.
@@ -286,6 +324,7 @@ function CompletedView({
           { id: 'report', label: 'Report' },
           { id: 'asks', label: `Follow-ups (${asks.length})` },
           { id: 'feedback', label: `Feedback (${run.feedback.length})` },
+          { id: 'steps', label: 'Steps' },
           { id: 'request', label: 'Request' },
         ]}
       />
@@ -364,12 +403,28 @@ function CompletedView({
                 <div key={i} className="runs-entry">
                   <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
                     <StatusTag tone={f.verdict === 'wrong' ? 'rust' : f.verdict === 'partial' || f.verdict === 'pending' ? 'amber' : 'neutral'}>
-                      {f.verdict}
+                      {verdictLabel(f)}
                     </StatusTag>
                     <span className="muted" style={{ fontSize: 13 }}>
                       {f.given_by} · {formatDateTime(f.given_at)} · {f.interface}
+                      {f.phase !== undefined && f.phase !== 'completed' && <> · while {f.phase}</>}
+                      {f.report_seq !== undefined && <> · report #{f.report_seq}</>}
                     </span>
                   </div>
+                  {f.notes !== undefined && <p style={{ margin: '8px 0 0', fontSize: 13, whiteSpace: 'pre-wrap' }}>{f.notes}</p>}
+                  {f.findings !== undefined && f.findings.length > 0 && (
+                    <ul className="runs-list" style={{ margin: '8px 0 0' }}>
+                      {f.findings.map((m) => (
+                        <li key={m.id} style={{ fontSize: 13 }}>
+                          <StatusTag tone={m.verdict === 'wrong' ? 'rust' : m.verdict === 'partial' ? 'amber' : 'neutral'} icon={m.verdict === 'wrong' ? 'x' : 'check'}>
+                            <span className="mono">{m.id}</span>
+                          </StatusTag>{' '}
+                          {m.text ?? <span className="muted">(an older version of the findings)</span>}
+                          {m.note !== undefined && <span className="muted"> · {m.note}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                   {f.actual_root_cause !== undefined && (
                     <p style={{ margin: '8px 0 0', fontSize: 13 }}>
                       <span className="muted">Actual root cause: </span>
@@ -387,6 +442,12 @@ function CompletedView({
             )}
           </Panel>
           {feedbackForm}
+        </div>
+      )}
+
+      {tab === 'steps' && (
+        <div className="runs-main">
+          <StepsPanel runId={run.run_id} live={run.status === 'running'} />
         </div>
       )}
 

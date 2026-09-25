@@ -5,8 +5,10 @@
 //   GET  /triage                       -> {runs: RunSummary[], next_cursor} (filters in run-list.ts)
 //   GET  /triage/:run_id               -> {run_id, status, phase, classification, id_chain, report?,
 //                                          created_at, updated_at, requested_by, submissions, feedback, ...}
+//   GET  /triage/:run_id/events        -> {events, next, more}; ?after=<next>&limit=<n>, the run's events.jsonl
 //   POST /triage/:run_id/ask           -> 202 {run_id, submission_id}
-//   POST /triage/:run_id/feedback      -> 200 {run_id, verdict, count}
+//   POST /triage/:run_id/feedback      -> 200 {run_id, verdict, count}; any time, not only after the report
+//   POST /triage/:run_id/stop          -> 200 {run_id, stopped_from, aborted, feedback_count, gaps}; 409 when finished
 //   POST /triage/:run_id/post-to-slack -> 403, or 501 when enabled (v1)
 //
 // Auth is not applied here. src/http/bearer-auth.http.ts puts bearerAuth in
@@ -40,9 +42,20 @@ import { IngressInputError, NoEnabledEntityError, type InputHints } from '../nor
 import { MAX_THREAD_FILE_BYTES, type PrepareInput, type PreparedSubmission } from '../prepare.ts';
 import { SlackFetchError } from '../slack.ts';
 import { SlackPermalinkError } from '../slack-url.ts';
+import { RunNotRunningError, stopRun } from '../stop.ts';
 import { askRun, className, type Dispatcher, type SettleDeps, type SubmissionResult } from '../submit.ts';
+import { findingRefs } from '../../report/finding-refs.ts';
+import { readRunEvents } from '../../runlog/read.ts';
 import { filterRuns, parseListQuery, statusOfPhase, storeQuery } from './run-list.ts';
-import { AskBodySchema, checkIdempotencyKey, FeedbackBodySchema, parseBody, TriageBodySchema, type TriageBody } from './schemas.ts';
+import {
+  AskBodySchema,
+  checkIdempotencyKey,
+  FeedbackBodySchema,
+  parseBody,
+  StopBodySchema,
+  TriageBodySchema,
+  type TriageBody,
+} from './schemas.ts';
 
 /** How long an Idempotency-Key maps to its run (LLD 04 §2.1). */
 export const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
@@ -73,6 +86,10 @@ export type TriageRouteDeps = {
   readonly allowSlackPost: boolean;
   /** Defaults to recordFeedback from src/report/feedback.ts. */
   readonly recordFeedback?: (runId: string, input: FeedbackInput, deps: FeedbackDeps) => Promise<FeedbackResult>;
+  /** A durable Flue abort of the run's instance, for a stop. Left out: the stop only marks the store. */
+  readonly abortRun?: (runId: RunId) => Promise<void>;
+  /** TRIAGE_RUNS_DIR, where each run's events.jsonl is. Left out: GET .../events answers an empty log. */
+  readonly runsDir?: string;
   /** Defaults to IDEMPOTENCY_TTL_MS. */
   readonly idempotencyTtlMs?: number;
   /** A background submission or follow-up failed. Gets the class name only by default. */
@@ -144,6 +161,24 @@ export function createTriageRoutes(source: TriageRouteDepsSource): Hono {
     return c.json(runView(run));
   });
 
+  app.get('/triage/:run_id/events', async (c) => {
+    const runId = c.req.param('run_id');
+    if (!v.is(RunIdSchema, runId)) return invalid(c, ['run_id'], 'is not a run id');
+    const after = intParam(c.req.query('after'));
+    const limitParam = intParam(c.req.query('limit'));
+    if (after === null) return invalid(c, ['after'], 'must be a whole number');
+    if (limitParam === null) return invalid(c, ['limit'], 'must be a whole number');
+    const deps = await load();
+    if ((await deps.store.getRun(runId)) === null) return notFound(c);
+    if (deps.runsDir === undefined) return c.json({ events: [], next: after ?? 0, more: false });
+    // The lines are persisted-profile text already; they are not redacted again here.
+    const page = await readRunEvents(deps.runsDir, runId, {
+      ...(after !== undefined ? { after } : {}),
+      ...(limitParam !== undefined ? { limit: limitParam } : {}),
+    });
+    return c.json(page);
+  });
+
   app.post('/triage/:run_id/ask', limit, async (c) => {
     const runId = c.req.param('run_id');
     if (!v.is(RunIdSchema, runId)) return invalid(c, ['run_id'], 'is not a run id');
@@ -190,9 +225,38 @@ export function createTriageRoutes(source: TriageRouteDepsSource): Hono {
     } catch (err) {
       if (!(err instanceof FeedbackError)) throw err;
       if (err.code === 'run_not_found') return notFound(c);
-      if (err.code === 'no_report') return c.json({ error: 'run has no report yet' }, 409);
       if (err.code === 'invalid_run_id') return invalid(c, ['run_id'], 'is not a run id');
       return invalid(c, err.fields);
+    }
+  });
+
+  app.post('/triage/:run_id/stop', limit, async (c) => {
+    const runId = c.req.param('run_id');
+    if (!v.is(RunIdSchema, runId)) return invalid(c, ['run_id'], 'is not a run id');
+    const body = await readJson(c);
+    if (body === NOT_JSON) return invalid(c, ['body'], 'is not valid JSON');
+    const parsed = parseBody(StopBodySchema, body);
+    if (!parsed.ok) return invalid(c, parsed.fields);
+
+    const deps = await load();
+    try {
+      const result = await stopRun(
+        runId,
+        { by: parsed.value.given_by, interface: 'http', ...(parsed.value.verdict !== undefined ? { verdict: parsed.value.verdict } : {}) },
+        { store: deps.store, home: deps.home, ...(deps.abortRun !== undefined ? { abort: deps.abortRun } : {}) },
+      );
+      return c.json({
+        run_id: runId,
+        stopped_from: result.stopped_from,
+        aborted: result.aborted,
+        feedback_count: result.feedback?.count ?? null,
+        gaps: [...result.gaps],
+      });
+    } catch (err) {
+      if (err instanceof RunNotFoundError) return notFound(c);
+      if (err instanceof RunNotRunningError) return c.json({ error: 'run is not running', phase: err.phase }, 409);
+      if (err instanceof IngressInputError) return invalid(c, [err.key === 'by' ? 'given_by' : err.key], err.reason);
+      throw err;
     }
   });
 
@@ -274,13 +338,21 @@ export function runView(run: RunRecord): Record<string, unknown> {
       created_at: s.created_at,
       has_report: s.report !== null && s.report !== undefined,
     })),
+    // Ids the feedback route takes in findings[]; the latest findings versions and the root cause.
+    findings: findingRefs({ evidence: run.evidence ?? {}, report: run.report }),
     feedback: (run.feedback ?? []).map((f) => ({
       verdict: f.verdict,
       ...(f.actual_root_cause !== undefined ? { actual_root_cause: f.actual_root_cause } : {}),
       ...(f.faster_path !== undefined ? { faster_path: f.faster_path } : {}),
+      ...(f.notes !== undefined ? { notes: f.notes } : {}),
       given_by: f.given_by,
       given_at: f.given_at,
       interface: f.interface,
+      ...(f.phase !== undefined ? { phase: f.phase } : {}),
+      ...(f.submission_seq !== undefined ? { submission_seq: f.submission_seq } : {}),
+      ...(f.report_seq !== undefined ? { report_seq: f.report_seq } : {}),
+      ...(f.cancelled === true ? { cancelled: true } : {}),
+      ...(f.findings !== undefined ? { findings: f.findings } : {}),
     })),
     ...(run.report !== null && run.report_md !== null ? { report_md: run.report_md } : {}),
   };
@@ -323,6 +395,12 @@ function prepareError(c: Context, err: unknown): Response {
 
 function invalid(c: Context, fields: readonly string[], reason?: string): Response {
   return c.json({ error: 'invalid request', fields, ...(reason !== undefined ? { reason } : {}) }, 400);
+}
+
+/** undefined when absent or blank, null when not a whole number >= 0. */
+function intParam(raw: string | undefined): number | undefined | null {
+  if (raw === undefined || raw === '') return undefined;
+  return /^[0-9]{1,9}$/.test(raw) ? Number(raw) : null;
 }
 
 function notFound(c: Context): Response {

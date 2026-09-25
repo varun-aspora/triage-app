@@ -17,6 +17,7 @@ import {
   InputRequestNotOpenError,
   InputRequestOpenError,
   RunNotFoundError,
+  RunStoppedError,
   RunStoreError,
   RunStoreRedactionError,
   type ClassificationRecord,
@@ -319,6 +320,62 @@ export const runStoreContract: readonly ContractCase[] = [
       const fresh = await store.getRun(RUN_C);
       assert.equal(fresh?.input_request, null);
       assert.deepEqual(fresh?.input_history, []);
+    },
+  },
+  {
+    name: 'markStopped stops an unfinished run, and a stopped run stays stopped until a resume',
+    async run(store, clock) {
+      await newRun(store, RUN_A);
+      await store.setPhase(RUN_A, 'investigating', { worker_pid: 4242 });
+      clock.advance(HOUR);
+      assert.equal(await store.markStopped(RUN_A, 'cancelled', p(sampleResolution('cancelled'))), 'investigating');
+      const run = await store.getRun(RUN_A);
+      assert.ok(run);
+      assert.equal(run.phase, 'stopped');
+      assert.equal(run.phase_reason, 'cancelled');
+      assert.equal(run.worker_pid, 4242);
+      assert.equal(run.updated_at, new Date(clock.now()).toISOString());
+      // The pipeline's later writes are refused and change nothing.
+      assert.equal(await store.setPhase(RUN_A, 'completed'), false);
+      assert.equal(await store.setPhase(RUN_A, 'failed', { reason: 'AgentRunError' }), false);
+      const still = await store.getRun(RUN_A);
+      assert.equal(still?.phase, 'stopped');
+      assert.equal(still?.phase_reason, 'cancelled');
+      await assert.rejects(() => store.putInputRequest(RUN_A, p(sampleInputRequest('q1'))), (err: unknown) => err instanceof RunStoppedError);
+      // A follow-up resumes it.
+      assert.equal(await store.setPhase(RUN_A, 'dispatched', { resume: true }), true);
+      assert.equal((await store.getRun(RUN_A))?.phase, 'dispatched');
+      assert.equal(await store.setPhase(RUN_A, 'completed'), true);
+    },
+  },
+  {
+    name: 'markStopped closes an open question, leaves a finished run alone and refuses a missing run',
+    async run(store, clock) {
+      await newRun(store, RUN_A);
+      await store.putInputRequest(RUN_A, p(sampleInputRequest('q1')));
+      clock.advance(HOUR);
+      const at = new Date(clock.now()).toISOString();
+      assert.equal(await store.markStopped(RUN_A, 'cancelled', p(sampleResolution('cancelled', at))), 'needs_input');
+      const run = await store.getRun(RUN_A);
+      assert.ok(run);
+      assert.equal(run.phase, 'stopped');
+      assert.equal(run.input_request, null);
+      assert.deepEqual(run.input_history, [{ ...sampleInputRequest('q1'), ...sampleResolution('cancelled', at) }]);
+      // Already stopped, completed or failed: nothing is written.
+      assert.equal(await store.markStopped(RUN_A, 'again', p(sampleResolution('cancelled'))), null);
+      assert.equal((await store.getRun(RUN_A))?.phase_reason, 'cancelled');
+      await newRun(store, RUN_B);
+      await store.setPhase(RUN_B, 'completed');
+      const before = await store.getRun(RUN_B);
+      clock.advance(HOUR);
+      assert.equal(await store.markStopped(RUN_B, 'cancelled', p(sampleResolution('cancelled'))), null);
+      const after = await store.getRun(RUN_B);
+      assert.equal(after?.phase, 'completed');
+      assert.equal(after?.updated_at, before?.updated_at);
+      await assert.rejects(
+        () => store.markStopped(RUN_C, 'cancelled', p(sampleResolution('cancelled'))),
+        (err: unknown) => err instanceof RunNotFoundError,
+      );
     },
   },
   {

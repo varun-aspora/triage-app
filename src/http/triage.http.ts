@@ -31,5 +31,7 @@ export function productionDeps(): TriageRouteDeps {
     prepare: (input) => prepareRequest(input, prepareDeps(rt.config, rt.registry)),
     submit: (prepared) => runSubmission(prepared, submission),
     ask: (runId, question, by) => startAsk(runId, question, by, submission),
+    abortRun: (runId) => submission.dispatcher.init(submission.agent, { id: runId }).abort(),
+    runsDir: rt.config.paths.runsDir,
   };
 }

@@ -61,11 +61,14 @@ export const RUN_PHASES = [
   'needs_input',
   'completed',
   'failed',
+  // Stopped by a person (triage stop, POST /triage/:run_id/stop). Terminal
+  // until a follow-up resumes the run.
+  'stopped',
 ] as const;
 export const RunPhaseSchema = v.picklist(RUN_PHASES);
 export type RunPhase = v.InferOutput<typeof RunPhaseSchema>;
 
-export const TERMINAL_PHASES: readonly RunPhase[] = ['completed', 'failed'];
+export const TERMINAL_PHASES: readonly RunPhase[] = ['completed', 'failed', 'stopped'];
 
 export function isTerminalPhase(phase: RunPhase): boolean {
   return TERMINAL_PHASES.includes(phase);
@@ -77,6 +80,11 @@ export type PhaseDetail = {
   readonly reason?: string;
   /** The detached worker's pid, so status can tell a stalled run. */
   readonly worker_pid?: number;
+  /**
+   * A stopped run stays stopped: setPhase leaves it alone unless resume is
+   * set. Only a new follow-up submission sets it.
+   */
+  readonly resume?: boolean;
 };
 
 // ------------------------------------------------------------------ records
@@ -142,13 +150,44 @@ export const FEEDBACK_VERDICTS = ['correct', 'partial', 'wrong', 'pending'] as c
 export const FeedbackVerdictSchema = v.picklist(FEEDBACK_VERDICTS);
 export type FeedbackVerdict = v.InferOutput<typeof FeedbackVerdictSchema>;
 
+/**
+ * A finding: '<key>.v<version>.<e|h|c><n>' for the nth evidence item,
+ * hypothesis or code claim of one findings version (src/report/finding-refs.ts),
+ * or 'root_cause' for the report's root cause.
+ */
+export const FINDING_ID_PATTERN = /^(?:(?:ssfb|atspl|rtl)\.v[1-9][0-9]*\.[eh]|code\.v[1-9][0-9]*\.c)[1-9][0-9]*$|^root_cause$/;
+export const FindingIdSchema = v.pipe(v.string(), v.regex(FINDING_ID_PATTERN));
+
+export const FINDING_VERDICTS = ['correct', 'partial', 'wrong'] as const;
+export const FindingVerdictSchema = v.picklist(FINDING_VERDICTS);
+
+/** A verdict on one finding. text is a copy of the finding, so learning needs no lookup later. */
+export const FindingFeedbackSchema = v.object({
+  id: FindingIdSchema,
+  verdict: FindingVerdictSchema,
+  note: v.optional(v.string()),
+  text: v.optional(v.string()),
+});
+export type FindingFeedback = v.InferOutput<typeof FindingFeedbackSchema>;
+
 export const FeedbackSchema = v.object({
   verdict: FeedbackVerdictSchema,
   actual_root_cause: v.optional(v.string()),
   faster_path: v.optional(v.string()),
+  /** Free notes with an accept or reject. */
+  notes: v.optional(v.string()),
   given_by: NonEmptyStringSchema,
   given_at: TakenAtSchema,
   interface: InterfaceSchema,
+  /** The run's phase when the verdict was given; a verdict can come before the report. */
+  phase: v.optional(RunPhaseSchema),
+  /** The run's latest submission at the time. */
+  submission_seq: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1))),
+  /** The submission whose report the verdict judged, when there was one. */
+  report_seq: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1))),
+  /** Set by a stop (Cancel): a reject with no notes that also stopped the run. */
+  cancelled: v.optional(v.literal(true)),
+  findings: v.optional(v.array(FindingFeedbackSchema)),
 });
 export type Feedback = v.InferOutput<typeof FeedbackSchema>;
 
@@ -269,11 +308,15 @@ export interface RunStore {
   createRun(runId: RunId, request: Persisted<TriageRequest>): Promise<void>;
   /** Adds a submission and returns its seq, starting at 1. */
   addSubmission(runId: RunId, submission: Persisted<SubmissionInput>): Promise<number>;
-  setPhase(runId: RunId, phase: RunPhase, detail?: PhaseDetail): Promise<void>;
+  /**
+   * Moves the run to the phase. Returns false, and writes nothing, when the
+   * run is stopped and detail.resume is not set.
+   */
+  setPhase(runId: RunId, phase: RunPhase, detail?: PhaseDetail): Promise<boolean>;
   /**
    * Opens a question for the requester and moves the run to phase
    * needs_input, clearing the phase reason. Throws InputRequestOpenError
-   * while another question is open.
+   * while another question is open, and RunStoppedError on a stopped run.
    */
   putInputRequest(runId: RunId, request: Persisted<InputRequest>): Promise<void>;
   /**
@@ -282,6 +325,13 @@ export interface RunStore {
    * InputRequestNotOpenError when no open question has that id.
    */
   resolveInputRequest(runId: RunId, questionId: string, resolution: Persisted<InputResolution>): Promise<void>;
+  /**
+   * Stops a run that has not finished: phase stopped with the reason, and an
+   * open question closed with the resolution. Returns the phase the run was
+   * in, or null when it had already finished, in which case nothing is
+   * written.
+   */
+  markStopped(runId: RunId, reason: string, resolution: Persisted<InputResolution>): Promise<RunPhase | null>;
   putClassification(runId: RunId, record: Persisted<ClassificationRecord>): Promise<void>;
   /** Stores a new version of the findings for the key and returns it (1, 2, ...). */
   putEvidence(runId: RunId, key: EvidenceKey, findings: Persisted<Findings>): Promise<number>;
@@ -319,6 +369,16 @@ export class RunNotFoundError extends RunStoreError {
   readonly runId: string;
   constructor(runId: string) {
     super(`run not found: ${runId}`);
+    this.runId = runId;
+  }
+}
+
+/** A write that a stopped run refuses, such as a new question. */
+export class RunStoppedError extends RunStoreError {
+  override name = 'RunStoppedError';
+  readonly runId: string;
+  constructor(runId: string) {
+    super(`run ${runId} was stopped`);
     this.runId = runId;
   }
 }

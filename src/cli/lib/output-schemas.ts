@@ -19,6 +19,9 @@ export const EXIT_WAIT_TIMEOUT: number = EXIT.CONFIG;
 /** Exit code of a `triage wait` or `triage run` that stopped on a question for the requester (P6 §4.5). */
 export const EXIT_NEEDS_INPUT = 4;
 
+/** Exit code of a `triage wait` or `triage run` on a run a person stopped. */
+export const EXIT_STOPPED = 5;
+
 /**
  * The stored report as the run store returns it (persisted profile). Loose on
  * purpose: the persisted profile can mask digits in the run id, so the stored
@@ -33,7 +36,7 @@ export const StoredReportSchema = v.looseObject({
 export const StartOutputSchema = v.strictObject({ run_id: RunIdSchema });
 export type StartOutput = v.InferOutput<typeof StartOutputSchema>;
 
-export const WAIT_STATUSES = ['completed', 'failed', 'stalled', 'timeout', 'needs_input'] as const;
+export const WAIT_STATUSES = ['completed', 'failed', 'stalled', 'timeout', 'needs_input', 'stopped'] as const;
 
 /** `triage wait --json`, and `triage run --json` (completed or failed only). */
 export const WaitOutputSchema = v.strictObject({
@@ -41,7 +44,7 @@ export const WaitOutputSchema = v.strictObject({
   status: v.picklist(WAIT_STATUSES),
   /** The latest report, when the run completed with one. */
   report: v.optional(StoredReportSchema),
-  /** Why the run failed or stalled. Error class names and fixed phrases only. */
+  /** Why the run failed, stalled or was stopped. Error class names and fixed phrases only. */
   reason: v.optional(v.string()),
   /** The phase the run was in when a wait timed out, or needs_input. */
   phase: v.optional(RunPhaseSchema),
@@ -50,7 +53,7 @@ export const WaitOutputSchema = v.strictObject({
 });
 export type WaitOutput = v.InferOutput<typeof WaitOutputSchema>;
 
-export const RUN_STATUSES = ['running', 'completed', 'failed', 'stalled', 'needs_input'] as const;
+export const RUN_STATUSES = ['running', 'completed', 'failed', 'stalled', 'needs_input', 'stopped'] as const;
 export const RunStatusSchema = v.picklist(RUN_STATUSES);
 export type RunStatus = v.InferOutput<typeof RunStatusSchema>;
 

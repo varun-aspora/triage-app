@@ -279,6 +279,7 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
   setPhase(p, db) {
     const row = runRow(db, str(p[0], 'run_id'));
     if (!row) return [];
+    if (row.phase === str(p[6], 'stopped') && bool(p[5], 'resume') !== true) return [];
     row.phase = str(p[1], 'phase');
     row.phase_reason = strOrNull(p[2], 'phase_reason');
     row.worker_pid = intOrNull(p[3], 'worker_pid') ?? row.worker_pid;
@@ -300,7 +301,7 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
   },
   putInputRequest(p, db) {
     const row = runRow(db, str(p[0], 'run_id'));
-    if (!row || row.input_request !== null) return [];
+    if (!row || row.input_request !== null || row.phase === 'stopped') return [];
     row.input_request = jsonb(p[1], 'input_request');
     row.phase = 'needs_input';
     row.phase_reason = null;
@@ -315,6 +316,22 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
     row.input_history = [...row.input_history, { ...open, ...(jsonb(p[2], 'resolution') as object) }];
     row.input_request = null;
     row.updated_at = ts(p[3], 'updated_at');
+    return [{ run_id: row.run_id }];
+  },
+  phaseForUpdate(p, db) {
+    const row = runRow(db, str(p[0], 'run_id'));
+    return row ? [{ phase: row.phase }] : [];
+  },
+  markStopped(p, db) {
+    const row = runRow(db, str(p[0], 'run_id'));
+    if (!row) return [];
+    row.phase = str(p[4], 'phase');
+    row.phase_reason = str(p[1], 'phase_reason');
+    row.updated_at = ts(p[2], 'updated_at');
+    if (row.input_request !== null) {
+      row.input_history = [...row.input_history, { ...(row.input_request as object), ...(jsonb(p[3], 'resolution') as object) }];
+      row.input_request = null;
+    }
     return [{ run_id: row.run_id }];
   },
   nextSubmissionSeq(p, db) {

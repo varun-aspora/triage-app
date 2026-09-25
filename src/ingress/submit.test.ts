@@ -17,7 +17,7 @@ import type { Embedder } from '../embed/index.ts';
 import { isPersisted, redactPersisted } from '../gate/redact.ts';
 import type { EmbedRunResult } from '../runstore/embed-run.ts';
 import { createFolderRunStore, folderRunStoreFromConfig } from '../runstore/folder.ts';
-import { RunNotFoundError, type RunStore } from '../runstore/types.ts';
+import { RunNotFoundError, RunStoppedError, type RunStore } from '../runstore/types.ts';
 import { type Classification, type TriageInit, TriageInitSchema } from '../types/classification.ts';
 import type { Tier } from '../types/core.ts';
 import type { IdChain } from '../types/id-chain.ts';
@@ -203,6 +203,7 @@ type HarnessOptions = {
   preflightWarnings?: { step: string; message: string }[];
   signal?: AbortSignal;
   readTimeoutMs?: number;
+  stopPollMs?: number;
 };
 
 const EMBEDDER: Embedder = { model: 'test/embed', embed: async () => [] };
@@ -260,6 +261,7 @@ function harness(o: HarnessOptions = {}): Harness {
     readAttachment: async () => new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
     ...(o.signal !== undefined ? { signal: o.signal } : {}),
     ...(o.readTimeoutMs !== undefined ? { readTimeoutMs: o.readTimeoutMs } : {}),
+    ...(o.stopPollMs !== undefined ? { stopPollMs: o.stopPollMs } : {}),
   };
   return { deps, events, calls, store, flue, spies };
 }
@@ -948,5 +950,99 @@ describe('needs_input and answerRun', () => {
     const { identity: _identity, ...noIdentity } = n.deps;
     await expect(answerRun(RUN_ID, { answer: 'x', ids: { customer_id: 'c' }, by: 'ops' }, noIdentity)).rejects.toBeInstanceOf(SubmissionInputError);
     expect(n.flue.dispatches).toHaveLength(0);
+  });
+});
+
+// ------------------------------------------------------------------ stop
+
+describe('a stop from another process', () => {
+  const cancel = () => redactPersisted({ status: 'cancelled' as const, resolved_at: NOW.toISOString(), resolved_by: 'ops' });
+  const stop = (store: RunStore) => store.markStopped(RUN_ID, 'cancelled', cancel());
+  /** A read that waits until its signal aborts. */
+  const readUntilAborted: ReadBehaviour = (signal) =>
+    new Promise((_, reject) => signal?.addEventListener('abort', () => reject(signal.reason ?? new Error('aborted'))));
+
+  test('a stop that lands during a step ends the run before dispatch at the next phase write', async () => {
+    let store: RunStore | undefined;
+    const h = harness({
+      stopPollMs: 0,
+      identity: async () => {
+        await stop(store!);
+        return { id_chain: CHAIN, basic_state: [], gaps: [] };
+      },
+    });
+    store = h.store;
+    await expect(runSubmission(prepared(), h.deps)).rejects.toBeInstanceOf(RunStoppedError);
+    expect(h.flue.dispatches).toHaveLength(0);
+    expect(h.events).not.toContain('classify');
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('stopped');
+    expect(run?.phase_reason).toBe('cancelled');
+  });
+
+  test('the watcher aborts a step that is still running', async () => {
+    let store: RunStore | undefined;
+    const h = harness({
+      stopPollMs: 5,
+      identity: (_request: unknown, { signal }: { signal: AbortSignal }) => {
+        setTimeout(() => void stop(store!), 1);
+        return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason)));
+      },
+    } as HarnessOptions);
+    store = h.store;
+    await expect(runSubmission(prepared(), h.deps)).rejects.toBeInstanceOf(RunStoppedError);
+    expect(h.flue.dispatches).toHaveLength(0);
+    expect((await h.store.getRun(RUN_ID))?.phase).toBe('stopped');
+  });
+
+  test('after dispatch the watcher aborts the read and the Flue instance; nothing is embedded', async () => {
+    const h = harness({
+      stopPollMs: 5,
+      read: readUntilAborted,
+      onDispatch: async (store) => {
+        setTimeout(() => void stop(store), 20);
+      },
+    });
+    const result = await runSubmission(prepared(), h.deps);
+    expect(result.status).toBe('stopped');
+    expect(result.error).toBeUndefined();
+    expect(h.flue.aborts).toBe(1);
+    expect(h.spies.embedRun).toHaveLength(0);
+    expect((await h.store.getRun(RUN_ID))?.phase).toBe('stopped');
+  });
+
+  test('a stop between the dispatch and the investigating write aborts at once', async () => {
+    const h = harness({ stopPollMs: 0, read: readUntilAborted, onDispatch: async (store) => void (await stop(store)) });
+    const result = await runSubmission(prepared(), h.deps);
+    expect(result.status).toBe('stopped');
+    expect(h.flue.aborts).toBe(1);
+    expect((await h.store.getRun(RUN_ID))?.phase).toBe('stopped');
+  });
+
+  test('a read that fails because the agent was aborted elsewhere settles as stopped', async () => {
+    let store: RunStore | undefined;
+    const h = harness({
+      stopPollMs: 0,
+      read: async () => {
+        await stop(store!);
+        throw new AgentRunError({ outcome: 'aborted', submissionId: 'sub-1' });
+      },
+    });
+    store = h.store;
+    const result = await runSubmission(prepared(), h.deps);
+    expect(result.status).toBe('stopped');
+    expect(result.error).toBeUndefined();
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('stopped');
+    expect(run?.phase_reason).toBe('cancelled');
+  });
+
+  test('a follow-up resumes a stopped run', async () => {
+    const h = harness({ stopPollMs: 0 });
+    await h.store.createRun(RUN_ID, redactPersisted(prepared().request));
+    await stop(h.store);
+    const result = await askRun(RUN_ID, 'did the reversal land?', 'ops', h.deps);
+    expect(result.status).toBe('completed');
+    expect((await h.store.getRun(RUN_ID))?.phase).toBe('completed');
   });
 });

@@ -19,11 +19,14 @@ import type {
   ListRunsResponse,
   ReposResponse,
   RunDetail,
+  RunEventsResponse,
   ServicesResponse,
   Session,
   StartRunBody,
   StartRunResponse,
   StartSyncResponse,
+  StopBody,
+  StopResponse,
   SyncJob,
   UiConfig,
 } from './types.ts';
@@ -65,6 +68,16 @@ export function askRun(runId: string, body: AskBody): Promise<AskResponse> {
 
 export function sendFeedback(runId: string, body: FeedbackBody): Promise<FeedbackResponse> {
   return request('POST', `/triage/${seg(runId)}/feedback`, { body });
+}
+
+/** 409 when the run has already finished. */
+export function stopRun(runId: string, body: StopBody): Promise<StopResponse> {
+  return request('POST', `/triage/${seg(runId)}/stop`, { body });
+}
+
+/** The run's event log from line `after` on. */
+export function getRunEvents(runId: string, q: { after?: number; limit?: number } = {}, opts: Read = {}): Promise<RunEventsResponse> {
+  return request('GET', `/triage/${seg(runId)}/events`, { query: { ...q }, signal: opts.signal });
 }
 
 // ------------------------------------------------------------------ catalog

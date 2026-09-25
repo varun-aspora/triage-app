@@ -36,6 +36,7 @@ describe('bootRuntime', () => {
         dbBuilt += 1;
         return DB;
       },
+      eventLog: false as const,
     };
     const a = await bootRuntime(opts);
     const b = await bootRuntime(opts);
@@ -50,7 +51,7 @@ describe('bootRuntime', () => {
 
   test('concurrent first calls share one start', async () => {
     const calls: StartOptions[] = [];
-    const opts = { start: fakeStart(calls), db: () => DB };
+    const opts = { start: fakeStart(calls), db: () => DB, eventLog: false as const };
     const [a, b] = await Promise.all([bootRuntime(opts), bootRuntime(opts)]);
     expect(a).toBe(b);
     expect(calls).toHaveLength(1);
@@ -58,8 +59,8 @@ describe('bootRuntime', () => {
 
   test('a failed start is forgotten so the next call tries again', async () => {
     const calls: StartOptions[] = [];
-    await expect(bootRuntime({ start: fakeStart(calls, true), db: () => DB })).rejects.toThrow('start failed');
-    await bootRuntime({ start: fakeStart(calls), db: () => DB });
+    await expect(bootRuntime({ start: fakeStart(calls, true), db: () => DB, eventLog: false as const })).rejects.toThrow('start failed');
+    await bootRuntime({ start: fakeStart(calls), db: () => DB, eventLog: false as const });
     expect(calls).toHaveLength(2);
   });
 
@@ -71,6 +72,7 @@ describe('bootRuntime', () => {
         return fakeStart([])(options);
       },
       db: () => DB,
+      eventLog: false as const,
       ensureModels: async () => {
         order.push('models');
       },

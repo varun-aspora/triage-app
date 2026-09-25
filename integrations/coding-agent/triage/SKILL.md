@@ -67,7 +67,10 @@ Read the `status` field of the JSON:
 - `needs_input` (exit 4): the run is paused on a question only the user can
   answer. Go to step 2a, then wait again.
 - `failed` or `stalled` (exit 1): tell the user the `reason` and stop. Do not
-  start a new run unless they ask.
+  start a new run unless they ask. To see what went wrong, read the run's
+  steps with `triage logs <run_id>` (step 7).
+- `stopped` (exit 5): someone stopped the run. Tell the user. A follow-up
+  (step 4) starts it again.
 
 Exit 3 is also a config error. That one prints `{"error":{"code":"CONFIG",...}}`
 instead of a `status`; show the message to the user and stop.
@@ -148,13 +151,39 @@ Post needs an explicit confirmation in this chat, every time:
 
 ## 6. Feedback
 
-If the user says whether the report was right, record it:
+If the user says whether the run was right, record it. It can be given while
+the run is still going:
 
 ```sh
-triage feedback <run_id> --verdict correct|partial|wrong|pending --actual-root-cause '<what it really was>'
+triage feedback <run_id> --verdict accept|reject --notes '<what the user said>' --given-by '<user email or Slack id>'
 ```
 
-`--actual-root-cause` is optional; use it when the verdict is partial or wrong.
+- Record only what the user said. Never judge the run yourself.
+- `--notes` is optional. `--actual-root-cause '<what it really was>'` and
+  `--finding <id>=accept|reject` are optional too; finding ids such as
+  `ssfb.v2.e1` are listed in the run's findings.
+- `correct`, `partial`, `wrong` and `pending` still work as verdicts.
+
+## 7. Stopping a run, and its steps
+
+Only when the user asks to stop or cancel a run that is still going:
+
+```sh
+triage stop <run_id> --given-by '<user email or Slack id>' --json
+```
+
+This stops the agent and records the run as rejected, with no notes. A
+follow-up (step 4) starts it again.
+
+Every step of a run is logged. When the user asks what a run did, or why it
+failed, print the steps:
+
+```sh
+triage logs <run_id>
+triage logs <run_id> --type tool --type failed
+```
+
+Show the lines the user asks about. Do not paste the whole log.
 
 ## Workspace
 

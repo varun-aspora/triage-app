@@ -98,7 +98,8 @@ export function createAskCommand(options: AskCommandOptions = {}): CliCommand {
 }
 
 async function markDispatched(store: Pick<RunStore, 'setPhase'>, runId: string, pid: number): Promise<void> {
-  await store.setPhase(runId, 'dispatched', { worker_pid: pid });
+  // A follow-up resumes a stopped run.
+  await store.setPhase(runId, 'dispatched', { worker_pid: pid, resume: true });
 }
 
 export const command: CliCommand = createAskCommand();

@@ -169,6 +169,7 @@ function memoryStore(runId: string): MemoryStore {
     setPhase: unused,
     putClassification: unused,
     putInputRequest: unused,
+    markStopped: unused,
     resolveInputRequest: unused,
     putEvidence: unused,
     putFeedback: unused,

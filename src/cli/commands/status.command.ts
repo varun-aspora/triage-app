@@ -39,6 +39,7 @@ export const pidAlive: PidChecker = (pid) => {
 export function runStatusOf(run: Pick<RunRecord, 'phase' | 'worker_pid'>, isAlive: PidChecker): RunStatus {
   if (run.phase === 'completed') return 'completed';
   if (run.phase === 'failed') return 'failed';
+  if (run.phase === 'stopped') return 'stopped';
   if (run.phase === 'needs_input') return 'needs_input';
   if (run.worker_pid !== undefined && !isAlive(run.worker_pid)) return 'stalled';
   return 'running';

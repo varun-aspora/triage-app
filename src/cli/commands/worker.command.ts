@@ -28,7 +28,7 @@ import {
   type SubmissionResult,
 } from '../../ingress/submit.ts';
 import { decodePayload, WorkerPayloadError, type WorkerPayload } from '../../ingress/worker-payload.ts';
-import type { RunStore } from '../../runstore/types.ts';
+import { RunStoppedError, type RunStore } from '../../runstore/types.ts';
 import { EXIT, printError } from '../output.ts';
 import type { CliCommand } from '../types.ts';
 import { defaultOpenStore, type OpenStore } from './status.command.ts';
@@ -119,11 +119,13 @@ export function createWorkerCommand(options: WorkerCommandOptions = {}): CliComm
           );
         }
       } catch (err) {
+        // A stop is what a person asked for, not a failure.
+        if (err instanceof RunStoppedError) return EXIT.OK;
         await store.setPhase(runId, 'failed', { reason: className(err) }).catch(() => undefined);
         printError(io, json, 'ERROR', `run ${runId} failed: ${className(err)}`);
         return EXIT.ERROR;
       }
-      // A run parked on a question is not a failure.
+      // A run parked on a question, or stopped, is not a failure.
       return result.status === 'failed' ? EXIT.ERROR : EXIT.OK;
     },
   };
@@ -152,8 +154,9 @@ async function recordPid(
   const run = await store.getRun(runId);
   if (run === null) return `run not found: ${runId}`;
   // `triage ask` and `triage input` write the same phase and pid once the
-  // spawn returns, so the order of the two writes does not matter.
-  await store.setPhase(runId, 'dispatched', { worker_pid: pid });
+  // spawn returns, so the order of the two writes does not matter. A
+  // follow-up resumes a stopped run.
+  await store.setPhase(runId, 'dispatched', { worker_pid: pid, ...(payload.kind === 'ask' ? { resume: true } : {}) });
   return true;
 }
 
