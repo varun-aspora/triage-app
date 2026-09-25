@@ -8,10 +8,18 @@
 // set, every route answers 503, so no route is ever served without the token.
 // The server boot (T07.10) calls assertHttpConfig before it listens, which is
 // where a blank token stops the process.
+//
+// One exemption: GET/HEAD of the web console's static shell and its public
+// config.json under /ui (see ui-public.ts), because the browser must load the
+// page before it can ask the operator for the token. The check runs before the
+// guard is built, so the prompt loads even while the token config is broken.
+// It lives here rather than in an earlier module because orderModules allows
+// nothing at or below this module's order.
 
 import type { MiddlewareHandler } from 'hono';
 import { ConfigError } from '../config/errors.ts';
 import { assertHttpConfig, bearerAuth } from '../ingress/http/auth.ts';
+import { isPublicUiRequest } from './ui-public.ts';
 import { BEARER_AUTH_ID, type HttpContext, type HttpModule } from './types.ts';
 
 /** Same text src/app.ts answers with when no auth module exists. Not imported from there, to keep the import graph acyclic. */
@@ -29,6 +37,7 @@ export const httpModule: HttpModule = {
 export function authMiddleware(ctx: HttpContext): MiddlewareHandler {
   let guard: MiddlewareHandler | undefined;
   return async (c, next) => {
+    if (isPublicUiRequest(c.req.method, c.req.path)) return next();
     if (guard === undefined) {
       try {
         guard = bearerAuth(assertHttpConfig(ctx.config()));

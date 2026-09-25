@@ -31,10 +31,13 @@ Mock mode is the default (`TRIAGE_MOCK_MODE=true`, `TRIAGE_MOCK_STRICT=true`): e
 
 | Script | What it does |
 |---|---|
-| `bun run typecheck` | Regenerates the import lists, then `tsc --noEmit` |
+| `bun run typecheck` | Regenerates the import lists, then `tsc --noEmit` for the server and the web console |
 | `bun run test` | Unit tests (`bun test ./src ./test ./scripts ./integrations`) with the no-I/O guard |
 | `bun run test:contract` | Vitest contract tests on Node with the fake model |
-| `bun run build` | `vite build` into `dist/`. Not needed to run the CLI or the server, which run from `src/` |
+| `bun run build` | `vite build` into `dist/`, then the web console into `web/dist/`. Not needed to run the CLI or the server, which run from `src/` |
+| `bun run build:web` | Builds only the web console, which the server serves at `/ui/` |
+| `bun run dev:web` | The web console on Vite's dev server (port 5173), proxying the API to `localhost:3000` |
+| `bun run test:web` | Unit tests for the web console (`bun test ./web/src`) |
 | `bun run ci` | Typecheck, unit tests, contract suite and classifier suite against a temp eval home |
 | `bun run triage -- <command>` | The CLI: `run`, `start`, `wait`, `status`, `ask`, `post`, `feedback`, `doctor`, `preflight`, `tunnel`, `repos sync`, `models refresh`, `fixtures review`, `runs`, `evals` |
 | `bun run serve` | The polling HTTP API (needs `TRIAGE_HTTP_AUTH_TOKEN`) |
@@ -91,6 +94,14 @@ Content-Type: application/json
 
 {"repo": "harbor"}
 ```
+
+## Web console
+
+`bun run build:web`, then `bun run serve` and open `http://<host>:<port>/ui/`. The page asks for the server's bearer token (`TRIAGE_HTTP_AUTH_TOKEN`) before it calls the API. It keeps the token in the tab's session storage, or in local storage when you tick "Remember on this device", and sends it only in the `Authorization` header. Sign out forgets it.
+
+The console's static files and `GET /ui/config.json` are the only routes served without the token; every API route still needs it. `TRIAGE_UI_ENV` (`production` or `non-production`, default `non-production`) only picks the colour theme: red for production, green otherwise.
+
+For development, run `bun run serve` and `bun run dev:web` side by side and open `http://localhost:5173/ui/`.
 
 ## Docs
 
