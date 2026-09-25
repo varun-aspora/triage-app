@@ -14,7 +14,7 @@ A Flue 2.0.8 agent service that triages NRI banking issues across the SSFB, ATSP
 bun install
 ```
 
-Configuration comes from one `.env` in a directory you name with `TRIAGE_HOME`. The loader reads `$TRIAGE_HOME/.env` and `$TRIAGE_HOME/resources/`, never the current directory.
+Configuration comes from one `.env` in a directory you name with `TRIAGE_HOME`. The loader reads `$TRIAGE_HOME/.env` and `$TRIAGE_HOME/resources/`. The CLI never falls back to the current directory. The HTTP server does: when `TRIAGE_HOME` is unset, it uses the directory it was started from. `bun run serve` runs from the repo root, so that is the repo root; start `node bin/triage-server.mjs` from another directory to use that one.
 
 ```bash
 export TRIAGE_HOME=/absolute/path/to/triage-home
