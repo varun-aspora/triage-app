@@ -258,8 +258,16 @@ Known gaps:
 
 - The crash: pg-pool takes its `error` listener off a client at checkout and puts it back at release, and pg emits `error` on the client, as well as rejecting the query, when the socket closes under a query. Both manual checkouts in the app (`transaction()` in `src/db/pg.ts`, `execute()` in `src/connectors/sql/pg-client.ts`) had no listener, so Node ended the process with `Unhandled 'error' event`. `pool.query()` was never exposed: pg-pool adds a listener of its own for those calls.
 - The fix: a listener for the life of each checkout, removed just before release; the client is released with the error so the pool discards it; the connector sends no ROLLBACK on a dead socket. The test fakes are EventEmitters and raise the event from a macrotask, the way pg does, so the new tests hang and fail without the fix.
-- Resume: `runResumePreflight` (the tunnel step only, local mode) runs in `resumeRun` before the block is closed, and in `triage resume` before the worker starts. A tunnel warning refuses with `ResumeNotReadyError`, handled wherever `RunNotResumableError` is (worker: exit 1, run left as it was; HTTP: 409 with the hint).
-- Left as they were: no retry or reconnect inside a run; no probe of the databases before a resume.
+- Resume: `runTunnelPreflight` (the tunnel step only, local mode) runs in `resumeRun` before the block is closed, and in `triage resume` before the worker starts. A tunnel warning refuses with `ResumeNotReadyError`, handled wherever `RunNotResumableError` is (worker: exit 1, run left as it was; HTTP: 409 with the hint).
+- Left as they were: no probe of the databases before a resume. Retries came next (D57).
+
+### Retries on a lost connection (D57, 2026-09-26)
+
+- `src/db/pg-retry.ts` holds the policy, the classifier and the wait; `src/db/pg.ts` and `src/connectors/sql/pg-client.ts` use it. The runner now checks clients out itself for single statements too, so a connect that failed can be told from a statement that failed; pg-pool's own `query()` gave one error for both.
+- Keys: `TRIAGE_DB_RETRY_ATTEMPTS` / `_DELAY_MS` / `_MAX_DELAY_MS` (store, postgres only; defaults 100, 1000, 5000) and `TRIAGE_SQL_RETRY_*` (entity databases; defaults 20, 1000, 5000). The wait is exponential from DELAY_MS, capped at MAX_DELAY_MS, with jitter from the upper half of the range; tests pass a constant `random`. `createPgRunner` retries only when given a policy; `getSharedPgRunner` passes `config.db.retry`. The doctor passes `NO_RETRY`.
+- The reconnect hook is wired in `realConnectors` (src/agents/triage-plan.ts): for `ssfb` it runs `runTunnelPreflight` with a real ExecRunner and probe; other entities have nothing to redo. `onRetry` writes `sql_retry` to the run's event log.
+- Tests drive the fakes with a fake sleep, so no test waits; the fakes count refused connects and dropped clients.
+- Not done: retries in the HTTP and Quickwit connectors; a probe of the databases before a resume.
 
 ## Commit trailer note
 
