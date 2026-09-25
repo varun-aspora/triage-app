@@ -12,6 +12,11 @@
 // split the process's registries, so nothing under src/http or
 // src/ingress/http imports this module.
 //
+// Before start(), a configured anthropic/openai model that the installed
+// pi-ai does not know triggers one catalog refresh (src/model-refresh.ts).
+// A failed refresh is reported on stderr and does not block the start; the
+// run then fails at model resolution with Flue's own message.
+//
 // src/db.ts is imported lazily: its default export loads the config and
 // builds the adapter on import, which should happen only when a runtime is
 // actually started.
@@ -19,6 +24,9 @@ import type { Agent } from '@flue/runtime';
 import type { PersistenceAdapter } from '@flue/runtime/adapter';
 import { type Flue, start as flueStart, type StartOptions } from '@flue/runtime/node';
 import { Triage } from '../agents/triage.agent.ts';
+import { loadConfig, type Config } from '../config/env.ts';
+import { ConfigError } from '../config/errors.ts';
+import { describeEnsure, ensureConfiguredModels } from '../model-refresh.ts';
 
 export type BootOptions = {
   /** Defaults to Flue's start() from @flue/runtime/node. */
@@ -27,6 +35,8 @@ export type BootOptions = {
   readonly agents?: readonly Agent[];
   /** Defaults to the adapter src/db.ts exports for the loaded config. */
   readonly db?: () => PersistenceAdapter | Promise<PersistenceAdapter>;
+  /** Defaults to refreshing the model catalog when a configured model is not found. */
+  readonly ensureModels?: () => Promise<void>;
 };
 
 let booted: Promise<Flue> | undefined;
@@ -43,9 +53,26 @@ export function bootRuntime(options: BootOptions = {}): Promise<Flue> {
 }
 
 async function startOnce(options: BootOptions): Promise<Flue> {
+  await (options.ensureModels ?? ensureModels)();
   const db = options.db !== undefined ? await options.db() : (await import('../db.ts')).default;
   const start = options.start ?? flueStart;
   return start({ agents: options.agents ?? [Triage], db });
+}
+
+// A config that does not load is left to start() and doctor to report.
+async function ensureModels(): Promise<void> {
+  let config: Config;
+  try {
+    config = loadConfig();
+  } catch (err) {
+    if (err instanceof ConfigError) return;
+    throw err;
+  }
+  try {
+    for (const line of describeEnsure(await ensureConfiguredModels(config))) process.stderr.write(`${line}\n`);
+  } catch (err) {
+    process.stderr.write(`models: catalog refresh failed: ${err instanceof Error ? err.message : String(err)}\n`);
+  }
 }
 
 /** Forgets the started runtime without stopping it. Test files only. */

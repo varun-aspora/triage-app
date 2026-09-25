@@ -374,6 +374,33 @@ describe('models check', () => {
     expect(rs.find((r) => r.message.includes('image'))?.status).toBe('warn');
   });
 
+  test('a model the catalog lacks triggers one refresh, reported in its own row', async () => {
+    const seen: string[] = [];
+    const rs = await models(
+      { MODEL_TIER_MID: 'openai/gpt-t9-doctor', OPENAI_API_KEY: 'fake-openai-key-01' },
+      {
+        ensureModels: async (config) => {
+          seen.push(config.models.tierMid ?? '');
+          return { refreshed: [{ provider: 'openai', ok: true, added: ['gpt-t9-doctor'] }], missing: [] };
+        },
+      },
+    );
+    expect(seen).toEqual(['openai/gpt-t9-doctor']);
+    expect(rs[0]?.message).toBe('refreshed the openai catalog: 1 models beyond the installed pi-ai');
+  });
+
+  test('a refreshable model still unknown after the refresh is a fail', async () => {
+    const rs = await models(
+      { MODEL_TIER_MID: 'openai/gpt-t9-never', OPENAI_API_KEY: 'fake-openai-key-01' },
+      { ensureModels: async () => ({ refreshed: [{ provider: 'openai', ok: false, error: 'offline' }], missing: [] }) },
+    );
+    expect(rs[0]).toMatchObject({ status: 'warn', message: 'could not refresh the openai catalog: offline' });
+    expect(slot(rs, 'MODEL_TIER_MID')).toMatchObject({
+      status: 'fail',
+      message: 'MODEL_TIER_MID is not in the openai catalog, even after a catalog refresh',
+    });
+  });
+
   test('a blank judge is disabled and a blank code walker falls back to the strong tier', async () => {
     const rs = await models({ TRIAGE_EVAL_JUDGE_MODEL: '', MODEL_CODE_WALKER: '' });
     expect(slot(rs, 'TRIAGE_EVAL_JUDGE_MODEL')?.status).toBe('disabled');
@@ -504,7 +531,7 @@ describe('rules check', () => {
 // ------------------------------------------------------------------ io and order
 
 describe('no io and stable order', () => {
-  test('the config checks make no network call and keep their row order', async () => {
+  test('the config checks make no network call when every model is found, and keep their row order', async () => {
     const original = globalThis.fetch;
     let calls = 0;
     globalThis.fetch = (async () => {
@@ -512,7 +539,8 @@ describe('no io and stable order', () => {
       throw new Error('fetch called');
     }) as unknown as typeof fetch;
     try {
-      const { config } = makeHome({ overrides: VALID_MODELS });
+      // Every model key is set to a model the installed pi-ai knows, so no catalog refresh runs.
+      const { config } = makeHome({ overrides: { ...VALID_MODELS, MODEL_CODE_WALKER: '', TRIAGE_EVAL_JUDGE_MODEL: '' } });
       const a = await doctor({ config });
       const b = await doctor({ config });
       expect(calls).toBe(0);

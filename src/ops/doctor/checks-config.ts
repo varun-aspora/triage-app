@@ -21,6 +21,8 @@ import { EMBEDDING_KEY, parseEmbeddingSpec, type EmbeddingSpec } from '../../emb
 import type { Embedder } from '../../embed/index.ts';
 import { redactPersisted } from '../../gate/redact.ts';
 import { loadRulesFile } from '../../gate/rules-file.ts';
+import { REFRESHABLE_PROVIDERS } from '../../model-catalog.ts';
+import { ensureConfiguredModels, type EnsureResult } from '../../model-refresh.ts';
 import { classifierModel, codeWalkerModel, lookupModel, modelForTier, parseSpec, type ModelLookup } from '../../models.ts';
 import { ENTITIES, type Entity } from '../../types/core.ts';
 import { describeError } from './run.ts';
@@ -32,6 +34,11 @@ declare module './types.ts' {
     readonly embedder?: Embedder | null;
     /** pi-ai metadata lookup; defaults to lookupModel from src/models.ts. */
     readonly modelLookup?: ModelLookup;
+    /**
+     * Refreshes the model catalog when a configured model is not found. Defaults to
+     * ensureConfiguredModels, or to none when modelLookup is injected.
+     */
+    readonly ensureModels?: (config: Config) => Promise<EnsureResult>;
   }
 }
 
@@ -169,13 +176,18 @@ function blankProviderKey(config: Config, spec: string): string | undefined {
 }
 
 // One row for a model slot. validate() applies the src/models.ts rules and throws ConfigError.
-function slotRow(config: Config, key: string, validate: () => string): { row: Row; spec?: string } {
+function slotRow(config: Config, key: string, validate: () => string, lookup: ModelLookup): { row: Row; spec?: string } {
   let spec: string;
   try {
     spec = validate();
   } catch (err) {
     if (!(err instanceof ConfigError)) throw err;
     return { row: row('fail', [...err.keys], err.problems.map((p) => `${p.key} ${p.reason}`).join('; ')) };
+  }
+  const provider = parseSpec(spec)?.provider ?? '';
+  if (REFRESHABLE_PROVIDERS.includes(provider) && lookup(spec) === undefined) {
+    // The spec is still returned, so the image row reports it too.
+    return { row: row('fail', [key], `${key} is not in the ${provider} catalog, even after a catalog refresh`), spec };
   }
   const blank = blankProviderKey(config, spec);
   if (blank !== undefined) return { row: row('fail', [key, blank], `${key} needs ${blank}, which is blank`) };
@@ -184,20 +196,39 @@ function slotRow(config: Config, key: string, validate: () => string): { row: Ro
 
 async function modelsCheck(ctx: DoctorContext): Promise<DoctorCheck[]> {
   const c = ctx.config;
-  const rows: Row[] = [];
-  rows.push(slotRow(c, 'MODEL_CLASSIFIER', () => classifierModel(c)).row);
-  rows.push(slotRow(c, 'MODEL_TIER_CHEAP', () => modelForTier('cheap', c)).row);
-  rows.push(slotRow(c, 'MODEL_TIER_MID', () => modelForTier('mid', c)).row);
-  const strong = slotRow(c, 'MODEL_TIER_STRONG', () => modelForTier('strong', c));
+  const lookup = ctx.modelLookup ?? lookupModel;
+  const rows: Row[] = await refreshRows(ctx);
+  rows.push(slotRow(c, 'MODEL_CLASSIFIER', () => classifierModel(c), lookup).row);
+  rows.push(slotRow(c, 'MODEL_TIER_CHEAP', () => modelForTier('cheap', c), lookup).row);
+  rows.push(slotRow(c, 'MODEL_TIER_MID', () => modelForTier('mid', c), lookup).row);
+  const strong = slotRow(c, 'MODEL_TIER_STRONG', () => modelForTier('strong', c), lookup);
   rows.push(strong.row);
   if (c.models.codeWalker === undefined) {
     rows.push(row('ok', ['MODEL_CODE_WALKER', 'MODEL_TIER_STRONG'], 'MODEL_CODE_WALKER is blank; code_walker uses MODEL_TIER_STRONG'));
   } else {
-    rows.push(slotRow(c, 'MODEL_CODE_WALKER', () => codeWalkerModel(c)).row);
+    rows.push(slotRow(c, 'MODEL_CODE_WALKER', () => codeWalkerModel(c), lookup).row);
   }
-  rows.push(imageRow(strong.spec, ctx.modelLookup ?? lookupModel));
+  rows.push(imageRow(strong.spec, lookup));
   rows.push(judgeRow(c));
   return withId('models', rows);
+}
+
+// A configured model the installed pi-ai lacks triggers one catalog refresh, as a run does.
+// One row per refreshed provider; none when every model was found.
+async function refreshRows(ctx: DoctorContext): Promise<Row[]> {
+  const ensure = ctx.ensureModels ?? (ctx.modelLookup === undefined ? ensureConfiguredModels : undefined);
+  if (ensure === undefined) return [];
+  let result: EnsureResult;
+  try {
+    result = await ensure(ctx.config);
+  } catch (err) {
+    return [row('warn', [], `model catalog refresh failed: ${describeError(err)}`)];
+  }
+  return result.refreshed.map((r) =>
+    r.ok
+      ? row('ok', [], `refreshed the ${r.provider} catalog: ${r.added.length} models beyond the installed pi-ai`)
+      : row('warn', [], `could not refresh the ${r.provider} catalog: ${r.error}`),
+  );
 }
 
 // D36: the strong tier must take image input.
@@ -205,7 +236,9 @@ function imageRow(spec: string | undefined, lookup: ModelLookup): Row {
   const key = 'MODEL_TIER_STRONG';
   if (spec === undefined) return row('skipped', [key], `image input not checked: ${key} is not usable`);
   const meta = lookup(spec);
-  if (meta === undefined) return row('warn', [key], `${key} is not in the pi-ai model metadata; image input unknown (D36)`);
+  if (meta === undefined) {
+    return row('warn', [key], `${key} is not in the pi-ai model metadata; image input unknown (D36). Run \`triage models refresh\``);
+  }
   if (!meta.input.includes('image')) return row('fail', [key], `${key} does not accept image input (D36)`);
   return row('ok', [key], `${key} accepts image input (D36)`);
 }

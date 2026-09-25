@@ -62,6 +62,23 @@ describe('bootRuntime', () => {
     await bootRuntime({ start: fakeStart(calls), db: () => DB });
     expect(calls).toHaveLength(2);
   });
+
+  test('the model check runs once, before start()', async () => {
+    const order: string[] = [];
+    const opts = {
+      start: async (options: StartOptions) => {
+        order.push('start');
+        return fakeStart([])(options);
+      },
+      db: () => DB,
+      ensureModels: async () => {
+        order.push('models');
+      },
+    };
+    await bootRuntime(opts);
+    await bootRuntime(opts);
+    expect(order).toEqual(['models', 'start']);
+  });
 });
 
 // ------------------------------------------------------------------ source rules

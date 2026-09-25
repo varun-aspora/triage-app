@@ -36,7 +36,7 @@ Mock mode is the default (`TRIAGE_MOCK_MODE=true`, `TRIAGE_MOCK_STRICT=true`): e
 | `bun run test:contract` | Vitest contract tests on Node with the fake model |
 | `bun run build` | `vite build` into `dist/`. Not needed to run the CLI or the server, which run from `src/` |
 | `bun run ci` | Typecheck, unit tests, contract suite and classifier suite against a temp eval home |
-| `bun run triage -- <command>` | The CLI: `run`, `start`, `wait`, `status`, `ask`, `post`, `feedback`, `doctor`, `preflight`, `tunnel`, `repos sync`, `fixtures review`, `runs`, `evals` |
+| `bun run triage -- <command>` | The CLI: `run`, `start`, `wait`, `status`, `ask`, `post`, `feedback`, `doctor`, `preflight`, `tunnel`, `repos sync`, `models refresh`, `fixtures review`, `runs`, `evals` |
 | `bun run serve` | The polling HTTP API (needs `TRIAGE_HTTP_AUTH_TOKEN`) |
 | `bun run dev` | `serve` under `node --watch`: restarts when a file changes |
 | `bun run evals:classifier` | promptfoo classifier suite (faux providers by default) |

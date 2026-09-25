@@ -152,6 +152,22 @@ For an existing `.env`:
 - `SSFB_INFRA_REPO`, `ATSPL_INFRA_REPO` and `RTL_INFRA_REPO` must be added. The registry refuses to start when a key it names is missing; blank turns the line off for that entity. Prod values are in `.env.example`; the stage values are in the comment above each key.
 - Run `triage repos sync` once to clone the four new repos.
 
+### Model catalog refresh
+
+Flue 2.0.8 pins pi-ai `^0.83.0`, whose bundled catalog has no `gpt-6-*` and no `claude-opus-5-5`, so those specs failed at `resolveModel`. pi-ai's `refreshModels()` only works for providers built with a `fetchModels`, and its built-in `anthropic` and `openai` providers are static.
+
+- `src/model-catalog.ts` rebuilds both providers with `createProvider` and a `fetchModels`, and delegates streaming to the built-in provider. `fetchModels` reads the latest published pi-ai catalog for the provider from jsDelivr (`@earendil-works/pi-ai/dist/providers/data/<provider>.json`, the same generated data pi-ai ships). It keeps only models the installed catalog lacks, on an API the provider already serves, and only the `Model` fields the installed pi-ai reads.
+- The extra models are cached in `<TRIAGE_DATA_DIR>/cache/models/<provider>.json`. `src/models.ts` registers them at import, without a network call.
+- `bootRuntime()` refreshes once before `start()` when a configured anthropic/openai model is not found (`src/model-refresh.ts`). A failed refresh goes to stderr and does not block the start. `triage models refresh [--provider] [--json]` does the same ahead of time. The doctor `models` check refreshes the same way before its rows, reports each refreshed provider in its own row, and fails a slot whose anthropic/openai model is still unknown. When every model is found it makes no network call, as before.
+
+Rejected:
+
+- Bumping pi-ai to 0.87: Flue's `^0.83.0` would install a second copy, and Flue resolves models through its own copy.
+- The providers' own `/v1/models` endpoints: they need the API key and return ids only, with no image input, cost, context window or thinking levels.
+- models.dev directly: pi-ai generates its catalog from it but adds compat flags and thinking-level maps that the stream code depends on.
+
+Assumption: the 0.83 stream code for `openai-responses` and `anthropic-messages` handles the newer models, because the refresh only adds models on those APIs. Checked for catalog resolution only (gpt-6-sol, gpt-6-astra, gpt-6-luna, claude-opus-5-5 resolve with image input); no model was called.
+
 ## Commit trailer note
 
 The trailer was pinned in CONVENTIONS.md and plan.json after wave 1 (`74cfcb3`, later `58b12b3`), because implementers had each picked their own model name. Commit T01.3 (`a70343b`) still carries a different co-author line from the rest, and T01.2 (`bb11e37`) was one of the two commits the wave log flagged at the time; on main today only `a70343b` differs. The commits before `58b12b3` also carry a `Claude-Session` line. History was left as is.

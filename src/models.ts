@@ -1,7 +1,9 @@
 // Model specs per tier, provider registration and image capability (HLD §1.1, §7 Providers).
 //
 // This is a side-effect module. Importing it loads config from TRIAGE_HOME and
-// registers the Ollama provider with setProvider when OLLAMA_BASE_URL is set.
+// registers the Ollama provider with setProvider when OLLAMA_BASE_URL is set,
+// and anthropic/openai with the models a catalog refresh cached
+// (src/model-catalog.ts; the refresh itself runs in src/model-refresh.ts).
 // The Triage agent module and the classifier import it, so start(), vite build
 // and flue run all see the registration; start() is called without providers.
 // With TRIAGE_HOME unset (vite build, --help) the import registers nothing and
@@ -26,6 +28,7 @@ import { hasProvider, resolveModel } from '@flue/runtime/internal';
 import { loadConfig, type Config, type ThinkingLevel } from './config/env.ts';
 import { ConfigError } from './config/errors.ts';
 import { HOME_KEY } from './config/keys.ts';
+import { registerCachedModels } from './model-catalog.ts';
 import type { Tier } from './types/core.ts';
 
 export type ModelSpec = { readonly provider: string; readonly modelId: string };
@@ -188,6 +191,7 @@ function loadAtImport(): Config | undefined {
   try {
     const config = loadConfig();
     registerProviders(config);
+    registerCachedModels(config);
     return config;
   } catch (err) {
     if (isHomeUnset(err)) return undefined;
@@ -210,6 +214,7 @@ function activeConfig(): Config {
   if (active === undefined) {
     active = loadConfig();
     registerProviders(active);
+    registerCachedModels(active);
   }
   return active;
 }
