@@ -299,6 +299,59 @@ describe('triage resume', () => {
     expect(spy.calls).toHaveLength(0);
   });
 
+  test('brings the SSFB tunnel back first and refuses, with the fix, when it does not come up; nothing starts', async () => {
+    const h = home();
+    const store = await seed(h, { phase: 'investigating', block: true, pid: 1111 });
+    const spy = spawnSpy();
+    const seen: { config: unknown; isTty: boolean }[] = [];
+    const cmd = resumeCmd({
+      spawn: spy.spawn,
+      readiness: async (config, isTty) => {
+        seen.push({ config, isTty });
+        return {
+          warnings: [
+            {
+              step: 'tunnel',
+              entity: 'ssfb',
+              message: 'SSFB DB tunnel did not start: the bastion is unreachable; the SSFB databases may be unreachable',
+              fix: 'triage tunnel status, then triage tunnel up',
+            },
+          ],
+        };
+      },
+    });
+    const r = await cli(cmd, ['resume', RUN_ID, '--json'], h);
+    expect(r.code).toBe(EXIT.ERROR);
+    const e = jsonLine(r.out) as { error: { code: string; message: string } };
+    expect(e.error.code).toBe('ERROR');
+    expect(e.error.message).toContain(`run ${RUN_ID} cannot be resumed (phase blocked)`);
+    expect(e.error.message).toContain('the bastion is unreachable');
+    expect(e.error.message).toContain('triage tunnel status, then triage tunnel up');
+    expect(seen).toEqual([{ config: h.config, isTty: false }]);
+    expect(spy.calls).toHaveLength(0);
+    const run = await store.getRun(RUN_ID);
+    expect(run?.phase).toBe('blocked');
+    expect(run?.block?.block_id).toBe('b1');
+    expect(run?.block_history).toEqual([]);
+  });
+
+  test('a readiness check that warns about another step still starts the worker', async () => {
+    const h = home();
+    const store = await seed(h, { phase: 'investigating', block: true, pid: 1111 });
+    const spy = spawnSpy(6161);
+    const cmd = resumeCmd({
+      spawn: spy.spawn,
+      pollMs: 10,
+      readiness: async () => ({ warnings: [{ step: 'preflight', message: 'the resume check could not finish; the run continues without it' }] }),
+      sleep: async () => {
+        await store.setPhase(RUN_ID, 'dispatched', { worker_pid: 6161, resume: true });
+      },
+    });
+    const r = await cli(cmd, ['resume', RUN_ID, '--json'], h);
+    expect(r.code).toBe(EXIT.OK);
+    expect(spy.calls).toHaveLength(1);
+  });
+
   test('usage errors exit 2 and start nothing', async () => {
     const h = home();
     await seed(h, { phase: 'investigating', block: true });

@@ -11,9 +11,20 @@
 //
 // Any other shape is refused before a client is checked out. All statements
 // run on one checked-out client; any failure after that sends ROLLBACK and
-// releases the client. Postgres enforces READ ONLY server-side whatever the
-// role can do, and the same statements are accepted on a hot-standby reader,
-// so primaries and readers share this code path.
+// releases the client. A socket that closes under a query is reported by pg
+// as an 'error' event on the client as well as a rejected query; the client
+// is listened to while it is checked out, so that event ends the call, not
+// the process, and the client is discarded. Postgres enforces READ ONLY
+// server-side whatever the role can do, and the same statements are accepted
+// on a hot-standby reader, so primaries and readers share this code path.
+//
+// A lost connection is tried again (D57): a call that failed because the
+// connection was refused, reset or closed under a query runs again on a
+// fresh client, up to the configured attempts, with a wait that doubles.
+// Every call is a read-only transaction, so any point of failure is safe to
+// repeat. Before each retry the reconnect hook may bring the network path
+// back (the SSFB tunnel in local mode). A query error, a server-side
+// timeout, a refused login or an abort is never repeated.
 //
 // Pools: one lazy, bounded pg.Pool per env var name. The pool config carries
 // options '-c default_transaction_read_only=on' as a separate field; the DSN
@@ -25,6 +36,17 @@
 import pg from 'pg';
 import type { Config } from '../../config/env.ts';
 import type { Capability, Registry } from '../../config/registry.ts';
+import {
+  errorCode,
+  isConnectionLoss,
+  mayRetry,
+  NETWORK_CODES,
+  retryDelayMs,
+  sleep as realSleep,
+  type Random,
+  type RetryPolicy,
+  type Sleep,
+} from '../../db/pg-retry.ts';
 import { MAX_TIMEOUT_MS, readOnlyConnectionOptions } from '../../gate/sql-txn.ts';
 import type { SqlSelectFacts } from '../../mock/key.ts';
 import type { Entity } from '../../types/core.ts';
@@ -66,6 +88,9 @@ export interface PgClientLike {
   query(query: PgQuery): Promise<PgQueryResult>;
   /** A truthy argument destroys the connection instead of returning it to the pool. */
   release(destroy?: Error | boolean): void;
+  /** pg's PoolClient is an EventEmitter. A fake may leave these out. */
+  on?(event: 'error', listener: (err: Error) => void): unknown;
+  off?(event: 'error', listener: (err: Error) => void): unknown;
 }
 
 /** The part of a pg.Pool the connector uses. */
@@ -203,16 +228,8 @@ function serialise(row: unknown): string {
 
 // ------------------------------------------------------------ errors
 
-const NETWORK_CODES = new Set([
-  'ECONNREFUSED',
-  'ECONNRESET',
-  'ENOTFOUND',
-  'ETIMEDOUT',
-  'EHOSTUNREACH',
-  'ENETUNREACH',
-  'EAI_AGAIN',
-  'EPIPE',
-]);
+/** pg's own words for a socket that closed under a query, and for a client it then refuses to use. */
+const CONNECTION_LOST = /^(Connection terminated|Client has encountered a connection error)/;
 const SQLSTATE = /^[0-9A-Z]{5}$/;
 const MAX_MESSAGE = 300;
 
@@ -263,6 +280,7 @@ export function mapPgError(err: unknown, where: string, envName: EnvVarName, sec
     return new ConnectorError('refused', `${where}: query failed (${code}): ${scrub(pgMessage, secrets)}`);
   }
   if (NETWORK_CODES.has(code)) return new ConnectorError('unreachable', `${where}: could not reach ${envName} (${code})`);
+  if (CONNECTION_LOST.test(pgMessage)) return new ConnectorError('unreachable', `${where}: the connection to ${envName} dropped`);
   return new ConnectorError('unreachable', `${where}: the call through ${envName} failed`);
 }
 
@@ -324,6 +342,31 @@ export type SqlConnectorOptions = {
   readonly maxResultBytes?: number;
   /** Told about idle-client errors. Gets the env var name and an error code, never the message. */
   readonly onPoolError?: (target_env: EnvVarName, code: string) => void;
+  /** Attempts per call on a lost connection and the first wait (D57). Defaults to config.sql.retry. */
+  readonly retry?: RetryPolicy;
+  /** Called before each retry: a chance to bring the network path back (the SSFB tunnel). A rejection is ignored. */
+  readonly reconnect?: (target: RetryTarget, signal: AbortSignal) => Promise<void>;
+  /** Told about each retry. Gets names and a code, never a message. */
+  readonly onRetry?: (info: RetryInfo) => void;
+  /** The wait between attempts. Tests pass a fake. */
+  readonly sleep?: Sleep;
+  /** The jitter source. Defaults to Math.random; tests pass a constant. */
+  readonly random?: Random;
+};
+
+/** The call being retried: names only, never a value. */
+export type RetryTarget = {
+  readonly entity: Entity;
+  readonly service: string;
+  readonly target_env: EnvVarName;
+  readonly run_id: string;
+};
+
+export type RetryInfo = RetryTarget & {
+  /** The attempt that failed, 1-based. */
+  readonly attempt: number;
+  /** The pg or network error code, or connection_lost. */
+  readonly code: string;
 };
 
 export type RunSelectInput = {
@@ -355,6 +398,9 @@ export function createSqlConnector(options: SqlConnectorOptions): SqlConnector {
   const { registry, config } = options;
   const factory = options.pgFactory ?? defaultPgFactory;
   const maxBytes = Math.min(options.maxResultBytes ?? MAX_SQL_RESULT_BYTES, MAX_SQL_RESULT_BYTES);
+  const retry = options.retry ?? config.sql.retry;
+  const wait = options.sleep ?? realSleep;
+  const random = options.random ?? Math.random;
   const pools = new Map<string, PgPoolLike>();
 
   function lookup(entity: Entity, service: string): { cap: Capability | undefined; where: string } {
@@ -424,8 +470,34 @@ export function createSqlConnector(options: SqlConnectorOptions): SqlConnector {
     }
   }
 
-  /** Runs a checked plan on one client. ROLLBACK on error, destroy on abort. */
+  /** Runs a checked plan, again on a fresh client when the connection was lost, per the retry policy (D57). */
   async function execute(
+    pool: PgPoolLike,
+    plan: readonly string[],
+    params: readonly BindValue[],
+    signal: AbortSignal,
+    target: RetryTarget,
+  ): Promise<PgQueryResult> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await runPlan(pool, plan, params, signal);
+      } catch (err) {
+        if (err instanceof AbortedError || signal.aborted || !mayRetry(retry, attempt) || !isConnectionLoss(err)) throw err;
+        try {
+          options.onRetry?.({ ...target, attempt, code: errorCode(err) || 'connection_lost' });
+        } catch {
+          // A broken sink must not stop the retry.
+        }
+        // The wait, then the network path, then the next attempt. An abort
+        // during the wait rejects here and is reported as cancelled.
+        await wait(retryDelayMs(retry, attempt, random), signal);
+        await options.reconnect?.(target, signal).catch(() => undefined);
+      }
+    }
+  }
+
+  /** Runs a checked plan once, on one client. ROLLBACK on error, destroy on abort or a dropped socket. */
+  async function runPlan(
     pool: PgPoolLike,
     plan: readonly string[],
     params: readonly BindValue[],
@@ -433,6 +505,19 @@ export function createSqlConnector(options: SqlConnectorOptions): SqlConnector {
   ): Promise<PgQueryResult> {
     signal.throwIfAborted();
     const client = await checkout(pool, signal);
+    // pg-pool listens for 'error' on a client only while it is idle, and pg
+    // emits it on the client when the socket closes under a query. With no
+    // listener Node ends the process. The query in flight rejects on its
+    // own; this listener only marks the client so release() discards it.
+    let dropped: Error | undefined;
+    const onError = (err: Error): void => {
+      dropped ??= err;
+    };
+    client.on?.('error', onError);
+    const release = (destroy?: Error): void => {
+      client.off?.('error', onError);
+      client.release(destroy ?? dropped);
+    };
     let data: PgQueryResult | undefined;
     try {
       for (let i = 0; i < plan.length; i++) {
@@ -444,18 +529,23 @@ export function createSqlConnector(options: SqlConnectorOptions): SqlConnector {
     } catch (err) {
       if (err instanceof AbortedError || signal.aborted) {
         await bounded(pool.cancel?.(client), CLEANUP_WAIT_MS);
-        client.release(new Error('sql call aborted'));
+        release(new Error('sql call aborted'));
         throw new AbortedError();
+      }
+      if (dropped !== undefined) {
+        // The socket is gone: nothing to roll back, and the client is discarded.
+        release();
+        throw err;
       }
       try {
         await client.query({ text: 'ROLLBACK' });
-        client.release();
+        release();
       } catch {
-        client.release(new Error('rollback failed'));
+        release(new Error('rollback failed'));
       }
       throw err;
     }
-    client.release();
+    release();
     return data as PgQueryResult;
   }
 
@@ -470,10 +560,10 @@ export function createSqlConnector(options: SqlConnectorOptions): SqlConnector {
     const secrets = dsnSecrets(t.dsn as string);
     const plan = rolePlan();
     try {
-      const result = await execute(poolFor(t, where), plan, [], ctx.signal);
+      const result = await execute(poolFor(t, where), plan, [], ctx.signal, { entity, service, target_env: t.envName, run_id: ctx.runId });
       return Object.freeze({ ...parseRoleCheckRows(result.rows), target_env: t.envName });
     } catch (err) {
-      throw toConnectorError(err, where, t.envName, secrets);
+      throw toConnectorError(err, where, t.envName, secrets, ctx.signal);
     }
   }
 
@@ -514,7 +604,12 @@ export function createSqlConnector(options: SqlConnectorOptions): SqlConnector {
         async (signal) => {
           const role = await policy.enforceRolePolicy(ctx, input.entity, input.service);
           role_warning = role.warning;
-          const result = await execute(poolFor(t, where), plan, params, signal);
+          const result = await execute(poolFor(t, where), plan, params, signal, {
+            entity: input.entity,
+            service: input.service,
+            target_env: t.envName,
+            run_id: ctx.runId,
+          });
           const capped = capRows(result.rows, maxBytes);
           const data: SqlRows = Object.freeze({
             rows: Object.freeze(capped.rows),

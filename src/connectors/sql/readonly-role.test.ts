@@ -17,6 +17,7 @@ import {
   RoleCheckCache,
   type RoleCheck,
 } from './readonly-role.ts';
+import { NO_RETRY } from '../../db/pg-retry.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const FAKE_DSN = 'postgres://role_fake_user:rolefakepw-99@role-fake-3311.invalid:6543/fake_package_db';
@@ -35,7 +36,7 @@ function setup(opts: { require?: boolean; fake?: FakePgOptions; cache?: RoleChec
   const pg = fakePg(opts.fake);
   const factory = mock(pg.factory);
   const cache = opts.cache ?? new RoleCheckCache();
-  const connector = createSqlConnector({ registry, config, pgFactory: factory, roleCache: cache });
+  const connector = createSqlConnector({ registry, config, pgFactory: factory, roleCache: cache, retry: NO_RETRY });
   return { config, pg, factory, connector, cache };
 }
 
@@ -120,7 +121,7 @@ describe('the role check statement', () => {
     const config = makeTestConfig({ TRIAGE_ENTITIES: 'ssfb,atspl,rtl', ATSPL_PACKAGE_DB_URL: '' });
     const registry = loadRegistry(config, { resourcesDir: join(ROOT, 'resources') });
     const pg = fakePg();
-    const connector = createSqlConnector({ registry, config, pgFactory: pg.factory, roleCache: new RoleCheckCache() });
+    const connector = createSqlConnector({ registry, config, pgFactory: pg.factory, roleCache: new RoleCheckCache(), retry: NO_RETRY });
     const err = await failure(connector.checkReadOnlyRole(ctxOf(), 'atspl', 'package'));
     expect(err.code).toBe('not_configured');
     expect(err.message).toContain('ATSPL_PACKAGE_DB_URL');

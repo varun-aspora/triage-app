@@ -69,6 +69,11 @@
 // a run that failed after it was dispatched, and a stopped run, because
 // their conversations exist. A run that failed before dispatch has none, so
 // resumeRun refuses it and points at a new run (RunNotResumableError).
+// Before it writes anything, resumeRun repeats the tunnel part of pre-flight
+// when the deps carry it (D56): in local mode the SSFB tunnel may have died
+// while the run was parked, and a tunnel that does not come up refuses the
+// resume (ResumeNotReadyError, a RunNotResumableError) with the run left as
+// it was.
 //
 // A run can be stopped from another process (src/ingress/stop.ts). While a
 // run works, the pipeline reads the store every STOP_POLL_MS; once the phase
@@ -111,7 +116,7 @@ import { redactModelFacing, redactPersisted } from '../gate/redact.ts';
 import { createMockLayer } from '../mock/index.ts';
 import { acceptsImages, modelForTier } from '../models.ts';
 import { netTcpConnect } from '../ops/doctor/probes.ts';
-import { runPreflight, type PreflightResult } from '../ops/preflight.ts';
+import { runPreflight, runTunnelPreflight, type PreflightInput, type PreflightResult } from '../ops/preflight.ts';
 import { syncBeforeRun } from '../ops/repos-autosync.ts';
 import type { TcpProbe } from '../ops/tunnel.ts';
 import { logRunEvent, setRunRedactionNames } from '../runlog/event-log.ts';
@@ -180,6 +185,12 @@ export type SettleDeps = {
   readonly stopPollMs?: number;
   /** Clock for the answer's resolution time. Defaults to the system clock. */
   readonly now?: () => Date;
+  /**
+   * The part of pre-flight a resume repeats (D56): the SSFB tunnel in local
+   * mode. A tunnel warning refuses the resume (ResumeNotReadyError) before
+   * anything is written. Left out: no check. Not called in mock mode.
+   */
+  readonly resumePreflight?: (input: { readonly signal: AbortSignal }) => Promise<Pick<PreflightResult, 'steps' | 'warnings'>>;
 };
 
 export type SubmissionDeps = SettleDeps & {
@@ -267,6 +278,34 @@ export class RunNotResumableError extends Error {
     this.phase = phase;
     this.hint = hint;
   }
+}
+
+/**
+ * A resume refused because the network path is not back (D56): the SSFB
+ * tunnel did not come up. The run is left as it was; the hint carries the
+ * tunnel warning and its fix. Handled wherever RunNotResumableError is.
+ */
+export class ResumeNotReadyError extends RunNotResumableError {
+  readonly warnings: readonly PreflightWarning[];
+  constructor(runId: string, phase: RunPhase, warnings: readonly PreflightWarning[]) {
+    super(runId, phase, resumeNotReadyHint(warnings));
+    this.warnings = warnings;
+  }
+}
+
+function resumeNotReadyHint(warnings: readonly PreflightWarning[]): string {
+  const w = warnings[0];
+  if (w === undefined) return 'the network path is not ready';
+  return w.fix === undefined ? w.message : `${w.message}; ${w.fix}`;
+}
+
+/** Why a resume cannot go on yet, from the resume pre-flight, or null. Only a tunnel warning refuses. */
+export function resumeReadinessRefusal(
+  run: Pick<RunRecord, 'run_id' | 'phase'>,
+  ready: Pick<PreflightResult, 'warnings'>,
+): ResumeNotReadyError | null {
+  const tunnel = ready.warnings.filter((w) => w.step === 'tunnel');
+  return tunnel.length === 0 ? null : new ResumeNotReadyError(run.run_id, run.phase, tunnel);
 }
 
 /** The hints RunNotResumableError carries. The CLI and the HTTP routes reuse them. */
@@ -545,6 +584,20 @@ export async function resumeRun(runId: string, input: ResumeInput, deps: SettleD
   if (run === null) throw new RunNotFoundError(runId);
   const refusal = resumeRefusal(run);
   if (refusal !== null) throw refusal;
+
+  // The network path first (D56): in local mode this brings the SSFB tunnel
+  // back, and a tunnel that does not come up refuses the resume here, before
+  // the block is closed, so the run stays parked as it was.
+  if (deps.resumePreflight !== undefined && !deps.config.mock.enabled) {
+    const ready = await deps.resumePreflight({ signal: deps.signal ?? new AbortController().signal });
+    const notReady = resumeReadinessRefusal(run, ready);
+    logRunEvent(runId, 'resume_preflight', {
+      steps: ready.steps,
+      warnings: ready.warnings,
+      ...(notReady !== null ? { refused: notReady.hint } : {}),
+    });
+    if (notReady !== null) throw notReady;
+  }
 
   const now = deps.now ?? (() => new Date());
   const at = now().toISOString();
@@ -937,6 +990,14 @@ export function submissionDeps(options: SubmissionDepsOptions = {}): SubmissionD
   const sql = rt.connectors.sql ?? {
     runSelect: () => Promise.reject(new ConnectorError('not_configured', 'no sql connector for this run')),
   };
+  const preflightInput = (signal: AbortSignal): PreflightInput => ({
+    config,
+    registry,
+    runner: options.runner ?? createExecRunner(),
+    tcpProbe: options.tcpProbe ?? netTcpConnect,
+    isTty: options.isTty ?? false,
+    signal,
+  });
   return {
     config,
     store,
@@ -945,15 +1006,8 @@ export function submissionDeps(options: SubmissionDepsOptions = {}): SubmissionD
     embedder,
     ...(options.signal !== undefined ? { signal: options.signal } : {}),
     ...(options.onEvent !== undefined ? { onEvent: options.onEvent } : {}),
-    preflight: ({ signal }) =>
-      runPreflight({
-        config,
-        registry,
-        runner: options.runner ?? createExecRunner(),
-        tcpProbe: options.tcpProbe ?? netTcpConnect,
-        isTty: options.isTty ?? false,
-        signal,
-      }),
+    preflight: ({ signal }) => runPreflight(preflightInput(signal)),
+    resumePreflight: ({ signal }) => runTunnelPreflight(preflightInput(signal)),
     repoSync: ({ interface: iface, signal }) =>
       syncBeforeRun(iface, { config, runner: options.runner ?? createExecRunner(), signal }, infraReposToSync(config, registry)),
     identity: (request, { redactionNames, signal }) =>

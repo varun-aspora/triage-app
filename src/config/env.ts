@@ -44,7 +44,12 @@ export type Config = {
     readonly knowledgeDir: string;
     readonly fixturesDir: string;
   };
-  readonly db: { readonly provider: DbProvider; readonly url: string };
+  readonly db: {
+    readonly provider: DbProvider;
+    readonly url: string;
+    /** Postgres only (D57): attempts per call on a lost connection; the wait doubles from delayMs up to maxDelayMs, with jitter. */
+    readonly retry: { readonly attempts: number; readonly delayMs: number; readonly maxDelayMs: number };
+  };
   readonly runs: { readonly retentionDays?: number; readonly priorCases: boolean };
   readonly approval: { readonly mode: ApprovalMode };
   readonly mock: { readonly enabled: boolean; readonly strict: boolean; readonly record: boolean };
@@ -65,6 +70,8 @@ export type Config = {
     readonly statementTimeoutMs: number;
     readonly lockTimeoutMs: number;
     readonly requireReadonlyRole: boolean;
+    /** D57: attempts per entity DB call on a lost connection; the wait doubles from delayMs up to maxDelayMs, with jitter. */
+    readonly retry: { readonly attempts: number; readonly delayMs: number; readonly maxDelayMs: number };
   };
   readonly models: {
     readonly classifier?: string;
@@ -167,7 +174,15 @@ export function configFromRecord(
       knowledgeDir: r.requiredPath('TRIAGE_KNOWLEDGE_DIR'),
       fixturesDir: r.requiredPath('TRIAGE_FIXTURES_DIR'),
     },
-    db: { provider, url: r.dbUrl(provider) },
+    db: {
+      provider,
+      url: r.dbUrl(provider),
+      retry: {
+        attempts: r.requiredInt('TRIAGE_DB_RETRY_ATTEMPTS'),
+        delayMs: r.requiredInt('TRIAGE_DB_RETRY_DELAY_MS'),
+        maxDelayMs: r.requiredInt('TRIAGE_DB_RETRY_MAX_DELAY_MS'),
+      },
+    },
     runs: { retentionDays: r.int('TRIAGE_RUNS_RETENTION_DAYS'), priorCases: r.bool('TRIAGE_PRIOR_CASES') },
     approval: { mode: r.enumOf<ApprovalMode>('TRIAGE_APPROVAL_MODE') },
     mock: {
@@ -191,6 +206,11 @@ export function configFromRecord(
       statementTimeoutMs: r.requiredInt('TRIAGE_SQL_STATEMENT_TIMEOUT_MS'),
       lockTimeoutMs: r.requiredInt('TRIAGE_SQL_LOCK_TIMEOUT_MS'),
       requireReadonlyRole: r.bool('TRIAGE_REQUIRE_READONLY_DB_ROLE'),
+      retry: {
+        attempts: r.requiredInt('TRIAGE_SQL_RETRY_ATTEMPTS'),
+        delayMs: r.requiredInt('TRIAGE_SQL_RETRY_DELAY_MS'),
+        maxDelayMs: r.requiredInt('TRIAGE_SQL_RETRY_MAX_DELAY_MS'),
+      },
     },
     models: {
       classifier: r.str('MODEL_CLASSIFIER'),

@@ -16,6 +16,12 @@
 // Nothing here blocks a run. Every failure, and anything thrown, becomes a
 // warning the caller copies into the report's gaps. runPreflight never
 // rejects.
+//
+// runTunnelPreflight runs the tunnel step only: for a resume (D56) and for a
+// retry after a lost connection inside a run (D57), since the SSFB tunnel
+// may have died while the run was parked or working. The caller decides what
+// a tunnel warning means there (resumeRun refuses the resume; a retry goes
+// ahead and fails on its own).
 
 import { deployModeForPreflight, type Config } from '../config/env.ts';
 import type { Registry } from '../config/registry.ts';
@@ -79,25 +85,31 @@ function freeze(mode: PreflightMode, out: Outcome): PreflightResult {
   return Object.freeze({ mode, steps: Object.freeze([...out.steps]), warnings: Object.freeze([...out.warnings]) });
 }
 
+function skipped(mode: PreflightMode): PreflightResult {
+  return Object.freeze({ mode, skipped: 'mock', steps: Object.freeze([]), warnings: Object.freeze([]) });
+}
+
+function stepContext(input: PreflightInput): StepContext {
+  return {
+    config: input.config,
+    registry: input.registry,
+    entities: input.registry.enabledEntities(),
+    runner: input.runner,
+    tcpProbe: input.tcpProbe,
+    tunnel: input.tunnel ?? tunnelUp,
+    isTty: input.isTty,
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
+  };
+}
+
 export async function runPreflight(input: PreflightInput): Promise<PreflightResult> {
   let mode: PreflightMode = 'unknown';
   const out = new Outcome();
   try {
     mode = readMode(input.config);
-    if (input.config.mock.enabled) {
-      return Object.freeze({ mode, skipped: 'mock', steps: Object.freeze([]), warnings: Object.freeze([]) });
-    }
+    if (input.config.mock.enabled) return skipped(mode);
 
-    const ctx: StepContext = {
-      config: input.config,
-      registry: input.registry,
-      entities: input.registry.enabledEntities(),
-      runner: input.runner,
-      tcpProbe: input.tcpProbe,
-      tunnel: input.tunnel ?? tunnelUp,
-      isTty: input.isTty,
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-    };
+    const ctx = stepContext(input);
 
     if (mode === 'local') {
       await tunnelStep(ctx, out);
@@ -112,6 +124,28 @@ export async function runPreflight(input: PreflightInput): Promise<PreflightResu
   } catch {
     // The steps guard themselves; this catches a broken config or registry.
     out.warn('preflight', undefined, 'pre-flight could not finish; the run continues without it');
+  }
+  return freeze(mode, out);
+}
+
+/**
+ * The tunnel step alone: for a resume (D56) and for a retry after a lost
+ * connection inside a run (D57). In local mode the SSFB tunnel may have died
+ * while the run was parked or working, so it is brought back before the run
+ * goes on. Nothing else is repeated: the logins and probes were made when the
+ * run started, and a system that is still down blocks the run again on its
+ * own. Mock mode skips; server and unknown modes have no tunnel step and
+ * return no steps. Never rejects, like runPreflight.
+ */
+export async function runTunnelPreflight(input: PreflightInput): Promise<PreflightResult> {
+  let mode: PreflightMode = 'unknown';
+  const out = new Outcome();
+  try {
+    mode = readMode(input.config);
+    if (input.config.mock.enabled) return skipped(mode);
+    if (mode === 'local') await tunnelStep(stepContext(input), out);
+  } catch {
+    out.warn('preflight', undefined, 'the resume check could not finish; the run continues without it');
   }
   return freeze(mode, out);
 }

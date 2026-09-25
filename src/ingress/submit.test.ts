@@ -43,8 +43,10 @@ import {
   RunNotWaitingError,
   SubmissionInputError,
   RESUME_HINTS,
+  ResumeNotReadyError,
   resumeRun,
   RunNotResumableError,
+  type SettleDeps,
 } from './submit.ts';
 import { makeTestHome } from '../../test/support/home.ts';
 
@@ -1096,6 +1098,71 @@ describe('blocked and resumeRun', () => {
     expect(run?.phase).toBe('blocked');
     expect(run?.block?.block_id).toBe('b1');
     expect(run?.report).toBeNull();
+  });
+
+  test('resumeRun repeats the tunnel check first and refuses, with the run as it was, when the tunnel does not come up', async () => {
+    const h = harness({ config: { mock: false } });
+    await blocked(h);
+    const signals: AbortSignal[] = [];
+    const warning = {
+      step: 'tunnel',
+      entity: 'ssfb' as const,
+      message: 'SSFB DB tunnel did not start: the bastion is unreachable; the SSFB databases may be unreachable',
+      fix: 'triage tunnel status, then triage tunnel up',
+    };
+    const deps: SettleDeps = {
+      ...h.deps,
+      resumePreflight: async ({ signal }) => {
+        signals.push(signal);
+        return { steps: [{ id: 'tunnel', entity: 'ssfb', status: 'warn' }], warnings: [warning] };
+      },
+    };
+    const err = await resumeRun(RUN_ID, { by: 'ops' }, deps).catch((x: unknown) => x);
+    expect(err).toBeInstanceOf(ResumeNotReadyError);
+    expect(err).toBeInstanceOf(RunNotResumableError);
+    expect((err as ResumeNotReadyError).phase).toBe('blocked');
+    expect((err as ResumeNotReadyError).hint).toBe(`${warning.message}; ${warning.fix}`);
+    expect((err as ResumeNotReadyError).warnings).toEqual([warning]);
+    expect(signals).toHaveLength(1);
+    expect(h.flue.dispatches).toHaveLength(0);
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('blocked');
+    expect(run?.block?.block_id).toBe('b1');
+    expect(run?.block_history).toEqual([]);
+    expect(run?.submissions).toHaveLength(1);
+  });
+
+  test('a clean tunnel check, or a warning from another step, lets the resume go on', async () => {
+    const h = harness({ config: { mock: false } });
+    await blocked(h);
+    const deps: SettleDeps = {
+      ...h.deps,
+      now: () => NOW,
+      resumePreflight: async () => ({
+        steps: [{ id: 'tunnel', entity: 'ssfb', status: 'ok' }],
+        warnings: [{ step: 'preflight', message: 'the resume check could not finish; the run continues without it' }],
+      }),
+    };
+    const result = await resumeRun(RUN_ID, { by: 'ops' }, deps);
+    expect(result.status).toBe('completed');
+    expect(h.flue.dispatches).toHaveLength(1);
+    expect((await h.store.getRun(RUN_ID))?.block).toBeNull();
+  });
+
+  test('mock mode never runs the resume check', async () => {
+    const h = harness();
+    await blocked(h);
+    let calls = 0;
+    const deps: SettleDeps = {
+      ...h.deps,
+      resumePreflight: async () => {
+        calls += 1;
+        return { steps: [], warnings: [{ step: 'tunnel', message: 'down' }] };
+      },
+    };
+    const result = await resumeRun(RUN_ID, { by: 'ops' }, deps);
+    expect(calls).toBe(0);
+    expect(result.status).toBe('completed');
   });
 
   test('resumeRun closes the block as resumed, records a resume submission and sends the run on with a signal', async () => {

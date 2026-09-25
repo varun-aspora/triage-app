@@ -13,6 +13,7 @@ import { parse } from 'dotenv';
 import { configFromRecord } from './config/env.ts';
 import { ConfigError } from './config/errors.ts';
 import type { PgPoolOptions, PoolFactory } from './db/pg.ts';
+import { NO_RETRY } from './db/pg-retry.ts';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const EXAMPLE = parse(readFileSync(join(REPO, '.env.example'), 'utf8'));
@@ -69,7 +70,7 @@ describe('createPersistence', () => {
     const rel = './.data/relative.sqlite';
     try {
       process.chdir(elsewhere);
-      const adapter = db.createPersistence({ home, db: { provider: 'sqlite', url: rel } });
+      const adapter = db.createPersistence({ home, db: { provider: 'sqlite', url: rel, retry: NO_RETRY } });
       await adapter.migrate?.();
       await adapter.connect();
       await adapter.close?.();
@@ -82,7 +83,7 @@ describe('createPersistence', () => {
   });
 
   test("sqlite(':memory:') is accepted and writes no file", async () => {
-    const adapter = db.createPersistence({ home, db: { provider: 'sqlite', url: ':memory:' } });
+    const adapter = db.createPersistence({ home, db: { provider: 'sqlite', url: ':memory:', retry: NO_RETRY } });
     await adapter.migrate?.();
     const stores = await adapter.connect();
     expect(stores.submissionStore).toBeDefined();
@@ -92,13 +93,13 @@ describe('createPersistence', () => {
   });
 
   test('sqlite with a DSN-shaped url fails naming TRIAGE_DB_URL only', () => {
-    const err = catchError(() => db.createPersistence({ home, db: { provider: 'sqlite', url: FAKE_DSN } }));
+    const err = catchError(() => db.createPersistence({ home, db: { provider: 'sqlite', url: FAKE_DSN, retry: NO_RETRY } }));
     expectKeyOnly(err, 'TRIAGE_DB_URL', [FAKE_DSN, 'not-a-real-password', 'db.invalid', 'triage_ro']);
   });
 
   test('unknown provider fails naming TRIAGE_DB_PROVIDER only', () => {
     const secretish = 'postgresql://admin:hunter2-SECRET@prod.invalid:5432/core';
-    const config = { home, db: { provider: secretish as 'sqlite', url: FAKE_DSN } };
+    const config = { home, db: { provider: secretish as 'sqlite', url: FAKE_DSN, retry: NO_RETRY } };
     const err = catchError(() => db.createPersistence(config));
     expectKeyOnly(err, 'TRIAGE_DB_PROVIDER', [secretish, 'hunter2-SECRET', 'prod.invalid', FAKE_DSN, 'not-a-real-password']);
   });
@@ -108,7 +109,7 @@ describe('createPersistence', () => {
     const factory = recordingFactory();
     for (const url of [bad, './.data/triage.sqlite', '']) {
       const err = catchError(() =>
-        db.createPersistence({ home, db: { provider: 'postgres', url } }, { poolFactory: factory.fn }),
+        db.createPersistence({ home, db: { provider: 'postgres', url, retry: NO_RETRY } }, { poolFactory: factory.fn }),
       );
       expectKeyOnly(err, 'TRIAGE_DB_URL', url === '' ? [] : [url, 'hunter2-SECRET', 'db.invalid']);
       expect(err.message).not.toContain('TRIAGE_DB_PROVIDER');
@@ -137,7 +138,7 @@ describe('createPersistence', () => {
   test('postgres adapter and the shared runner use one pool', async () => {
     const { getSharedPgRunner } = await import('./db/pg.ts');
     const factory = recordingFactory();
-    const config = { home, db: { provider: 'postgres' as const, url: FAKE_DSN } };
+    const config = { home, db: { provider: 'postgres' as const, url: FAKE_DSN, retry: NO_RETRY } };
     const adapter = db.createPersistence(config, { poolFactory: factory.fn });
     const runner = getSharedPgRunner(config, { poolFactory: factory.fn });
     expect(factory.options).toHaveLength(1);

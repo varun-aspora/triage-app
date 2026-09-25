@@ -28,6 +28,7 @@ import type { TunnelResult } from '../../src/ops/tunnel.ts';
 import type { Entity } from '../../src/types/core.ts';
 import { RESOURCES_DIR, testEnvRecord } from '../support/home.ts';
 import { memoryFixtures } from '../support/ssfb-tools.ts';
+import { NO_RETRY } from '../../src/db/pg-retry.ts';
 
 // ------------------------------------------------------------------ helpers
 
@@ -242,7 +243,7 @@ describe('db check with fake probes', () => {
 describe('db check over the real SQL connector with a fake pg pool', () => {
   function realProbes(config: Config, pg: ReturnType<typeof fakePg>) {
     const registry = loadRegistry(config);
-    const sql = createSqlConnector({ registry, config, pgFactory: pg.factory, roleCache: new RoleCheckCache() });
+    const sql = createSqlConnector({ registry, config, pgFactory: pg.factory, roleCache: new RoleCheckCache(), retry: NO_RETRY });
     const fetchSpy = spyFetch();
     return { registry, probes: createRealProbes({ config, registry, sql, fetch: fetchSpy.fn }), fetchSpy };
   }

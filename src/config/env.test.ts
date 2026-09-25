@@ -139,7 +139,14 @@ describe('defaults with an empty .env', () => {
     expect(c.budgets.runMaxAttempts).toBe(2);
     expect(c.budgets.httpTimeoutMs).toBe(30000);
     expect(c.budgets.defaultLookbackDays).toBe(7);
-    expect(c.sql).toEqual({ maxRows: 200, statementTimeoutMs: 30000, lockTimeoutMs: 2000, requireReadonlyRole: false });
+    expect(c.sql).toEqual({
+      maxRows: 200,
+      statementTimeoutMs: 30000,
+      lockTimeoutMs: 2000,
+      requireReadonlyRole: false,
+      retry: { attempts: 20, delayMs: 1000, maxDelayMs: 5000 },
+    });
+    expect(c.db.retry).toEqual({ attempts: 100, delayMs: 1000, maxDelayMs: 5000 });
     expect(c.entities).toEqual(['ssfb', 'atspl', 'rtl']);
     expect(c.models.thinkingCheap).toBe('off');
     expect(c.models.thinkingMid).toBe('low');
@@ -245,7 +252,7 @@ describe('cross-field and policy refusals', () => {
     expect(configError(() => fromRecord({ TRIAGE_DB_URL: 'postgresql://u:p@h/db' })).keys).toEqual(['TRIAGE_DB_URL']);
     const dsn = 'postgresql://u:p@localhost:5432/triage';
     const c = fromRecord({ TRIAGE_DB_PROVIDER: 'postgres', TRIAGE_DB_URL: dsn });
-    expect(c.db).toEqual({ provider: 'postgres', url: dsn });
+    expect(c.db).toEqual({ provider: 'postgres', url: dsn, retry: { attempts: 100, delayMs: 1000, maxDelayMs: 5000 } });
   });
 });
 

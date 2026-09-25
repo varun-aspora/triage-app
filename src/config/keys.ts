@@ -70,6 +70,11 @@ export const KEYS: readonly KeySpec[] = [
   // Flue persistence (D38). TRIAGE_DB_URL is a path for sqlite and a DSN for postgres.
   { name: 'TRIAGE_DB_PROVIDER', type: 'enum', group: 'persistence', default: 'sqlite', values: ['sqlite', 'postgres'] },
   { name: 'TRIAGE_DB_URL', type: 'string', group: 'persistence', default: './.data/triage.sqlite', secret: true },
+  // D57: postgres only. Attempts per call when the connection is lost or refused; the wait doubles each
+  // retry from DELAY_MS up to MAX_DELAY_MS, with jitter.
+  { name: 'TRIAGE_DB_RETRY_ATTEMPTS', type: 'int', group: 'persistence', default: '100', min: 1, max: 10_000 },
+  { name: 'TRIAGE_DB_RETRY_DELAY_MS', type: 'int', group: 'persistence', default: '1000', min: 0, max: 60_000 },
+  { name: 'TRIAGE_DB_RETRY_MAX_DELAY_MS', type: 'int', group: 'persistence', default: '5000', min: 0, max: 600_000 },
 
   // Run store (D43). Blank retention means keep.
   { name: 'TRIAGE_RUNS_RETENTION_DAYS', type: 'int', group: 'runstore', example: '365', min: 1 },
@@ -100,6 +105,11 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'TRIAGE_SQL_STATEMENT_TIMEOUT_MS', type: 'int', group: 'sql', default: '30000', min: 1 },
   { name: 'TRIAGE_SQL_LOCK_TIMEOUT_MS', type: 'int', group: 'sql', default: '2000', min: 1 },
   { name: 'TRIAGE_REQUIRE_READONLY_DB_ROLE', type: 'bool', group: 'sql', default: 'false' },
+  // D57: attempts per entity DB call when the connection is lost or refused; the wait doubles each retry
+  // from DELAY_MS up to MAX_DELAY_MS, with jitter.
+  { name: 'TRIAGE_SQL_RETRY_ATTEMPTS', type: 'int', group: 'sql', default: '20', min: 1, max: 10_000 },
+  { name: 'TRIAGE_SQL_RETRY_DELAY_MS', type: 'int', group: 'sql', default: '1000', min: 0, max: 60_000 },
+  { name: 'TRIAGE_SQL_RETRY_MAX_DELAY_MS', type: 'int', group: 'sql', default: '5000', min: 0, max: 600_000 },
 
   // Models. Specs are parsed by src/models.ts; blank MODEL_CODE_WALKER falls back to the strong tier there.
   { name: 'MODEL_CLASSIFIER', type: 'string', group: 'models', example: 'openrouter/typesafe/jev-1.13' },

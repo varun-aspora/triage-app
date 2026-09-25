@@ -16,7 +16,7 @@ import { redactPersisted } from '../../gate/redact.ts';
 import { WorkerSpawnError } from '../../ingress/detach.ts';
 import { prepareDeps, prepareRequest, type PrepareInput, type PreparedSubmission } from '../../ingress/prepare.ts';
 import { SlackFetchError, THREAD_FILE_HINT } from '../../ingress/slack.ts';
-import { RunNotResumableError, type AnswerInput, type SubmissionResult } from '../../ingress/submit.ts';
+import { ResumeNotReadyError, RunNotResumableError, type AnswerInput, type SubmissionResult } from '../../ingress/submit.ts';
 import type { WorkerPayload } from '../../ingress/worker-payload.ts';
 import { sampleBlock, sampleClassification, sampleInputRequest, sampleReport, SYNTHETIC_PHONE } from '../../runstore/contract.ts';
 import { createRunStore } from '../../runstore/index.ts';
@@ -561,6 +561,35 @@ describe('worker', () => {
     expect(run?.phase).toBe('blocked');
     expect(run?.phase_reason).toBeUndefined();
     expect(run?.block?.block_id).toBe('b1');
+  });
+
+  test('a resume refused because the SSFB tunnel is down leaves the run parked and says how to fix it', async () => {
+    const h = home();
+    const store = await seed(h, { phase: 'investigating' });
+    await store.putBlock(RUN_ID, redactPersisted(sampleBlock('b1')));
+    const warning = {
+      step: 'tunnel',
+      entity: 'ssfb' as const,
+      message: 'SSFB DB tunnel did not start: the bastion is unreachable',
+      fix: 'triage tunnel status, then triage tunnel up',
+    };
+    const worker = createWorkerCommand({
+      boot: async () => undefined,
+      deps: () => ({}) as never,
+      pid: () => 1515,
+      resumeRun: async () => {
+        throw new ResumeNotReadyError(RUN_ID, 'blocked', [warning]);
+      },
+    });
+    const payload = JSON.stringify({ kind: 'resume', run_id: RUN_ID, by: 'ops-reviewer' });
+    const r = await cli([worker], ['__worker', RUN_ID], { config: () => h.config, stdin: Readable.from([payload]) });
+    expect(r.code).toBe(EXIT.ERROR);
+    expect(r.err).toContain('the bastion is unreachable');
+    expect(r.err).toContain('triage tunnel up');
+    const run = await store.getRun(RUN_ID);
+    expect(run?.phase).toBe('blocked');
+    expect(run?.block?.block_id).toBe('b1');
+    expect(run?.worker_pid).toBe(1515);
   });
 
   test('a resume whose runtime fails to start marks a stopped run failed, so the next wait shows it', async () => {
