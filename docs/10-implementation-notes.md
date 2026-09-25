@@ -30,7 +30,8 @@ How to run things (all from the repo root, see `package.json`):
 | `bun run test:contract` | gen, then Vitest over `test/contract/**/*.contract.ts` on Node |
 | `bun run build` | gen, then `vite build` into `dist/` |
 | `bun run triage -- <command>` | The CLI (`node bin/triage.mjs`) |
-| `bun run serve` | HTTP server (`node bin/triage-server.mjs`, needs a build and `TRIAGE_HTTP_AUTH_TOKEN`) |
+| `bun run serve` | HTTP server (`node bin/triage-server.mjs`, runs from `src/`, needs `TRIAGE_HTTP_AUTH_TOKEN`; D50) |
+| `bun run dev` | `serve` under `node --watch` |
 | `bun run evals:classifier` | promptfoo classifier suite (faux providers by default) |
 | `bun run ci` | The CI gate: temp eval home, then typecheck, unit tests, contract suite, classifier suite |
 
@@ -88,12 +89,13 @@ Only places where what was built differs from the HLD, LLD, decisions or plan te
 | Gap | Sub-ticket |
 |---|---|
 | The no-I/O guard patches fetch, WebSocket, net, tls, http, https and named binaries through child_process and Bun spawn. It does not cover a child `node` process's own I/O or DNS lookups. | T01.2 |
-| `libpg-query` loads its WASM at import. `bun run build` passes, but running the bundled `dist/` with the SQL gate was not verified, so the WASM file may not be found in the bundle. | T02.1 |
-| The postgres run store migrator defaults to `./migrations` next to the module. A bundled build has to pass `migrationsDir`, and nothing in the server boot passes it yet. | T09.3, T09.4, T07.10 |
+| `libpg-query` loads its WASM at import. `bun run build` passes, but running the bundled `dist/` with the SQL gate was not verified, so the WASM file may not be found in the bundle. Nothing runs `dist/` since D50. | T02.1 |
+| The postgres run store migrator defaults to `./migrations` next to the module. A bundled build has to pass `migrationsDir`, and nothing in the server boot passes it yet. The server runs from `src/` since D50, where the default holds. | T09.3, T09.4, T07.10 |
 | CONVENTIONS.md said `bun test ./src ./test ./scripts`; T07.8 added `./integrations`. Fixed with these notes. | T07.8 |
 | `evals/promptfoo/*` tests are outside `bun run test`; run them with `bun test ./evals`. `bun run ci` runs the suite itself, not these tests. | T10.7 |
 | promptfoo full-Triage suite (`triage evals triage`) is refused as not in v1. | T10.8 |
 | HTTP `POST /triage/:run_id/post-to-slack` answers 403, or 501 when enabled; posting is CLI only. | T07.7 |
+| `POST /triage` answers 202 before the background submission writes the run record, so a `GET /triage/:run_id` sent straight after can answer 404 for a moment. Found by `test/contract/server.contract.ts`, which polls through it. | T07.7 |
 | just-bash defence-in-depth patches cannot install under bun, so the bun unit tests run the virtual sandbox with it off. Node, where the app runs, has it on. | T06.7 |
 | ~~`resources/repos.json` pins carry no `remote`, so `triage repos sync` cannot clone a repo that is not checked out.~~ Fixed by D46: a pin without a remote is cloned from `TRIAGE_GIT_PROTOCOL`, `TRIAGE_GIT_HOST` and `TRIAGE_GIT_ORG`. | T11.4 |
 | Decrypted values that the `credential` detector would read as a secret come back as null with a note (about 4 in 10,000). | T05.7 |
@@ -101,7 +103,7 @@ Only places where what was built differs from the HLD, LLD, decisions or plan te
 | HLD §7 still says libsql and LLD 04 still shows `uid` on `dispatch()`; the tables above are the correction. | T01.1, T07.4 |
 | Knowledge notes carry `(unverified: ...)` markers where the sources disagreed or were silent: harbor `/v1/device/register`, whether adminV1 checks `x-customer-id`, IMPS COMPLETED vs SUCCESS, comms tables, cohort (a stub), canopy, RTL logs (a stub), CodeGraph YAML indexing. | T12.4, T12.5, T12.6, T12.7, T12.3 |
 | Pattern entries marked `stable: true` only where a note states the cause as fact; the sim-binding entries stay `stable: false` until reviewed. | T12.8 |
-| `test/server/triage-server.test.ts` skips its "says to build first" case when `dist/server.mjs` exists. | T07.10 |
+| ~~`test/server/triage-server.test.ts` skips its "says to build first" case when `dist/server.mjs` exists.~~ Gone with D50: the server needs no build, and the test boots it from `src/` and checks a request and SIGTERM. | T07.10 |
 
 ## Follow-ups on 2026-09-24
 

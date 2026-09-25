@@ -19,6 +19,7 @@
     "build:raw": "vite build",
     "triage": "node bin/triage.mjs",
     "serve": "node bin/triage-server.mjs",
+    "dev": "node --watch bin/triage-server.mjs",
     "evals:classifier": "node bin/triage.mjs evals classifier",
     "ci": "bun scripts/ci.ts"
   },

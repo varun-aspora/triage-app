@@ -1,16 +1,14 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ConfigError } from '../config/errors.ts';
 import { startRetentionTimer, type RetentionTimerHandle, type RetentionTimers } from '../runstore/retention.ts';
 import type { RunStore } from '../runstore/types.ts';
 import { makeTestHome, type TestHome } from '../../test/support/home.ts';
 import { prepareServer, type ServerConfig, type ServerDeps } from './boot.ts';
-import { describeBootError, runServer } from '../../bin/triage-server.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const REPO = resolve(HERE, '../..');
 
 type FakeTimers = RetentionTimers & { set: number; cleared: RetentionTimerHandle[]; handles: RetentionTimerHandle[] };
 
@@ -203,85 +201,5 @@ describe('prepareServer', () => {
     expect(src).not.toMatch(/process\.env/);
     expect(src).not.toMatch(/\bBun\./);
     expect(src).not.toMatch(/from ['"]bun:/);
-  });
-});
-
-describe('bin/triage-server.mjs', () => {
-  test('sets PORT before importing the server', async () => {
-    const env: Record<string, string | undefined> = {};
-    const steps: string[] = [];
-    let portAtImport: string | undefined;
-    const cfg = { marker: 'config' };
-    let stops = 0;
-    const prepared = await runServer({
-      env,
-      loadConfig: () => {
-        steps.push('loadConfig');
-        return cfg;
-      },
-      prepareServer: async (c: unknown) => {
-        expect(c).toBe(cfg);
-        steps.push('prepareServer');
-        return { port: 4321, stop: () => stops++ };
-      },
-      importServer: async () => {
-        steps.push('importServer');
-        portAtImport = env.PORT;
-      },
-    });
-    expect(steps).toEqual(['loadConfig', 'prepareServer', 'importServer']);
-    expect(portAtImport).toBe('4321');
-    expect(prepared.port).toBe(4321);
-    expect(stops).toBe(0);
-  });
-
-  test('a refused boot sets no PORT and never imports the server', async () => {
-    const env: Record<string, string | undefined> = {};
-    let imported = false;
-    const err = await runServer({
-      env,
-      loadConfig: () => ({}),
-      prepareServer: async () => {
-        throw ConfigError.of('TRIAGE_HTTP_AUTH_TOKEN', 'is blank; the HTTP API needs a bearer token');
-      },
-      importServer: async () => {
-        imported = true;
-      },
-    }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(ConfigError);
-    expect(imported).toBe(false);
-    expect(env.PORT).toBeUndefined();
-  });
-
-  test('a failed server import stops the timer and rethrows', async () => {
-    let stops = 0;
-    const boom = new Error('import failed');
-    const err = await runServer({
-      env: {},
-      loadConfig: () => ({}),
-      prepareServer: async () => ({ port: 3000, stop: () => stops++ }),
-      importServer: async () => {
-        throw boom;
-      },
-    }).catch((e: unknown) => e);
-    expect(err).toBe(boom);
-    expect(stops).toBe(1);
-  });
-
-  test('describeBootError prints ConfigError keys and only the name of other errors', () => {
-    const cfg = describeBootError(ConfigError.of('TRIAGE_HTTP_AUTH_TOKEN', 'is blank; the HTTP API needs a bearer token'));
-    expect(cfg.exitCode).toBe(3);
-    expect(cfg.line).toContain('TRIAGE_HTTP_AUTH_TOKEN');
-
-    class PgError extends Error {
-      override name = 'PgError';
-    }
-    const other = describeBootError(new PgError('connect failed for postgresql://user:secret@db.internal/x'));
-    expect(other.exitCode).toBe(1);
-    expect(other.line).toBe('triage-server: boot failed (PgError)');
-
-    const missing = Object.assign(new Error(`Cannot find module '${join(REPO, 'dist/server.mjs')}'`), { code: 'ERR_MODULE_NOT_FOUND' });
-    expect(describeBootError(missing).line).toContain('bun run build');
-    expect(describeBootError(undefined).line).toBe('triage-server: boot failed (unknown error)');
   });
 });

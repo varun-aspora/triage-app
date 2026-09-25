@@ -78,8 +78,8 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
   `agents/*.agent.ts` under the `src/` source root. There is no `.flue/`
   directory; if one existed, Flue would use it instead of `src/`.
 - `src/` is erasable-only TypeScript (`erasableSyntaxOnly`) with explicit `.ts`
-  import extensions, so `bin/triage.mjs` can run it through Node type
-  stripping. No `Bun.*` and no `bun:*` imports in `src/`.
+  import extensions, so `bin/triage.mjs` and `bin/triage-server.mjs` can run
+  it through Node type stripping, with no build (D50). No `Bun.*` and no `bun:*` imports in `src/`.
 - Scripts that exist before the index generator: `typecheck:raw` (tsc),
   `build:raw` (vite build) and `triage` (node bin/triage.mjs). T01.2 adds
   `gen`, `test`, `typecheck`, `build` and the rest.

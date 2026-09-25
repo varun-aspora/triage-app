@@ -6,6 +6,7 @@ A Flue 2.0.8 agent service that triages NRI banking issues across the SSFB, ATSP
 
 - Node 22.19 or later (the app runs on Node)
 - bun (installs packages, runs scripts and unit tests)
+- With `TRIAGE_DB_PROVIDER=postgres`: a Postgres with the pgvector extension installed, for example the `pgvector/pgvector:pg17` Docker image. The run store's first migration runs `CREATE EXTENSION vector` (D43). The default `sqlite` needs neither.
 
 ## Setup
 
@@ -33,10 +34,11 @@ Mock mode is the default (`TRIAGE_MOCK_MODE=true`, `TRIAGE_MOCK_STRICT=true`): e
 | `bun run typecheck` | Regenerates the import lists, then `tsc --noEmit` |
 | `bun run test` | Unit tests (`bun test ./src ./test ./scripts ./integrations`) with the no-I/O guard |
 | `bun run test:contract` | Vitest contract tests on Node with the fake model |
-| `bun run build` | `vite build` into `dist/` |
+| `bun run build` | `vite build` into `dist/`. Not needed to run the CLI or the server, which run from `src/` |
 | `bun run ci` | Typecheck, unit tests, contract suite and classifier suite against a temp eval home |
 | `bun run triage -- <command>` | The CLI: `run`, `start`, `wait`, `status`, `ask`, `post`, `feedback`, `doctor`, `preflight`, `tunnel`, `repos sync`, `fixtures review`, `runs`, `evals` |
-| `bun run serve` | The polling HTTP API (needs `bun run build` and `TRIAGE_HTTP_AUTH_TOKEN`) |
+| `bun run serve` | The polling HTTP API (needs `TRIAGE_HTTP_AUTH_TOKEN`) |
+| `bun run dev` | `serve` under `node --watch`: restarts when a file changes |
 | `bun run evals:classifier` | promptfoo classifier suite (faux providers by default) |
 
 ## Repo sync

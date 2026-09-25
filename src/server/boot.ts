@@ -1,13 +1,12 @@
 // HTTP server boot (HLD 02 §5.2 and §7, D25, D43). Node only.
 //
-// prepareServer runs before the Flue-built server is imported. It refuses to
-// start without TRIAGE_HTTP_AUTH_TOKEN, takes the listen port from
+// prepareServer runs before the Flue runtime starts. It refuses to start
+// without TRIAGE_HTTP_AUTH_TOKEN, takes the listen port from
 // TRIAGE_HTTP_PORT, builds the run store and starts the retention timer and
 // the repo sync timer (D47), so both run in the same process as the routes.
-// bin/triage-server.mjs calls it, sets PORT and then imports dist/server.mjs.
+// src/server/main.ts calls it.
 //
-// Nothing here reads or writes the process environment; the shim does
-// the PORT write, outside src/.
+// Nothing here reads or writes the process environment.
 
 import type { Config } from '../config/env.ts';
 import { createExecRunner } from '../connectors/exec.ts';
@@ -34,7 +33,7 @@ export type ServerDeps = {
 };
 
 export type PreparedServer = {
-  /** The port Flue's server should listen on (TRIAGE_HTTP_PORT). */
+  /** The port the server listens on (TRIAGE_HTTP_PORT). */
   readonly port: number;
   /** Stops the retention and repo sync timers. Safe to call twice. */
   stop(): void;

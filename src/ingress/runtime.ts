@@ -1,4 +1,4 @@
-// Starts the Flue runtime in a CLI process (HLD 02 §5.1).
+// Starts the Flue runtime in a CLI or server process (HLD 02 §5.1, §5.2).
 //
 // bootRuntime() wraps start({ agents: [Triage], db }) with the persistence
 // adapter from src/db.ts, so a later process can re-attach to a run's
@@ -6,9 +6,11 @@
 // returns the same promise, and a failed start is forgotten so the next call
 // can try again.
 //
-// CLI processes only. The HTTP server already runs inside a configured Flue
-// runtime, where start() throws rather than split the process's registries,
-// so nothing under src/http or src/ingress/http imports this module.
+// Called at process start: by the CLI commands that run triage, and by
+// src/server/main.ts before it listens. Route handlers run inside the runtime
+// the server already started, where a second start() throws rather than
+// split the process's registries, so nothing under src/http or
+// src/ingress/http imports this module.
 //
 // src/db.ts is imported lazily: its default export loads the config and
 // builds the adapter on import, which should happen only when a runtime is
