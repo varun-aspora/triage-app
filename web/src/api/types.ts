@@ -123,6 +123,8 @@ type StartRunCommon = {
   tier?: Tier;
   requested_by: string;
   time_window?: { from: string; to: string };
+  /** Extra notes not in the thread. The server appends them after the thread. */
+  context?: string;
 };
 
 /** POST /triage. Either a Slack thread URL or pasted messages. */

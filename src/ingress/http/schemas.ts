@@ -6,7 +6,7 @@
 
 import * as v from 'valibot';
 import { NonEmptyStringSchema, TierSchema } from '../../types/core.ts';
-import { ThreadFileMessageSchema } from '../normalise.ts';
+import { MAX_CONTEXT_CHARS, ThreadFileMessageSchema } from '../normalise.ts';
 import { FEEDBACK_VERDICTS } from '../../runstore/types.ts';
 import { MAX_FEEDBACK_TEXT } from '../../report/feedback.ts';
 
@@ -23,7 +23,8 @@ const WhoSchema = v.pipe(NonEmptyStringSchema, v.maxLength(MAX_REQUESTED_BY));
 
 /**
  * POST /triage. Exactly one of slack_url and messages. requested_by is
- * required (self-declared: one shared token is a known v1 limit).
+ * required (self-declared: one shared token is a known v1 limit). context is
+ * optional with either source and is appended after the thread.
  */
 export const TriageBodySchema = v.pipe(
   v.object({
@@ -34,6 +35,7 @@ export const TriageBodySchema = v.pipe(
     tier: v.optional(TierSchema),
     requested_by: WhoSchema,
     time_window: v.optional(v.object({ from: v.string(), to: v.string() })),
+    context: v.optional(v.pipe(v.string(), v.maxLength(MAX_CONTEXT_CHARS))),
   }),
   v.check((b) => (b.slack_url === undefined) !== (b.messages === undefined), 'send exactly one of slack_url and messages'),
 );

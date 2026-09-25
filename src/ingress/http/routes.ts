@@ -291,7 +291,11 @@ export function runView(run: RunRecord): Record<string, unknown> {
 // ------------------------------------------------------------------ helpers
 
 function toPrepareInput(body: TriageBody): PrepareInput {
-  const common = { interface: 'http' as const, requested_by: body.requested_by };
+  const common = {
+    interface: 'http' as const,
+    requested_by: body.requested_by,
+    ...(body.context !== undefined ? { context: body.context } : {}),
+  };
   if (body.slack_url !== undefined) {
     const hints: {
       -readonly [K in keyof InputHints]: InputHints[K];
@@ -303,7 +307,7 @@ function toPrepareInput(body: TriageBody): PrepareInput {
     if (body.time_window !== undefined) hints.time_window = body.time_window;
     return { ...common, kind: 'slack', url: body.slack_url, hints };
   }
-  const { slack_url: _unused, ...rest } = body;
+  const { slack_url: _unused, context: _context, ...rest } = body;
   return { ...common, kind: 'json', body: rest };
 }
 

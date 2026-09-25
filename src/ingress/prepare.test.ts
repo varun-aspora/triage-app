@@ -258,6 +258,20 @@ describe('text and json input', () => {
     expect(p.redaction_names).toEqual(['Tara Singh']);
   });
 
+  test('context is appended and its author is not a redaction name', async () => {
+    const p = await prepareRequest(
+      {
+        kind: 'json',
+        interface: 'http',
+        context: 'already retried the payout',
+        body: { requested_by: 'U0SYNTH02', messages: [{ ts: '1695460000.123456', author: 'Tara Singh', text: 'card blocked' }] },
+      },
+      deps(),
+    );
+    expect(p.request.messages.map((m) => m.text)).toEqual(['card blocked', 'already retried the payout']);
+    expect(p.redaction_names).toEqual(['Tara Singh']);
+  });
+
   test('an aborted signal stops before anything else', async () => {
     const ctrl = new AbortController();
     ctrl.abort(new Error('stop'));

@@ -7,7 +7,9 @@ import { configFromRecord } from '../config/env.ts';
 import { loadRegistry } from '../config/registry.ts';
 import type { Entity } from '../types/core.ts';
 import {
+  CONTEXT_AUTHOR,
   IngressInputError,
+  MAX_CONTEXT_CHARS,
   NoEnabledEntityError,
   ThreadFileSchema,
   buildTriageRequest,
@@ -169,6 +171,53 @@ describe('buildTriageRequest: text and slack', () => {
     expect(() =>
       build({ kind: 'slack', interface: 'slack', requested_by: 'U1', url: 'https://example.com/x', thread: { messages: messages() } }),
     ).toThrow(SlackPermalinkError);
+  });
+});
+
+describe('buildTriageRequest: context', () => {
+  const SLACK_URL = 'https://acme.slack.com/archives/C0123ABCD/p1695460999000111?thread_ts=1695460000.123456';
+
+  test('context is appended after the slack thread as a non-parent message', () => {
+    const r = build({
+      kind: 'slack',
+      interface: 'http',
+      requested_by: 'ops',
+      url: SLACK_URL,
+      thread: { messages: messages() },
+      context: '  already checked the KYC status  ',
+    });
+    expect(r.messages).toHaveLength(3);
+    expect(r.messages[2]).toEqual({ ts: '1790164800.000000', author: CONTEXT_AUTHOR, text: 'already checked the KYC status', is_parent: false });
+    expect(r.messages[0]?.is_parent).toBe(true);
+  });
+
+  test('context works with pasted json messages too', () => {
+    const r = build({ kind: 'json', interface: 'http', requested_by: 'ops', body: { messages: messages() }, context: 'see ticket AS-1' });
+    expect(r.messages.map((m) => m.author)).toEqual(['U1', 'U2', CONTEXT_AUTHOR]);
+  });
+
+  test('context sorts after a thread that ends later than now', () => {
+    const late = String(NOW.getTime() / 1000 + 60) + '.000000';
+    const r = build({
+      kind: 'json',
+      interface: 'http',
+      requested_by: 'ops',
+      body: { messages: [{ ts: late, author: 'U1', text: 'x' }] },
+      context: 'note',
+    });
+    expect(r.messages[1]?.ts).toBe(String(NOW.getTime() / 1000 + 60) + '.000001');
+  });
+
+  test('blank context adds nothing', () => {
+    const r = build({ kind: 'json', interface: 'http', requested_by: 'ops', body: { messages: messages() }, context: '   ' });
+    expect(r.messages).toHaveLength(2);
+  });
+
+  test('oversized context is refused by key', () => {
+    const big = 'x'.repeat(MAX_CONTEXT_CHARS + 1);
+    expect(inputError(() => build({ kind: 'json', interface: 'http', requested_by: 'ops', body: { messages: messages() }, context: big })).key).toBe(
+      'context',
+    );
   });
 });
 

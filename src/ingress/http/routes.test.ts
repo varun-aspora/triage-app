@@ -259,6 +259,22 @@ describe('POST /triage accept', () => {
     ]);
   });
 
+  test('context rides along with slack_url and with messages', async () => {
+    const h = harness();
+    await post(h.app, '/triage', { slack_url: PERMALINK, requested_by: 'ops@example.com', context: 'checked KYC' });
+    await post(h.app, '/triage', { messages: MESSAGES, requested_by: 'ops@example.com', context: 'checked KYC' });
+    expect(h.prepared).toEqual([
+      { interface: 'http', requested_by: 'ops@example.com', context: 'checked KYC', kind: 'slack', url: PERMALINK, hints: {} },
+      {
+        interface: 'http',
+        requested_by: 'ops@example.com',
+        context: 'checked KYC',
+        kind: 'json',
+        body: { messages: MESSAGES, requested_by: 'ops@example.com' },
+      },
+    ]);
+  });
+
   test('the same Idempotency-Key twice -> the same run_id, runSubmission once', async () => {
     const h = harness();
     const body = { messages: MESSAGES, requested_by: 'ops@example.com' };
