@@ -1,14 +1,16 @@
 // The text of the first message the Triage orchestrator receives, of a
-// `triage ask` follow-up, and of the answer to a question the run asked
-// (LLD 04 §2.4, D24, P6 §4.3).
+// `triage ask` follow-up, of the answer to a question the run asked, and of
+// the signal that sends a blocked, failed or stopped run on again
+// (LLD 04 §2.4, D24, P6 §4.3, D55).
 //
-// Both are built from the in-memory request and then passed through the
-// model-facing redaction profile as a whole: PAN, card numbers, passports,
-// secrets and email local parts are masked, while account numbers, UTRs,
-// phones, UUIDs and names stay visible because the investigation searches
-// with them. The persisted-profile copy of the request travels separately,
-// in initialData.
+// All of them are built from the in-memory request and then passed through
+// the model-facing redaction profile as a whole: PAN, card numbers,
+// passports, secrets and email local parts are masked, while account
+// numbers, UTRs, phones, UUIDs and names stay visible because the
+// investigation searches with them. The persisted-profile copy of the
+// request travels separately, in initialData.
 import { redactModelFacing } from '../gate/redact.ts';
+import type { BlockRecord } from '../types/block.ts';
 import { KNOWN_ID_KEYS, type KnownIds } from '../types/core.ts';
 import type { InputRequest } from '../types/input-request.ts';
 import type { TriageRequest } from '../types/request.ts';
@@ -89,8 +91,69 @@ export function renderAnswer(request: Pick<InputRequest, 'question_id' | 'questi
 
 // The stored question, on one line and short enough to quote back.
 function quoted(question: string): string {
-  const flat = question.replace(/\s+/g, ' ').trim();
+  const flat = oneLine(question);
   return `"${flat.length > 120 ? `${flat.slice(0, 120)}…` : flat}"`;
+}
+
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/** What the run was doing when it stopped, for the resume signal. */
+export type ResumeFrom =
+  /** Parked by stop_blocked; the block names the systems. */
+  | { readonly kind: 'blocked'; readonly block: Pick<BlockRecord, 'block_id' | 'systems' | 'reason'> }
+  /** Failed after it was dispatched; the reason is the stored phase reason (an error class name). */
+  | { readonly kind: 'failed'; readonly reason?: string }
+  /** Stopped by a person. */
+  | { readonly kind: 'stopped' };
+
+export type ResumeRender = {
+  /** Who resumed the run. */
+  readonly by: string;
+  /** When, ISO 8601. */
+  readonly at: string;
+  /** The person's message: what was fixed, and anything new the run should take into account. Empty for none. May span lines. */
+  readonly note: string;
+};
+
+const CONTINUE_LINE =
+  'Continue from what you already found: the evidence you noted stands, so do not repeat lookups that answered.';
+
+/** The signal that sends a blocked, failed or stopped run on (D55), model-facing profile. */
+export function renderResume(from: ResumeFrom, r: ResumeRender): string {
+  const lines: string[] = [];
+  if (from.kind === 'blocked') {
+    lines.push(`This run was blocked (${from.block.block_id}) because ${listed(from.block.systems)} did not answer: ${oneLine(from.block.reason)}`);
+  } else if (from.kind === 'failed') {
+    lines.push(`This run failed${from.reason !== undefined ? ` (${from.reason})` : ''} before it finished.`);
+  } else {
+    lines.push('This run was stopped before it finished.');
+  }
+  lines.push(`${r.by} resumed it at ${r.at}.`);
+  const message = r.note.trim();
+  if (message !== '') lines.push('', `Message from ${r.by}:`, message);
+  lines.push('');
+  if (message !== '') lines.push('Take the message into account: it may change what to check next.');
+  if (from.kind === 'blocked') {
+    lines.push(
+      `${listed(from.block.systems)} ${from.block.systems.length === 1 ? 'is' : 'are'} expected to answer now.`,
+      CONTINUE_LINE,
+      'Check what was blocked, then call finish_report with the report. If a system still does not answer and you cannot go on without it, call stop_blocked again.',
+    );
+  } else {
+    lines.push(
+      CONTINUE_LINE,
+      'Finish the investigation and call finish_report with the report. If a system does not answer and you cannot go on without it, call stop_blocked.',
+    );
+  }
+  return redactModelFacing(lines.join('\n'));
+}
+
+// "a", "a and b", "a, b and c".
+function listed(items: readonly string[]): string {
+  if (items.length <= 1) return items.join('');
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
 }
 
 function imageNote(images: RenderImages): string[] {

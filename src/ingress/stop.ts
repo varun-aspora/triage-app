@@ -4,10 +4,10 @@
 // stopRun(run_id, input, deps), in order:
 //   1. Checks the run id and who is stopping it, before anything is written.
 //   2. store.markStopped: phase stopped with reason 'cancelled', and an open
-//      question closed as cancelled. A run that has already finished is left
-//      alone and RunNotRunningError is thrown; the check and the write are
-//      one step in the store, so a run that settles at the same moment keeps
-//      its result.
+//      question or an open block (D55) closed as cancelled. A run that has
+//      already finished is left alone and RunNotRunningError is thrown; the
+//      check and the write are one step in the store, so a run that settles
+//      at the same moment keeps its result.
 //   3. Records the Cancel verdict through recordFeedback: verdict wrong, no
 //      notes, cancelled: true, with the phase the run was in. Learning can
 //      tell it apart from a considered reject. input.verdict false skips it.
@@ -18,7 +18,8 @@
 //      runtime would otherwise pick up again. A failed abort is a gap, not an
 //      error: the run is already stopped in the store.
 //
-// A stopped run can be asked a follow-up, which resumes it.
+// A stopped run can be resumed (triage resume) or asked a follow-up, which
+// moves it on.
 
 import * as v from 'valibot';
 import { recordFeedback, type FeedbackDeps, type FeedbackResult } from '../report/feedback.ts';

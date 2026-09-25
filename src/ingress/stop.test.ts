@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { makeTestHome, type TestHome } from '../../test/support/home.ts';
 import { redactPersisted } from '../gate/redact.ts';
-import { sampleInputRequest, sampleRequest } from '../runstore/contract.ts';
+import { sampleBlock, sampleInputRequest, sampleRequest } from '../runstore/contract.ts';
 import { createFolderRunStore } from '../runstore/folder.ts';
 import { RunNotFoundError, type RunStore } from '../runstore/types.ts';
 import { IngressInputError } from './normalise.ts';
@@ -86,6 +86,22 @@ describe('stopRun', () => {
     const run = await e.store.getRun(RUN);
     expect(run?.input_request).toBeNull();
     expect(run?.input_history.at(-1)).toMatchObject({ question_id: 'q1', status: 'cancelled', resolved_by: 'ops' });
+  });
+
+  test('an open block is closed as cancelled by the same person at the same time', async () => {
+    const e = await env();
+    await e.store.putBlock(RUN, redactPersisted(sampleBlock('b1')));
+    const r = await stopRun(RUN, { by: 'ops', interface: 'cli' }, e.deps);
+    expect(r.stopped_from).toBe('blocked');
+    const run = await e.store.getRun(RUN);
+    expect(run?.phase).toBe('stopped');
+    expect(run?.block).toBeNull();
+    expect(run?.block_history.at(-1)).toMatchObject({
+      block_id: 'b1',
+      status: 'cancelled',
+      resolved_by: 'ops',
+      resolved_at: NOW.toISOString(),
+    });
   });
 
   test('a failed abort is a gap; the run is stopped anyway', async () => {

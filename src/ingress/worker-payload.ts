@@ -2,13 +2,15 @@
 // process. It travels only over the child's stdin, never on argv or disk, so
 // the raw thread in a submit payload is never stored anywhere (D43).
 //
-// Three kinds:
+// Four kinds:
 // - submit: the prepared TriageRequest for a new run, plus the names ingress
 //   collected for redaction (they ride next to the request, not inside it, so
 //   the run store never receives them).
 // - ask: a follow-up question on an existing run.
 // - answer: the answer to the question a run is waiting on (or a skip), with
 //   any ids the person gave for the ingress identity step (P6 §4.5).
+// - resume: send a blocked run, or one that failed after it was dispatched,
+//   on as a new submission (D55), with an optional note on what was fixed.
 //
 // Error messages name the failing field and what was expected. They never
 // quote the received value, since it can be customer data.
@@ -60,7 +62,17 @@ export const AnswerPayloadSchema = v.pipe(
 );
 export type AnswerPayload = v.InferOutput<typeof AnswerPayloadSchema>;
 
-export const WorkerPayloadSchema = v.variant('kind', [SubmitPayloadSchema, AskPayloadSchema, AnswerPayloadSchema]);
+export const ResumePayloadSchema = v.strictObject({
+  kind: v.literal('resume'),
+  run_id: RunIdSchema,
+  // What was fixed, for the model and the record.
+  note: v.optional(NonEmptyStringSchema),
+  // Who resumed: an email or a Slack user id.
+  by: NonEmptyStringSchema,
+});
+export type ResumePayload = v.InferOutput<typeof ResumePayloadSchema>;
+
+export const WorkerPayloadSchema = v.variant('kind', [SubmitPayloadSchema, AskPayloadSchema, AnswerPayloadSchema, ResumePayloadSchema]);
 export type WorkerPayload = v.InferOutput<typeof WorkerPayloadSchema>;
 
 /** A payload that is not valid JSON, too large, or fails the schema. */
