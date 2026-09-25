@@ -6,7 +6,6 @@ import type { ExecRunner } from '../../src/connectors/exec.ts';
 import { hostPort, probeTargets } from '../../src/ops/preflight-steps.ts';
 import { parseDeployMode, runPreflight, type PreflightInput, type PreflightResult } from '../../src/ops/preflight.ts';
 import type { TcpProbe, TunnelDeps, TunnelResult } from '../../src/ops/tunnel.ts';
-import type { Entity } from '../../src/types/core.ts';
 import { RESOURCES_DIR, testEnvRecord } from '../support/home.ts';
 
 // Seeded fake values. None names a real system: .invalid never resolves and
@@ -90,7 +89,6 @@ async function run(options: {
   probe?: Probe;
   tunnel?: FakeTunnel;
   isTty?: boolean;
-  entities?: Entity[];
 } = {}): Promise<Run> {
   const { config, registry } = setup(options.overrides);
   const runner = createFakeRunner(options.script ?? [qwOk(SSFB_QW), qwOk(ATSPL_QW)]);
@@ -103,7 +101,6 @@ async function run(options: {
     tcpProbe: probe,
     tunnel,
     isTty: options.isTty ?? false,
-    ...(options.entities === undefined ? {} : { entities: options.entities }),
   };
   const result = await runPreflight(input);
   return { result, runner, probe, tunnel };
@@ -206,13 +203,6 @@ describe('local mode', () => {
     const r = await run({ overrides: { TRIAGE_ENTITIES: 'atspl,rtl' }, script: [qwOk(ATSPL_QW)] });
     expect(r.tunnel.calls).toBe(0);
     expect(r.result.steps.some((s) => s.entity === 'ssfb')).toBe(false);
-  });
-
-  test('entities narrows the run and never widens it', async () => {
-    const r = await run({ overrides: { TRIAGE_ENTITIES: 'ssfb,atspl' }, entities: ['atspl', 'rtl'], script: [qwOk(ATSPL_QW)] });
-    expect(r.tunnel.calls).toBe(0);
-    expect(r.runner.calls.map((c) => c.argv[2])).toEqual([ATSPL_QW]);
-    expect(r.probe.calls.map((c) => c.host)).toEqual(['atspl-db.fixture.invalid']);
   });
 
   test('the ssfb cbs flag false gives no aws or kubectl calls', async () => {

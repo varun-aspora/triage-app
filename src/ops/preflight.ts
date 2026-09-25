@@ -21,7 +21,6 @@ import { deployModeForPreflight, type Config } from '../config/env.ts';
 import type { Registry } from '../config/registry.ts';
 import type { ExecRunner } from '../connectors/exec.ts';
 import type { PreflightWarning } from '../types/classification.ts';
-import type { Entity } from '../types/core.ts';
 import {
   Outcome,
   kubeLoginSteps,
@@ -46,8 +45,6 @@ export type PreflightMode = 'local' | 'server' | 'unknown';
 export type PreflightInput = {
   readonly config: Config;
   readonly registry: Registry;
-  /** Entities to cover. Defaults to every enabled entity; entities not enabled are dropped. */
-  readonly entities?: readonly Entity[];
   readonly runner: ExecRunner;
   readonly tcpProbe: TcpProbe;
   /** Starts the SSFB tunnel. Defaults to tunnelUp. */
@@ -78,12 +75,6 @@ function readMode(config: Config): PreflightMode {
   }
 }
 
-function coveredEntities(input: PreflightInput): readonly Entity[] {
-  const enabled = input.registry.enabledEntities();
-  if (input.entities === undefined) return enabled;
-  return enabled.filter((e) => input.entities?.includes(e) === true);
-}
-
 function freeze(mode: PreflightMode, out: Outcome): PreflightResult {
   return Object.freeze({ mode, steps: Object.freeze([...out.steps]), warnings: Object.freeze([...out.warnings]) });
 }
@@ -100,7 +91,7 @@ export async function runPreflight(input: PreflightInput): Promise<PreflightResu
     const ctx: StepContext = {
       config: input.config,
       registry: input.registry,
-      entities: coveredEntities(input),
+      entities: input.registry.enabledEntities(),
       runner: input.runner,
       tcpProbe: input.tcpProbe,
       tunnel: input.tunnel ?? tunnelUp,

@@ -133,17 +133,13 @@ export type SettleDeps = {
 };
 
 export type SubmissionDeps = SettleDeps & {
-  /** Pre-flight for the request's entities. Not called in mock mode. */
-  readonly preflight: (input: { readonly entities?: readonly Entity[]; readonly signal: AbortSignal }) => Promise<Pick<PreflightResult, 'warnings'>>;
+  /** Pre-flight for every enabled entity. Not called in mock mode. */
+  readonly preflight: (input: { readonly signal: AbortSignal }) => Promise<Pick<PreflightResult, 'warnings'>>;
   /**
-   * Syncs the repos when due for this interface (D47), then fetches the
-   * request's deploy manifests repos. Not called in mock mode. Left out: no sync.
+   * Syncs the repos when due for this interface (D47), then fetches the deploy
+   * manifests repos of every enabled entity. Not called in mock mode. Left out: no sync.
    */
-  readonly repoSync?: (input: {
-    readonly interface: Interface;
-    readonly entities?: readonly Entity[];
-    readonly signal: AbortSignal;
-  }) => Promise<readonly PreflightWarning[]>;
+  readonly repoSync?: (input: { readonly interface: Interface; readonly signal: AbortSignal }) => Promise<readonly PreflightWarning[]>;
   readonly identity: (
     request: TriageRequest,
     opts: { readonly redactionNames: readonly string[]; readonly signal: AbortSignal },
@@ -221,16 +217,11 @@ export async function runSubmission(prepared: PreparedSubmission, deps: Submissi
 
     await store.setPhase(runId, 'preflight');
     if (!deps.config.mock.enabled) {
+      // Every enabled entity, not only the ones the request names: the names
+      // are where the agent starts, and it may brief any enabled entity.
       const [pf, repos] = await Promise.all([
-        deps.preflight({
-          ...(request.hints.entities !== undefined ? { entities: request.hints.entities } : {}),
-          signal,
-        }),
-        deps.repoSync?.({
-          interface: request.interface,
-          ...(request.hints.entities !== undefined ? { entities: request.hints.entities } : {}),
-          signal,
-        }) ?? [],
+        deps.preflight({ signal }),
+        deps.repoSync?.({ interface: request.interface, signal }) ?? [],
       ]);
       warnings.push(...pf.warnings, ...repos);
     }
@@ -562,18 +553,17 @@ export function submissionDeps(options: SubmissionDepsOptions = {}): SubmissionD
     embedder,
     ...(options.signal !== undefined ? { signal: options.signal } : {}),
     ...(options.onEvent !== undefined ? { onEvent: options.onEvent } : {}),
-    preflight: ({ entities, signal }) =>
+    preflight: ({ signal }) =>
       runPreflight({
         config,
         registry,
-        ...(entities !== undefined ? { entities } : {}),
         runner: options.runner ?? createExecRunner(),
         tcpProbe: options.tcpProbe ?? netTcpConnect,
         isTty: options.isTty ?? false,
         signal,
       }),
-    repoSync: ({ interface: iface, entities, signal }) =>
-      syncBeforeRun(iface, { config, runner: options.runner ?? createExecRunner(), signal }, infraReposToSync(config, registry, entities)),
+    repoSync: ({ interface: iface, signal }) =>
+      syncBeforeRun(iface, { config, runner: options.runner ?? createExecRunner(), signal }, infraReposToSync(config, registry)),
     identity: (request, { redactionNames, signal }) =>
       resolveIngressIdentity(request, {
         sql,
@@ -600,18 +590,17 @@ export function submissionDeps(options: SubmissionDepsOptions = {}): SubmissionD
   };
 }
 
-// A refused MODEL_EMBEDDING must not stop runs: embeddings are derived data.
-// The deploy manifests repos for the request's entities (all enabled ones when
-// it names none). A repos.json that does not load means none; the code tools
-// report that problem.
-function infraReposToSync(config: Config, registry: Registry, entities: readonly Entity[] | undefined): readonly string[] {
+// The deploy manifests repos of every enabled entity. A repos.json that does
+// not load means none; the code tools report that problem.
+function infraReposToSync(config: Config, registry: Registry): readonly string[] {
   try {
-    return infraRepoNames(registry, loadRepos(config, registry), registry.enabledEntities(entities));
+    return infraRepoNames(registry, loadRepos(config, registry), registry.enabledEntities());
   } catch {
     return [];
   }
 }
 
+// A refused MODEL_EMBEDDING must not stop runs: embeddings are derived data.
 function embedderFor(config: Config, fetchImpl: FetchLike | undefined): Embedder | null {
   try {
     return createEmbedder(config, { fetch: fetchImpl ?? ((url, reqInit) => fetch(url, reqInit)) });

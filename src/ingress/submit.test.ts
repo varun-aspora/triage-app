@@ -415,20 +415,23 @@ describe('pre-flight', () => {
     expect(warnings).toContainEqual(repoWarning);
   });
 
-  test('the repo sync gets the entities the request names, so it fetches their deploy manifests', async () => {
-    const seen: (readonly string[] | undefined)[] = [];
+  test('pre-flight and the repo sync cover every enabled entity, even when the request names one', async () => {
+    const seen: string[][] = [];
     const h = harness({ config: { mock: false } });
     const deps: SubmissionDeps = {
       ...h.deps,
-      repoSync: async ({ entities }) => {
-        seen.push(entities);
+      preflight: async (input) => {
+        seen.push(Object.keys(input));
+        return { warnings: [] };
+      },
+      repoSync: async (input) => {
+        seen.push(Object.keys(input));
         return [];
       },
     };
     const p = prepared();
     await runSubmission({ ...p, request: { ...p.request, hints: { ...p.request.hints, entities: ['atspl'] } } }, deps);
-    await runSubmission(prepared({ runId: 'run_submit_no_hints_01' }), deps);
-    expect(seen).toEqual([['atspl'], p.request.hints.entities]);
+    expect(seen).toEqual([['signal'], ['interface', 'signal']]);
   });
 
   test('mock mode does not sync repos', async () => {

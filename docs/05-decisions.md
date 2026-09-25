@@ -264,6 +264,11 @@ Append-only. When a decision is reversed, add a new entry that supersedes it; do
 - **Why**: code must not branch on `TRIAGE_ENV_LABEL`, and no key name encodes prod or stage, so the `.env` has to name the repo itself. One string per entity cannot be half set. "What is deployed" has to be current, so the manifests are fetched on every run, not every 24 hours.
 - **Rejected**: prod and stage fields in `repos.json` picked by an env label (code would branch on the environment); hiding the other environment's repos from `repo_grep` and `repo_read` (the owner wants the agents to pick from the line, and every repo stays readable); two keys, one for the repo and one for the path (easy to set one and not the other); a shorter global sync interval (every repo would pay for what only the manifests need); indexing the manifests repos before each run (YAML indexes as near-empty and it slows every run).
 
+### D52. Pre-flight and the deploy manifests fetch cover every enabled entity, whatever the request names (2026-09-25; refines D47, D51)
+- **Chosen**: `runSubmission` no longer passes `request.hints.entities` to pre-flight or to the repo sync. Kube login, `qw whoami`, host probes and the deploy manifests fetch run for every entity in `TRIAGE_ENTITIES` that the registry enables. `--entities` (and `entities` on HTTP and in a thread file) still sets the root's focus, where it starts. With no caller left, the `entities` option on `runPreflight` is removed; `triage preflight` never had one.
+- **Why**: the root mounts investigators for every enabled entity and is told to follow `suggested_next_entity` to any of them. With pre-flight narrowed, a run started with `--entities ssfb` that moved on to RTL read RTL without a login and with stale manifests, and that showed up only as `unreachable` gaps.
+- **Rejected**: running pre-flight for an entity the first time the root briefs it (a delegate cannot run a step before its tools, and a login prompt mid-run breaks non-TTY runs); keeping the narrowing and telling the root not to leave the named entities (the owner wants the agent to follow the evidence across entities).
+
 ## Assumptions (explicit; each needs your confirmation or correction)
 
 | # | Assumption | Basis | If wrong |

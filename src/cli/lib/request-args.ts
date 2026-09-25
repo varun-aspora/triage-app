@@ -3,7 +3,8 @@
 //
 //   --slack-url <url> | --thread-file <path> | --text <text>   exactly one
 //   --ids k=v ...          known id keys only
-//   --entities <names...>  registry ids or aliases; may narrow TRIAGE_ENTITIES, never widen it
+//   --entities <names...>  registry ids or aliases, each enabled by TRIAGE_ENTITIES; where the
+//                          agent starts, not a limit (pre-flight still covers every enabled entity)
 //   --tier cheap|mid|strong
 //   --requested-by <who>   defaults to the OS user name
 //   --interface cli|claude-code
@@ -49,7 +50,7 @@ export function configureRequestArgs(cmd: Command): Command {
     .option('--thread-file <path>', 'JSON file with the thread messages[] (when no bot token is set up)')
     .option('--text <text>', 'free text to triage')
     .option('--ids <pairs...>', 'known ids as key=value, e.g. customer_id=...')
-    .option('--entities <names...>', 'entities to look at (ids or aliases); narrows TRIAGE_ENTITIES')
+    .option('--entities <names...>', 'entities to start with (ids or aliases); the agent may still brief other enabled entities')
     .option('--tier <tier>', `model tier override: ${TIERS.join('|')}`)
     .option('--requested-by <who>', 'who asked (email or Slack user id); defaults to the OS user')
     .option('--interface <name>', `caller interface: ${CLI_INTERFACES.join('|')}`, 'cli');
