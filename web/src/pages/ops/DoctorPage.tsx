@@ -120,6 +120,13 @@ export default function DoctorPage() {
   );
 }
 
+/** Row tint for the statuses that need someone to act; ok, disabled and skipped stay plain. */
+function problemRowClass(status: DoctorCheck['status']): string | undefined {
+  if (status === 'fail') return 'row-rust';
+  if (status === 'warn') return 'row-amber';
+  return undefined;
+}
+
 function isUnknownCheck(err: unknown): err is ApiError {
   return err instanceof ApiError && err.status === 400 && err.body.valid_checks !== undefined;
 }
@@ -127,17 +134,28 @@ function isUnknownCheck(err: unknown): err is ApiError {
 function Counts({ counts }: { counts: DoctorResponse['counts'] }) {
   return (
     <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-      {DOCTOR_STATUSES.map((status) => (
-        <div
-          key={status}
-          style={{ flex: '1 1 120px', padding: '12px 16px', background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 'var(--radius-lg)' }}
-        >
-          <div style={{ margin: '0 0 6px' }}>
-            <StatusTag look={doctorStatusTone(status)}>{status}</StatusTag>
+      {DOCTOR_STATUSES.map((status) => {
+        const n = counts[status] ?? 0;
+        // Tint only when there is something to fix, so a clean run looks calm.
+        const tone = n > 0 ? (status === 'fail' ? 'rust' : status === 'warn' ? 'amber' : null) : null;
+        return (
+          <div
+            key={status}
+            style={{
+              flex: '1 1 120px',
+              padding: '12px 16px',
+              background: tone === null ? 'var(--surface)' : `var(--tone-${tone}-row)`,
+              border: `1px solid ${tone === null ? 'var(--line)' : `var(--tone-${tone}-fg)`}`,
+              borderRadius: 'var(--radius-lg)',
+            }}
+          >
+            <div style={{ margin: '0 0 6px' }}>
+              <StatusTag look={doctorStatusTone(status)}>{status}</StatusTag>
+            </div>
+            <div style={{ fontSize: 24, fontWeight: 600, color: tone === null ? undefined : `var(--tone-${tone}-fg)` }}>{n}</div>
           </div>
-          <div style={{ fontSize: 24, fontWeight: 600 }}>{counts[status] ?? 0}</div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -213,7 +231,7 @@ function ChecksTable({ checks, sortBy, errorsOnly }: { checks: DoctorCheck[]; so
                   </th>
                 </tr>
                 {group.rows.map((c, i) => (
-                  <tr key={`${c.id}-${i}`}>
+                  <tr key={`${c.id}-${i}`} className={problemRowClass(c.status)}>
                     <td className="mono" style={{ fontSize: 13, fontWeight: 500 }}>
                       {c.id}
                     </td>
@@ -242,7 +260,9 @@ function ChecksTable({ checks, sortBy, errorsOnly }: { checks: DoctorCheck[]; so
                         ))
                       )}
                     </td>
-                    <td style={{ fontSize: 13, color: 'var(--text-2)', lineHeight: 1.45 }}>{c.message}</td>
+                    <td className="row-message" style={{ fontSize: 13, lineHeight: 1.45 }}>
+                      {c.message}
+                    </td>
                   </tr>
                 ))}
               </Fragment>

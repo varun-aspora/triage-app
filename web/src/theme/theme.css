@@ -28,6 +28,9 @@
   --tone-rust-fg: #8f2d0c;
   --tone-info-bg: #e3ecf7;
   --tone-info-fg: #24508f;
+  /* Lighter than the chip fills so a whole tinted table row keeps body text readable. */
+  --tone-amber-row: #fdf5ea;
+  --tone-rust-row: #fcede7;
 
   --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
@@ -119,6 +122,15 @@ pre {
 .tone-amber { background: var(--tone-amber-bg); color: var(--tone-amber-fg); }
 .tone-rust { background: var(--tone-rust-bg); color: var(--tone-rust-fg); }
 .tone-info { background: var(--tone-info-bg); color: var(--tone-info-fg); }
+
+/* Problem rows in a table: tint plus a left edge, so a warning or failure stands out without reading the chip. */
+.table tr.row-amber > td { background: var(--tone-amber-row); }
+.table tr.row-rust > td { background: var(--tone-rust-row); }
+.table tr.row-amber > td:first-child { box-shadow: inset 3px 0 0 var(--tone-amber-fg); }
+.table tr.row-rust > td:first-child { box-shadow: inset 3px 0 0 var(--tone-rust-fg); }
+.table .row-message { color: var(--text-2); }
+.table tr.row-amber .row-message { color: var(--tone-amber-fg); font-weight: 500; }
+.table tr.row-rust .row-message { color: var(--tone-rust-fg); font-weight: 500; }
 
 /* Form fields */
 .lbl {
