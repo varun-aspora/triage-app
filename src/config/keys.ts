@@ -64,7 +64,7 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'TRIAGE_DATA_DIR', type: 'path', group: 'runtime', default: './.data' },
   { name: 'TRIAGE_AUDIT_LOG', type: 'path', group: 'runtime', default: './.data/audit.jsonl' },
   { name: 'TRIAGE_RUNS_DIR', type: 'path', group: 'runtime', default: './.data/runs' },
-  { name: 'TRIAGE_REPOS_DIR', type: 'path', group: 'runtime' },
+  { name: 'TRIAGE_REPOS_DIR', type: 'path', group: 'runtime', example: './data/repos' },
   { name: 'TRIAGE_KNOWLEDGE_DIR', type: 'path', group: 'runtime', default: './knowledge' },
 
   // Flue persistence (D38). TRIAGE_DB_URL is a path for sqlite and a DSN for postgres.
@@ -101,15 +101,15 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'TRIAGE_REQUIRE_READONLY_DB_ROLE', type: 'bool', group: 'sql', default: 'false' },
 
   // Models. Specs are parsed by src/models.ts; blank MODEL_CODE_WALKER falls back to the strong tier there.
-  { name: 'MODEL_CLASSIFIER', type: 'string', group: 'models' },
-  { name: 'MODEL_TIER_CHEAP', type: 'string', group: 'models' },
-  { name: 'MODEL_TIER_MID', type: 'string', group: 'models' },
-  { name: 'MODEL_TIER_STRONG', type: 'string', group: 'models' },
-  { name: 'MODEL_CODE_WALKER', type: 'string', group: 'models' },
-  { name: 'MODEL_THINKING_CHEAP', type: 'enum', group: 'models', default: 'off', values: THINKING_LEVELS },
-  { name: 'MODEL_THINKING_MID', type: 'enum', group: 'models', default: 'low', values: THINKING_LEVELS },
+  { name: 'MODEL_CLASSIFIER', type: 'string', group: 'models', example: 'openrouter/typesafe/jev-1.13' },
+  { name: 'MODEL_TIER_CHEAP', type: 'string', group: 'models', example: 'openai/gpt-6-luna' },
+  { name: 'MODEL_TIER_MID', type: 'string', group: 'models', example: 'openai/gpt-6-sol' },
+  { name: 'MODEL_TIER_STRONG', type: 'string', group: 'models', example: 'openai/gpt-6-sol' },
+  { name: 'MODEL_CODE_WALKER', type: 'string', group: 'models', example: 'openai/gpt-6-sol' },
+  { name: 'MODEL_THINKING_CHEAP', type: 'enum', group: 'models', example: 'low', default: 'off', values: THINKING_LEVELS },
+  { name: 'MODEL_THINKING_MID', type: 'enum', group: 'models', example: 'medium', default: 'low', values: THINKING_LEVELS },
   { name: 'MODEL_THINKING_STRONG', type: 'enum', group: 'models', default: 'high', values: THINKING_LEVELS },
-  { name: 'MODEL_EMBEDDING', type: 'string', group: 'models' },
+  { name: 'MODEL_EMBEDDING', type: 'string', group: 'models', example: 'openai/text-embedding-3-small' },
 
   // Provider credentials
   { name: 'ANTHROPIC_API_KEY', type: 'string', group: 'providers', secret: true },
@@ -118,7 +118,7 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'OLLAMA_BASE_URL', type: 'string', group: 'providers' },
 
   // Evals (D42)
-  { name: 'TRIAGE_EVAL_JUDGE_MODEL', type: 'string', group: 'evals' },
+  { name: 'TRIAGE_EVAL_JUDGE_MODEL', type: 'string', group: 'evals', example: 'openai/gpt-6-sol' },
   { name: 'TRIAGE_EVAL_MAX_COST_USD', type: 'number', group: 'evals', min: 0 },
 
   // HTTP API

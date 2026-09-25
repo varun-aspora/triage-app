@@ -1,7 +1,7 @@
 // Builds a throwaway TRIAGE_HOME for tests.
 //
-// The generated .env starts from .env.example with every credential and host
-// value blanked, so nothing in a test home can point at a real system. Mock
+// The generated .env starts from .env.example with every credential, host and
+// model choice blanked, so nothing in a test home can point at a real system. Mock
 // mode is forced on and strict, fixture recording is forced off (D19, D27,
 // D42), and resources/ is copied in so the registry loads. The home lives in
 // the OS temp dir and cleanup() removes it. No .env is ever written inside
@@ -82,6 +82,8 @@ export type TestHome = {
 /** True for keys whose value a test home always blanks. */
 export function isBlankedKey(name: string): boolean {
   if (BLANK_NAMES.has(name)) return true;
+  // Model choices: the example names live models; a test sets the ones it needs.
+  if (KEY_BY_NAME.get(name)?.group === 'models' || name === 'TRIAGE_EVAL_JUDGE_MODEL') return true;
   if (BLANK_SUFFIXES.some((s) => name.endsWith(s))) return true;
   return KEY_BY_NAME.get(name)?.secret === true;
 }
