@@ -441,7 +441,7 @@ describe('postgres provider: every statement is parameterised', () => {
     const model = 'ollama/nomic-embed-text';
     for (const id of [RUN_A, RUN_B]) await store.createRun(id, p(sampleRequest(id)));
     const seq = await store.addSubmission(RUN_A, p({ kind: 'ask' as const, question: 'was the refund sent?' }));
-    await store.putReport(RUN_A, seq, p(sampleReport(RUN_A, 'answer')), p('# answer'));
+    await store.putReport(RUN_A, seq, p(sampleReport(RUN_A, 'the refund landed')), p('# the refund landed'));
     await store.putEvidence(RUN_A, 'ssfb', p(sampleFindings('look')));
     await store.putFeedback(RUN_A, p(sampleFeedback('partial', '2026-09-01T10:00:00.000Z')), p('# fb'));
     await store.setPhase(RUN_A, 'failed', { reason: 'AgentRunError', worker_pid: 4242 });
@@ -453,7 +453,7 @@ describe('postgres provider: every statement is parameterised', () => {
     await store.listExpired(new Date());
     await store.deleteRun(RUN_B);
 
-    const values = [RUN_A, RUN_B, 'was the refund sent?', 'AgentRunError', 'answer', 'look', 'key-a', 'partial', model];
+    const values = [RUN_A, RUN_B, 'was the refund sent?', 'AgentRunError', 'the refund landed', 'look', 'key-a', 'partial', model];
     const statements = fake.calls.filter((c) => !['BEGIN', 'COMMIT', 'ROLLBACK'].includes(c.text));
     expect(statements.length).toBeGreaterThan(20);
     for (const c of statements) {

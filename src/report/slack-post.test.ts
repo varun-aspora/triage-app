@@ -85,6 +85,8 @@ function runRecord(o: { report?: Report | null; source?: Source; requestedBy?: s
     created_at: '2026-09-20T10:00:00.000Z',
     updated_at: '2026-09-20T10:15:00.000Z',
     phase: 'completed',
+    input_request: null,
+    input_history: [],
     request,
     classification: null,
     evidence: {},

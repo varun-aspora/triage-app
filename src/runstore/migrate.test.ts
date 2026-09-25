@@ -16,6 +16,9 @@ import { RunStoreError } from './types.ts';
 const DSN = 'postgresql://triage_rw:not-a-real-password@db.invalid:5432/triage';
 const MIGRATIONS_DIR = fileURLToPath(new URL('./migrations/', import.meta.url));
 const INIT_SQL = readFileSync(join(MIGRATIONS_DIR, '0001_init.sql'), 'utf8');
+const INPUT_SQL = readFileSync(join(MIGRATIONS_DIR, '0002_input_requests.sql'), 'utf8');
+/** Every shipped migration, in order. */
+const ALL_VERSIONS = ['0001_init', '0002_input_requests'];
 
 // ------------------------------------------------------------------ fake database
 
@@ -132,12 +135,12 @@ async function caught(promise: Promise<unknown>): Promise<RunStoreMigrationError
 // ------------------------------------------------------------------ migrator
 
 describe('migrateRunStore', () => {
-  test('first run applies 0001 inside BEGIN/COMMIT and inserts its version', async () => {
+  test('first run applies every file inside its own BEGIN/COMMIT and inserts each version', async () => {
     const db = fakeDb();
     const result = await migrateRunStore(runnerFor(db));
 
-    expect(result).toEqual({ applied: ['0001_init'], skipped: [] });
-    expect(db.committed).toEqual(new Set(['0001_init']));
+    expect(result).toEqual({ applied: ALL_VERSIONS, skipped: [] });
+    expect(db.committed).toEqual(new Set(ALL_VERSIONS));
 
     // client1 is the bootstrap, client2 applies the file.
     expect(db.clientCalls(1)).toEqual([
@@ -155,8 +158,16 @@ describe('migrateRunStore', () => {
       'INSERT INTO triage.schema_migrations (version) VALUES ($1)',
       'COMMIT',
     ]);
-    const insert = db.calls.find((c) => c.text.startsWith('INSERT INTO triage.schema_migrations'));
-    expect(insert?.params).toEqual(['0001_init']);
+    expect(db.clientCalls(3)).toEqual([
+      'BEGIN',
+      'SELECT pg_advisory_xact_lock(7426150093)',
+      'SELECT version FROM triage.schema_migrations WHERE version = $1',
+      INPUT_SQL,
+      'INSERT INTO triage.schema_migrations (version) VALUES ($1)',
+      'COMMIT',
+    ]);
+    const inserts = db.calls.filter((c) => c.text.startsWith('INSERT INTO triage.schema_migrations'));
+    expect(inserts.map((c) => c.params)).toEqual(ALL_VERSIONS.map((v) => [v]));
   });
 
   test('second run with the version recorded applies nothing', async () => {
@@ -167,20 +178,21 @@ describe('migrateRunStore', () => {
 
     const result = await migrateRunStore(runner);
 
-    expect(result).toEqual({ applied: [], skipped: ['0001_init'] });
+    expect(result).toEqual({ applied: [], skipped: ALL_VERSIONS });
     const second = db.calls.slice(before).map((c) => c.text);
     expect(second).not.toContain(INIT_SQL);
+    expect(second).not.toContain(INPUT_SQL);
     expect(second.some((t) => t.startsWith('INSERT'))).toBe(false);
     // Only the bootstrap transaction opens; no transaction for a skipped file.
     expect(second.filter((t) => t === 'BEGIN')).toHaveLength(1);
-    expect(db.committed).toEqual(new Set(['0001_init']));
+    expect(db.committed).toEqual(new Set(ALL_VERSIONS));
   });
 
   test('a file recorded by another process while waiting on the lock is skipped', async () => {
-    const db = fakeDb({ recordedLater: ['0001_init'] });
+    const db = fakeDb({ recordedLater: ALL_VERSIONS });
     const result = await migrateRunStore(runnerFor(db));
 
-    expect(result).toEqual({ applied: [], skipped: ['0001_init'] });
+    expect(result).toEqual({ applied: [], skipped: ALL_VERSIONS });
     expect(db.migrationSql()).toEqual([]);
     expect(db.committed.size).toBe(0);
   });
@@ -318,8 +330,11 @@ describe('migration files', () => {
     expect(f.text).not.toMatch(/ivfflat/i);
   });
 
-  test.each(sqlFiles.map((f) => [f.name, f] as const))('%s qualifies every CREATE TABLE with triage.', (_n, f) => {
-    const names = [...f.code.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?([^\s(]+)/gi)].map((m) => m[1]);
+  test.each(sqlFiles.map((f) => [f.name, f] as const))('%s qualifies every CREATE TABLE and ALTER TABLE with triage.', (_n, f) => {
+    const names = [
+      ...[...f.code.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?([^\s(]+)/gi)].map((m) => m[1]),
+      ...[...f.code.matchAll(/alter\s+table\s+([^\s(]+)/gi)].map((m) => m[1]),
+    ];
     expect(names.length).toBeGreaterThan(0);
     for (const name of names) expect(name).toStartWith('triage.');
     const refs = [...f.code.matchAll(/references\s+([^\s(]+)/gi)].map((m) => m[1]);
@@ -368,9 +383,13 @@ describe('migration files parsed with the Postgres grammar', () => {
     }
   });
 
-  test('only the triage schema and the vector extension are created outside tables', () => {
-    const allowed = new Set(['CreateSchemaStmt', 'CreateExtensionStmt', 'CreateStmt', 'IndexStmt']);
+  test('only the triage schema and the vector extension are created outside tables; later files only add columns', () => {
+    const allowed = new Set(['CreateSchemaStmt', 'CreateExtensionStmt', 'CreateStmt', 'IndexStmt', 'AlterTableStmt']);
     for (const s of statements) expect([...allowed]).toContain(s.kind);
+    for (const s of statements.filter((x) => x.kind === 'AlterTableStmt')) {
+      expect(s.file).not.toBe('0001_init.sql');
+      for (const cmd of (s.node.cmds ?? []) as Json[]) expect(cmd.AlterTableCmd?.subtype).toBe('AT_AddColumn');
+    }
     for (const s of statements.filter((x) => x.kind === 'CreateSchemaStmt')) expect(s.node.schemaname).toBe('triage');
     for (const s of statements.filter((x) => x.kind === 'CreateExtensionStmt')) expect(s.node.extname).toBe('vector');
   });

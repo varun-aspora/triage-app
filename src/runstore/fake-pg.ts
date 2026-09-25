@@ -39,6 +39,8 @@ type RunRow = {
   request: unknown;
   classification: unknown;
   id_chain: unknown;
+  input_request: unknown;
+  input_history: unknown[];
 };
 
 type EmbRow = {
@@ -55,7 +57,15 @@ type State = {
   migrated: boolean;
   versions: string[];
   runs: Map<string, RunRow>;
-  submissions: { run_id: string; seq: number; kind: string; question: string | null; created_at: Date }[];
+  submissions: {
+    run_id: string;
+    seq: number;
+    kind: string;
+    question: string | null;
+    created_at: Date;
+    question_id: string | null;
+    answer: string | null;
+  }[];
   evidence: { run_id: string; key: string; version: number; findings: unknown; created_at: Date }[];
   reports: { run_id: string; seq: number; report: unknown; report_md: string; created_at: Date }[];
   feedback: {
@@ -253,6 +263,8 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
       request: jsonb(p[4], 'request'),
       classification: null,
       id_chain: null,
+      input_request: null,
+      input_history: [],
     });
     return [];
   },
@@ -286,6 +298,25 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
     row.matched_pattern_id = strOrNull(p[8], 'matched_pattern_id');
     return [{ run_id: row.run_id }];
   },
+  putInputRequest(p, db) {
+    const row = runRow(db, str(p[0], 'run_id'));
+    if (!row || row.input_request !== null) return [];
+    row.input_request = jsonb(p[1], 'input_request');
+    row.phase = 'needs_input';
+    row.phase_reason = null;
+    row.updated_at = ts(p[2], 'updated_at');
+    return [{ run_id: row.run_id }];
+  },
+  resolveInputRequest(p, db) {
+    const row = runRow(db, str(p[0], 'run_id'));
+    if (!row) return [];
+    const open = row.input_request as { question_id?: unknown } | null;
+    if (open === null || open.question_id !== str(p[1], 'question_id')) return [];
+    row.input_history = [...row.input_history, { ...open, ...(jsonb(p[2], 'resolution') as object) }];
+    row.input_request = null;
+    row.updated_at = ts(p[3], 'updated_at');
+    return [{ run_id: row.run_id }];
+  },
   nextSubmissionSeq(p, db) {
     const id = str(p[0], 'run_id');
     const max = db.submissions.filter((s) => s.run_id === id).reduce((m, s) => Math.max(m, s.seq), 0);
@@ -303,6 +334,8 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
       kind: str(p[2], 'kind'),
       question: strOrNull(p[3], 'question'),
       created_at: ts(p[4], 'created_at'),
+      question_id: strOrNull(p[5], 'question_id'),
+      answer: strOrNull(p[6], 'answer'),
     });
     return [];
   },
@@ -406,6 +439,8 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
         worker_pid: row.worker_pid,
         request: row.request,
         classification: row.classification,
+        input_request: row.input_request,
+        input_history: row.input_history,
       }),
     ];
   },
@@ -432,6 +467,8 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
           seq: s.seq,
           kind: s.kind,
           question: s.question,
+          question_id: s.question_id,
+          answer: s.answer,
           created_at: s.created_at,
           report: r?.report ?? null,
           report_md: r?.report_md ?? null,
@@ -636,6 +673,13 @@ function migratorHandler(text: string): Handler | undefined {
     return (_p, db) => {
       if (db.migrated) throw new FakePgError('42P07', 'relation "runs" already exists');
       db.migrated = true;
+      return [];
+    };
+  }
+  // The body of 0002_input_requests.sql: columns the fake's rows carry from the start.
+  if (text.includes('ADD COLUMN input_request jsonb') && text.includes('ADD COLUMN answer text')) {
+    return (_p, db) => {
+      if (!db.migrated) throw missingRelation('triage.runs');
       return [];
     };
   }

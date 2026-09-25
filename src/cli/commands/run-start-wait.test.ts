@@ -187,6 +187,8 @@ function record(phase: RunPhase, extra: Partial<RunRecord> = {}): RunRecord {
     created_at: '2026-09-20T10:00:00.000Z',
     updated_at: '2026-09-20T10:00:00.000Z',
     phase,
+    input_request: null,
+    input_history: [],
     request: {} as RunRecord['request'],
     classification: null,
     evidence: {},

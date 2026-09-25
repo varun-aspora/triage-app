@@ -121,6 +121,8 @@ function fakeStore(): RunStore & { calls: string[] } {
     addSubmission: record('addSubmission'),
     setPhase: record('setPhase'),
     putClassification: record('putClassification'),
+    putInputRequest: record('putInputRequest'),
+    resolveInputRequest: record('resolveInputRequest'),
     putEvidence: record('putEvidence'),
     putReport: record('putReport'),
     putFeedback: record('putFeedback'),
