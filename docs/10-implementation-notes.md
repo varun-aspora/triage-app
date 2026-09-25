@@ -96,6 +96,7 @@ Only places where what was built differs from the HLD, LLD, decisions or plan te
 | `evals/promptfoo/*` tests are outside `bun run test`; run them with `bun test ./evals`. `bun run ci` runs the suite itself, not these tests. | T10.7 |
 | promptfoo full-Triage suite (`triage evals triage`) is refused as not in v1. | T10.8 |
 | HTTP `POST /triage/:run_id/post-to-slack` answers 403, or 501 when enabled; posting is CLI only. | T07.7 |
+| `GET /doctor` runs the `triage doctor` checks on the server (`check=`, `errors_only=`, `sort_by=`) and answers 200 `{checks, counts}` with fail rows included. Requests during a run share it. Preflight stays CLI only: in server mode it is a subset of these probes, and in local mode it starts the tunnel and logins. | T11 |
 | `POST /triage` answers 202 before the background submission writes the run record, so a `GET /triage/:run_id` sent straight after can answer 404 for a moment. Found by `test/contract/server.contract.ts`, which polls through it. | T07.7 |
 | just-bash defence-in-depth patches cannot install under bun, so the bun unit tests run the virtual sandbox with it off. Node, where the app runs, has it on. | T06.7 |
 | ~~`resources/repos.json` pins carry no `remote`, so `triage repos sync` cannot clone a repo that is not checked out.~~ Fixed by D46: a pin without a remote is cloned from `TRIAGE_GIT_PROTOCOL`, `TRIAGE_GIT_HOST` and `TRIAGE_GIT_ORG`. | T11.4 |

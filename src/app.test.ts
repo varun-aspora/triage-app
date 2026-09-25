@@ -44,6 +44,7 @@ const PATHS = [
   ['POST', '/repos/sync'],
   ['GET', '/repos'],
   ['GET', '/repos/sync/x'],
+  ['GET', '/doctor'],
   ['GET', '/'],
   ['DELETE', '/anything/else'],
 ] as const;
