@@ -29,8 +29,20 @@
 // before that, or gives up before it sent the run on, this exits 1 and says
 // so. If the worker is still starting after the takeover timeout, this
 // returns anyway: the run is on its way.
+//
+// Before the worker starts, this repeats the tunnel part of pre-flight (D56):
+// in local mode the SSFB tunnel may have died while the run was parked, so
+// `triage resume` brings it back, and refuses here, with the reason and the
+// fix, when it does not come up (exit 1, nothing started). The worker makes
+// the same check; this one is for the person's eyes, since the worker's
+// output is not shown.
+import type { Config } from '../../config/env.ts';
+import { loadRegistry, RegistryError, type Registry } from '../../config/registry.ts';
+import { createExecRunner } from '../../connectors/exec.ts';
 import { spawnWorker } from '../../ingress/detach.ts';
-import { resumeRefusal } from '../../ingress/submit.ts';
+import { resumeReadinessRefusal, resumeRefusal } from '../../ingress/submit.ts';
+import { netTcpConnect } from '../../ops/doctor/probes.ts';
+import { runResumePreflight, type PreflightResult } from '../../ops/preflight.ts';
 import type { RunRecord } from '../../runstore/types.ts';
 import { MAX_RESUME_NOTE_CHARS } from '../../types/block.ts';
 import { emitJson, ResumeOutputSchema } from '../lib/output-schemas.ts';
@@ -54,9 +66,23 @@ export type ResumeCommandOptions = {
   readonly pollMs?: number;
   readonly takeoverMs?: number;
   readonly defaultRequestedBy?: () => string | undefined;
+  /** The resume pre-flight (the SSFB tunnel, D56). Defaults to runResumePreflight with the real runner and probe. */
+  readonly readiness?: (config: Config, isTty: boolean) => Promise<Pick<PreflightResult, 'warnings'>>;
 };
 
 const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The resume pre-flight with the real runner and probe. A registry that does not load is the worker's to report; nothing is checked here. */
+async function defaultReadiness(config: Config, isTty: boolean): Promise<Pick<PreflightResult, 'warnings'>> {
+  let registry: Registry;
+  try {
+    registry = loadRegistry(config);
+  } catch (err) {
+    if (!(err instanceof RegistryError)) throw err;
+    return { warnings: [] };
+  }
+  return runResumePreflight({ config, registry, runner: createExecRunner(), tcpProbe: netTcpConnect, isTty });
+}
 
 type TakeoverView = Pick<RunRecord, 'phase' | 'submissions' | 'block'>;
 
@@ -79,6 +105,7 @@ export function createResumeCommand(options: ResumeCommandOptions = {}): CliComm
   const sleep = options.sleep ?? realSleep;
   const pollMs = options.pollMs ?? TAKEOVER_POLL_MS;
   const takeoverMs = options.takeoverMs ?? TAKEOVER_TIMEOUT_MS;
+  const readiness = options.readiness ?? defaultReadiness;
   return {
     path: ['resume'],
     summary: 'send a run on after the system it was blocked on answers again (also a run that failed or was stopped)',
@@ -108,12 +135,20 @@ export function createResumeCommand(options: ResumeCommandOptions = {}): CliComm
         return code;
       }
 
-      const store = await openStore(ctx.config());
+      const config = ctx.config();
+      const store = await openStore(config);
       const before = await store.getRun(runId);
       if (before === null) return printNotFound(io, json, runId);
       const refusal = resumeRefusal(before);
       if (refusal !== null) {
         printError(io, json, 'ERROR', refusal.message);
+        return EXIT.ERROR;
+      }
+      // The network path first (D56): brings the SSFB tunnel back in local
+      // mode, and refuses with the fix when it does not come up.
+      const notReady = resumeReadinessRefusal(before, await readiness(config, io.isTTY));
+      if (notReady !== null) {
+        printError(io, json, 'ERROR', notReady.message);
         return EXIT.ERROR;
       }
       const submissionId = before.submissions.length + 1;

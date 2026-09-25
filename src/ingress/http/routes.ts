@@ -26,7 +26,9 @@
 // A follow-up (ask) and a resume answer 202 as soon as Flue accepts the
 // message, with Flue's submission id. A resume is refused with 409 unless the
 // run is blocked, failed after it was dispatched, or stopped: the same rule
-// resumeRun applies, checked here first so nothing starts for a refusal.
+// resumeRun applies, checked here first so nothing starts for a refusal. It
+// is also 409 when resumeRun finds the SSFB tunnel down in local mode (D56);
+// the hint carries the fix.
 //
 // GET /triage/:run_id passes the whole answer through one more
 // persisted-profile redaction, even though the store holds redacted text only.

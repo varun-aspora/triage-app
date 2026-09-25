@@ -134,7 +134,8 @@ export function createWorkerCommand(options: WorkerCommandOptions = {}): CliComm
         // A stop is what a person asked for, not a failure.
         if (err instanceof RunStoppedError) return EXIT.OK;
         // The run was sent on by someone else between the check and the
-        // resume: it is theirs now, and not failed.
+        // resume: it is theirs now, and not failed. The same when the network
+        // path is not back (ResumeNotReadyError, D56): the run stays parked.
         if (err instanceof RunNotResumableError) {
           printError(io, json, 'ERROR', err.message);
           return EXIT.ERROR;
