@@ -17,6 +17,10 @@
 // A failed refresh is reported on stderr and does not block the start; the
 // run then fails at model resolution with Flue's own message.
 //
+// It also installs the run event log (src/runlog/event-log.ts) before
+// start(), so every Flue event of a run this process drives lands in the
+// run's events.jsonl. A config that does not load leaves the log off.
+//
 // src/db.ts is imported lazily: its default export loads the config and
 // builds the adapter on import, which should happen only when a runtime is
 // actually started.
@@ -27,6 +31,7 @@ import { Triage } from '../agents/triage.agent.ts';
 import { loadConfig, type Config } from '../config/env.ts';
 import { ConfigError } from '../config/errors.ts';
 import { describeEnsure, ensureConfiguredModels } from '../model-refresh.ts';
+import { installRunEventLog } from '../runlog/event-log.ts';
 
 export type BootOptions = {
   /** Defaults to Flue's start() from @flue/runtime/node. */
@@ -37,6 +42,8 @@ export type BootOptions = {
   readonly db?: () => PersistenceAdapter | Promise<PersistenceAdapter>;
   /** Defaults to refreshing the model catalog when a configured model is not found. */
   readonly ensureModels?: () => Promise<void>;
+  /** Where the run event log writes. Default: config.paths.runsDir; false leaves it off. */
+  readonly eventLog?: false | { readonly runsDir: string };
 };
 
 let booted: Promise<Flue> | undefined;
@@ -54,9 +61,22 @@ export function bootRuntime(options: BootOptions = {}): Promise<Flue> {
 
 async function startOnce(options: BootOptions): Promise<Flue> {
   await (options.ensureModels ?? ensureModels)();
+  if (options.eventLog !== false) {
+    const runsDir = options.eventLog?.runsDir ?? runsDirOf();
+    if (runsDir !== undefined) installRunEventLog({ runsDir });
+  }
   const db = options.db !== undefined ? await options.db() : (await import('../db.ts')).default;
   const start = options.start ?? flueStart;
   return start({ agents: options.agents ?? [Triage], db });
+}
+
+function runsDirOf(): string | undefined {
+  try {
+    return loadConfig().paths.runsDir;
+  } catch (err) {
+    if (err instanceof ConfigError) return undefined;
+    throw err;
+  }
 }
 
 // A config that does not load is left to start() and doctor to report.

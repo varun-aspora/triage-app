@@ -44,7 +44,8 @@ export const InputRequestSchema = v.object({
 });
 export type InputRequest = v.InferOutput<typeof InputRequestSchema>;
 
-export const INPUT_RESOLUTIONS = ['answered', 'skipped'] as const;
+// cancelled: the run was stopped while the question was open.
+export const INPUT_RESOLUTIONS = ['answered', 'skipped', 'cancelled'] as const;
 export const InputResolutionStatusSchema = v.picklist(INPUT_RESOLUTIONS);
 export type InputResolutionStatus = v.InferOutput<typeof InputResolutionStatusSchema>;
 

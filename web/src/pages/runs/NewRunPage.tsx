@@ -13,7 +13,15 @@ import { PageHeader } from '../../components/PageHeader.tsx';
 import { Panel } from '../../components/Panel.tsx';
 import { Segmented } from '../../components/Segmented.tsx';
 import { ENTITY_LABELS, KNOWN_ID_KEYS, TIERS } from '../../lib/constants.ts';
-import { buildStartBody, type FormField, formFieldOf, type IdRow, joinEntityLabels, newIdempotencyKey } from './run-logic.ts';
+import {
+  buildStartBody,
+  type FormField,
+  formFieldOf,
+  type IdRow,
+  joinEntityLabels,
+  MAX_CONTEXT,
+  newIdempotencyKey,
+} from './run-logic.ts';
 import { useRememberedName } from './remembered-name.ts';
 import './runs.css';
 
@@ -39,6 +47,7 @@ export default function NewRunPage() {
   const [source, setSource] = useState<'slack' | 'paste'>('slack');
   const [slackUrl, setSlackUrl] = useState('');
   const [pasted, setPasted] = useState('');
+  const [context, setContext] = useState('');
   const [requestedBy, setRequestedBy] = useRememberedName();
   const [entitiesMode, setEntitiesMode] = useState<'auto' | 'choose'>('auto');
   const [entities, setEntities] = useState<Entity[]>([]);
@@ -60,7 +69,7 @@ export default function NewRunPage() {
     e.preventDefault();
     if (inFlight.current) return;
     const built = buildStartBody(
-      { source, slackUrl, pasted, requestedBy, entitiesMode, entities, tierMode, tier, ids, from, to },
+      { source, slackUrl, pasted, context, requestedBy, entitiesMode, entities, tierMode, tier, ids, from, to },
       Date.now(),
     );
     if (!built.ok) {
@@ -126,7 +135,10 @@ export default function NewRunPage() {
             </Notice>
           )}
 
-          <Panel title="Thread" description="Send one of the two. If the Slack read fails, paste the messages instead.">
+          <Panel
+            title="Thread"
+            description="Send a Slack thread URL or pasted messages. If the Slack read fails, paste the messages instead. Additional context goes with either."
+          >
             <div style={{ margin: '0 0 16px' }}>
               <Segmented
                 label="Thread source"
@@ -158,6 +170,16 @@ export default function NewRunPage() {
                 <Textarea rows={8} value={pasted} onChange={(e) => setPasted(e.target.value)} />
               </Field>
             )}
+            <div style={{ margin: '16px 0 0' }}>
+              <Field
+                label="Additional context"
+                optional
+                hint="Anything the thread does not say: what you already checked, related tickets, customer details. Sent after the thread messages."
+                error={errors.context}
+              >
+                <Textarea rows={4} maxLength={MAX_CONTEXT} value={context} onChange={(e) => setContext(e.target.value)} />
+              </Field>
+            </div>
           </Panel>
 
           <Panel title="Requested by">

@@ -19,7 +19,7 @@ import {
   type RunSummary,
 } from '../../runstore/types.ts';
 
-export const RUN_STATUSES = ['running', 'completed', 'failed'] as const;
+export const RUN_STATUSES = ['running', 'completed', 'failed', 'stopped'] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
 /** 'none' matches runs nobody has given feedback on yet. */
@@ -55,7 +55,7 @@ const FeedbackFilterSchema = v.picklist(FEEDBACK_FILTERS);
 /** running covers every phase that is not terminal. */
 export function statusOfPhase(phase: RunPhase): RunStatus {
   if (!isTerminalPhase(phase)) return 'running';
-  return phase === 'completed' ? 'completed' : 'failed';
+  return phase === 'completed' || phase === 'stopped' ? phase : 'failed';
 }
 
 export function parseListQuery(query: Readonly<Record<string, string | undefined>>): ListQueryResult {

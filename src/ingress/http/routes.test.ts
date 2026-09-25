@@ -259,6 +259,22 @@ describe('POST /triage accept', () => {
     ]);
   });
 
+  test('context rides along with slack_url and with messages', async () => {
+    const h = harness();
+    await post(h.app, '/triage', { slack_url: PERMALINK, requested_by: 'ops@example.com', context: 'checked KYC' });
+    await post(h.app, '/triage', { messages: MESSAGES, requested_by: 'ops@example.com', context: 'checked KYC' });
+    expect(h.prepared).toEqual([
+      { interface: 'http', requested_by: 'ops@example.com', context: 'checked KYC', kind: 'slack', url: PERMALINK, hints: {} },
+      {
+        interface: 'http',
+        requested_by: 'ops@example.com',
+        context: 'checked KYC',
+        kind: 'json',
+        body: { messages: MESSAGES, requested_by: 'ops@example.com' },
+      },
+    ]);
+  });
+
   test('the same Idempotency-Key twice -> the same run_id, runSubmission once', async () => {
     const h = harness();
     const body = { messages: MESSAGES, requested_by: 'ops@example.com' };
@@ -767,10 +783,9 @@ describe('POST /triage/:run_id/feedback', () => {
     expect(fdeps.home).toBe('/tmp/triage-test-home');
   });
 
-  test('FeedbackError codes map to 404, 409 and 400', async () => {
+  test('FeedbackError codes map to 404 and 400', async () => {
     for (const [code, status] of [
       ['run_not_found', 404],
-      ['no_report', 409],
       ['invalid_run_id', 400],
       ['invalid_input', 400],
     ] as const) {
@@ -898,5 +913,101 @@ describe('source rules', () => {
     const source = readFileSync(join(SRC, 'app.ts'), 'utf8');
     expect(source).toContain("from './http/http-modules.gen.ts'");
     expect(source).not.toContain('routes.ts');
+  });
+});
+
+// ------------------------------------------------------------------ stop, events and verdicts before the report
+
+describe('POST /triage/:run_id/stop, GET /triage/:run_id/events, feedback on a running run', () => {
+  const tmp: string[] = [];
+  afterEach(() => {
+    for (const d of tmp.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  async function realStore(): Promise<{ store: RunStore; runsDir: string; home: string }> {
+    const dir = mkdtempSync(join(tmpdir(), 'triage-routes-stop-'));
+    tmp.push(dir);
+    const runsDir = join(dir, 'runs');
+    const store = createFolderRunStore({ runsDir, dataDir: join(dir, 'data') });
+    await store.createRun(RUN_A, redactPersisted(sampleRequest(RUN_A)));
+    await store.addSubmission(RUN_A, redactPersisted({ kind: 'initial' as const }));
+    await store.setPhase(RUN_A, 'investigating');
+    return { store, runsDir, home: dir };
+  }
+
+  test('stop marks the run stopped, records the Cancel verdict and asks Flue to abort', async () => {
+    const { store, home } = await realStore();
+    const aborted: string[] = [];
+    const h = harness({ store, home, abortRun: async (id) => void aborted.push(id), recordFeedback: undefined as never });
+    const res = await post(h.app, `/triage/${RUN_A}/stop`, { given_by: 'ops@example.com' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ run_id: RUN_A, stopped_from: 'investigating', aborted: true, feedback_count: 1, gaps: [] });
+    expect(aborted).toEqual([RUN_A]);
+    const view = (await (await h.app.request(`/triage/${RUN_A}`)).json()) as Record<string, any>;
+    expect(view.status).toBe('stopped');
+    expect(view.phase).toBe('stopped');
+    expect(view.feedback[0]).toMatchObject({ verdict: 'wrong', cancelled: true, phase: 'investigating' });
+
+    // A second stop: the run has finished.
+    const again = await post(h.app, `/triage/${RUN_A}/stop`, { given_by: 'ops@example.com' });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toEqual({ error: 'run is not running', phase: 'stopped' });
+  });
+
+  test('stop with verdict false records no feedback; bad bodies and unknown runs are refused', async () => {
+    const { store, home } = await realStore();
+    const h = harness({ store, home });
+    expect((await post(h.app, `/triage/${RUN_A}/stop`, {})).status).toBe(400);
+    expect((await post(h.app, `/triage/${RUN_A}/stop`, 'not json')).status).toBe(400);
+    expect((await post(h.app, '/triage/..%2Fx/stop', { given_by: 'ops' })).status).toBe(400);
+    expect((await post(h.app, `/triage/${RUN_B}/stop`, { given_by: 'ops' })).status).toBe(404);
+    const res = await post(h.app, `/triage/${RUN_A}/stop`, { given_by: 'ops', verdict: false });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { feedback_count: unknown }).feedback_count).toBeNull();
+    expect((await store.getRun(RUN_A))?.feedback).toEqual([]);
+  });
+
+  test('feedback on a run with no report is stored, with notes and the phase', async () => {
+    const { store, home } = await realStore();
+    const h = harness({ store, home, recordFeedback: undefined as never });
+    const res = await post(h.app, `/triage/${RUN_A}/feedback`, { verdict: 'correct', notes: 'on the right track', given_by: 'ops' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ run_id: RUN_A, verdict: 'correct', count: 1 });
+    expect((await store.getRun(RUN_A))?.feedback_latest).toMatchObject({ notes: 'on the right track', phase: 'investigating' });
+    // Finding verdicts are checked against the run's findings.
+    const bad = await post(h.app, `/triage/${RUN_A}/feedback`, { verdict: 'wrong', findings: [{ id: 'ssfb.v1.e1', verdict: 'wrong' }], given_by: 'ops' });
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as { fields: string[] }).fields).toEqual(['findings.0.id']);
+  });
+
+  test('the run view lists the findings the feedback route takes', async () => {
+    const { store, home } = await realStore();
+    await store.putEvidence(
+      RUN_A,
+      'ssfb',
+      redactPersisted({ evidence: [{ source: 'db' as const, at: '2026-09-20T10:00:00.000Z', query_or_path: 'select 1', summary: 'row found' }], timeline: [], hypotheses: ['h'], confidence: 'low' as const, gaps: [] }),
+    );
+    const h = harness({ store, home });
+    const view = (await (await h.app.request(`/triage/${RUN_A}`)).json()) as { findings: { id: string }[] };
+    expect(view.findings.map((f) => f.id)).toEqual(['ssfb.v1.e1', 'ssfb.v1.h1']);
+  });
+
+  test('events pages through the run event log', async () => {
+    const { store, home, runsDir } = await realStore();
+    const { mkdirSync, writeFileSync } = await import('node:fs');
+    mkdirSync(join(runsDir, RUN_A), { recursive: true });
+    const line = (i: number) => JSON.stringify({ ts: '2026-09-25T10:00:00.000Z', source: 'pipeline', type: 'phase', data: { i } });
+    writeFileSync(join(runsDir, RUN_A, 'events.jsonl'), `${line(0)}\n${line(1)}\n${line(2)}\n`);
+    const h = harness({ store, home, runsDir });
+    const first = (await (await h.app.request(`/triage/${RUN_A}/events?limit=2`)).json()) as { events: { index: number }[]; next: number; more: boolean };
+    expect(first.events.map((e) => e.index)).toEqual([0, 1]);
+    expect(first).toMatchObject({ next: 2, more: true });
+    const rest = (await (await h.app.request(`/triage/${RUN_A}/events?after=2`)).json()) as { events: unknown[]; more: boolean };
+    expect(rest.events).toHaveLength(1);
+    expect((await h.app.request(`/triage/${RUN_A}/events?after=x`)).status).toBe(400);
+    expect((await h.app.request(`/triage/${RUN_B}/events`)).status).toBe(404);
+    // Without a runs dir the log is empty.
+    const none = harness({ store, home });
+    expect(await (await none.app.request(`/triage/${RUN_A}/events`)).json()).toEqual({ events: [], next: 0, more: false });
   });
 });

@@ -54,10 +54,15 @@ export function reportStatusLook(status: ReportStatus): StatusLook {
 
 export type IdRow = { key: KnownIdKey; value: string };
 
+/** The server's limit on context (MAX_CONTEXT_CHARS). */
+export const MAX_CONTEXT = 20_000;
+
 export type NewRunForm = {
   source: 'slack' | 'paste';
   slackUrl: string;
   pasted: string;
+  /** Extra notes sent with either source. */
+  context: string;
   requestedBy: string;
   entitiesMode: 'auto' | 'choose';
   entities: readonly Entity[];
@@ -70,7 +75,7 @@ export type NewRunForm = {
 };
 
 /** Form sections a 400 field or a local check points at. */
-export type FormField = 'thread' | 'requested_by' | 'entities' | 'tier' | 'ids' | 'time_window';
+export type FormField = 'thread' | 'context' | 'requested_by' | 'entities' | 'tier' | 'ids' | 'time_window';
 
 export type BuildResult = { ok: true; body: StartRunBody } | { ok: false; errors: Partial<Record<FormField, string>> };
 
@@ -83,7 +88,7 @@ export function localToIso(value: string): string | undefined {
 
 /**
  * The POST /triage body. Auto fields are left out so the agent decides; empty
- * ID rows are dropped.
+ * ID rows and blank context are dropped.
  */
 export function buildStartBody(form: NewRunForm, now: number): BuildResult {
   const errors: Partial<Record<FormField, string>> = {};
@@ -102,6 +107,9 @@ export function buildStartBody(form: NewRunForm, now: number): BuildResult {
     // are not known, and the agent only needs the words.
     else thread = { messages: [{ ts: (now / 1000).toFixed(6), author: 'pasted', text, is_parent: true }] };
   }
+
+  const context = form.context.trim();
+  if (context.length > MAX_CONTEXT) errors.context = `Keep it under ${MAX_CONTEXT.toLocaleString('en')} characters.`;
 
   let entities: Entity[] | undefined;
   if (form.entitiesMode === 'choose') {
@@ -135,6 +143,7 @@ export function buildStartBody(form: NewRunForm, now: number): BuildResult {
   const body = {
     ...thread,
     requested_by: requestedBy,
+    ...(context !== '' ? { context } : {}),
     ...(Object.keys(ids).length > 0 ? { ids } : {}),
     ...(entities !== undefined ? { entities } : {}),
     ...(form.tierMode === 'choose' ? { tier: form.tier } : {}),
@@ -152,6 +161,8 @@ export function formFieldOf(field: string): FormField | undefined {
     case 'thread':
     case 'url':
       return 'thread';
+    case 'context':
+      return 'context';
     case 'requested_by':
       return 'requested_by';
     case 'entities':

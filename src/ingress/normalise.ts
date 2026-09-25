@@ -8,6 +8,10 @@
 // - json: an HTTP body with the same messages[] shape.
 // - slack: a permalink plus the thread another module already fetched.
 //
+// Any kind may also carry context: free text from the caller that is not in
+// the thread. It is appended as one last message under CONTEXT_AUTHOR, so
+// every reader of the thread sees it without a separate field.
+//
 // Error messages name keys and positions only. Message text and id values are
 // customer data and never go into an error.
 import * as v from 'valibot';
@@ -108,11 +112,19 @@ export type InputHints = {
   readonly time_window?: { readonly from: string; readonly to: string };
 };
 
+/** The author of the appended context message. Not a person, so never a redaction name. */
+export const CONTEXT_AUTHOR = 'added context';
+
+/** Caller context longer than this is refused. */
+export const MAX_CONTEXT_CHARS = 20_000;
+
 type CommonInput = {
   readonly interface: Interface;
   /** Required, except that a json body may carry its own requested_by. */
   readonly requested_by?: string;
   readonly hints?: InputHints;
+  /** Extra text from the caller, appended after the thread. Blank means none. */
+  readonly context?: string;
   readonly attachments?: readonly Attachment[];
 };
 
@@ -203,6 +215,21 @@ function tsToMicros(ts: string, key: string): bigint {
 function dateToSlackTs(d: Date): string {
   const ms = d.getTime();
   return `${Math.floor(ms / 1000)}.${String((ms % 1000) * 1000).padStart(6, '0')}`;
+}
+
+/**
+ * The caller's context as a reply after the last thread message. Its ts is
+ * now, or just after the last message if the thread ends later than now.
+ */
+function contextMessage(text: string | undefined, messages: readonly ThreadMessage[], opts: NormaliseOptions): ThreadMessage | undefined {
+  if (text === undefined || text.trim() === '') return undefined;
+  if (text.length > MAX_CONTEXT_CHARS) throw new IngressInputError('context', `is longer than ${MAX_CONTEXT_CHARS} characters`);
+  const last = messages[messages.length - 1] as ThreadMessage;
+  const afterLast = tsToMicros(last.ts, 'messages.ts') + 1n;
+  const nowMicros = BigInt(opts.now.getTime()) * 1000n;
+  const micros = nowMicros > afterLast ? nowMicros : afterLast;
+  const ts = `${micros / 1_000_000n}.${String(micros % 1_000_000n).padStart(6, '0')}`;
+  return { ts, author: CONTEXT_AUTHOR, text: text.trim(), is_parent: false };
 }
 
 function isoOf(value: string, key: string): string {
@@ -359,6 +386,8 @@ export function buildTriageRequest(input: TriageInput, opts: NormaliseOptions): 
   if (requestedBy === '') throw new IngressInputError('requested_by', 'is required');
 
   const messages = normaliseMessages(x.raw);
+  const context = contextMessage(input.context, messages, opts);
+  if (context !== undefined) messages.push(context);
   const timeWindow = flags.time_window ?? x.timeWindow;
   const window = buildWindow(messages, timeWindow, opts);
 

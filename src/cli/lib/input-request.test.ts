@@ -68,7 +68,7 @@ describe('askAtTerminal', () => {
 describe('startAnswer', () => {
   test('spawns the answer payload, records the pid and numbers the submission', async () => {
     const phases: unknown[] = [];
-    const store = { setPhase: async (...args: unknown[]) => void phases.push(args) };
+    const store = { setPhase: async (...args: unknown[]) => (phases.push(args), true) };
     const spawned: WorkerPayload[] = [];
     const spawn = async (p: WorkerPayload) => {
       spawned.push(p);

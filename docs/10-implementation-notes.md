@@ -191,6 +191,34 @@ Rejected:
 
 Assumption: the 0.83 stream code for `openai-responses` and `anthropic-messages` handles the newer models, because the refresh only adds models on those APIs. Checked for catalog resolution only (gpt-6-sol, gpt-6-astra, gpt-6-luna, claude-opus-5-5 resolve with image input); no model was called.
 
+### Verdicts, stop and the step log (D54, 2026-09-26)
+
+| Change | Decision |
+|---|---|
+| Feedback at any phase, with `notes`, per-finding verdicts, the run's `phase`, `submission_seq`, `report_seq` and `cancelled`; `accept`/`reject` on the CLI; finding ids from `src/report/finding-refs.ts`, listed as `findings` on `GET /triage/:run_id` | D54 |
+| `stopped` phase and status; `RunStore.markStopped`; `setPhase` returns false on a stopped run unless `resume` is set; `putInputRequest` refuses a stopped run; the input resolution `cancelled` | D54 |
+| `stopRun` (`src/ingress/stop.ts`), `triage stop`, `POST /triage/:run_id/stop`; the pipeline's stop watcher; `triage wait` and `triage run` exit 5 on a stopped run | D54 |
+| `src/runlog/` (the event log, its reader and summaries), installed by `bootRuntime`; `triage logs`, `GET /triage/:run_id/events` | D54 |
+| Console: the Accept or reject panel with per-finding ticks and Cancel, the Steps panel and tab, the stopped view | D54 |
+
+No migration: feedback rows keep the whole record in `body`, and `phase` is text. Shared edits: `src/runstore/types.ts` (phase, schemas, the store interface), `src/types/input-request.ts`, `src/cli/lib/output-schemas.ts`, the coding-agent skill.
+
+Checked in mock mode on 2026-09-26: typecheck; `bun run test` 5032 pass, 2 fail (the two `.env.example` checks that already failed before this change: `TRIAGE_UI_DEV_PORT` is missing from `evals/home/.env.example`, and the `TRIAGE_MAX_ASKS_PER_RUN` default shown in `.env.example` differs from `keys.ts`); `bun run test:web` 78 pass; `bun run test:contract` 169 pass, including a check that a scripted run's `events.jsonl` holds the pipeline lines and the root's and delegate's Flue events; `bun run build`. The console was also driven by hand against the real server on an eval home with the fake model: Cancel on a run whose delegate was waiting stopped it within a second (Flue aborted the delegate, the submission settled `aborted`, the pipeline's `failed` write was refused and the run stayed `stopped`), and a reject with notes and two finding ticks was stored with the finding text.
+
+Assumptions made, not verified against a real system:
+
+- A stop from a process other than the one running the run reaches it. The HTTP route aborts through the server's own runtime, which was checked. `triage stop` from a second shell against a detached worker was not run. It relies on Flue 2.0.8 checking `abortRequestedAt` for live submissions on its lease scans (`enforceLiveAttemptDeadline` in `@flue/runtime`), and on the worker's own 2 s store check as a second path.
+- `triage stop` starts a Flue runtime to record the abort, like `triage run` does. While it is up, its coordinator can pick up other submissions whose lease has expired.
+- The folder store's stopped check is serialised per process only. A phase write from the worker that reads `meta.json` just before the stop writes it can still land after the stop. The Flue abort then settles the run as failed, with the Cancel verdict recorded. Postgres does the check in the `UPDATE`, so it does not have this gap.
+- A long run's log size is not measured. A small scripted run wrote 72 lines and 132 KB, 43 KB of it the first turn's system prompt and tools. Nothing rotates or caps the file.
+
+Known gaps:
+
+- With the Postgres run store, `triage runs delete` and retention remove the run from the database but leave `<TRIAGE_RUNS_DIR>/<run_id>/` with `events.jsonl` (as they already leave `audit.jsonl`). The folder store removes the whole folder.
+- The persisted profile masks digit runs inside ids, so tool call ids read like `tool:****1584:...` in the log. They still match between a `tool_start` and its `tool`.
+- A verdict given before the report has no eval draft; a later report does not create one for it. The next verdict on the finished run does.
+- The Steps panel reads the whole file on every poll.
+
 ## Commit trailer note
 
 The trailer was pinned in CONVENTIONS.md and plan.json after wave 1 (`74cfcb3`, later `58b12b3`), because implementers had each picked their own model name. Commit T01.3 (`a70343b`) still carries a different co-author line from the rest, and T01.2 (`bb11e37`) was one of the two commits the wave log flagged at the time; on main today only `a70343b` differs. The commits before `58b12b3` also carry a `Claude-Session` line. History was left as is.

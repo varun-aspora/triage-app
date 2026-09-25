@@ -42,6 +42,7 @@ import {
   RunPhaseSchema,
   RunStoreError,
   RunNotFoundError,
+  RunStoppedError,
   SubmissionInputSchema,
   SubmissionMetaSchema,
   assertClean,
@@ -49,6 +50,7 @@ import {
   assertPersisted,
   assertRunId,
   cosine,
+  isTerminalPhase,
   type ClassificationRecord,
   type EmbeddingInput,
   type EmbeddingMeta,
@@ -243,12 +245,14 @@ class FolderRunStore implements RunStore {
     });
   }
 
-  async setPhase(runId: RunId, phase: RunPhase, detail: PhaseDetail = {}): Promise<void> {
+  async setPhase(runId: RunId, phase: RunPhase, detail: PhaseDetail = {}): Promise<boolean> {
     parseRecord(RunPhaseSchema, phase, 'phase');
     if (detail.reason !== undefined) assertClean(detail.reason, 'phase reason');
     if (detail.worker_pid !== undefined) positiveInt(detail.worker_pid, 'worker pid');
-    await serial(this.#lock(runId), async () => {
+    return serial(this.#lock(runId), async () => {
       const meta = await this.#requireRun(runId);
+      // The lock is per process; a second process can still race this read.
+      if (meta.phase === 'stopped' && detail.resume !== true) return false;
       const next: RunMeta = {
         schema_version: meta.schema_version,
         run_id: meta.run_id,
@@ -260,6 +264,7 @@ class FolderRunStore implements RunStore {
         ...inputFields(meta),
       };
       await writeFileAtomic(join(this.#dir(runId), 'meta.json'), json(next));
+      return true;
     });
   }
 
@@ -267,6 +272,7 @@ class FolderRunStore implements RunStore {
     const value = parseRecord(InputRequestSchema, assertPersisted(request, 'input request'), 'input request');
     await serial(this.#lock(runId), async () => {
       const meta = await this.#requireRun(runId);
+      if (meta.phase === 'stopped') throw new RunStoppedError(runId);
       if (meta.input_request !== undefined) throw new InputRequestOpenError(runId, meta.input_request.question_id);
       const next: RunMeta = {
         schema_version: meta.schema_version,
@@ -300,6 +306,29 @@ class FolderRunStore implements RunStore {
         input_history: [...(meta.input_history ?? []), { ...open, ...value }],
       };
       await writeFileAtomic(join(this.#dir(runId), 'meta.json'), json(next));
+    });
+  }
+
+  async markStopped(runId: RunId, reason: string, resolution: Persisted<InputResolution>): Promise<RunPhase | null> {
+    assertClean(reason, 'phase reason');
+    const value = parseRecord(InputResolutionSchema, assertPersisted(resolution, 'input resolution'), 'input resolution');
+    return serial(this.#lock(runId), async () => {
+      const meta = await this.#requireRun(runId);
+      if (isTerminalPhase(meta.phase)) return null;
+      const open = meta.input_request;
+      const history = open !== undefined ? [...(meta.input_history ?? []), { ...open, ...value }] : meta.input_history;
+      const next: RunMeta = {
+        schema_version: meta.schema_version,
+        run_id: meta.run_id,
+        created_at: meta.created_at,
+        updated_at: this.#iso(),
+        phase: 'stopped',
+        phase_reason: reason,
+        ...(meta.worker_pid !== undefined ? { worker_pid: meta.worker_pid } : {}),
+        ...(history !== undefined ? { input_history: history } : {}),
+      };
+      await writeFileAtomic(join(this.#dir(runId), 'meta.json'), json(next));
+      return meta.phase;
     });
   }
 

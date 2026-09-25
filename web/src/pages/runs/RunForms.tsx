@@ -1,15 +1,13 @@
-// The follow-up and feedback forms, and the disabled Slack post panel.
+// The follow-up form and the disabled Slack post panel. The verdict panel is in RunVerdict.tsx.
 
 import { type FormEvent, useState } from 'react';
 import { ApiError } from '../../api/client.ts';
-import { askRun, sendFeedback } from '../../api/endpoints.ts';
-import type { FeedbackVerdict } from '../../api/types.ts';
+import { askRun } from '../../api/endpoints.ts';
 import { Button } from '../../components/Button.tsx';
 import { Field, Input, Textarea } from '../../components/Field.tsx';
 import { describeError } from '../../components/LoadState.tsx';
 import { Notice } from '../../components/Notice.tsx';
 import { Panel } from '../../components/Panel.tsx';
-import { FEEDBACK_VERDICTS } from '../../lib/constants.ts';
 import { useRememberedName } from './remembered-name.ts';
 
 const MAX_QUESTION = 4000;
@@ -65,81 +63,6 @@ export function AskForm({ runId, reports, onAsked }: { runId: string; reports: n
           </Field>
           <Button type="submit" variant="primary" busy={busy}>
             Ask
-          </Button>
-        </div>
-        {status.kind !== 'idle' && <Notice variant={status.kind === 'ok' ? 'info' : 'error'}>{status.text}</Notice>}
-      </form>
-    </Panel>
-  );
-}
-
-export function FeedbackForm({ runId, onSaved }: { runId: string; onSaved: () => void }) {
-  const [verdict, setVerdict] = useState<FeedbackVerdict>('correct');
-  const [rootCause, setRootCause] = useState('');
-  const [fasterPath, setFasterPath] = useState('');
-  const [name, setName] = useRememberedName();
-  const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<Status>({ kind: 'idle' });
-
-  const submit = async (e: FormEvent) => {
-    e.preventDefault();
-    if (busy) return;
-    if (name.trim() === '') {
-      setStatus({ kind: 'error', text: 'Enter your name.' });
-      return;
-    }
-    setBusy(true);
-    setStatus({ kind: 'idle' });
-    try {
-      const res = await sendFeedback(runId, {
-        verdict,
-        given_by: name.trim(),
-        ...(rootCause.trim() !== '' ? { actual_root_cause: rootCause.trim() } : {}),
-        ...(fasterPath.trim() !== '' ? { faster_path: fasterPath.trim() } : {}),
-      });
-      setStatus({ kind: 'ok', text: `Saved. This run has ${res.count} feedback ${res.count === 1 ? 'entry' : 'entries'}.` });
-      setRootCause('');
-      setFasterPath('');
-      onSaved();
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) return;
-      const text =
-        err instanceof ApiError && err.status === 409
-          ? 'The run has no report yet.'
-          : err instanceof ApiError && err.status === 404
-            ? 'This run no longer exists.'
-            : describeError(err);
-      setStatus({ kind: 'error', text });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Panel title="Was this right?" description="Feedback trains the evals. The latest entry wins.">
-      <form onSubmit={submit} noValidate style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div role="radiogroup" aria-label="Verdict" className="runs-row">
-          {FEEDBACK_VERDICTS.map((v) => (
-            <label key={v} className="runs-pill">
-              <input type="radio" name={`verdict-${runId}`} checked={verdict === v} onChange={() => setVerdict(v)} />
-              {v}
-            </label>
-          ))}
-        </div>
-        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-          <Field label="Actual root cause" optional className="runs-grow">
-            <Textarea rows={2} placeholder="Only if the report got it wrong" value={rootCause} onChange={(e) => setRootCause(e.target.value)} />
-          </Field>
-          <Field label="Faster path" optional className="runs-grow">
-            <Textarea rows={2} placeholder="Where it should have looked first" value={fasterPath} onChange={(e) => setFasterPath(e.target.value)} />
-          </Field>
-        </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 12, flexWrap: 'wrap' }}>
-          <Field label="Given by" className="runs-grow">
-            <Input placeholder="[your name]" autoComplete="name" value={name} onChange={(e) => setName(e.target.value)} style={{ maxWidth: 280 }} />
-          </Field>
-          <Button type="submit" variant="primary" busy={busy}>
-            Save feedback
           </Button>
         </div>
         {status.kind !== 'idle' && <Notice variant={status.kind === 'ok' ? 'info' : 'error'}>{status.text}</Notice>}

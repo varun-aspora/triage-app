@@ -219,18 +219,134 @@ describe('run checks', () => {
     expect(s.puts).toHaveLength(0);
   });
 
-  test('a run without a report is refused and writes nothing', async () => {
+  test('a run without a report takes the verdict, with no feedback.md and no eval draft', async () => {
     const s = await setup();
-    const err = await rejected(recordFeedback(NO_REPORT_RUN, valid, s.deps));
-    expect(err.code).toBe('no_report');
-    expect(s.puts).toHaveLength(0);
-    expect((await s.store.getRun(NO_REPORT_RUN))?.feedback).toHaveLength(0);
+    const r = await recordFeedback(NO_REPORT_RUN, { ...valid, verdict: 'wrong', notes: 'looking at the wrong customer' }, s.deps);
+    expect(r.count).toBe(1);
+    expect(r.draft_dir).toBeNull();
+    expect(r.draft_files).toBeNull();
+    expect(s.puts).toHaveLength(1);
+    expect(s.puts[0]?.md).toBeUndefined();
+    expect(existsSync(join(s.h.config.home, 'evals', '_unreviewed', NO_REPORT_RUN))).toBe(false);
+    const run = await s.store.getRun(NO_REPORT_RUN);
+    expect(run?.feedback_latest).toEqual({
+      verdict: 'wrong',
+      notes: 'looking at the wrong customer',
+      given_by: 'reviewer-a',
+      given_at: '2026-09-24T09:01:00.000Z',
+      interface: 'cli',
+      phase: 'created',
+      submission_seq: 1,
+    });
   });
 
   test('input is checked before the run id and the store', async () => {
     const s = await setup();
     const err = await rejected(recordFeedback('nope', { ...valid, verdict: 'bad' } as unknown as FeedbackInput, s.deps));
     expect(err.code).toBe('invalid_input');
+  });
+});
+
+// ------------------------------------------------------------------ notes, findings and context
+
+describe('notes, finding verdicts and run context', () => {
+  test('notes, finding verdicts with their text and the run context are recorded', async () => {
+    const s = await setup();
+    const r = await recordFeedback(
+      RUN,
+      {
+        ...valid,
+        verdict: 'wrong',
+        notes: 'the dispatch was fine; the card was held',
+        findings: [
+          { id: 'ssfb.v1.e2', verdict: 'wrong', note: 'that log is for another form' },
+          { id: 'ssfb.v1.h1', verdict: 'partial' },
+          { id: 'root_cause', verdict: 'wrong' },
+        ],
+      },
+      s.deps,
+    );
+    expect(r.record).toMatchObject({
+      verdict: 'wrong',
+      notes: 'the dispatch was fine; the card was held',
+      phase: 'created',
+      submission_seq: 1,
+      report_seq: 1,
+      findings: [
+        { id: 'ssfb.v1.e2', verdict: 'wrong', note: 'that log is for another form', text: 'vendor rejected the address' },
+        { id: 'ssfb.v1.h1', verdict: 'partial', text: 'address rejected' },
+        { id: 'root_cause', verdict: 'wrong', text: (sampleReport as unknown as Report).root_cause?.statement },
+      ],
+    });
+    expect(r.record.cancelled).toBeUndefined();
+    const fm = frontMatter(readFileSync(r.draft_files!.feedback_md, 'utf8'));
+    expect(fm.ground_truth.notes).toBe('the dispatch was fine; the card was held');
+    expect(fm.ground_truth.findings).toHaveLength(3);
+  });
+
+  test('a finding id the run does not have, or one given twice, is refused and nothing is written', async () => {
+    const s = await setup();
+    for (const findingsIn of [
+      [{ id: 'ssfb.v2.e1', verdict: 'wrong' as const }],
+      [{ id: 'ssfb.v1.e9', verdict: 'wrong' as const }],
+      [{ id: 'atspl.v1.e1', verdict: 'wrong' as const }],
+      [{ id: 'ssfb.v1.c1', verdict: 'wrong' as const }],
+      [{ id: 'not-an-id', verdict: 'wrong' as const }],
+      [
+        { id: 'ssfb.v1.e1', verdict: 'wrong' as const },
+        { id: 'ssfb.v1.e1', verdict: 'correct' as const },
+      ],
+    ]) {
+      const err = await rejected(recordFeedback(RUN, { ...valid, findings: findingsIn }, s.deps));
+      expect(err.code).toBe('invalid_input');
+      expect(err.fields[0]).toMatch(/^findings\.\d+\.id$/);
+    }
+    // root_cause needs a report.
+    const noReport = await rejected(recordFeedback(NO_REPORT_RUN, { ...valid, findings: [{ id: 'root_cause', verdict: 'wrong' }] }, s.deps));
+    expect(noReport.fields).toEqual(['findings.0.id']);
+    expect(s.puts).toHaveLength(0);
+  });
+
+  test('an id from an older findings version is kept, without text', async () => {
+    const s = await setup();
+    await s.store.putEvidence(RUN, 'ssfb', redactPersisted({ ...findings, evidence: findings.evidence.slice(0, 1) }));
+    const r = await recordFeedback(
+      RUN,
+      {
+        ...valid,
+        findings: [
+          { id: 'ssfb.v1.e3', verdict: 'wrong' },
+          { id: 'ssfb.v2.e1', verdict: 'correct' },
+        ],
+      },
+      s.deps,
+    );
+    expect(r.record.findings).toEqual([
+      { id: 'ssfb.v1.e3', verdict: 'wrong' },
+      { id: 'ssfb.v2.e1', verdict: 'correct', text: 'dispatch rejected' },
+    ]);
+    await expect(recordFeedback(RUN, { ...valid, findings: [{ id: 'ssfb.v2.e2', verdict: 'wrong' }] }, s.deps)).rejects.toThrow(FeedbackError);
+  });
+
+  test('a cancel carries cancelled and the phase given by the caller', async () => {
+    const s = await setup();
+    const r = await recordFeedback(NO_REPORT_RUN, { ...valid, verdict: 'wrong', cancelled: true }, s.deps, { phase: 'investigating' });
+    expect(r.record).toMatchObject({ verdict: 'wrong', cancelled: true, phase: 'investigating' });
+    expect(r.record.notes).toBeUndefined();
+  });
+
+  test('bad finding verdicts and notes name the field', () => {
+    const f = (x: unknown) => {
+      try {
+        parseFeedbackInput({ ...valid, ...(x as object) });
+        return [];
+      } catch (err) {
+        return (err as FeedbackError).fields;
+      }
+    };
+    expect(f({ findings: [{ id: 'ssfb.v1.e1', verdict: 'maybe' }] })).toEqual(['findings.0.verdict']);
+    expect(f({ notes: 'x'.repeat(5000) })).toEqual(['notes']);
+    expect(f({ findings: 'all' })).toEqual(['findings']);
   });
 });
 
@@ -255,7 +371,7 @@ describe('append-then-render latest-wins', () => {
     const jsonl = readFileSync(join(s.h.config.paths.runsDir, RUN, 'feedback.jsonl'), 'utf8').trim().split('\n');
     expect(jsonl).toHaveLength(2);
 
-    for (const path of [join(s.h.config.paths.runsDir, RUN, 'feedback.md'), second.draft_files.feedback_md]) {
+    for (const path of [join(s.h.config.paths.runsDir, RUN, 'feedback.md'), second.draft_files!.feedback_md]) {
       const md = readFileSync(path, 'utf8');
       const fm = frontMatter(md);
       expect(fm.ground_truth).toEqual({ verdict: 'partial', faster_path: 'check the vendor callback log first' });
@@ -267,13 +383,13 @@ describe('append-then-render latest-wins', () => {
 
     // The second putFeedback carried the rendering of both records.
     expect(s.puts).toHaveLength(2);
-    expect(s.puts[1]?.md).toBe(readFileSync(second.draft_files.feedback_md, 'utf8'));
+    expect(s.puts[1]?.md).toBe(readFileSync(second.draft_files!.feedback_md, 'utf8'));
   });
 
   test('a pending verdict gives type pending', async () => {
     const s = await setup();
     const r = await recordFeedback(RUN, { ...valid, verdict: 'pending' }, s.deps);
-    expect(frontMatter(readFileSync(r.draft_files.feedback_md, 'utf8')).type).toBe('pending');
+    expect(frontMatter(readFileSync(r.draft_files!.feedback_md, 'utf8')).type).toBe('pending');
   });
 
   test('renderFeedbackMd refuses an empty record list', () => {
@@ -310,8 +426,8 @@ describe('redaction of free text before write', () => {
     const written = [
       join(s.h.config.paths.runsDir, RUN, 'feedback.jsonl'),
       join(s.h.config.paths.runsDir, RUN, 'feedback.md'),
-      r.draft_files.feedback_md,
-      r.draft_files.report_json,
+      r.draft_files!.feedback_md,
+      r.draft_files!.report_json,
     ];
     for (const path of written) {
       const text = readFileSync(path, 'utf8');
@@ -325,8 +441,8 @@ describe('redaction of free text before write', () => {
     const digitRun = '01J8ZQ7XK3PSEDRMN000000001';
     await seedRun(s.store, digitRun);
     const r = await recordFeedback(digitRun, valid, s.deps);
-    expect(r.draft_dir.endsWith(digitRun)).toBe(true);
-    const fm = frontMatter(readFileSync(r.draft_files.feedback_md, 'utf8'));
+    expect(r.draft_dir!.endsWith(digitRun)).toBe(true);
+    const fm = frontMatter(readFileSync(r.draft_files!.feedback_md, 'utf8'));
     expect(fm.id).not.toContain('000000001');
     expect(fm.id).toContain('****');
   });
@@ -349,7 +465,7 @@ describe('draft path', () => {
     );
     expect(existsSync(join(home, 'evals', 'cases'))).toBe(false);
 
-    const copy = JSON.parse(readFileSync(r.draft_files.report_json, 'utf8'));
+    const copy = JSON.parse(readFileSync(r.draft_files!.report_json, 'utf8'));
     expect(copy).toEqual((await s.store.getRun(RUN))?.report);
   });
 
@@ -357,7 +473,7 @@ describe('draft path', () => {
     const s = await setup();
     await recordFeedback(RUN, valid, s.deps);
     const r = await recordFeedback(RUN, { ...valid, verdict: 'wrong' }, s.deps);
-    expect(frontMatter(readFileSync(r.draft_files.feedback_md, 'utf8')).ground_truth.verdict).toBe('wrong');
+    expect(frontMatter(readFileSync(r.draft_files!.feedback_md, 'utf8')).ground_truth.verdict).toBe('wrong');
     expect(readdirSync(join(s.h.config.home, 'evals'))).toEqual(['_unreviewed']);
   });
 });
@@ -372,7 +488,7 @@ describe('front-matter parse round trip', () => {
       { ...valid, verdict: 'partial', actual_root_cause: 'the pincode: was blank', faster_path: 'look at "vendor callback" logs' },
       s.deps,
     );
-    const md = readFileSync(r.draft_files.feedback_md, 'utf8');
+    const md = readFileSync(r.draft_files!.feedback_md, 'utf8');
     const fm = frontMatter(md);
 
     expect(Object.keys(fm)).toEqual(['id', 'type', 'input', 'investigation', 'ground_truth', 'captured_at']);

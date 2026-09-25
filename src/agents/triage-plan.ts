@@ -60,6 +60,7 @@ import { investigatorName } from './delegates/investigator.ts';
 import { type Escalation, type EscalationSnapshot, escalationFor, releaseEscalation } from './escalation.ts';
 import { sandboxFactory } from './sandbox.ts';
 import { currentKnowledge, type Knowledge, loadKnowledge } from './skills.ts';
+import { setRunRedactionNames } from '../runlog/event-log.ts';
 import { installedTripwire, installTripwire, runUsage, tripwireOptionsFor } from './tripwire.ts';
 
 /** The pinned Flue identity of the root agent. */
@@ -448,6 +449,7 @@ export function lazyRunStore(config: Pick<Config, 'db'>, load: () => Promise<Run
     setPhase: async (...a) => (await store()).setPhase(...a),
     putClassification: async (...a) => (await store()).putClassification(...a),
     putInputRequest: async (...a) => (await store()).putInputRequest(...a),
+    markStopped: async (...a) => (await store()).markStopped(...a),
     resolveInputRequest: async (...a) => (await store()).resolveInputRequest(...a),
     putEvidence: async (...a) => (await store()).putEvidence(...a),
     putReport: async (...a) => (await store()).putReport(...a),
@@ -472,6 +474,8 @@ export function runDepsFor(runId: RunId, init: TriageInit, rt: TriageRuntime = t
   const cached = runDeps.get(runId);
   if (cached !== undefined) return cached;
   runInterfaces.set(runId, init.request.interface);
+  // A follow-up in a new process has not seen runSubmission, so the event log learns the names here.
+  setRunRedactionNames(runId, init.redaction_names ?? []);
   const deps = createToolDeps({
     runId,
     config: rt.config,

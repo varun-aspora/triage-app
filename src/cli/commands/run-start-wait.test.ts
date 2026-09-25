@@ -27,6 +27,7 @@ import { buildProgram, runCli } from '../index.ts';
 import {
   AskOutputSchema,
   EXIT_NEEDS_INPUT,
+  EXIT_STOPPED,
   EXIT_WAIT_TIMEOUT,
   InputOutputSchema,
   StartOutputSchema,
@@ -640,6 +641,19 @@ describe('wait', () => {
     const human = await cli([createWaitCommand()], ['wait', RUN_ID], { config: () => h.config });
     expect(human.code).toBe(EXIT.ERROR);
     expect(human.err).toContain('failed: SubmissionReadTimeoutError');
+  });
+
+  test('a stopped run exits 5 and says how to resume it', async () => {
+    const h = home();
+    await seed(h, { phase: 'stopped', reason: 'cancelled' });
+    const r = await cli([createWaitCommand()], ['wait', RUN_ID, '--json'], { config: () => h.config });
+    expect(r.code).toBe(EXIT_STOPPED);
+    const doc = jsonLine(r.out);
+    expect(v.is(WaitOutputSchema, doc)).toBe(true);
+    expect(doc).toEqual({ run_id: RUN_ID, status: 'stopped', reason: 'cancelled' });
+    const human = await cli([createWaitCommand()], ['wait', RUN_ID], { config: () => h.config });
+    expect(human.code).toBe(EXIT_STOPPED);
+    expect(human.out).toContain(`triage ask ${RUN_ID}`);
   });
 
   test('a run whose worker is gone ends the wait as stalled', async () => {

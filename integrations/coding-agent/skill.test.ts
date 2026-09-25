@@ -191,7 +191,7 @@ describe('command and flag cross-check', () => {
   const fencedLines = all.filter((i) => i.fenced).map((i) => i.line);
 
   test('the CLI spec has the commands the skill relies on', () => {
-    for (const name of ['start', 'wait', 'status', 'ask', 'post', 'feedback']) expect(spec.has(name)).toBe(true);
+    for (const name of ['start', 'wait', 'status', 'ask', 'post', 'feedback', 'stop', 'logs']) expect(spec.has(name)).toBe(true);
     expect([...spec.keys()].some((k) => k.includes('worker'))).toBe(false);
   });
 

@@ -6,6 +6,7 @@
 //   --entities <names...>  registry ids or aliases, each enabled by TRIAGE_ENTITIES; where the
 //                          agent starts, not a limit (pre-flight still covers every enabled entity)
 //   --tier cheap|mid|strong
+//   --context <text>       extra notes not in the thread, appended after it
 //   --requested-by <who>   defaults to the OS user name
 //   --interface cli|claude-code
 //
@@ -52,6 +53,7 @@ export function configureRequestArgs(cmd: Command): Command {
     .option('--ids <pairs...>', 'known ids as key=value, e.g. customer_id=...')
     .option('--entities <names...>', 'entities to start with (ids or aliases); the agent may still brief other enabled entities')
     .option('--tier <tier>', `model tier override: ${TIERS.join('|')}`)
+    .option('--context <text>', 'extra notes that are not in the thread; appended after it')
     .option('--requested-by <who>', 'who asked (email or Slack user id); defaults to the OS user')
     .option('--interface <name>', `caller interface: ${CLI_INTERFACES.join('|')}`, 'cli');
 }
@@ -86,9 +88,11 @@ export function parseRequestArgs(opts: Readonly<Record<string, unknown>>, deps: 
 
   const iface = checkInterface(stringOpt(opts, 'interface', '--interface') ?? 'cli');
   const requestedBy = requestedByOf(opts, deps);
+  const context = stringOpt(opts, 'context', '--context');
   const common = {
     interface: iface,
     ...(requestedBy !== undefined ? { requested_by: requestedBy } : {}),
+    ...(context !== undefined && context.trim() !== '' ? { context } : {}),
     ...(Object.keys(hints).length > 0 ? { hints } : {}),
   };
 

@@ -9,6 +9,7 @@ import {
   formatUsd,
   inferFailure,
   joinEntityLabels,
+  MAX_CONTEXT,
   type NewRunForm,
   newIdempotencyKey,
   permalinkHref,
@@ -21,6 +22,7 @@ const baseForm: NewRunForm = {
   source: 'slack',
   slackUrl: ' https://acme.slack.com/archives/C1/p1727275322000100 ',
   pasted: '',
+  context: '',
   requestedBy: ' Asha ',
   entitiesMode: 'auto',
   entities: [],
@@ -61,6 +63,20 @@ describe('buildStartBody', () => {
   test('auto leaves entities and tier out', () => {
     const r = buildStartBody(baseForm, 0);
     expect(r).toEqual({ ok: true, body: { slack_url: 'https://acme.slack.com/archives/C1/p1727275322000100', requested_by: 'Asha' } });
+  });
+
+  test('context is sent trimmed with either source, and left out when blank', () => {
+    const slack = buildStartBody({ ...baseForm, context: '  checked KYC  ' }, 0);
+    expect(slack.ok && slack.body.context).toBe('checked KYC');
+    const paste = buildStartBody({ ...baseForm, source: 'paste', pasted: 'stuck', context: 'checked KYC' }, 0);
+    expect(paste.ok && paste.body.context).toBe('checked KYC');
+    const blank = buildStartBody({ ...baseForm, context: '   ' }, 0);
+    expect(blank.ok && 'context' in blank.body).toBe(false);
+  });
+
+  test('context over the limit is flagged', () => {
+    const r = buildStartBody({ ...baseForm, context: 'x'.repeat(MAX_CONTEXT + 1) }, 0);
+    expect(r.ok ? undefined : r.errors.context).toBeDefined();
   });
 
   test('choose sends entities, tier, ids and the window', () => {

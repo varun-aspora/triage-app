@@ -6,9 +6,9 @@ import type { Category, PreflightWarning, TierDecision } from '../../../src/type
 import type { Entity, Interface, KnownIdKey, ReportStatus, Tier } from '../../../src/types/core.ts';
 import type { IdChain } from '../../../src/types/id-chain.ts';
 import type { Report } from '../../../src/types/report.ts';
-import type { DoctorStatus, EvidenceKey, FeedbackVerdict, GuideStatus, RunPhase, RunStatus } from '../lib/constants.ts';
+import type { DoctorStatus, EvidenceKey, FeedbackVerdict, FindingVerdict, GuideStatus, RunPhase, RunStatus } from '../lib/constants.ts';
 
-export type { Category, DoctorStatus, Entity, EvidenceKey, FeedbackVerdict, GuideStatus, IdChain, Interface, KnownIdKey };
+export type { Category, DoctorStatus, Entity, EvidenceKey, FeedbackVerdict, FindingVerdict, GuideStatus, IdChain, Interface, KnownIdKey };
 export type { PreflightWarning, Report, ReportStatus, RunPhase, RunStatus, Tier, TierDecision };
 
 // ------------------------------------------------------------------ ui
@@ -73,19 +73,39 @@ export type ListRunsResponse = { runs: RunSummary[]; next_cursor: string | null 
 
 export type SubmissionView = {
   seq: number;
-  kind: 'initial' | 'ask';
+  kind: 'initial' | 'ask' | 'answer';
   question?: string;
   created_at: string;
   has_report: boolean;
 };
 
+export type FindingFeedback = { id: string; verdict: FindingVerdict; note?: string; text?: string };
+
 export type FeedbackEntry = {
   verdict: FeedbackVerdict;
   actual_root_cause?: string;
   faster_path?: string;
+  notes?: string;
   given_by: string;
   given_at: string;
   interface: Interface;
+  /** The run's phase when it was given. */
+  phase?: RunPhase;
+  submission_seq?: number;
+  report_seq?: number;
+  /** A Cancel: the run was stopped with it. */
+  cancelled?: true;
+  findings?: FindingFeedback[];
+};
+
+/** A finding a verdict can name (src/report/finding-refs.ts). */
+export type FindingRef = {
+  id: string;
+  kind: 'evidence' | 'hypothesis' | 'code_claim' | 'root_cause';
+  key: EvidenceKey | null;
+  version: number | null;
+  text: string;
+  detail?: string;
 };
 
 export type EvidenceProgress = { key: EvidenceKey; version: number };
@@ -108,6 +128,8 @@ export type RunDetail = {
   current_ask: string | null;
   preflight_warnings?: PreflightWarning[];
   evidence: EvidenceProgress[];
+  /** The latest findings and the root cause, with the ids feedback takes. */
+  findings: FindingRef[];
   submissions: SubmissionView[];
   feedback: FeedbackEntry[];
   report_md?: string;
@@ -123,6 +145,8 @@ type StartRunCommon = {
   tier?: Tier;
   requested_by: string;
   time_window?: { from: string; to: string };
+  /** Extra notes not in the thread. The server appends them after the thread. */
+  context?: string;
 };
 
 /** POST /triage. Either a Slack thread URL or pasted messages. */
@@ -138,9 +162,19 @@ export type FeedbackBody = {
   verdict: FeedbackVerdict;
   actual_root_cause?: string;
   faster_path?: string;
+  notes?: string;
+  findings?: { id: string; verdict: FindingVerdict; note?: string }[];
   given_by: string;
 };
 export type FeedbackResponse = { run_id: string; verdict: FeedbackVerdict; count: number };
+
+/** POST /triage/:run_id/stop. verdict false: stop without the Cancel verdict. */
+export type StopBody = { given_by: string; verdict?: boolean };
+export type StopResponse = { run_id: string; stopped_from: RunPhase; aborted: boolean; feedback_count: number | null; gaps: string[] };
+
+/** One line of a run's event log. data is the redacted event, whose shape depends on type. */
+export type RunEvent = { index: number; ts: string; source: 'flue' | 'pipeline'; type: string; data: unknown };
+export type RunEventsResponse = { events: RunEvent[]; next: number; more: boolean };
 
 // ------------------------------------------------------------------ catalog
 

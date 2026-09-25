@@ -8,13 +8,15 @@ export const RUN_PHASES = [
   'classifying',
   'dispatched',
   'investigating',
+  'needs_input',
   'completed',
   'failed',
+  'stopped',
 ] as const;
 export type RunPhase = (typeof RUN_PHASES)[number];
 
-/** GET /triage status filter. running is any phase that is not completed or failed. */
-export const RUN_STATUSES = ['running', 'completed', 'failed'] as const;
+/** GET /triage status filter. running is any phase that is not completed, failed or stopped. */
+export const RUN_STATUSES = ['running', 'completed', 'failed', 'stopped'] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
 export const CATEGORIES = [
@@ -55,6 +57,10 @@ export const REPORT_STATUSES = ['root_cause_confirmed', 'resolved', 'pending_use
 
 export const FEEDBACK_VERDICTS = ['correct', 'partial', 'wrong', 'pending'] as const;
 export type FeedbackVerdict = (typeof FEEDBACK_VERDICTS)[number];
+
+/** A verdict on one finding. The console sets correct (accept) or wrong (reject). */
+export const FINDING_VERDICTS = ['correct', 'partial', 'wrong'] as const;
+export type FindingVerdict = (typeof FINDING_VERDICTS)[number];
 
 export const EVIDENCE_LADDER_STEPS = ['api', 'db', 'logs', 'cbs', 'code'] as const;
 

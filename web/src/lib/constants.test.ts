@@ -10,6 +10,7 @@ import { EVIDENCE_LADDER_STEPS as SRC_LADDER } from '../../../src/types/findings
 import {
   EVIDENCE_KEYS as SRC_EVIDENCE_KEYS,
   FEEDBACK_VERDICTS as SRC_VERDICTS,
+  FINDING_VERDICTS as SRC_FINDING_VERDICTS,
   RUN_PHASES as SRC_PHASES,
   TERMINAL_PHASES,
 } from '../../../src/runstore/types.ts';
@@ -26,6 +27,7 @@ describe('constants match src/', () => {
     expect([...c.KNOWN_ID_KEYS]).toEqual([...SRC_KNOWN_ID_KEYS]);
     expect([...c.REPORT_STATUSES]).toEqual([...SRC_REPORT_STATUSES]);
     expect([...c.FEEDBACK_VERDICTS]).toEqual([...SRC_VERDICTS]);
+    expect([...c.FINDING_VERDICTS]).toEqual([...SRC_FINDING_VERDICTS]);
     expect([...c.EVIDENCE_LADDER_STEPS]).toEqual([...SRC_LADDER]);
     expect([...c.EVIDENCE_KEYS]).toEqual([...SRC_EVIDENCE_KEYS]);
     expect([...c.DOCTOR_STATUSES]).toEqual([...SRC_DOCTOR]);

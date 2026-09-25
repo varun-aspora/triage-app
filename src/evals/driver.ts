@@ -112,6 +112,7 @@ export async function bootEvalRuntime(options: EvalBootOptions): Promise<EvalRun
     // env is empty, so Flue picks up no provider key from the shell.
     start: (o) => start({ ...o, env: {} }),
     db: async () => (await import('../db.ts')).createPersistence(config),
+    eventLog: { runsDir: config.paths.runsDir },
   });
   current = Object.freeze({ flue, faux: options.faux, config, registry, store });
   return current;

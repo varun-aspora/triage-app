@@ -6,9 +6,9 @@
 
 import * as v from 'valibot';
 import { NonEmptyStringSchema, TierSchema } from '../../types/core.ts';
-import { ThreadFileMessageSchema } from '../normalise.ts';
-import { FEEDBACK_VERDICTS } from '../../runstore/types.ts';
-import { MAX_FEEDBACK_TEXT } from '../../report/feedback.ts';
+import { MAX_CONTEXT_CHARS, ThreadFileMessageSchema } from '../normalise.ts';
+import { FEEDBACK_VERDICTS, FINDING_VERDICTS } from '../../runstore/types.ts';
+import { MAX_FEEDBACK_TEXT, MAX_FINDING_VERDICTS } from '../../report/feedback.ts';
 
 /** Longest Idempotency-Key header accepted. */
 export const MAX_IDEMPOTENCY_KEY_LENGTH = 256;
@@ -23,7 +23,8 @@ const WhoSchema = v.pipe(NonEmptyStringSchema, v.maxLength(MAX_REQUESTED_BY));
 
 /**
  * POST /triage. Exactly one of slack_url and messages. requested_by is
- * required (self-declared: one shared token is a known v1 limit).
+ * required (self-declared: one shared token is a known v1 limit). context is
+ * optional with either source and is appended after the thread.
  */
 export const TriageBodySchema = v.pipe(
   v.object({
@@ -34,6 +35,7 @@ export const TriageBodySchema = v.pipe(
     tier: v.optional(TierSchema),
     requested_by: WhoSchema,
     time_window: v.optional(v.object({ from: v.string(), to: v.string() })),
+    context: v.optional(v.pipe(v.string(), v.maxLength(MAX_CONTEXT_CHARS))),
   }),
   v.check((b) => (b.slack_url === undefined) !== (b.messages === undefined), 'send exactly one of slack_url and messages'),
 );
@@ -51,9 +53,29 @@ export const FeedbackBodySchema = v.object({
   verdict: v.picklist(FEEDBACK_VERDICTS),
   actual_root_cause: v.optional(v.pipe(v.string(), v.maxLength(MAX_FEEDBACK_TEXT))),
   faster_path: v.optional(v.pipe(v.string(), v.maxLength(MAX_FEEDBACK_TEXT))),
+  notes: v.optional(v.pipe(v.string(), v.maxLength(MAX_FEEDBACK_TEXT))),
+  findings: v.optional(
+    v.pipe(
+      v.array(
+        v.object({
+          id: v.pipe(NonEmptyStringSchema, v.maxLength(64)),
+          verdict: v.picklist(FINDING_VERDICTS),
+          note: v.optional(v.pipe(v.string(), v.maxLength(MAX_FEEDBACK_TEXT))),
+        }),
+      ),
+      v.maxLength(MAX_FINDING_VERDICTS),
+    ),
+  ),
   given_by: WhoSchema,
 });
 export type FeedbackBody = v.InferOutput<typeof FeedbackBodySchema>;
+
+/** POST /triage/:run_id/stop. verdict: false stops without recording the Cancel verdict. */
+export const StopBodySchema = v.object({
+  given_by: WhoSchema,
+  verdict: v.optional(v.boolean()),
+});
+export type StopBody = v.InferOutput<typeof StopBodySchema>;
 
 export type ParseResult<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly fields: readonly string[] };
 

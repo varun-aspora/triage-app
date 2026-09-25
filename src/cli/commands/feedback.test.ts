@@ -110,7 +110,7 @@ describe('usage deny paths', () => {
       const e = await env();
       const r = await feedback(e, [RUN, '--verdict', verdict]);
       expect(r.code).toBe(EXIT.USAGE);
-      expect(r.err).toContain('--verdict must be one of correct, partial, wrong, pending');
+      expect(r.err).toContain('--verdict must be one of accept, reject, correct, partial, wrong, pending');
       expect(e.storeBuilds).toBe(0);
       await nothingWritten(e);
     });
@@ -121,7 +121,7 @@ describe('usage deny paths', () => {
     const r = await feedback(e, [RUN, '--verdict', 'nope', '--json']);
     expect(r.code).toBe(EXIT.USAGE);
     expect(JSON.parse(r.out)).toEqual({
-      error: { code: 'USAGE', message: '--verdict must be one of correct, partial, wrong, pending' },
+      error: { code: 'USAGE', message: '--verdict must be one of accept, reject, correct, partial, wrong, pending' },
     });
   });
 
@@ -204,5 +204,42 @@ describe('a valid call', () => {
     expect(r.code).toBe(EXIT.OK);
     expect(r.out).toContain('(2 feedback entries)');
     expect((await e.store.getRun(RUN))?.feedback.map((f) => f.verdict)).toEqual(['pending', 'correct']);
+  });
+});
+
+describe('accept, reject, notes and finding verdicts', () => {
+  test('accept and reject are stored as correct and wrong, with notes and finding verdicts', async () => {
+    const e = await env();
+    expect((await feedback(e, [RUN, '--verdict', 'accept'])).code).toBe(EXIT.OK);
+    const r = await feedback(e, [RUN, '--verdict', 'reject', '--notes', 'wrong customer', '--finding', 'root_cause=reject']);
+    expect(r.code).toBe(EXIT.OK);
+    const run = await e.store.getRun(RUN);
+    expect(run?.feedback.map((f) => f.verdict)).toEqual(['correct', 'wrong']);
+    expect(run?.feedback[1]).toMatchObject({
+      notes: 'wrong customer',
+      findings: [{ id: 'root_cause', verdict: 'wrong', text: (sampleReport as unknown as Report).root_cause?.statement }],
+    });
+  });
+
+  for (const [label, flag, message] of [
+    ['no =', 'root_cause', '--finding must be <id>=<verdict>'],
+    ['a bad verdict', 'root_cause=maybe', '--finding verdict must be one of'],
+  ] as const) {
+    test(`--finding with ${label} is a usage error and writes nothing`, async () => {
+      const e = await env();
+      const r = await feedback(e, [RUN, '--verdict', 'reject', '--finding', flag]);
+      expect(r.code).toBe(EXIT.USAGE);
+      expect(r.err).toContain(message);
+      expect(e.storeBuilds).toBe(0);
+      await nothingWritten(e);
+    });
+  }
+
+  test('a finding the run does not have is a usage error and writes nothing', async () => {
+    const e = await env();
+    const r = await feedback(e, [RUN, '--verdict', 'reject', '--finding', 'ssfb.v1.e1=wrong']);
+    expect(r.code).toBe(EXIT.USAGE);
+    expect(r.err).toContain('findings.0.id names findings the run does not have');
+    await nothingWritten(e);
   });
 });

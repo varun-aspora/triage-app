@@ -7,6 +7,7 @@
 // - thread_file: the file is read and parsed as JSON here, and
 //   buildTriageRequest checks it against ThreadFileSchema;
 // - text and json pass straight through.
+// input.context, when given, is appended to the thread for every kind.
 //
 // Every failure surfaces here, before anything is stored or dispatched: a
 // SlackFetchError (with the --thread-file hint), a SlackPermalinkError, an
@@ -25,6 +26,7 @@ import type { Interface, RunId } from '../types/core.ts';
 import type { TriageRequest } from '../types/request.ts';
 import {
   buildTriageRequest,
+  CONTEXT_AUTHOR,
   IngressInputError,
   normaliseOptions,
   type InputHints,
@@ -54,6 +56,8 @@ type PrepareCommon = {
   /** Required, except that a json body may carry its own requested_by. */
   readonly requested_by?: string;
   readonly hints?: InputHints;
+  /** Extra caller text appended after the thread; see buildTriageRequest. */
+  readonly context?: string;
 };
 
 export type PrepareInput =
@@ -98,6 +102,7 @@ export async function prepareRequest(input: PrepareInput, deps: PrepareDeps): Pr
     interface: input.interface,
     ...(input.requested_by !== undefined ? { requested_by: input.requested_by } : {}),
     ...(input.hints !== undefined ? { hints: input.hints } : {}),
+    ...(input.context !== undefined ? { context: input.context } : {}),
   };
 
   if (input.kind === 'slack') {
@@ -198,7 +203,7 @@ function collectNames(request: TriageRequest): string[] {
   const names: string[] = [];
   for (const m of request.messages) {
     const author = m.author.trim();
-    if (author !== '' && !NOT_A_NAME.test(author)) names.push(author);
+    if (author !== '' && author !== CONTEXT_AUTHOR && !NOT_A_NAME.test(author)) names.push(author);
   }
   for (const value of templateFieldValues(request.messages.map((m) => m.text))) {
     if (value.name !== undefined) names.push(value.name);

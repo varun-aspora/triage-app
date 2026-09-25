@@ -16,6 +16,7 @@ import {
   runStoreContract,
   sampleEmbedding,
   sampleFeedback,
+  sampleResolution,
   sampleFindings,
   sampleReport,
   sampleRequest,
@@ -445,6 +446,7 @@ describe('postgres provider: every statement is parameterised', () => {
     await store.putEvidence(RUN_A, 'ssfb', p(sampleFindings('look')));
     await store.putFeedback(RUN_A, p(sampleFeedback('partial', '2026-09-01T10:00:00.000Z')), p('# fb'));
     await store.setPhase(RUN_A, 'failed', { reason: 'AgentRunError', worker_pid: 4242 });
+    await store.markStopped(RUN_B, 'cancelled', p(sampleResolution('cancelled')));
     await store.putEmbedding(RUN_A, p(sampleEmbedding('request', model, [1, 0], seq)));
     await store.claimIdempotencyKey('key-a', RUN_A, 60_000);
     await store.findSimilar({ vector: [1, 0], model, excludeRunId: RUN_B });
