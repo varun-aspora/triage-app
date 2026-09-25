@@ -52,6 +52,7 @@ import {
   watchFinishReport,
 } from './triage-plan.ts';
 import { runUsage } from './tripwire.ts';
+import { NO_RETRY } from '../db/pg-retry.ts';
 
 // Model specs are pi-ai built-ins, so modelForTier accepts them without a
 // registered provider. No model is called in this file.
@@ -532,7 +533,7 @@ describe('lazyRunStore', () => {
   test('loads the store once and forwards calls', async () => {
     const inner = fakeStore();
     let loads = 0;
-    const store = lazyRunStore({ db: { provider: 'sqlite', url: ':memory:' } }, async () => {
+    const store = lazyRunStore({ db: { provider: 'sqlite', url: ':memory:', retry: NO_RETRY } }, async () => {
       loads += 1;
       return inner;
     });
@@ -549,7 +550,7 @@ describe('lazyRunStore', () => {
   test('a failed load is not kept, so the next call tries again', async () => {
     const inner = fakeStore();
     let loads = 0;
-    const store = lazyRunStore({ db: { provider: 'postgres', url: 'postgresql://x/y' } }, async () => {
+    const store = lazyRunStore({ db: { provider: 'postgres', url: 'postgresql://x/y', retry: NO_RETRY } }, async () => {
       loads += 1;
       if (loads === 1) throw new Error('store not ready');
       return inner;

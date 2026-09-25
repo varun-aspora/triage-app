@@ -88,7 +88,8 @@ describe('postgres provider: statements', () => {
     expect(SQL.createRun).toStartWith('INSERT INTO triage.runs');
     expect(SQL.createRun).toContain('ON CONFLICT (run_id) DO NOTHING');
     const [first] = inserts;
-    expect(first?.on).toBe('pool');
+    // A single statement on its own client, not inside a transaction.
+    expect(fake.calls.filter((c) => c.on === first?.on).map((c) => c.text)).not.toContain('BEGIN');
     expect(first?.params[0]).toBe(RUN_A);
     expect(first?.params[1]).toBe(1);
     expect(first?.params[2]).toBe('2026-09-01T00:00:00.000Z');

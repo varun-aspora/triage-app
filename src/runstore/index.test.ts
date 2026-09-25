@@ -13,6 +13,7 @@ import { RUN_A, sampleRequest } from './contract.ts';
 import { createFakePg, FAKE_PG_DSN } from './fake-pg.ts';
 import { createRunStore, getRunStore, resetRunStoreForTests, type RunStoreConfig } from './index.ts';
 import { SQL, createPostgresRunStore, type PgStoreRunner } from './postgres.ts';
+import { NO_RETRY } from '../db/pg-retry.ts';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -23,7 +24,7 @@ function config(provider: string, url: string): RunStoreConfig {
   const root = mkdtempSync(join(tmpdir(), 'runstore-index-'));
   dirs.push(root);
   return {
-    db: { provider: provider as RunStoreConfig['db']['provider'], url },
+    db: { provider: provider as RunStoreConfig['db']['provider'], url, retry: NO_RETRY },
     paths: { runsDir: join(root, 'runs'), dataDir: join(root, 'data') } as RunStoreConfig['paths'],
   };
 }

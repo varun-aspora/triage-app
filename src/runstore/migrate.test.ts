@@ -78,6 +78,10 @@ function fakeDb(options: FakeDbOptions = {}): FakeDb {
             return { rows: [] };
           }
           fail(text);
+          // The runner runs single statements on a checked-out client too (D57), so the version read lands here.
+          if (text.startsWith('SELECT version FROM triage.schema_migrations') && params === undefined) {
+            return { rows: [...committed].map((version) => ({ version })) };
+          }
           if (text.startsWith('SELECT version FROM triage.schema_migrations WHERE version = $1')) {
             const version = String(params?.[0]);
             const seen = committed.has(version) || staged.includes(version) || options.recordedLater?.includes(version);
@@ -143,7 +147,7 @@ describe('migrateRunStore', () => {
     expect(result).toEqual({ applied: ALL_VERSIONS, skipped: [] });
     expect(db.committed).toEqual(new Set(ALL_VERSIONS));
 
-    // client1 is the bootstrap, client2 applies the file.
+    // client1 is the bootstrap, client2 reads the recorded versions, client3 on apply the files.
     expect(db.clientCalls(1)).toEqual([
       'BEGIN',
       'SELECT pg_advisory_xact_lock(7426150093)',
@@ -151,7 +155,8 @@ describe('migrateRunStore', () => {
       expect.stringContaining('CREATE TABLE IF NOT EXISTS triage.schema_migrations'),
       'COMMIT',
     ]);
-    expect(db.clientCalls(2)).toEqual([
+    expect(db.clientCalls(2)).toEqual([expect.stringMatching(/^SELECT version FROM triage\.schema_migrations/)]);
+    expect(db.clientCalls(3)).toEqual([
       'BEGIN',
       'SELECT pg_advisory_xact_lock(7426150093)',
       'SELECT version FROM triage.schema_migrations WHERE version = $1',
@@ -159,7 +164,7 @@ describe('migrateRunStore', () => {
       'INSERT INTO triage.schema_migrations (version) VALUES ($1)',
       'COMMIT',
     ]);
-    expect(db.clientCalls(3)).toEqual([
+    expect(db.clientCalls(4)).toEqual([
       'BEGIN',
       'SELECT pg_advisory_xact_lock(7426150093)',
       'SELECT version FROM triage.schema_migrations WHERE version = $1',
@@ -167,7 +172,7 @@ describe('migrateRunStore', () => {
       'INSERT INTO triage.schema_migrations (version) VALUES ($1)',
       'COMMIT',
     ]);
-    expect(db.clientCalls(4)).toEqual([
+    expect(db.clientCalls(5)).toEqual([
       'BEGIN',
       'SELECT pg_advisory_xact_lock(7426150093)',
       'SELECT version FROM triage.schema_migrations WHERE version = $1',
@@ -216,9 +221,9 @@ describe('migrateRunStore', () => {
     expect(err.message).toContain('syntax error');
     expect(err.message).not.toContain('not-a-real-password');
     expect(db.committed.size).toBe(0);
-    const tail = db.clientCalls(2).slice(-2);
+    const tail = db.clientCalls(3).slice(-2);
     expect(tail).toEqual([INIT_SQL, 'ROLLBACK']);
-    expect(db.clientCalls(2)).not.toContain('COMMIT');
+    expect(db.clientCalls(3)).not.toContain('COMMIT');
   });
 
   test('a failing later file keeps earlier files and stops there', async () => {
