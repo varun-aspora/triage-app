@@ -1,5 +1,5 @@
 // Agent contract: a run that pauses on a question for the person who
-// started it, and resumes with the answer (P6 §4.3, D52).
+// started it, and resumes with the answer (P6 §4.3, D53).
 //
 // - ask_requester opens the question and the response ends there: no
 //   triage.finish_required signal, the submission completes, and the run is

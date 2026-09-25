@@ -152,11 +152,11 @@ For an existing `.env`:
 - `SSFB_INFRA_REPO`, `ATSPL_INFRA_REPO` and `RTL_INFRA_REPO` must be added. The registry refuses to start when a key it names is missing; blank turns the line off for that entity. Prod values are in `.env.example`; the stage values are in the comment above each key.
 - Run `triage repos sync` once to clone the four new repos.
 
-### Mid-run input (P6, D52)
+### Mid-run input (P6, D53)
 
 | Change | Decision |
 |---|---|
-| `ask_requester` on the Triage root; `needs_input` phase and input requests in both run stores (`0002_input_requests.sql`); `answerRun` and the `triage.input_answer` signal; `triage input`; `run`/`wait` ask at a terminal; `status` shows the question; `ask` refuses while one is open; `TRIAGE_MAX_ASKS_PER_RUN`; the run's id chain mirrored into persistent state | D52 |
+| `ask_requester` on the Triage root; `needs_input` phase and input requests in both run stores (`0002_input_requests.sql`); `answerRun` and the `triage.input_answer` signal; `triage input`; `run`/`wait` ask at a terminal; `status` shows the question; `ask` refuses while one is open; `TRIAGE_MAX_ASKS_PER_RUN`; the run's id chain mirrored into persistent state | D53 |
 
 Departures from the P6 design, all the owner's scope (CLI only):
 

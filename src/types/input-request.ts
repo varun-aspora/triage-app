@@ -1,4 +1,4 @@
-// The question a run asks the person who started it (P6 §4.3, D52). The
+// The question a run asks the person who started it (P6 §4.3, D53). The
 // orchestrator opens one through ask_requester, the run pauses in phase
 // needs_input, and the CLI shows it and sends the answer back as a new
 // submission on the same run.

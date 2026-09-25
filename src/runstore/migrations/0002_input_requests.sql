@@ -1,4 +1,4 @@
--- Input requests (P6 §4.3, D52): the question a run asks the person who
+-- Input requests (P6 §4.3, D53): the question a run asks the person who
 -- started it, and the answers.
 --
 -- runs.input_request holds the open question (null when none) and

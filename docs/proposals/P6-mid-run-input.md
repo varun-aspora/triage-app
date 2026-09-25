@@ -1,6 +1,6 @@
 # P6. Mid-run input: relaying a blocked run to the person and resuming it
 
-Source: discussion with the owner on 2026-09-25, in the session that reviewed the built v1. Status: **decided 2026-09-25 → D52**, scoped by the owner to the CLI: park through the run store, `ask_requester` on the root, answers through `triage run`, `triage wait` and `triage input`. The HTTP/web and Slack adapters, `do` requests, the deadline and the ingress-time ask are not built; the defaults D52 records stand in for §9 questions 1, 4 and 5, and questions 2, 3, 6, 7 and 8 stay open with the parts they belong to. Decisions it touches: D13, D17, D22, D24, D25, D26, D28, D32, D35, D39, D43.
+Source: discussion with the owner on 2026-09-25, in the session that reviewed the built v1. Status: **decided 2026-09-25 → D53**, scoped by the owner to the CLI: park through the run store, `ask_requester` on the root, answers through `triage run`, `triage wait` and `triage input`. The HTTP/web and Slack adapters, `do` requests, the deadline and the ingress-time ask are not built; the defaults D53 records stand in for §9 questions 1, 4 and 5, and questions 2, 3, 6, 7 and 8 stay open with the parts they belong to. Decisions it touches: D13, D17, D22, D24, D25, D26, D28, D32, D35, D39, D43.
 
 ## Summary
 

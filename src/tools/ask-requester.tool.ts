@@ -1,5 +1,5 @@
 // ask_requester: the orchestrator's one way to reach the person who started
-// the run (P6 §4.3, D52). Mounted on the triage root only; investigators
+// the run (P6 §4.3, D53). Mounted on the triage root only; investigators
 // return blocked_on in their gaps and the root decides whether to ask.
 //
 // The call opens an input request in the run store, which moves the run to
