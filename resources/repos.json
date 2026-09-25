@@ -19,5 +19,7 @@
   { "repo": "go-commons", "entities": ["ssfb", "atspl", "rtl"] },
   { "repo": "java-commons", "entities": ["ssfb", "atspl", "rtl"] },
   { "repo": "vance-android", "entities": ["ssfb", "atspl", "rtl"] },
-  { "repo": "vance-ios", "entities": ["ssfb", "atspl", "rtl"] }
+  { "repo": "vance-ios", "entities": ["ssfb", "atspl", "rtl"] },
+  { "repo": "x-ray", "entities": ["rtl"] },
+  { "repo": "munin", "entities": ["rtl"] }
 ]

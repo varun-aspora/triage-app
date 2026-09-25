@@ -34,6 +34,8 @@ path to pass.
 | `pulse-backend` | atspl | `atspl:pulse` | Java (Gradle) | Back-office console for staff with maker-checker approval. It proxies the harbor and rhythm admin APIs, so for triage check harbor state first. |
 | `banking-service` | rtl | `rtl:banking` | Go | The pre-CBS part of NRI onboarding (NRI, eVisa and survey modules). Harbor pulls the pre-CBS form data from it. |
 | `kyc-service` | rtl | `rtl:kyc` | Java (Gradle) | System of record for Persona KYC inquiries and eVisa. |
+| `munin` | rtl | none | Java (Gradle) | Ingests a user's inbound email from consented channels (Google OAuth), stores each raw message as an `.eml` in S3 with one index row, and hands it to the downstream identity leg. An API server and a worker. No registry service, so code only. |
+| `x-ray` | rtl | none | TypeScript (Flue) | The Munin identity-leg agent. A run API (`POST /v1/runs`) that turns the messages Munin fetched into one validated identity record per leg; passport is the first leg. No registry service, so code only. |
 
 `ssfb:finacle` is the core banking system itself. It has no repo.
 
