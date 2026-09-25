@@ -172,7 +172,7 @@ Assumptions made, not verified against a real system:
 
 For an existing `.env`:
 
-- `TRIAGE_MAX_ASKS_PER_RUN` can be left out; the default (2) applies. `0` leaves the tool unmounted.
+- `TRIAGE_MAX_ASKS_PER_RUN` can be left out; the default (10, raised from 2 on 2026-09-25) applies. `0` leaves the tool unmounted.
 - A postgres run store gets `0002_input_requests.sql` on the next start; the folder store needs nothing.
 
 ### Model catalog refresh
