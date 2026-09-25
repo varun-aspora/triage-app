@@ -31,7 +31,7 @@ sequenceDiagram
     G->>FS: audit ×4
     IDS-->>IN: IdChain + basic state (customer state, form status_v2, account freeze), each with taken_at
     IN->>CL: classify(thread, IdChain, basic state)
-    CL-->>IN: Classification {category: delivery, entities_likely:[ssfb, atspl], current_ask, money_moved: false, tier_proposed: mid, matched_pattern_id: welcome-letter-vendor-fail}
+    CL-->>IN: Classification {category: delivery, entities_likely:[ssfb, atspl], money_moved: false, tier_proposed: mid, matched_pattern_id: welcome-letter-vendor-fail}
     IN->>IN: policy → tier_final = mid (rules 1–4 not hit, rule 5 keeps mid)
     IN->>FS: classification.json
     IN->>TR: init(Triage,{id: run_id}).dispatch({message, initialData:{request, classification, id_chain}, uid:null})
@@ -132,13 +132,11 @@ type Classification = {
           | 'account_view' | 'upi_third_party' | 'fd_td' | 'systemic' | 'unknown';
   subcategory: string;
   entities_likely: Entity[];
-  current_ask: string;                       // one sentence, from the latest messages
   money_moved: boolean;                      // transfer, credit or reversal involved
   misdirected_funds: boolean;
   tier_proposed: 'cheap' | 'mid' | 'strong';
   confidence: number;                        // 0..1
   matched_pattern_id?: string;
-  missing_info: string[];
   images_seen: boolean;
   classifier_error?: string;                 // set when output was invalid; policy then forces strong
 };

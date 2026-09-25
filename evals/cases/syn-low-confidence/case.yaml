@@ -33,12 +33,10 @@ faux_classification:
   category: account_view
   subcategory: account_list
   entities_likely: [ssfb]
-  current_ask: Work out what the user sees on the home screen.
   money_moved: false
   misdirected_funds: false
   tier_proposed: cheap
   confidence: 0.45
-  missing_info: [screenshot of the home screen]
   images_seen: false
 provenance:
   origin: synthetic

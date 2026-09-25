@@ -28,12 +28,10 @@ faux_classification:
   category: unknown
   subcategory: ""
   entities_likely: []
-  current_ask: Find out what is not working.
   money_moved: false
   misdirected_funds: false
   tier_proposed: cheap
   confidence: 0.7
-  missing_info: [what the user was trying to do, a screenshot]
   images_seen: false
 provenance:
   origin: synthetic

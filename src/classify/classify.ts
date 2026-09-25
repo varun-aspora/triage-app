@@ -1,13 +1,21 @@
 // The classifier (HLD 02 §1.5, LLD 04 §2.3 and §3, D9, D22, D36, D41, D43).
 //
-// classify() makes one completion call on MODEL_CLASSIFIER and validates the
-// answer with ClassificationSchema. It never throws: invalid, unparseable or
-// unreachable output, a timeout and a config problem all return category
-// 'unknown' with classifier_error set, and the tier policy then routes the
-// run to strong (fail upward, D9).
+// classify() asks MODEL_CLASSIFIER once and validates the answer with
+// ClassificationSchema. It never throws: invalid, unparseable or unreachable
+// output, a timeout and a config problem all return category 'unknown' with
+// classifier_error set, and the tier policy then routes the run to strong
+// (fail upward, D9).
 //
-// Structured output: pi-ai has no provider-neutral response format, so the
-// prompt asks for one JSON object and this module parses and validates it.
+// Two paths, picked by the spec:
+// - a decision model spec (typesafe/<model> or openrouter/typesafe/<model>,
+//   src/decisions/registry.ts) makes one decide() call with the questions in
+//   ./decision.ts. Decision models take no images, so images_seen is false.
+// - any other spec (anthropic, openai, openrouter chat, ollama, faux) makes
+//   one completion call, described below.
+//
+// Structured output on the completion path: pi-ai has no provider-neutral
+// response format, so the prompt asks for one JSON object and this module
+// parses and validates it.
 // Only the fields the model is asked for are taken from its answer. The
 // module sets images_seen and classifier_error itself, and drops any
 // matched_pattern_id the model makes up: that id lowers the tier (policy
@@ -17,9 +25,10 @@
 // (acceptsImages, D36). Otherwise the call is text only and images_seen is
 // false; the tier model still gets the images later.
 //
-// The completion function is injectable. Tests and evals pass
-// completeWith(fake.provider); the default builds a private pi-ai Models
-// instance for the classifier's own provider. Importing ../models.ts runs its
+// The completion function and the decision provider are injectable. Tests
+// and evals pass completeWith(fake.provider) or fakeDecisionProvider(); the
+// defaults build a private pi-ai Models instance for the classifier's own
+// provider, or decisionProviderFor(spec). Importing ../models.ts runs its
 // provider registration side effect before the first call.
 import { createModels, type AssistantMessage, type Context, type ImageContent, type Provider, type TextContent } from '@earendil-works/pi-ai';
 import { anthropicProvider } from '@earendil-works/pi-ai/providers/anthropic';
@@ -28,12 +37,16 @@ import { openrouterProvider } from '@earendil-works/pi-ai/providers/openrouter';
 import * as v from 'valibot';
 
 import type { Config } from '../config/env.ts';
+import { decide, DecisionError } from '../decisions/decide.ts';
+import { decisionProviderFor, isDecisionSpec } from '../decisions/registry.ts';
+import type { DecisionProvider } from '../decisions/types.ts';
 import { redactPersisted } from '../gate/redact.ts';
 import { acceptsImages, classifierModel, ollamaProvider, parseSpec, type ModelLookup } from '../models.ts';
 import { ClassificationSchema, type Classification } from '../types/classification.ts';
 import type { BasicStateItem, IdChain } from '../types/id-chain.ts';
 import type { ThreadMessage } from '../types/request.ts';
-import { buildClassifierPrompt, loadCategories, type CategoryEntry } from './prompt.ts';
+import { classificationFromAnswers, classifierQuestions } from './decision.ts';
+import { buildClassifierPrompt, buildDecisionState, loadCategories, type CategoryEntry } from './prompt.ts';
 
 /** One screenshot, already read from the attachment store. */
 export type ClassifierImage = {
@@ -47,7 +60,7 @@ export type ClassifyInput = {
   readonly idChain: IdChain;
   readonly basicState: readonly BasicStateItem[];
   readonly images: readonly ClassifierImage[];
-  /** Names from ingress, masked when the classifier runs on openrouter. */
+  /** Names from ingress, masked when the classifier runs on openrouter or typesafe. */
   readonly redactionNames?: readonly string[];
 };
 
@@ -60,8 +73,10 @@ export type CompleteFn = (
 
 export type ClassifyDeps = {
   readonly config: Config;
-  /** Default: defaultComplete(config). */
+  /** Completion path only. Default: defaultComplete(config). */
   readonly complete?: CompleteFn;
+  /** Decision path only. Default: decisionProviderFor(MODEL_CLASSIFIER, config). */
+  readonly decisions?: DecisionProvider;
   /** Default: <knowledgeDir>/classifier/categories.json. */
   readonly categories?: readonly CategoryEntry[];
   /** Model metadata lookup for the image check. Default: models.ts lookupModel. */
@@ -80,12 +95,10 @@ const MODEL_FIELDS = [
   'category',
   'subcategory',
   'entities_likely',
-  'current_ask',
   'money_moved',
   'misdirected_funds',
   'tier_proposed',
   'confidence',
-  'missing_info',
 ] as const;
 
 export async function classify(input: ClassifyInput, deps: ClassifyDeps): Promise<Classification> {
@@ -101,6 +114,7 @@ async function classifyOnce(input: ClassifyInput, deps: ClassifyDeps): Promise<C
   const spec = classifierModel(deps.config);
   const provider = parseSpec(spec)?.provider ?? '';
   const categories = deps.categories ?? (await loadCategories(deps.config.paths.knowledgeDir));
+  if (isDecisionSpec(spec)) return classifyByDecision(input, deps, spec, provider, categories);
   const sendImages = input.images.length > 0 && acceptsImages(spec, deps.imageLookup);
 
   const prompt = buildClassifierPrompt({
@@ -132,6 +146,49 @@ async function classifyOnce(input: ClassifyInput, deps: ClassifyDeps): Promise<C
     return unknownClassification(`provider error: ${message.errorMessage ?? message.stopReason}`);
   }
   return parseClassification(textOf(message), sendImages);
+}
+
+// ---------------------------------------------------------------- decision path
+
+async function classifyByDecision(
+  input: ClassifyInput,
+  deps: ClassifyDeps,
+  spec: string,
+  provider: string,
+  categories: readonly CategoryEntry[],
+): Promise<Classification> {
+  const { state } = buildDecisionState({
+    thread: input.thread,
+    idChain: input.idChain,
+    basicState: input.basicState,
+    provider,
+    imageCount: input.images.length,
+    ...(input.redactionNames === undefined ? {} : { redactionNames: input.redactionNames }),
+  });
+  const questions = classifierQuestions(categories, deps.config.entities);
+  try {
+    const decider = deps.decisions ?? decisionProviderFor(spec, deps.config);
+    const result = await decide(
+      decider,
+      { state, questions },
+      { timeoutMs: deps.timeoutMs ?? DEFAULT_CLASSIFIER_TIMEOUT_MS, ...(deps.signal === undefined ? {} : { signal: deps.signal }) },
+    );
+    const outcome = classificationFromAnswers(result.answers);
+    return outcome.ok ? outcome.classification : unknownClassification(outcome.error);
+  } catch (err) {
+    return unknownClassification(decisionFailure(err));
+  }
+}
+
+// A DecisionError message holds only a code, the provider and a status. Its
+// detail is kept for the codes whose detail this code base writes itself
+// (key names, answer paths, the time limit); a provider's own error text
+// could echo the request, so it is left out.
+const LOCAL_DETAIL_CODES: ReadonlySet<string> = new Set(['config', 'invalid_response', 'timeout']);
+
+function decisionFailure(err: unknown): string {
+  if (!(err instanceof DecisionError)) return `decision failed: ${err instanceof Error ? err.name : typeof err}`;
+  return err.detail !== undefined && LOCAL_DETAIL_CODES.has(err.code) ? `${err.message}: ${err.detail}` : err.message;
 }
 
 // ---------------------------------------------------------------- parsing
@@ -187,12 +244,10 @@ export function unknownClassification(error: string): Classification {
     category: 'unknown',
     subcategory: '',
     entities_likely: [],
-    current_ask: '',
     money_moved: false,
     misdirected_funds: false,
     tier_proposed: 'strong',
     confidence: 0,
-    missing_info: [],
     images_seen: false,
     classifier_error: sanitize(error),
   };

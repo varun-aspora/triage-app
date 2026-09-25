@@ -211,12 +211,10 @@ const CLASSIFIER_FIELDS = [
   'category',
   'subcategory',
   'entities_likely',
-  'current_ask',
   'money_moved',
   'misdirected_funds',
   'tier_proposed',
   'confidence',
-  'missing_info',
 ] as const;
 
 /** The classifier's answer for a classification, as one JSON object in a text turn. */

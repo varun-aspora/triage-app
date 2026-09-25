@@ -108,12 +108,10 @@ export function sampleClassification(category: 'transfer_out' | 'onboarding' = '
         category,
         subcategory: 'stuck',
         entities_likely: ['ssfb'],
-        current_ask: 'why is the transfer stuck',
         money_moved: true,
         misdirected_funds: false,
         tier_proposed: 'mid',
         confidence: 0.8,
-        missing_info: [],
         images_seen: false,
       },
       tier_final: 'strong',
@@ -1009,7 +1007,7 @@ export const runStoreContract: readonly ContractCase[] = [
           store.putClassification(
             RUN_A,
             tampered(sampleClassification(), (c) => {
-              c.decision.proposed.current_ask = `ask ${SYNTHETIC_EMAIL}`;
+              c.decision.proposed.subcategory = `ask ${SYNTHETIC_EMAIL}`;
             }),
           ),
         'email',

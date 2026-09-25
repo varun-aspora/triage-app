@@ -54,12 +54,10 @@ faux_classification:
   category: onboarding
   subcategory: kyc_review_pending
   entities_likely: [ssfb, rtl]
-  current_ask: Explain what is still pending after video KYC and when the account will open.
   money_moved: false
   misdirected_funds: false
   tier_proposed: mid
   confidence: 0.8
-  missing_info: []
   images_seen: false
 provenance:
   origin: synthetic

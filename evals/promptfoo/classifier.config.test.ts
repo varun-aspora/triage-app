@@ -14,7 +14,6 @@ import { makeTestHome, type TestHome } from '../../test/support/home.ts';
 import { assertNoIoGuardInstalled } from '../../test/support/no-io-guard.ts';
 import { parseClassifierOutput } from './asserts/schema.ts';
 import {
-  CURRENT_ASK_METRIC,
   SuiteConfigError,
   buildClassifierSuite,
   type BuildClassifierSuiteOptions,
@@ -110,7 +109,7 @@ describe('buildClassifierSuite', () => {
     expect((await suite.grader.callApi('grade')).error).toBe(GRADER_REFUSED);
   });
 
-  test('judge on: rubric asserts use the judge explicitly, only on cases with expected.current_ask', async () => {
+  test('judge on: the judge is the grader, and no case has a rubric assert', async () => {
     const suite = await build({
       judgeOn: true,
       overrides: { TRIAGE_EVAL_JUDGE_MODEL: 'openai/gpt-5-mini' },
@@ -118,14 +117,9 @@ describe('buildClassifierSuite', () => {
     });
     expect(suite.grader).toBeInstanceOf(JudgeProvider);
     expect(suite.testSuite.defaultTest).toMatchObject({ options: { provider: suite.grader } });
-    const tests = suite.testSuite.tests as { description: string; assert: Assertion[] }[];
-    const withRubric = tests.filter((t) => t.assert.some((a) => a.type === 'llm-rubric')).map((t) => t.description);
-    expect(withRubric.sort()).toEqual(['syn-money-moved', 'syn-strong-category']);
+    const tests = suite.testSuite.tests as { assert: Assertion[] }[];
     for (const t of tests) {
-      for (const a of t.assert.filter((x) => x.type === 'llm-rubric')) {
-        expect(a.provider).toBe(suite.grader);
-        expect(a.metric).toBe(CURRENT_ASK_METRIC);
-      }
+      expect(t.assert.map((a) => a.metric)).toEqual(['schema', 'category', 'tier']);
     }
   });
 
@@ -199,20 +193,22 @@ describe('suite run through promptfoo evaluate()', () => {
     expect(JSON.stringify(graded!.gradingResult)).toContain('grader refused');
   });
 
-  test('judge on: the rubric goes to the judge with the extracted ask and the reference', async () => {
+  test('judge on: a model-graded assert goes to the judge', async () => {
     const seen: string[] = [];
     const suite = await build({
       judgeOn: true,
       overrides: { TRIAGE_EVAL_JUDGE_MODEL: 'openai/gpt-5-mini' },
       judgeDeps: { complete: judgeComplete(seen) },
     });
+    const first = (suite.testSuite.tests as { assert: Assertion[] }[])[0];
+    first?.assert.push({ type: 'llm-rubric', value: 'The output is polite.', metric: 'probe' });
     const summary = await runSuite(suite);
     expect(summary.stats.errors).toBe(0);
     expect(summary.stats.failures).toBe(0);
-    expect(seen.length).toBe(2);
-    const moneyMoved = seen.find((s) => s.includes('IMPS'));
-    expect(moneyMoved).toContain('Find where the debited IMPS transfer is stuck.');
-    expect(moneyMoved).not.toContain('case_id');
+    expect(seen.length).toBe(1);
+    expect(seen[0]).toContain('The output is polite.');
+    const graded = summary.results.find((r) => metricsOf(r).probe !== undefined);
+    expect(metricsOf(graded!).probe).toBe(true);
   });
 
   test('cost cap exceeded: the remaining cases return an error and the budget reports it', async () => {

@@ -165,6 +165,7 @@ const PROVIDER_KEYS: Readonly<Record<string, { key: string; value: (c: Config) =
   anthropic: { key: 'ANTHROPIC_API_KEY', value: (c) => c.providers.anthropicApiKey },
   openai: { key: 'OPENAI_API_KEY', value: (c) => c.providers.openaiApiKey },
   openrouter: { key: 'OPENROUTER_API_KEY', value: (c) => c.providers.openrouterApiKey },
+  typesafe: { key: 'TYPESAFE_API_KEY', value: (c) => c.providers.typesafeApiKey },
   ollama: { key: 'OLLAMA_BASE_URL', value: (c) => c.providers.ollamaBaseUrl },
 };
 
@@ -249,7 +250,9 @@ function judgeRow(c: Config): Row {
   if (spec === undefined) return row('disabled', [key], `${key} is blank; model evals refuse to run without a judge`);
   const parsed = parseSpec(spec);
   if (parsed === undefined) return row('fail', [key], `${key} must be a 'provider/model' spec`);
-  if (parsed.provider === 'openrouter') return row('fail', [key], `${key} may not use openrouter (D41)`);
+  if (parsed.provider === 'openrouter' || parsed.provider === 'typesafe') {
+    return row('fail', [key], `${key} may not use ${parsed.provider} (D41)`);
+  }
   const known = PROVIDER_KEYS[parsed.provider] !== undefined || hasProvider(parsed.provider);
   if (!known) return row('fail', [key], `${key} names a provider that is not built in and not registered`);
   const blank = blankProviderKey(c, spec);

@@ -128,6 +128,8 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'OPENROUTER_API_KEY', type: 'string', group: 'providers', secret: true },
   // Read only by src/decisions/ for direct TypeSafe calls; never copied into process.env.
   { name: 'TYPESAFE_API_KEY', type: 'string', group: 'providers', secret: true },
+  // Not read yet: pi-ai's openai provider uses its own base URL.
+  { name: 'OPENAI_BASE_URL', type: 'string', group: 'providers', example: 'https://api.openai.com/v1' },
   { name: 'OLLAMA_BASE_URL', type: 'string', group: 'providers' },
 
   // Evals (D42)

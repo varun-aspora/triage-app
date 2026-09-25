@@ -17,6 +17,11 @@
 // fresh fake per call keeps concurrent cases from taking each other's
 // response.
 //
+// Decision models (typesafe/<model>, openrouter/typesafe/<model>) go through
+// classify()'s decide() path with the decision provider built here, or
+// deps.decisions in tests. Their cost is the one the provider reports, since
+// pi-ai has no metadata for them; a call that reports none is an error.
+//
 // Cost: every call is metered with CostMeter from the model's pi-ai cost
 // metadata. Once the suite total is above TRIAGE_EVAL_MAX_COST_USD, the
 // remaining calls return a cost_cap_exceeded error without calling a model.
@@ -32,6 +37,9 @@ import type { ApiProvider, CallApiContextParams, CallApiOptionsParams, ProviderO
 import * as v from 'valibot';
 
 import { classify, completeWith, defaultComplete, type CompleteFn } from '../../src/classify/classify.ts';
+import { DecisionError } from '../../src/decisions/decide.ts';
+import { decisionProviderFor, isDecisionSpec } from '../../src/decisions/registry.ts';
+import type { DecisionProvider, DecisionResult } from '../../src/decisions/types.ts';
 import { matchPattern } from '../../src/classify/patterns.ts';
 import { applyTierPolicy } from '../../src/classify/policy.ts';
 import type { CategoryEntry } from '../../src/classify/prompt.ts';
@@ -86,6 +94,10 @@ export class SuiteBudget {
 
   add(model: CostModel, usage: UsageTokens): number {
     return this.meter.add(model, usage);
+  }
+
+  addUsd(model: string, usd: number | undefined): number {
+    return this.meter.addUsd(model, usd);
   }
 
   /** True once a call was refused for the cap. */
@@ -168,8 +180,10 @@ export type ClassifierProviderDeps = {
   readonly config?: Config;
   /** Shared suite budget. Default: one per provider, capped by config.evals.maxCostUsd. */
   readonly budget?: SuiteBudget;
-  /** Completion for non-faux models. Default: defaultComplete(config). */
+  /** Completion for non-faux chat models. Default: defaultComplete(config). */
   readonly complete?: CompleteFn;
+  /** Provider for decision model specs. Default: decisionProviderFor(model, config). */
+  readonly decisions?: DecisionProvider;
   /** Cost metadata per spec. Default: defaultCostModel. */
   readonly costModel?: (spec: string) => CostModel;
   /** Installed before every faux call. Default: installNoIoGuard. */
@@ -237,11 +251,32 @@ export class ClassifierProvider implements ApiProvider {
       return reply;
     };
 
+    let decided: DecisionResult | undefined;
+    let decisions: DecisionProvider | undefined;
+    if (isDecisionSpec(this.model)) {
+      let base: DecisionProvider;
+      try {
+        base = this.deps.decisions ?? decisionProviderFor(this.model, this.env);
+      } catch (err) {
+        const detail = err instanceof DecisionError && err.detail !== undefined ? `: ${err.detail}` : '';
+        return this.fail(`decision provider: ${err instanceof Error ? err.message : String(err)}${detail}`, { case_id: vars.case_id });
+      }
+      decisions = {
+        id: base.id,
+        model: base.model,
+        decide: async (request, opts) => {
+          decided = await base.decide(request, opts);
+          return decided;
+        },
+      };
+    }
+
     const classification = await classify(
       { thread: vars.thread, idChain: toIdChain(vars), basicState: vars.basic_state, images: [] },
       {
         config: withClassifierModel(this.env, this.model),
         complete,
+        ...(decisions === undefined ? {} : { decisions }),
         ...(this.deps.categories === undefined ? {} : { categories: this.deps.categories }),
         ...(this.config.timeoutMs === undefined ? {} : { timeoutMs: this.config.timeoutMs }),
         ...(options?.abortSignal === undefined ? {} : { signal: options.abortSignal }),
@@ -249,9 +284,12 @@ export class ClassifierProvider implements ApiProvider {
     );
 
     let costUsd = 0;
-    if (reply !== undefined) {
+    if (reply !== undefined || decided !== undefined) {
       try {
-        costUsd = this.budget.add((this.deps.costModel ?? defaultCostModel)(this.model), reply.usage);
+        costUsd =
+          decided !== undefined
+            ? this.budget.addUsd(this.model, decided.usage.costUsd)
+            : this.budget.add((this.deps.costModel ?? defaultCostModel)(this.model), (reply as AssistantMessage).usage);
       } catch (err) {
         const message = err instanceof CostError ? err.message : 'cost could not be computed';
         return this.fail(`cost meter: ${message}`, { case_id: vars.case_id });
@@ -285,6 +323,7 @@ export class ClassifierProvider implements ApiProvider {
       cost_usd: costUsd,
     };
     const usage = reply?.usage;
+    const decisionUsage = decided?.usage;
     return {
       output: JSON.stringify(output),
       cost: costUsd,
@@ -295,6 +334,16 @@ export class ClassifierProvider implements ApiProvider {
               prompt: usage.input + usage.cacheRead + usage.cacheWrite,
               completion: usage.output,
               total: usage.totalTokens,
+              numRequests: 1,
+            },
+          }),
+      ...(decisionUsage === undefined
+        ? {}
+        : {
+            tokenUsage: {
+              prompt: decisionUsage.inputTokens,
+              completion: decisionUsage.outputTokens,
+              total: decisionUsage.inputTokens + decisionUsage.outputTokens,
               numRequests: 1,
             },
           }),

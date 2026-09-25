@@ -42,13 +42,11 @@ faux_classification:
   category: onboarding
   subcategory: notary
   entities_likely: [ssfb]
-  current_ask: Confirm the notary session expiry from the form status.
   money_moved: false
   misdirected_funds: false
   tier_proposed: mid
   confidence: 0.9
   matched_pattern_id: syn-notary-session-expired
-  missing_info: []
   images_seen: false
 policy:
   patterns:

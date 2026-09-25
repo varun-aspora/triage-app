@@ -160,7 +160,7 @@ export function createEvalsCommand(options: EvalsCommandOptions = {}): CliComman
         .addOption(
           new Option('--provider <spec>', 'classifier model to compare, repeatable').argParser(collect).default([], 'faux/classifier'),
         )
-        .option('--judge', `grade current_ask with ${JUDGE_KEY}`)
+        .option('--judge', `grade model-graded asserts with ${JUDGE_KEY}`)
         .option('--repeat <k>', 'trials per case, passed to promptfoo')
         .option('--json', 'print machine-readable JSON')
         // Declared only so a key passed this way is refused without being echoed.

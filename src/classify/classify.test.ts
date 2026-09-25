@@ -103,12 +103,10 @@ const VALID = {
   category: 'delivery',
   subcategory: 'welcome_letter',
   entities_likely: ['ssfb', 'atspl'],
-  current_ask: 'Re-send the welcome letter to the new address.',
   money_moved: false,
   misdirected_funds: false,
   tier_proposed: 'cheap',
   confidence: 0.85,
-  missing_info: ['the new address'],
 };
 
 const INPUT = { thread: THREAD, idChain: ID_CHAIN, basicState: BASIC_STATE, images: [] };
@@ -206,8 +204,8 @@ describe('failure paths return unknown and never throw', () => {
 
   test('a JSON array or a missing field is schema-invalid or unparseable', () => {
     expectUnknown(parseClassification('[1, 2]', false), /^unparseable output|^schema-invalid/);
-    const { current_ask: _drop, ...partial } = VALID;
-    expectUnknown(parseClassification(JSON.stringify(partial), false), /current_ask/);
+    const { money_moved: _drop, ...partial } = VALID;
+    expectUnknown(parseClassification(JSON.stringify(partial), false), /money_moved/);
   });
 
   test('a thrown provider error', async () => {
@@ -440,13 +438,14 @@ describe('prompt', () => {
     expect(p.userText).toMatchSnapshot();
   });
 
-  test('the latest messages are marked for current_ask', () => {
+  test('only the parent message is marked, and no free-text fields are asked for', () => {
     const p = buildClassifierPrompt(base);
     const lines = p.userText.split('\n').filter((l) => /^\(\d+\)/.test(l));
     expect(lines).toHaveLength(3);
-    for (const line of lines) expect(line).toContain('LATEST');
-    expect(lines[0]).toContain('PARENT');
-    expect(p.systemPrompt).toContain('current_ask: one sentence');
+    expect(lines[0]).toContain('[PARENT]');
+    for (const line of lines.slice(1)) expect(line).not.toContain('[');
+    expect(p.systemPrompt).not.toContain('current_ask');
+    expect(p.systemPrompt).not.toContain('missing_info');
   });
 
   test('a long thread keeps the parent and the latest messages', () => {

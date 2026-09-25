@@ -464,7 +464,7 @@ describe('GET /triage/:run_id detail fields', () => {
       } as unknown as RunRecord['request'],
       classification: {
         decision: {
-          proposed: { category: 'transfer_out', current_ask: `why can ${SYNTHETIC_PHONE} not send money` },
+          proposed: { category: 'transfer_out' },
           tier_final: 'mid',
         } as unknown as NonNullable<RunRecord['classification']>['decision'],
         id_chain: { hops: [] } as unknown as NonNullable<RunRecord['classification']>['id_chain'],
@@ -521,17 +521,23 @@ describe('GET /triage/:run_id detail fields', () => {
     ]);
     expect('report' in json).toBe(false);
     expect('report_md' in json).toBe(false);
+    // The classifier gives no current_ask, so there is none until the report exists.
+    expect(json.current_ask).toBeNull();
   });
 
   test('a synthetic phone in current_ask and in a submission question comes back masked', async () => {
-    const { text, json } = await getJson({ [RUN_A]: detailRecord() });
+    const report = {
+      status: 'resolved',
+      request: { current_ask: `why can ${SYNTHETIC_PHONE} not send money`, requested_by: 'ops' },
+    } as unknown as RunRecord['report'];
+    const { text, json } = await getJson({ [RUN_A]: detailRecord({ report }) });
     expect(text).not.toContain(SYNTHETIC_PHONE);
     expect(json.current_ask).toContain('****3210');
     const subs = json.submissions as { question?: string }[];
     expect(subs[1]?.question).toContain('****3210');
   });
 
-  test("the report's current_ask wins over the classifier's, and report_md comes with the report", async () => {
+  test("current_ask is the report's, and report_md comes with the report", async () => {
     const report = { status: 'resolved', request: { current_ask: 'where is the refund', requested_by: 'ops' } };
     const run = detailRecord({
       phase: 'completed',
@@ -693,7 +699,8 @@ describe('GET /triage', () => {
       expect(detail.requested_by).toBe('ops-reviewer');
       expect(detail.interface).toBe('cli');
       expect('permalink' in detail).toBe(false);
-      expect(detail.current_ask).toBe('why is the transfer stuck');
+      // No report yet, and the classification carries no current_ask.
+      expect(detail.current_ask).toBeNull();
       expect((detail.submissions as { seq: number; kind: string }[]).map((s) => [s.seq, s.kind])).toEqual([[1, 'initial']]);
       expect((detail.feedback as { verdict: string }[]).map((f) => f.verdict)).toEqual(['wrong']);
     } finally {

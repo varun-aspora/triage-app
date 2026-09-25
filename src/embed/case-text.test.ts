@@ -61,7 +61,7 @@ describe('caseCardText', () => {
   test('falls back to the classification when there is no report yet', () => {
     const text = caseCardText({ classification: classification(), report: null });
     expect(text.value).toBe(
-      ['category: transfer_out', 'subcategory: stuck', 'current_ask: why is the transfer stuck'].join('\n'),
+      ['category: transfer_out', 'subcategory: stuck'].join('\n'),
     );
   });
 

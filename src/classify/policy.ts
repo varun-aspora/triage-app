@@ -84,12 +84,10 @@ function fallbackClassification(raw: unknown, reason: string): Classification {
     category: 'unknown',
     subcategory: '',
     entities_likely: [],
-    current_ask: '',
     money_moved: false,
     misdirected_funds: false,
     tier_proposed: 'strong',
     confidence: 0,
-    missing_info: [],
     images_seen: false,
     classifier_error:
       typeof rawError === 'string' && rawError.trim() ? rawError : `policy: invalid classification: ${reason}`,

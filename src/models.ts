@@ -12,7 +12,10 @@
 // Spec rules (D1, D41, D42):
 // - A spec is 'provider/model', split at the first '/'.
 // - anthropic and openai are pi-ai built-ins and always accepted.
-// - openrouter is accepted for MODEL_CLASSIFIER only.
+// - openrouter and typesafe are third parties, accepted for MODEL_CLASSIFIER
+//   only. openrouter takes chat models and TypeSafe decision models
+//   ('openrouter/typesafe/<model>'); typesafe takes 'typesafe/<model>', which
+//   src/decisions/registry.ts routes to TypeSafe directly.
 // - ollama needs OLLAMA_BASE_URL.
 // - Any other provider must already be registered with setProvider (faux in tests).
 // Errors name the env key, never its value. Nothing here makes a network call.
@@ -28,6 +31,7 @@ import { hasProvider, resolveModel } from '@flue/runtime/internal';
 import { loadConfig, type Config, type ThinkingLevel } from './config/env.ts';
 import { ConfigError } from './config/errors.ts';
 import { HOME_KEY } from './config/keys.ts';
+import { isDecisionSpec } from './decisions/registry.ts';
 import { registerCachedModels } from './model-catalog.ts';
 import type { Tier } from './types/core.ts';
 
@@ -41,6 +45,7 @@ export type ModelLookup = (spec: string) => ModelMetadata | undefined;
 
 const OLLAMA = 'ollama';
 const OPENROUTER = 'openrouter';
+const TYPESAFE = 'typesafe';
 const OLLAMA_KEY = 'OLLAMA_BASE_URL';
 
 // pi-ai built-in catalogs this project uses. Built lazily; they are static lists.
@@ -77,7 +82,7 @@ export function thinkingForTier(tier: Tier, config: Config = activeConfig()): Th
   return tier === 'cheap' ? models.thinkingCheap : tier === 'mid' ? models.thinkingMid : models.thinkingStrong;
 }
 
-/** The classifier model spec. The only slot where openrouter is allowed (D41). */
+/** The classifier model spec. The only slot where openrouter and typesafe are allowed (D41). */
 export function classifierModel(config: Config = activeConfig()): string {
   return checkSpec('MODEL_CLASSIFIER', config.models.classifier, config, true);
 }
@@ -166,14 +171,21 @@ export function ollamaProvider(baseUrl: string, ids: readonly string[]) {
   });
 }
 
-function checkSpec(key: string, spec: string | undefined, config: Config, allowOpenRouter: boolean): string {
+function checkSpec(key: string, spec: string | undefined, config: Config, allowThirdParty: boolean): string {
   if (spec === undefined) throw ConfigError.of(key, 'is not set');
   const parsed = parseSpec(spec);
   if (parsed === undefined) throw ConfigError.of(key, "must be a 'provider/model' spec");
   const { provider } = parsed;
   if (provider === OPENROUTER) {
-    if (allowOpenRouter) return spec;
+    if (allowThirdParty) return spec;
     throw ConfigError.of(key, 'may not use openrouter; openrouter is allowed for MODEL_CLASSIFIER only (D41)');
+  }
+  if (provider === TYPESAFE) {
+    if (!allowThirdParty) {
+      throw ConfigError.of(key, 'may not use typesafe; typesafe is allowed for MODEL_CLASSIFIER only (D41)');
+    }
+    if (!isDecisionSpec(spec)) throw ConfigError.of(key, "must be 'typesafe/<model>' with no further '/'");
+    return spec;
   }
   if (provider === OLLAMA) {
     if (config.providers.ollamaBaseUrl === undefined) {
