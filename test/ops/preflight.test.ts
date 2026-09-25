@@ -4,7 +4,7 @@ import { loadRegistry, type Registry } from '../../src/config/registry.ts';
 import { createFakeRunner, type FakeRunner, type FakeStep } from '../../src/connectors/exec-fake.ts';
 import type { ExecRunner } from '../../src/connectors/exec.ts';
 import { hostPort, probeTargets } from '../../src/ops/preflight-steps.ts';
-import { parseDeployMode, runPreflight, runResumePreflight, type PreflightInput, type PreflightResult } from '../../src/ops/preflight.ts';
+import { parseDeployMode, runPreflight, runTunnelPreflight, type PreflightInput, type PreflightResult } from '../../src/ops/preflight.ts';
 import type { TcpProbe, TunnelDeps, TunnelResult } from '../../src/ops/tunnel.ts';
 import { RESOURCES_DIR, testEnvRecord } from '../support/home.ts';
 
@@ -524,9 +524,9 @@ describe('probe targets', () => {
   });
 });
 
-describe('runResumePreflight', () => {
+describe('runTunnelPreflight', () => {
   test('mock mode skips with no runner, tunnel or probe call', async () => {
-    const r = await run({ fn: runResumePreflight, overrides: { TRIAGE_MOCK_MODE: 'true' }, script: [] });
+    const r = await run({ fn: runTunnelPreflight, overrides: { TRIAGE_MOCK_MODE: 'true' }, script: [] });
     expect(r.result).toEqual({ mode: 'local', skipped: 'mock', steps: [], warnings: [] });
     expect(r.tunnel.calls).toBe(0);
     expect(r.runner.calls).toEqual([]);
@@ -534,7 +534,7 @@ describe('runResumePreflight', () => {
   });
 
   test('local mode repeats the tunnel step and nothing else', async () => {
-    const r = await run({ fn: runResumePreflight, script: [] });
+    const r = await run({ fn: runTunnelPreflight, script: [] });
     expect(r.result.mode).toBe('local');
     expect(r.result.skipped).toBeUndefined();
     expect(r.tunnel.calls).toBe(1);
@@ -546,7 +546,7 @@ describe('runResumePreflight', () => {
 
   test('a tunnel that does not come up is one warning with the fix, and no value leaks', async () => {
     const tunnel = tunnelOf({ state: 'down', owned: false, listening: false, started: false, message: 'SSFB DB tunnel did not start', error: 'the bastion is unreachable' });
-    const r = await run({ fn: runResumePreflight, tunnel, script: [] });
+    const r = await run({ fn: runTunnelPreflight, tunnel, script: [] });
     expect(stepOf(r.result, 'tunnel', 'ssfb')).toEqual([{ id: 'tunnel', entity: 'ssfb', status: 'warn' }]);
     const [w] = warningsFor(r.result, 'tunnel');
     expect(w?.message).toContain('the bastion is unreachable');
@@ -555,20 +555,20 @@ describe('runResumePreflight', () => {
   });
 
   test('a tunnel that throws is a warning, not a rejection', async () => {
-    const r = await run({ fn: runResumePreflight, tunnel: tunnelOf(new Error(`ssh to ${SSFB_DB} exploded`)), script: [] });
+    const r = await run({ fn: runTunnelPreflight, tunnel: tunnelOf(new Error(`ssh to ${SSFB_DB} exploded`)), script: [] });
     expect(warningsFor(r.result, 'tunnel')).toHaveLength(1);
     expectNoValues(r.result);
   });
 
   test('SSFB_DB_TUNNEL_REQUIRED=false records the step as skipped', async () => {
-    const r = await run({ fn: runResumePreflight, overrides: { SSFB_DB_TUNNEL_REQUIRED: 'false' }, script: [] });
+    const r = await run({ fn: runTunnelPreflight, overrides: { SSFB_DB_TUNNEL_REQUIRED: 'false' }, script: [] });
     expect(r.tunnel.calls).toBe(0);
     expect(r.result.steps).toEqual([{ id: 'tunnel', entity: 'ssfb', status: 'skipped' }]);
     expect(r.result.warnings).toEqual([]);
   });
 
   test('server mode has no tunnel step and makes no call', async () => {
-    const r = await run({ fn: runResumePreflight, overrides: { TRIAGE_DEPLOY_MODE: 'server' }, script: [] });
+    const r = await run({ fn: runTunnelPreflight, overrides: { TRIAGE_DEPLOY_MODE: 'server' }, script: [] });
     expect(r.result).toEqual({ mode: 'server', steps: [], warnings: [] });
     expect(r.tunnel.calls).toBe(0);
     expect(r.runner.calls).toEqual([]);

@@ -42,6 +42,8 @@ import { createQuickwitConnector } from '../connectors/quickwit/client.ts';
 import { createSqlConnector } from '../connectors/sql/pg-client.ts';
 import { type AuditSink, createJsonlAuditSink } from '../gate/audit-sink.ts';
 import { modelForTier, thinkingForTier } from '../models.ts';
+import { netTcpConnect } from '../ops/doctor/probes.ts';
+import { runTunnelPreflight } from '../ops/preflight.ts';
 import { getRunStore } from '../runstore/index.ts';
 import type { RunStore } from '../runstore/types.ts';
 import { releaseConnectorFailures } from '../tools/_lib/connector-failures.ts';
@@ -65,7 +67,7 @@ import { investigatorName } from './delegates/investigator.ts';
 import { type Escalation, type EscalationSnapshot, escalationFor, releaseEscalation } from './escalation.ts';
 import { sandboxFactory } from './sandbox.ts';
 import { currentKnowledge, type Knowledge, loadKnowledge } from './skills.ts';
-import { setRunRedactionNames } from '../runlog/event-log.ts';
+import { logRunEvent, setRunRedactionNames } from '../runlog/event-log.ts';
 import { installedTripwire, installTripwire, runUsage, tripwireOptionsFor } from './tripwire.ts';
 
 /** The pinned Flue identity of the root agent. */
@@ -443,7 +445,19 @@ function knowledgeFor(config: Config): Knowledge {
  */
 export function realConnectors(config: Config, registry: Registry): ToolConnectors {
   return Object.freeze({
-    sql: createSqlConnector({ registry, config }),
+    sql: createSqlConnector({
+      registry,
+      config,
+      // A lost connection is tried again (D57). In local mode the SSFB tunnel
+      // is brought back first: it is the part of the path that dies on its
+      // own. Other entities are reached directly, so there is nothing to redo.
+      reconnect: async (target, signal) => {
+        if (target.entity !== 'ssfb') return;
+        await runTunnelPreflight({ config, registry, runner: createExecRunner(), tcpProbe: netTcpConnect, isTty: false, signal });
+      },
+      onRetry: (r) =>
+        logRunEvent(r.run_id, 'sql_retry', { entity: r.entity, service: r.service, target_env: r.target_env, attempt: r.attempt, code: r.code }),
+    }),
     http: createHttpConnector({ registry, config }),
     quickwit: createQuickwitConnector({ registry, config }),
     codegraph: createCodegraphConnector({ config, runner: createExecRunner() }),

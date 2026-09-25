@@ -42,7 +42,7 @@ import { createExecRunner } from '../../connectors/exec.ts';
 import { spawnWorker } from '../../ingress/detach.ts';
 import { resumeReadinessRefusal, resumeRefusal } from '../../ingress/submit.ts';
 import { netTcpConnect } from '../../ops/doctor/probes.ts';
-import { runResumePreflight, type PreflightResult } from '../../ops/preflight.ts';
+import { runTunnelPreflight, type PreflightResult } from '../../ops/preflight.ts';
 import type { RunRecord } from '../../runstore/types.ts';
 import { MAX_RESUME_NOTE_CHARS } from '../../types/block.ts';
 import { emitJson, ResumeOutputSchema } from '../lib/output-schemas.ts';
@@ -66,7 +66,7 @@ export type ResumeCommandOptions = {
   readonly pollMs?: number;
   readonly takeoverMs?: number;
   readonly defaultRequestedBy?: () => string | undefined;
-  /** The resume pre-flight (the SSFB tunnel, D56). Defaults to runResumePreflight with the real runner and probe. */
+  /** The resume pre-flight (the SSFB tunnel, D56). Defaults to runTunnelPreflight with the real runner and probe. */
   readonly readiness?: (config: Config, isTty: boolean) => Promise<Pick<PreflightResult, 'warnings'>>;
 };
 
@@ -81,7 +81,7 @@ async function defaultReadiness(config: Config, isTty: boolean): Promise<Pick<Pr
     if (!(err instanceof RegistryError)) throw err;
     return { warnings: [] };
   }
-  return runResumePreflight({ config, registry, runner: createExecRunner(), tcpProbe: netTcpConnect, isTty });
+  return runTunnelPreflight({ config, registry, runner: createExecRunner(), tcpProbe: netTcpConnect, isTty });
 }
 
 type TakeoverView = Pick<RunRecord, 'phase' | 'submissions' | 'block'>;

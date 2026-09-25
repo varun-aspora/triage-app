@@ -116,7 +116,7 @@ import { redactModelFacing, redactPersisted } from '../gate/redact.ts';
 import { createMockLayer } from '../mock/index.ts';
 import { acceptsImages, modelForTier } from '../models.ts';
 import { netTcpConnect } from '../ops/doctor/probes.ts';
-import { runPreflight, runResumePreflight, type PreflightInput, type PreflightResult } from '../ops/preflight.ts';
+import { runPreflight, runTunnelPreflight, type PreflightInput, type PreflightResult } from '../ops/preflight.ts';
 import { syncBeforeRun } from '../ops/repos-autosync.ts';
 import type { TcpProbe } from '../ops/tunnel.ts';
 import { logRunEvent, setRunRedactionNames } from '../runlog/event-log.ts';
@@ -1007,7 +1007,7 @@ export function submissionDeps(options: SubmissionDepsOptions = {}): SubmissionD
     ...(options.signal !== undefined ? { signal: options.signal } : {}),
     ...(options.onEvent !== undefined ? { onEvent: options.onEvent } : {}),
     preflight: ({ signal }) => runPreflight(preflightInput(signal)),
-    resumePreflight: ({ signal }) => runResumePreflight(preflightInput(signal)),
+    resumePreflight: ({ signal }) => runTunnelPreflight(preflightInput(signal)),
     repoSync: ({ interface: iface, signal }) =>
       syncBeforeRun(iface, { config, runner: options.runner ?? createExecRunner(), signal }, infraReposToSync(config, registry)),
     identity: (request, { redactionNames, signal }) =>

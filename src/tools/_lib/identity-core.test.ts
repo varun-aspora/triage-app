@@ -16,6 +16,7 @@ import type { KnownIds } from '../../types/core.ts';
 import { makeTestConfig } from '../../../test/support/fake-tool-context.ts';
 import { IdentityCoreError, resolveIdChain, type IdentityCoreDeps } from './identity-core.ts';
 import * as statements from './identity-statements.ts';
+import { NO_RETRY } from '../../db/pg-retry.ts';
 
 const S = statements;
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
@@ -547,7 +548,7 @@ describe('audit lines', () => {
         return undefined;
       },
     });
-    const connector = createSqlConnector({ registry, config, pgFactory: pg.factory, roleCache: new RoleCheckCache() });
+    const connector = createSqlConnector({ registry, config, pgFactory: pg.factory, roleCache: new RoleCheckCache(), retry: NO_RETRY });
     const { deps, audit } = depsOf(connector, { entities: registry });
     const result = await resolveIdChain({ horus_customer_id: CUST, device_id: 'dev-1' }, deps);
 

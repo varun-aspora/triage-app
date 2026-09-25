@@ -7,8 +7,17 @@ import { buildReadOnlyTxn, wrapWithCap } from '../../gate/sql-txn.ts';
 import type { SqlSelectFacts } from '../../mock/key.ts';
 import { makeTestConfig } from '../../../test/support/fake-tool-context.ts';
 import type { MockLookup, MockPort } from '../mock.ts';
-import { ConnectorError, MAX_SQL_RESULT_BYTES, type ConnectorContext } from '../types.ts';
-import { capRows, createSqlConnector, type PgQuery, type SqlConnectorOptions, type SqlSelectOutcome } from './pg-client.ts';
+import { NO_RETRY } from '../../db/pg-retry.ts';
+import { ConnectorError, envVarName, MAX_SQL_RESULT_BYTES, type ConnectorContext } from '../types.ts';
+import {
+  capRows,
+  createSqlConnector,
+  type PgQuery,
+  type RetryInfo,
+  type RetryTarget,
+  type SqlConnectorOptions,
+  type SqlSelectOutcome,
+} from './pg-client.ts';
 import { fakePg, type FakePgOptions } from './pg-fake.ts';
 import { RoleCheckCache } from './readonly-role.ts';
 
@@ -22,7 +31,11 @@ const FAKE_DSN = `postgres://${FAKE_USER}:${FAKE_PASSWORD}@${FAKE_HOST}:6543/fak
 const FAKE_DSN_2 = `postgres://${FAKE_USER}:${FAKE_PASSWORD}@${FAKE_HOST}:6543/fake_pulse_db`;
 const SECRETS = [FAKE_DSN, FAKE_DSN_2, FAKE_PASSWORD, FAKE_HOST, FAKE_USER];
 
-function setup(env: Record<string, string> = {}, options: Partial<SqlConnectorOptions> & { fake?: FakePgOptions } = {}) {
+// Retries are off here unless a test turns them on (configRetry takes the policy from the config; retry sets one).
+function setup(
+  env: Record<string, string> = {},
+  options: Partial<SqlConnectorOptions> & { fake?: FakePgOptions; configRetry?: boolean } = {},
+) {
   const config = makeTestConfig({
     TRIAGE_ENTITIES: 'ssfb,atspl,rtl',
     ATSPL_PACKAGE_DB_URL: FAKE_DSN,
@@ -35,12 +48,14 @@ function setup(env: Record<string, string> = {}, options: Partial<SqlConnectorOp
   const registry = loadRegistry(config, { resourcesDir: join(ROOT, 'resources') });
   const pg = fakePg(options.fake);
   const factory = mock(pg.factory);
-  const { fake: _fake, ...rest } = options;
+  const { fake: _fake, configRetry, ...rest } = options;
   const connector = createSqlConnector({
     registry,
     config,
     pgFactory: factory,
     roleCache: new RoleCheckCache(),
+    ...(configRetry === true ? {} : { retry: NO_RETRY }),
+    sleep: async () => undefined,
     ...rest,
   });
   return { config, registry, pg, factory, connector };
@@ -244,6 +259,144 @@ describe('a socket that closes under a query', () => {
     await connector.runSelect(ctxOf(), input());
     expect(pg.outstanding()).toBe(0);
     expect(pg.selectClients().at(-1)?.releases).toEqual([undefined]);
+  });
+});
+
+describe('retry (D57)', () => {
+  // The cap makes the second wait 150, not 200; random() = 1 takes the top of the jitter range.
+  const POLICY = { attempts: 3, delayMs: 100, maxDelayMs: 150 };
+  const TARGET: RetryTarget = { entity: 'atspl', service: 'package', target_env: envVarName('ATSPL_PACKAGE_DB_URL'), run_id: 'run_test_0001' };
+  const refused = (): Error => Object.assign(new Error(`connect ECONNREFUSED ${FAKE_HOST}:6543`), { code: 'ECONNREFUSED' });
+
+  function retrying(fake: FakePgOptions, extra: Partial<SqlConnectorOptions> = {}) {
+    const waits: number[] = [];
+    const retries: RetryInfo[] = [];
+    const reconnects: RetryTarget[] = [];
+    const base = setup({}, {
+      fake,
+      retry: POLICY,
+      sleep: async (ms) => {
+        waits.push(ms);
+      },
+      random: () => 1,
+      onRetry: (r) => retries.push(r),
+      reconnect: async (t) => {
+        reconnects.push(t);
+      },
+      ...extra,
+    });
+    return { ...base, waits, retries, reconnects };
+  }
+
+  test('a refused connect is tried again: the sink is told, the wait doubles, the network path is brought back, then it answers', async () => {
+    let refusals = 0;
+    const r = retrying({ connectError: () => (refusals++ < 2 ? refused() : undefined) });
+    const out = await r.connector.runSelect(ctxOf(), input());
+    expect(out.data).toBeDefined();
+    // The role check comes first on a new env var name, so its connects are the ones refused.
+    expect(r.pg.connects()).toBe(4);
+    expect(r.waits).toEqual([100, 150]);
+    expect(r.retries).toEqual([
+      { ...TARGET, attempt: 1, code: 'ECONNREFUSED' },
+      { ...TARGET, attempt: 2, code: 'ECONNREFUSED' },
+    ]);
+    expect(r.reconnects).toEqual([TARGET, TARGET]);
+    expect(r.pg.outstanding()).toBe(0);
+  });
+
+  test('a socket that closes under the SELECT is tried again on a fresh client', async () => {
+    let drops = 0;
+    const r = retrying({ drop: (q) => q.text.startsWith('SELECT * FROM') && drops++ < 1 });
+    const out = await r.connector.runSelect(ctxOf(), input());
+    expect(out.data).toBeDefined();
+    const selects = r.pg.selectClients();
+    expect(selects).toHaveLength(2);
+    expect((selects[0]!.releases[0] as Error).message).toBe('Connection terminated unexpectedly');
+    expect(selects[1]!.releases).toEqual([undefined]);
+    expect(r.waits).toEqual([100]);
+    expect(r.retries).toEqual([{ ...TARGET, attempt: 1, code: 'connection_lost' }]);
+    expect(r.pg.outstanding()).toBe(0);
+  });
+
+  test('once the attempts are used up the call is unreachable, naming the env var only', async () => {
+    const r = retrying({ connectError: refused });
+    const err = await failure(r.connector.runSelect(ctxOf(), input()));
+    expect(err.code).toBe('unreachable');
+    expect(err.message).toContain('ECONNREFUSED');
+    expectNoSecret(everyForm(err));
+    expect(r.pg.connects()).toBe(3);
+    expect(r.waits).toEqual([100, 150]);
+    expect(r.retries.map((x) => x.attempt)).toEqual([1, 2]);
+  });
+
+  test('a query error is not tried again', async () => {
+    const r = retrying({
+      respond: (q) => {
+        if (q.text.startsWith('SELECT * FROM')) throw Object.assign(new Error('column "nope" does not exist'), { code: '42703' });
+        return undefined;
+      },
+    });
+    const err = await failure(r.connector.runSelect(ctxOf(), input()));
+    expect(err.code).toBe('refused');
+    expect(r.waits).toEqual([]);
+    expect(r.retries).toEqual([]);
+    expect(r.reconnects).toEqual([]);
+  });
+
+  test('an abort during the wait ends the call as cancelled', async () => {
+    const controller = new AbortController();
+    const r = retrying(
+      { connectError: () => Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }) },
+      {
+        sleep: async (_ms, signal) => {
+          controller.abort();
+          throw signal?.reason ?? new Error('aborted');
+        },
+      },
+    );
+    const err = await failure(r.connector.runSelect(ctxOf(realPort(), controller.signal), input()));
+    expect(err.code).toBe('timeout');
+    expect(err.message).toContain('cancelled');
+    expect(r.retries).toHaveLength(1);
+    expect(r.reconnects).toEqual([]);
+    expect(r.pg.outstanding()).toBe(0);
+  });
+
+  test('a reconnect hook that fails, or a sink that throws, does not stop the retry', async () => {
+    let refusals = 0;
+    const r = retrying(
+      { connectError: () => (refusals++ < 1 ? refused() : undefined) },
+      {
+        reconnect: async () => {
+          throw new Error('ssh exploded');
+        },
+        onRetry: () => {
+          throw new Error('sink broke');
+        },
+      },
+    );
+    const out = await r.connector.runSelect(ctxOf(), input());
+    expect(out.data).toBeDefined();
+    expect(r.waits).toEqual([100]);
+  });
+
+  test('the policy comes from TRIAGE_SQL_RETRY_ATTEMPTS, _DELAY_MS and _MAX_DELAY_MS unless given', async () => {
+    let refusals = 0;
+    const waits: number[] = [];
+    const { connector, pg } = setup(
+      { TRIAGE_SQL_RETRY_ATTEMPTS: '3', TRIAGE_SQL_RETRY_DELAY_MS: '5', TRIAGE_SQL_RETRY_MAX_DELAY_MS: '8' },
+      {
+        configRetry: true,
+        random: () => 1,
+        sleep: async (ms) => {
+          waits.push(ms);
+        },
+        fake: { connectError: () => (refusals++ < 2 ? refused() : undefined) },
+      },
+    );
+    await connector.runSelect(ctxOf(), input());
+    expect(waits).toEqual([5, 8]);
+    expect(pg.connects()).toBe(4);
   });
 });
 

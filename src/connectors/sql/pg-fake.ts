@@ -30,7 +30,7 @@ export type FakePgOptions = {
   readonly reader?: boolean;
   /** Makes connect() wait on this promise first. */
   readonly connectGate?: () => Promise<void>;
-  /** Makes connect() reject with this error. */
+  /** Makes connect() reject with the error it returns; undefined lets that connect through. */
   readonly connectError?: () => unknown;
   /** Closes the client's socket under this query, the way pg reports it; later queries on that client are refused. */
   readonly drop?: (query: PgQuery, client: FakeClientLog) => boolean;
@@ -115,7 +115,10 @@ export function fakePg(options: FakePgOptions = {}): FakePg {
       async connect() {
         connects += 1;
         if (options.connectGate !== undefined) await options.connectGate();
-        if (options.connectError !== undefined) throw options.connectError();
+        if (options.connectError !== undefined) {
+          const err = options.connectError();
+          if (err !== undefined) throw err;
+        }
         outstanding += 1;
         return makeClient();
       },

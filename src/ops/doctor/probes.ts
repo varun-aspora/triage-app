@@ -23,6 +23,7 @@ import { searchUrl, type FetchLike } from '../../connectors/quickwit/http-transp
 import { createSqlConnector, type SqlConnector } from '../../connectors/sql/pg-client.ts';
 import { ROLE_CHECK_SQL, RoleCheckCache } from '../../connectors/sql/readonly-role.ts';
 import { isConnectorError, type ConnectorContext } from '../../connectors/types.ts';
+import { NO_RETRY } from '../../db/pg-retry.ts';
 import type { FixtureEntity } from '../../mock/types.ts';
 import type { Entity } from '../../types/core.ts';
 
@@ -198,8 +199,9 @@ const DB_FAILURE_CODES: ReadonlySet<string> = new Set(['unreachable', 'timeout',
 
 export function createRealProbes(options: RealProbesOptions): Probes {
   const { config, registry } = options;
+  // The doctor reports a database that does not answer at once: no retry (D57).
   const sql =
-    options.sql ?? createSqlConnector({ registry, config, roleCache: new RoleCheckCache(), poolMax: 1 });
+    options.sql ?? createSqlConnector({ registry, config, roleCache: new RoleCheckCache(), poolMax: 1, retry: NO_RETRY });
   const tcpConnect = options.tcpConnect ?? netTcpConnect;
   const signal = options.signal ?? new AbortController().signal;
 
