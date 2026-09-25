@@ -205,12 +205,19 @@ export function joinEntityLabels(entities: readonly Entity[]): string {
 /** The phases the stepper shows; 'created' counts as not started. */
 export const STEPPER_PHASES = ['preflight', 'identity', 'classifying', 'dispatched', 'investigating', 'completed'] as const;
 export type StepperPhase = (typeof STEPPER_PHASES)[number];
-export type StepState = 'done' | 'current' | 'failed' | 'todo';
+/** waiting: the run is parked on this phase (blocked on a system that did not answer). */
+export type StepState = 'done' | 'current' | 'waiting' | 'failed' | 'todo';
 
 /** Step states for a run that is still going: everything before the current phase is done. */
 export function runningSteps(phase: RunPhase): Record<StepperPhase, StepState> {
   const current = phase === 'created' ? 0 : STEPPER_PHASES.indexOf(phase as StepperPhase);
   return stepsFrom((i) => (current < 0 ? 'todo' : i < current ? 'done' : i === current ? (phase === 'completed' ? 'done' : 'current') : 'todo'));
+}
+
+/** Step states for a blocked run: it parks while investigating, so that step waits and the ones before are done. */
+export function blockedSteps(): Record<StepperPhase, StepState> {
+  const at = STEPPER_PHASES.indexOf('investigating');
+  return stepsFrom((i) => (i < at ? 'done' : i === at ? 'waiting' : 'todo'));
 }
 
 function stepsFrom(fn: (index: number) => StepState): Record<StepperPhase, StepState> {
@@ -339,10 +346,16 @@ export function formatUsd(usd: number | undefined): string {
   return usd < 0.01 && usd > 0 ? '<$0.01' : `$${usd.toFixed(2)}`;
 }
 
-/** True while a follow-up sent from this page has not produced its report. */
-export function askPending(submissions: readonly SubmissionView[], askedAfterSeq: number): boolean {
-  const newer = submissions.filter((s) => s.seq > askedAfterSeq);
-  return newer.length === 0 || newer.some((s) => !s.has_report);
+/**
+ * True while a follow-up or a resume sent from this page has not settled: its
+ * submission is not stored yet, or the run is still going. A newer submission
+ * on a run that is not running settled without a report (it blocked, failed
+ * or was stopped), so polling stops.
+ */
+export function followUpPending(run: Pick<RunDetail, 'status' | 'submissions'>, afterSeq: number): boolean {
+  const newer = run.submissions.filter((s) => s.seq > afterSeq);
+  if (newer.length === 0) return true;
+  return run.status === 'running';
 }
 
 export const YES_NO = (b: boolean): string => (b ? 'Yes' : 'No');

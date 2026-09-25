@@ -18,6 +18,8 @@ import type {
   ListRunsQuery,
   ListRunsResponse,
   ReposResponse,
+  ResumeBody,
+  ResumeResponse,
   RunDetail,
   RunEventsResponse,
   ServicesResponse,
@@ -62,8 +64,14 @@ export function startRun(body: StartRunBody, idempotencyKey: string): Promise<St
   return request('POST', '/triage', { body, headers: { 'Idempotency-Key': idempotencyKey } });
 }
 
+/** 409 while the run is blocked: resume it instead. */
 export function askRun(runId: string, body: AskBody): Promise<AskResponse> {
   return request('POST', `/triage/${seg(runId)}/ask`, { body });
+}
+
+/** Sends a blocked, failed or stopped run on (D55). 409 with a hint when the run cannot be resumed. */
+export function resumeRun(runId: string, body: ResumeBody): Promise<ResumeResponse> {
+  return request('POST', `/triage/${seg(runId)}/resume`, { body });
 }
 
 export function sendFeedback(runId: string, body: FeedbackBody): Promise<FeedbackResponse> {

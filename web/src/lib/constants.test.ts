@@ -35,6 +35,6 @@ describe('constants match src/', () => {
   });
 
   test('run statuses: every non-terminal phase counts as running', () => {
-    expect([...c.RUN_STATUSES]).toEqual(['running', ...TERMINAL_PHASES]);
+    expect([...c.RUN_STATUSES]).toEqual(['running', 'blocked', ...TERMINAL_PHASES]);
   });
 });

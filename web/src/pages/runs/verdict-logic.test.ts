@@ -53,6 +53,7 @@ describe('verdict body', () => {
 
   test('cancel only while running; labels read as the buttons do', () => {
     expect(canCancel({ status: 'running' })).toBe(true);
+    expect(canCancel({ status: 'blocked' })).toBe(true);
     for (const status of ['completed', 'failed', 'stopped'] as const) expect(canCancel({ status })).toBe(false);
     expect(verdictLabel({ verdict: 'correct' })).toBe('accepted');
     expect(verdictLabel({ verdict: 'wrong' })).toBe('rejected');
@@ -112,5 +113,13 @@ describe('lifecycle summaries', () => {
     expect(summariseStep(ev('turn_request', { session: 'default', request: { requestedModel: 'm', input: { message_count: 4, systemPrompt: 'x' } } }))).toBe(
       'm · 4 messages · new system prompt · root',
     );
+  });
+
+  test('a block and a resume name the block, the systems and who sent the run on', () => {
+    expect(summariseStep(ev('blocked', { submission_seq: 1, block_id: 'b1', systems: ['ssfb:harbor', 'global:codegraph'] }))).toBe('b1 · ssfb:harbor, global:codegraph');
+    expect(summariseStep(ev('resume', { kind: 'resume', from: 'blocked', block_id: 'b1', by: 'Asha', note: 'harbor is back' }))).toBe(
+      'by Asha from blocked (b1) · harbor is back',
+    );
+    expect(summariseStep(ev('resume', { kind: 'resume', from: 'stopped', by: 'Asha' }))).toBe('by Asha from stopped');
   });
 });

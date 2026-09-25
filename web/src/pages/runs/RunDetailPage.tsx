@@ -22,16 +22,18 @@ import {
   SuggestedFixSection,
   TimelineSection,
 } from './ReportSections.tsx';
+import { blockHistory, openBlock, resumeFrom, shownBlock, submissionKindLabel } from './block-logic.ts';
+import { BlockHistoryPanel, BlockPanel, ResumeForm, ResumePanel } from './RunBlock.tsx';
 import { AskForm, SlackPostPanel } from './RunForms.tsx';
 import { StepsPanel } from './RunSteps.tsx';
 import { VerdictPanel } from './RunVerdict.tsx';
 import { verdictLabel } from './verdict-logic.ts';
 import { ClassificationPanel, CostPanel, Dash, EvidencePanel, IdChainPanel, KV, PhaseStepper, RunHeader } from './RunParts.tsx';
-import { askPending, deriveInvestigators, inferFailure, investigatorLook, permalinkHref, runningSteps } from './run-logic.ts';
+import { blockedSteps, deriveInvestigators, followUpPending, inferFailure, investigatorLook, permalinkHref, runningSteps } from './run-logic.ts';
 import './runs.css';
 
 const POLL_MS = 3000;
-// A follow-up that never produces a report (it failed) must not keep the page polling forever.
+// A follow-up or a resume whose submission never shows up must not keep the page polling forever.
 const ASK_POLL_LIMIT_MS = 15 * 60_000;
 
 type PendingAsk = { afterSeq: number; until: number };
@@ -47,7 +49,7 @@ export default function RunDetailPage() {
     pollWhile: (run) => {
       if (run.status === 'running') return true;
       const p = pendingRef.current;
-      return p !== null && Date.now() < p.until && askPending(run.submissions, p.afterSeq);
+      return p !== null && Date.now() < p.until && followUpPending(run, p.afterSeq);
     },
   });
 
@@ -81,26 +83,28 @@ export default function RunDetailPage() {
       </Notice>
     ) : null;
 
-  const onAsked = () => {
+  // After a follow-up or a resume: poll until its submission settles.
+  const onFollowUp = () => {
     const lastSeq = data.submissions.reduce((m, s) => Math.max(m, s.seq), 0);
     setPendingAsk({ afterSeq: lastSeq, until: Date.now() + ASK_POLL_LIMIT_MS });
     reload();
   };
 
-  // A stored report means a submission already finished, so a running or
-  // failed status here is a follow-up: keep the report and forms in view.
+  // A stored report means a submission already finished, so a running,
+  // blocked or failed status here is a follow-up: keep the report and forms in view.
   if (data.report === undefined) {
     if (data.status === 'running') return <RunningView run={data} refreshError={refreshError} onChanged={reload} />;
+    if (data.status === 'blocked') return <BlockedView run={data} refreshError={refreshError} onChanged={reload} onFollowUp={onFollowUp} />;
     if (data.status === 'failed' || data.status === 'stopped') {
-      return <FailedView run={data} refreshError={refreshError} onChanged={reload} onAsked={onAsked} />;
+      return <FailedView run={data} refreshError={refreshError} onChanged={reload} onFollowUp={onFollowUp} />;
     }
   }
   return (
     <CompletedView
       run={data}
       refreshError={refreshError}
-      askInFlight={pendingAsk !== null && Date.now() < pendingAsk.until && askPending(data.submissions, pendingAsk.afterSeq)}
-      onAsked={onAsked}
+      askInFlight={pendingAsk !== null && Date.now() < pendingAsk.until && followUpPending(data, pendingAsk.afterSeq)}
+      onFollowUp={onFollowUp}
       onFeedback={reload}
     />
   );
@@ -168,28 +172,86 @@ function RunningView({ run, refreshError, onChanged }: { run: RunDetail; refresh
   );
 }
 
+// ------------------------------------------------------------------ blocked
+
+/** Parked on a system that did not answer (D55): no report, and nothing runs until someone resumes it. */
+function BlockedView({
+  run,
+  refreshError,
+  onChanged,
+  onFollowUp,
+}: {
+  run: RunDetail;
+  refreshError: ReactNode;
+  onChanged: () => void;
+  onFollowUp: () => void;
+}) {
+  const now = useNow(30_000);
+  const block = shownBlock(run);
+  const hasSide = run.id_chain !== null || run.classification !== null;
+  const form = <ResumeForm runId={run.run_id} from="blocked" onResumed={onFollowUp} onRefused={onChanged} />;
+  return (
+    <>
+      <RunHeader run={run} extraMeta={block !== null ? <span>Blocked {formatRelative(block.blocked_at, now)}</span> : undefined} />
+      {refreshError}
+      <PhaseStepper steps={blockedSteps()} />
+      <div className="runs-cols">
+        <div className="runs-main">
+          {block !== null ? (
+            <BlockPanel block={block} now={now}>
+              {form}
+            </BlockPanel>
+          ) : (
+            <Panel title="The run is waiting on a system" description="The block record was not stored with the run, so the reason cannot be shown.">
+              {form}
+            </Panel>
+          )}
+          <BlockHistoryPanel history={blockHistory(run)} />
+          <VerdictPanel run={run} onSaved={onChanged} />
+          <PreflightWarnings run={run} />
+          <StepsPanel runId={run.run_id} live={false} />
+        </div>
+        {hasSide && (
+          <aside className="runs-side">
+            {run.id_chain !== null && <IdChainPanel chain={run.id_chain} />}
+            {run.classification !== null && <ClassificationPanel decision={run.classification} full={false} />}
+          </aside>
+        )}
+      </div>
+    </>
+  );
+}
+
 // ------------------------------------------------------------------ failed
 
 function FailedView({
   run,
   refreshError,
   onChanged,
-  onAsked,
+  onFollowUp,
 }: {
   run: RunDetail;
   refreshError: ReactNode;
   onChanged: () => void;
-  onAsked: () => void;
+  onFollowUp: () => void;
 }) {
+  const now = useNow(30_000);
   const stopped = run.status === 'stopped';
+  // Resume continues the run's conversation, so it needs one: at least one submission was sent.
+  const from = resumeFrom(run);
   const failure = inferFailure(run);
   const guess = stopped
     ? {
         ...failure,
         title: 'The run was stopped',
-        hint: 'Someone stopped it before it finished. Ask a follow-up to start it again on what it has found so far.',
+        hint:
+          from !== null
+            ? 'Someone stopped it before it finished. Resume it to carry on from what it found so far, or ask a follow-up.'
+            : 'Someone stopped it before it finished. Ask a follow-up to start it again on what it has found so far.',
       }
     : failure;
+  // A run that failed right after it blocked still holds the block: show what it was waiting on.
+  const block = openBlock(run);
   const hasSide = run.id_chain !== null || run.classification !== null;
   return (
     <>
@@ -211,7 +273,9 @@ function FailedView({
                 <p className="hint">{guess.hint}</p>
                 {!stopped && (
                   <p className="hint">
-                    The stored thread is redacted, so this run cannot be repeated as it was. Start a new run with the original thread.
+                    {from !== null
+                      ? 'The run had started investigating, so once the cause is fixed it can be resumed. It carries on from what it found.'
+                      : 'The stored thread is redacted, so this run cannot be repeated as it was. Start a new run with the original thread.'}
                   </p>
                 )}
                 <div style={{ display: 'flex', gap: 12, margin: '16px 0 0', flexWrap: 'wrap' }}>
@@ -220,14 +284,19 @@ function FailedView({
                       Open Doctor
                     </LinkButton>
                   )}
-                  <LinkButton to="/runs/new" variant="primary" icon="plus">
-                    Start a new run
-                  </LinkButton>
+                  {from === null && (
+                    <LinkButton to="/runs/new" variant="primary" icon="plus">
+                      Start a new run
+                    </LinkButton>
+                  )}
                 </div>
               </div>
             </div>
           </Panel>
-          {stopped && <AskForm runId={run.run_id} reports={0} onAsked={onAsked} />}
+          {block !== null && <BlockPanel block={block} now={now} title="It had blocked on a system" />}
+          {from !== null && <ResumePanel runId={run.run_id} from={from} onResumed={onFollowUp} onRefused={onChanged} />}
+          {stopped && <AskForm runId={run.run_id} reports={0} onAsked={onFollowUp} />}
+          <BlockHistoryPanel history={blockHistory(run)} />
           <VerdictPanel run={run} onSaved={onChanged} />
           <PreflightWarnings run={run} />
           <StepsPanel runId={run.run_id} live={false} />
@@ -269,33 +338,54 @@ function CompletedView({
   run,
   refreshError,
   askInFlight,
-  onAsked,
+  onFollowUp,
   onFeedback,
 }: {
   run: RunDetail;
   refreshError: ReactNode;
   askInFlight: boolean;
-  onAsked: () => void;
+  onFollowUp: () => void;
   onFeedback: () => void;
 }) {
   const [tab, setTab] = useState<TabId>('report');
+  const now = useNow(30_000);
   const asks = run.submissions.filter((s) => s.kind === 'ask');
   const reports = run.submissions.filter((s) => s.has_report).length;
   const report = run.report;
+  const from = resumeFrom(run);
+  const block = openBlock(run);
 
-  const askForm = <AskForm runId={run.run_id} reports={reports} onAsked={onAsked} />;
+  const askForm = <AskForm runId={run.run_id} reports={reports} onAsked={onFollowUp} />;
   const feedbackForm = <VerdictPanel run={run} onSaved={onFeedback} />;
+  // A blocked follow-up shows what it waits on with the form; a failed or stopped one gets the form alone.
+  let resumePanel: ReactNode = null;
+  if (from === 'blocked' && block !== null) {
+    resumePanel = (
+      <BlockPanel block={block} now={now}>
+        <ResumeForm runId={run.run_id} from="blocked" onResumed={onFollowUp} onRefused={onFeedback} />
+      </BlockPanel>
+    );
+  } else if (from !== null) {
+    resumePanel = <ResumePanel runId={run.run_id} from={from} onResumed={onFollowUp} onRefused={onFeedback} />;
+  }
   let askNotice: ReactNode = null;
-  if (run.status === 'stopped') {
+  if (run.status === 'blocked') {
+    askNotice = (
+      <Notice variant="warn" title="The follow-up is waiting on a system">
+        A system did not answer and the follow-up could not go on. The report below is from before it. Resume it once the system is back.
+      </Notice>
+    );
+  } else if (run.status === 'stopped') {
     askNotice = (
       <Notice variant="warn" title="The run was stopped">
-        The report below is from before it was stopped. Ask a follow-up to start it again.
+        The report below is from before it was stopped. Resume it to carry on, or ask a follow-up to start it again.
       </Notice>
     );
   } else if (run.status === 'failed') {
     askNotice = (
       <Notice variant="warn" title="The last follow-up failed">
-        Reason: <span className="mono">{run.phase_reason ?? 'not recorded'}</span>. The report below is from before it. You can ask again.
+        Reason: <span className="mono">{run.phase_reason ?? 'not recorded'}</span>. The report below is from before it. You can resume it or ask
+        again.
       </Notice>
     );
   } else if (run.status === 'running' || askInFlight) {
@@ -339,12 +429,14 @@ function CompletedView({
         ) : (
           <div className="runs-cols">
             <div className="runs-main">
+              {from === 'blocked' && resumePanel}
               <CxAnswerSection cx={report.cx_answer} />
               <RootCauseSection report={report} />
               <TimelineSection items={report.timeline} />
               <CurrentStateSection items={report.current_state} />
               <ActionsSection actions={report.actions} />
               <SuggestedFixSection fixes={report.suggested_fix} />
+              {from !== 'blocked' && resumePanel}
               {askForm}
               {feedbackForm}
               <SlackPostPanel />
@@ -505,7 +597,7 @@ function RequestTab({ run }: { run: RunDetail }) {
                 {run.submissions.map((s) => (
                   <tr key={s.seq}>
                     <td className="mono">{s.seq}</td>
-                    <td>{s.kind === 'initial' ? 'first run' : 'follow-up'}</td>
+                    <td>{submissionKindLabel(s.kind)}</td>
                     <td style={{ fontSize: 13 }}>{s.question ?? <Dash />}</td>
                     <td style={{ whiteSpace: 'nowrap' }}>{formatDateTime(s.created_at)}</td>
                     <td>{s.has_report ? 'Yes' : 'No'}</td>
@@ -515,6 +607,7 @@ function RequestTab({ run }: { run: RunDetail }) {
             </table>
           </div>
         </Panel>
+        <BlockHistoryPanel history={blockHistory(run)} />
         <PreflightWarnings run={run} />
       </div>
       {run.id_chain !== null && (

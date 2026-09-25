@@ -8,9 +8,9 @@ export type Tone = 'neutral' | 'muted' | 'amber' | 'rust' | 'info';
 export type StatusIcon = 'check' | 'clock' | 'spinner' | 'x' | 'dash' | 'alert';
 export type StatusLook = { readonly tone: Tone; readonly icon: StatusIcon };
 
-/** running for every phase that is not completed, failed or stopped. */
+/** running for every phase that is not blocked, completed, failed or stopped. */
 export function runStatusOf(phase: RunPhase): RunStatus {
-  return phase === 'completed' || phase === 'failed' || phase === 'stopped' ? phase : 'running';
+  return phase === 'blocked' || phase === 'completed' || phase === 'failed' || phase === 'stopped' ? phase : 'running';
 }
 
 export function runStatusTone(status: RunStatus): StatusLook {
@@ -23,6 +23,8 @@ export function runStatusTone(status: RunStatus): StatusLook {
       return { tone: 'amber', icon: 'spinner' };
     case 'stopped':
       return { tone: 'muted', icon: 'dash' };
+    case 'blocked':
+      return { tone: 'amber', icon: 'alert' };
   }
 }
 

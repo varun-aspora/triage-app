@@ -2,14 +2,15 @@
 // already exist in src/types are imported type-only, so no runtime code from
 // src/ reaches the bundle.
 
+import type { BlockRecord, ConnectorFailure, ResolvedBlock } from '../../../src/types/block.ts';
 import type { Category, PreflightWarning, TierDecision } from '../../../src/types/classification.ts';
 import type { Entity, Interface, KnownIdKey, ReportStatus, Tier } from '../../../src/types/core.ts';
 import type { IdChain } from '../../../src/types/id-chain.ts';
 import type { Report } from '../../../src/types/report.ts';
 import type { DoctorStatus, EvidenceKey, FeedbackVerdict, FindingVerdict, GuideStatus, RunPhase, RunStatus } from '../lib/constants.ts';
 
-export type { Category, DoctorStatus, Entity, EvidenceKey, FeedbackVerdict, FindingVerdict, GuideStatus, IdChain, Interface, KnownIdKey };
-export type { PreflightWarning, Report, ReportStatus, RunPhase, RunStatus, Tier, TierDecision };
+export type { BlockRecord, Category, ConnectorFailure, DoctorStatus, Entity, EvidenceKey, FeedbackVerdict, FindingVerdict, GuideStatus, IdChain };
+export type { Interface, KnownIdKey, PreflightWarning, Report, ReportStatus, ResolvedBlock, RunPhase, RunStatus, Tier, TierDecision };
 
 // ------------------------------------------------------------------ ui
 
@@ -33,7 +34,10 @@ export type ApiErrorBody = {
   reason?: string;
   /** POST /triage 422 (slack thread read failed). */
   code?: string;
+  /** POST /triage 422; POST .../ask and .../resume 409: what to do instead. */
   hint?: string;
+  /** POST .../stop and .../resume 409: the run's phase. */
+  phase?: RunPhase;
   /** POST /repos/sync 400 and 409. */
   valid_repos?: string[];
   sync_id?: string;
@@ -73,7 +77,8 @@ export type ListRunsResponse = { runs: RunSummary[]; next_cursor: string | null 
 
 export type SubmissionView = {
   seq: number;
-  kind: 'initial' | 'ask' | 'answer';
+  /** resume: the run was sent on after a block, a failure or a stop (D55). */
+  kind: 'initial' | 'ask' | 'answer' | 'resume';
   question?: string;
   created_at: string;
   has_report: boolean;
@@ -126,6 +131,10 @@ export type RunDetail = {
   /** Slack runs only. The redacted copy: render it as a link only when it has no '*'. */
   permalink?: string;
   current_ask: string | null;
+  /** The open block while the run waits on a system that did not answer (status blocked); null otherwise. */
+  block: BlockRecord | null;
+  /** Closed blocks, oldest first, each with how it was resolved. */
+  block_history: ResolvedBlock[];
   preflight_warnings?: PreflightWarning[];
   evidence: EvidenceProgress[];
   /** The latest findings and the root cause, with the ids feedback takes. */
@@ -157,6 +166,10 @@ export type StartRunResponse = { run_id: string; deduplicated?: true };
 
 export type AskBody = { question: string; requested_by: string };
 export type AskResponse = { run_id: string; submission_id: string | null };
+
+/** POST /triage/:run_id/resume. 409 (error, phase, hint) unless the run is blocked, or failed or stopped after it started. */
+export type ResumeBody = { requested_by: string; note?: string };
+export type ResumeResponse = { run_id: string; submission_id: string | null };
 
 export type FeedbackBody = {
   verdict: FeedbackVerdict;

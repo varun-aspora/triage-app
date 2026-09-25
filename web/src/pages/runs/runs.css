@@ -344,3 +344,13 @@
   flex: 1 1 200px;
   min-width: 0;
 }
+
+/* A run parked on a system (blocked): the step waits rather than runs. */
+.runs-steps .waiting .dot {
+  background: var(--tone-amber-fg);
+  box-shadow: 0 0 0 4px var(--tone-amber-bg);
+}
+
+.runs-steps .waiting {
+  font-weight: 600;
+}
