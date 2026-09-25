@@ -5,3 +5,7 @@
 ## Conventions
 
 - Directory layout, naming, tool, CLI, HTTP and agent file shapes, registration rules, test placement and commit format: @CONVENTIONS.md
+
+## Tests
+
+- Run tests with `--only-failures`, for example `bun run test --only-failures` or `bun test <path> --only-failures`, so the output shows only the failing tests and the summary.
