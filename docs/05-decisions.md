@@ -436,6 +436,12 @@ Append-only. When a decision is reversed, add a new entry that supersedes it; do
 - **Rejected**: the first D82 build (a per-event redaction layer, root-span capture with a migration, feedback scores, and edits across ingress, run store and feedback: 65 files for a 10-line integration); a `useDecision()` lifecycle hook (hooks cannot make model calls, and decisions are called explicitly, anywhere); emitting custom decision events into Flue's stream (Flue 2.0.8 has no public API for it, and adapters ignore unknown events); routing decisions through a Flue model provider (a decision model is not a chat model, and ingress decisions run before any session).
 - **Open**: feedback verdicts as scores. OTel has nothing for it; each backend needs its own call (Braintrust `logFeedback`, Langfuse scores).
 
+### D93. Flue ids pass both redaction profiles, like UUIDs (2026-09-26; extends A11)
+- **Problem**: Flue mints ids as a lowercase prefix plus a ULID (`sub_`, `turn_`, `inv_`, `call_` and others). The ULID's leading timestamp often holds six or more digits in a row, so the persisted profile masked them: `sub_01M3EN703470…` was written to `events.jsonl` as `sub_01M3EN****3470…`. The logged dispatch id then no longer matched the stored `flue_submission_id` (D71), and `stalled.contract.ts` failed whenever the timestamp had such a run.
+- **Chosen**: `flueIdSpans` in `src/gate/redact-patterns.ts` protects any lowercase prefix, `_`, and a 26-character Crockford ULID whose first character is 0-7. It joins the UUID guard, so every detector that spares UUIDs spares Flue ids, in both profiles and in `checkEgress`. Digits next to an id, and prefixed tokens that are not a full ULID, are still masked. The same holds for span content sent by D82 tracing, which goes through `redactPersisted`.
+- **Rejected**: comparing the redacted form in the test (it hides a real mismatch in the event log); a guard for `sub_` alone (the other Flue ids carry the same timestamp and would be masked the same way); matching any `word_token` (too wide for a banking redactor).
+- **Assumptions**: a lowercase-prefixed 26-character ULID never carries customer data. Flue builds these ids with `ulidx`, whose alphabet is `0123456789ABCDEFGHJKMNPQRSTVWXYZ` (2.0.8).
+
 ## Assumptions (explicit; each needs your confirmation or correction)
 
 | # | Assumption | Basis | If wrong |

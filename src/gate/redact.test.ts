@@ -121,6 +121,23 @@ describe('UUIDs and hex ids (A11)', () => {
     const sha = '3f2a1b9c8d7e6f5a4b3c2d1e0f9a8b7c6d523456';
     expect(persisted({ commit: sha })).toEqual({ commit: sha });
   });
+
+  test('a Flue id is not masked, even when its ULID holds a digit run (D93)', () => {
+    const sub = 'sub_01M3EN703470J8WMPG9CJVP51R'; // six digits in the timestamp
+    const turn = 'turn_01M3EN9876543210ABCDEFGHJK'; // a phone-shaped run
+    for (const id of [sub, turn]) {
+      expect(redactModelFacing(`id ${id}`)).toBe(`id ${id}`);
+      expect(persisted({ submission_id: id })).toEqual({ submission_id: id });
+      expect(checkEgress({ submission_id: id })).toEqual({ ok: true });
+    }
+  });
+
+  test('digits next to a Flue id, or in a token that is not one, are still masked', () => {
+    const sub = 'sub_01M3EN703470J8WMPG9CJVP51R';
+    expect(persisted(`${sub} account ${ACCOUNT}`)).toBe(`${sub} account ****5678`);
+    expect(persisted(`ref_${ACCOUNT}`)).toBe('ref_****5678');
+    expect(persisted('sub_01M3EN703470J8WMPG9CJVP5')).toBe('sub_01M3EN****3470J8WMPG9CJVP5'); // 24 chars, not a ULID
+  });
 });
 
 describe('secrets and DSN-like strings', () => {
