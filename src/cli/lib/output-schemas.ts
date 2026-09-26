@@ -8,6 +8,7 @@ import { ReportStatusSchema, RunIdSchema, TierSchema } from '../../types/core.ts
 import { RunPhaseSchema } from '../../runstore/types.ts';
 import { InputRequestSchema, QuestionIdSchema } from '../../types/input-request.ts';
 import { BlockRecordSchema } from '../../types/block.ts';
+import { StalledSchema } from '../../types/stalled.ts';
 import { RunUsageViewSchema, USAGE_AGENT_PATTERN, UsageModelSchema, UsageTotalsSchema } from '../../types/usage.ts';
 import { EXIT, printJson } from '../output.ts';
 import type { CliIo } from '../types.ts';
@@ -100,6 +101,11 @@ export const StatusOutputSchema = v.strictObject({
   block: v.optional(BlockRecordSchema),
   /** Why the run failed or was stopped, with status failed or stopped. Same text as `triage wait`. */
   reason: v.optional(v.string()),
+  /**
+   * D71: set while the phase is dispatched or investigating and nobody works
+   * on the run. status keeps its own rule: 'stalled' only for a dead worker pid.
+   */
+  stalled: v.optional(v.strictObject(StalledSchema.entries)),
   /** The run's usage, when any is recorded. Absent for a run from before D59. */
   usage: v.optional(UsageViewSchema),
 });
@@ -132,10 +138,15 @@ export const InputOutputSchema = v.strictObject({
 });
 export type InputOutput = v.InferOutput<typeof InputOutputSchema>;
 
-/** `triage resume --json`. submission_id is the run store seq the resume gets. */
+/**
+ * `triage resume --json`. submission_id is the run store seq the resume gets.
+ * mode (D72): steer when the message went to a working run, resume otherwise
+ * (a stalled run is stopped and resumed).
+ */
 export const ResumeOutputSchema = v.strictObject({
   run_id: RunIdSchema,
   submission_id: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  mode: v.picklist(['steer', 'resume']),
 });
 export type ResumeOutput = v.InferOutput<typeof ResumeOutputSchema>;
 

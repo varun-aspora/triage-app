@@ -11,14 +11,15 @@ import type {
   RunPhase,
   RunSummary,
   RunUsageView,
+  StalledView,
   StartRunBody,
   SubmissionView,
   Tier,
   UsageTotals,
 } from '../../api/types.ts';
 import { ENTITY_LABELS } from '../../lib/constants.ts';
-import { formatRelative, formatTokens } from '../../lib/format.ts';
-import { runStatusOf, type StatusLook } from '../../lib/status.ts';
+import { formatDateTime, formatRelative, formatTokens } from '../../lib/format.ts';
+import { runStatusOf, runStatusTone, type StatusLook } from '../../lib/status.ts';
 
 // ------------------------------------------------------------------ list
 
@@ -228,6 +229,45 @@ export function blockedSteps(): Record<StepperPhase, StepState> {
   return stepsFrom((i) => (i < at ? 'done' : i === at ? 'waiting' : 'todo'));
 }
 
+// ------------------------------------------------------------------ stalled (D71)
+
+/** A stalled run reads like a warning, not like the spinner of a run at work. */
+export const STALLED_LOOK: StatusLook = { tone: 'amber', icon: 'alert' };
+
+/**
+ * The header's status tag: 'stalled' while a running run has nobody working
+ * on it, the phase while it runs, else the status. Stalled is a display
+ * state only; the run's status stays running.
+ */
+export function headerStatus(
+  run: Pick<RunDetail, 'status' | 'phase'> & Partial<Pick<RunDetail, 'stalled'>>,
+  resuming = false,
+): { text: string; look: StatusLook } {
+  // A stalled run's resume (D72) stops it before it runs again; the page reads it as one step.
+  if (resuming) return { text: 'resuming', look: runStatusTone('running') };
+  if (run.status === 'running' && run.stalled !== undefined) return { text: 'stalled', look: STALLED_LOOK };
+  return { text: run.status === 'running' ? run.phase : run.status, look: runStatusTone(run.status) };
+}
+
+/** The runs list's status cell: the phase, or 'stalled' like the run page's header. */
+export function listStatus(row: Pick<RunSummary, 'phase' | 'stalled'>): { text: string; look: StatusLook } {
+  return headerStatus({ status: runStatusOf(row.phase), phase: row.phase, ...(row.stalled !== undefined ? { stalled: row.stalled } : {}) });
+}
+
+/** Why a running run is stalled, in one line, then what Resume does. */
+export function stalledText(stalled: StalledView, now: number): string {
+  const at = formatDateTime(stalled.since, new Date(now));
+  let why: string;
+  if (stalled.reason === 'no_owner') {
+    why = `No process has held this run since ${at}.`;
+  } else {
+    const since = Date.parse(stalled.since);
+    const mins = Number.isNaN(since) ? undefined : Math.max(1, Math.floor((now - since) / 60_000));
+    why = mins === undefined ? `No activity since ${at}.` : `No activity since ${at} (${mins} min).`;
+  }
+  return `${why} Resume stops the current attempt and continues with your note.`;
+}
+
 function stepsFrom(fn: (index: number) => StepState): Record<StepperPhase, StepState> {
   const out = {} as Record<StepperPhase, StepState>;
   STEPPER_PHASES.forEach((p, i) => {
@@ -389,11 +429,47 @@ export function isLongText(text: string): boolean {
   return false;
 }
 
-/** 'Report v2 of 3': submissions with a report, out of all submissions. Undefined when none has a report. */
+/**
+ * Submissions by response (D72): each submission that is not a steer starts
+ * one, and the steers after it belong to it. A steer that joined the live
+ * response holds that response's report; one that missed it ran its own
+ * response and holds its own.
+ */
+function responses(submissions: readonly SubmissionView[]): SubmissionView[][] {
+  const out: SubmissionView[][] = [];
+  for (const s of submissions) {
+    const last = out.at(-1);
+    if (s.kind === 'steer' && last !== undefined) last.push(s);
+    else out.push([s]);
+  }
+  return out;
+}
+
+/**
+ * 'Report v2 of 3': the submissions with a report, out of the responses,
+ * where a response with more than one report (a steer that ran its own)
+ * counts each. A steer without a report adds nothing, since it joined another
+ * submission's reply or is still running. Undefined when none has a report.
+ */
 export function reportVersionLabel(submissions: readonly SubmissionView[]): string | undefined {
   const withReport = submissions.filter((s) => s.has_report).length;
   if (withReport === 0) return undefined;
-  return `Report v${withReport} of ${submissions.length}`;
+  const of = responses(submissions).reduce((n, group) => n + Math.max(1, group.filter((s) => s.has_report).length), 0);
+  return `Report v${withReport} of ${of}`;
+}
+
+/**
+ * The Request tab's Report cell for one submission: Yes or No, or 'On #n'
+ * for a submission whose report is stored on the steer that joined it (D72).
+ */
+export function submissionReportLabel(submissions: readonly SubmissionView[], seq: number): string {
+  const group = responses(submissions).find((g) => g.some((s) => s.seq === seq));
+  const self = group?.find((s) => s.seq === seq);
+  if (group === undefined || self === undefined) return 'No';
+  if (self.has_report) return 'Yes';
+  if (self.kind === 'steer') return 'No';
+  const steer = group.find((s) => s.kind === 'steer' && s.has_report);
+  return steer !== undefined ? `On #${steer.seq}` : 'No';
 }
 
 // ------------------------------------------------------------------ usage (D59)

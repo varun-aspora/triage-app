@@ -8,6 +8,7 @@
 //   evidence/<entity|code>.json    latest findings, as written
 //   evidence/<key>.v<n>.json       every version, so older ones are kept
 //   submissions/<seq>/submission.json, report.json, report.md
+//                                  (submission.json gains flue_submission_id after the dispatch, D71)
 //   report.json, report.md         the latest submission's report
 //   feedback.jsonl                 one entry per line, append-only
 //   feedback.md                    the caller's rendering, or a short default
@@ -82,12 +83,15 @@ import {
 } from './types.ts';
 import {
   assertBlockId,
+  assertFlueSubmissionId,
+  assertPhaseList,
   assertQuestionId,
   BlockNotOpenError,
   BlockOpenError,
   cancelledBlockResolution,
   InputRequestNotOpenError,
   InputRequestOpenError,
+  WORKING_PHASES,
 } from './types.ts';
 import {
   InputRequestSchema,
@@ -266,25 +270,46 @@ class FolderRunStore implements RunStore {
   async setPhase(runId: RunId, phase: RunPhase, detail: PhaseDetail = {}): Promise<boolean> {
     parseRecord(RunPhaseSchema, phase, 'phase');
     if (detail.reason !== undefined) assertClean(detail.reason, 'phase reason');
-    if (detail.worker_pid !== undefined) positiveInt(detail.worker_pid, 'worker pid');
+    if (detail.worker_pid !== undefined && detail.worker_pid !== null) positiveInt(detail.worker_pid, 'worker pid');
     return serial(this.#lock(runId), async () => {
       const meta = await this.#requireRun(runId);
       // The lock is per process; a second process can still race this read.
       if (meta.phase === 'stopped' && detail.resume !== true) return false;
-      const next: RunMeta = {
-        schema_version: meta.schema_version,
-        run_id: meta.run_id,
-        created_at: meta.created_at,
-        updated_at: this.#iso(),
-        phase,
-        ...(detail.reason !== undefined ? { phase_reason: detail.reason } : {}),
-        ...((detail.worker_pid ?? meta.worker_pid) !== undefined ? { worker_pid: detail.worker_pid ?? meta.worker_pid } : {}),
-        ...inputFields(meta),
-        ...blockFields(meta),
-      };
-      await writeFileAtomic(join(this.#dir(runId), 'meta.json'), json(next));
+      await this.#writePhase(meta, phase, detail);
       return true;
     });
+  }
+
+  async setPhaseIf(runId: RunId, fromPhases: readonly RunPhase[], phase: RunPhase, detail: PhaseDetail = {}): Promise<boolean> {
+    const from = assertPhaseList(fromPhases);
+    parseRecord(RunPhaseSchema, phase, 'phase');
+    if (detail.reason !== undefined) assertClean(detail.reason, 'phase reason');
+    if (detail.worker_pid !== undefined && detail.worker_pid !== null) positiveInt(detail.worker_pid, 'worker pid');
+    return serial(this.#lock(runId), async () => {
+      const meta = await this.#requireRun(runId);
+      // Atomic within this process only, like every folder write: the lock is per process.
+      if (!from.includes(meta.phase)) return false;
+      await this.#writePhase(meta, phase, detail);
+      return true;
+    });
+  }
+
+  /** meta.json with the new phase, reason and worker pid. The caller holds the run's lock. */
+  async #writePhase(meta: RunMeta, phase: RunPhase, detail: PhaseDetail): Promise<void> {
+    // Left out keeps the recorded pid; null clears it.
+    const pid = detail.worker_pid === null ? undefined : (detail.worker_pid ?? meta.worker_pid);
+    const next: RunMeta = {
+      schema_version: meta.schema_version,
+      run_id: meta.run_id,
+      created_at: meta.created_at,
+      updated_at: this.#iso(),
+      phase,
+      ...(detail.reason !== undefined ? { phase_reason: detail.reason } : {}),
+      ...(pid !== undefined ? { worker_pid: pid } : {}),
+      ...inputFields(meta),
+      ...blockFields(meta),
+    };
+    await writeFileAtomic(join(this.#dir(meta.run_id), 'meta.json'), json(next));
   }
 
   async putInputRequest(runId: RunId, request: Persisted<InputRequest>): Promise<void> {
@@ -431,6 +456,20 @@ class FolderRunStore implements RunStore {
       const meta: SubmissionMeta = { ...input, seq, created_at: this.#iso() };
       await writeFileAtomic(join(base, String(seq), 'submission.json'), json(meta));
       return seq;
+    });
+  }
+
+  async setSubmissionFlueId(runId: RunId, seq: number, flueSubmissionId: string): Promise<void> {
+    const n = positiveInt(seq, 'submission id');
+    const flueId = assertFlueSubmissionId(flueSubmissionId);
+    await serial(this.#lock(runId), async () => {
+      await this.#requireRun(runId);
+      const path = join(this.#dir(runId), 'submissions', String(n), 'submission.json');
+      const raw = await readJson(path, 'submission.json');
+      if (raw === undefined) throw new RunStoreError(`submission ${n} not found`);
+      const meta = parseRecord(SubmissionMetaSchema, raw, 'submission.json');
+      // meta.json is left alone, so updated_at does not move.
+      await writeFileAtomic(path, json({ ...meta, flue_submission_id: flueId }));
     });
   }
 
@@ -809,6 +848,7 @@ class FolderRunStore implements RunStore {
       const verdict = (await this.#feedback(runId)).at(-1)?.verdict;
       const rows = (await this.#usage(runId)).flatMap((u) => u.rows);
       const priced = rows.filter((r) => r.usd !== null);
+      const submissions = await this.#submissions(runId);
       out.push({
         run_id: runId,
         created_at: meta.created_at,
@@ -817,7 +857,7 @@ class FolderRunStore implements RunStore {
         ...(category !== undefined ? { category } : {}),
         ...(cls?.decision.tier_final !== undefined ? { tier_final: cls.decision.tier_final } : {}),
         ...(report?.status !== undefined ? { report_status: report.status } : {}),
-        submissions: (await this.#submissions(runId)).length,
+        submissions: submissions.length,
         ...(verdict !== undefined ? { feedback_verdict: verdict } : {}),
         // The same sums as the postgres subqueries: usd over priced rows, tokens over every row.
         ...(priced.length > 0 ? { usd_total: priced.reduce((sum, r) => sum + (r.usd ?? 0), 0) } : {}),
@@ -830,6 +870,7 @@ class FolderRunStore implements RunStore {
             }
           : {}),
         ...(priced.length > 0 && priced.length < rows.length ? { usd_partial: true as const } : {}),
+        ...(WORKING_PHASES.includes(meta.phase) ? stalledInputs(submissions, meta) : {}),
       });
     }
     out.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.run_id.localeCompare(a.run_id));
@@ -908,6 +949,21 @@ export function createFolderRunStore(opts: FolderRunStoreOptions): RunStore {
 /** The folder store at TRIAGE_RUNS_DIR, with idempotency claims under TRIAGE_DATA_DIR. */
 export function folderRunStoreFromConfig(config: Config, opts: { now?: () => number } = {}): RunStore {
   return new FolderRunStore({ runsDir: config.paths.runsDir, dataDir: config.paths.dataDir, ...opts });
+}
+
+/** The same stalled-check inputs as the postgres listRuns (D71), from submission.json and meta.json. */
+function stalledInputs(
+  submissions: readonly Submission[],
+  meta: RunMeta,
+): Pick<RunSummary, 'flue_submission_id' | 'steer_flue_submission_id' | 'worker_pid'> {
+  const latest = [...submissions].sort((a, b) => b.seq - a.seq);
+  const head = latest.find((s) => s.kind !== 'steer');
+  const steer = latest.find((s) => s.kind === 'steer' && s.flue_submission_id !== undefined && s.seq > (head?.seq ?? 0));
+  return {
+    ...(head?.flue_submission_id !== undefined ? { flue_submission_id: head.flue_submission_id } : {}),
+    ...(steer?.flue_submission_id !== undefined ? { steer_flue_submission_id: steer.flue_submission_id } : {}),
+    ...(meta.worker_pid !== undefined ? { worker_pid: meta.worker_pid } : {}),
+  };
 }
 
 /** The input request fields of a meta record, carried over by every rewrite that is not about them. */

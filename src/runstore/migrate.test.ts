@@ -18,7 +18,7 @@ const DSN = 'postgresql://triage_rw:not-a-real-password@db.invalid:5432/triage';
 const MIGRATIONS_DIR = fileURLToPath(new URL('./migrations/', import.meta.url));
 const INIT_SQL = readFileSync(join(MIGRATIONS_DIR, '0001_init.sql'), 'utf8');
 /** Every shipped migration, in order. */
-const ALL_VERSIONS = ['0001_init'];
+const ALL_VERSIONS = ['0001_init', '0002_submission_flue_id'];
 
 // ------------------------------------------------------------------ fake database
 
@@ -331,7 +331,8 @@ describe('migration files', () => {
   });
 
   test.each(sqlFiles.map((f) => [f.name, f] as const))('%s mentions no flue_ table and no vector index', (_n, f) => {
-    expect(f.text).not.toMatch(/flue_/i);
+    // flue_submission_id (D71) is a run store column that holds Flue's id, not a Flue table.
+    expect(f.text.replaceAll('flue_submission_id', '')).not.toMatch(/flue_/i);
     expect(f.text).not.toMatch(/using\s+hnsw/i);
     expect(f.text).not.toMatch(/ivfflat/i);
   });

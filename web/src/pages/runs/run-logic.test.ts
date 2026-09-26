@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { RunDetail, RunRequest, RunUsageView, TierDecision, UsageTotals } from '../../api/types.ts';
+import { formatDateTime } from '../../lib/format.ts';
+import { runStatusTone } from '../../lib/status.ts';
 import {
   blockedSteps,
   buildStartBody,
@@ -10,9 +12,11 @@ import {
   formFieldOf,
   formatTokenSplit,
   formatUsd,
+  headerStatus,
   inferFailure,
   isLongText,
   joinEntityLabels,
+  listStatus,
   listCost,
   MAX_CONTEXT,
   type NewRunForm,
@@ -25,7 +29,10 @@ import {
   runTitle,
   sinceFor,
   splitLead,
+  STALLED_LOOK,
+  stalledText,
   submissionCost,
+  submissionReportLabel,
   usageLines,
   usageNotes,
 } from './run-logic.ts';
@@ -237,6 +244,90 @@ test('reportVersionLabel', () => {
   expect(reportVersionLabel([s(1, true), s(2, true)])).toBe('Report v2 of 2');
   expect(reportVersionLabel([s(1, true), s(2, false)])).toBe('Report v1 of 2');
   expect(reportVersionLabel([s(1, false)])).toBeUndefined();
+  // A note sent while running joins another submission's reply, so it is not a version of its own.
+  expect(reportVersionLabel([s(1, true), { seq: 2, kind: 'steer', created_at: '', has_report: false }])).toBe('Report v1 of 1');
+});
+
+describe('reports held by a steer (D72)', () => {
+  const s = (seq: number, kind: 'initial' | 'ask' | 'steer', has: boolean) => ({ seq, kind, created_at: '', has_report: has });
+
+  test('a joined steer holds its host reply: the pair is one version', () => {
+    const subs = [s(1, 'initial', true), s(2, 'ask', false), s(3, 'steer', true)];
+    expect(reportVersionLabel(subs)).toBe('Report v2 of 2');
+    expect(reportVersionLabel([s(1, 'initial', false), s(2, 'steer', true)])).toBe('Report v1 of 1');
+  });
+
+  test('a steer that missed the live reply has a report of its own and counts on its own', () => {
+    expect(reportVersionLabel([s(1, 'initial', true), s(2, 'steer', true)])).toBe('Report v2 of 2');
+    expect(reportVersionLabel([s(1, 'initial', true), s(2, 'steer', true), s(3, 'ask', false)])).toBe('Report v2 of 3');
+  });
+
+  test('the version never runs ahead of the count', () => {
+    const cases = [
+      [s(1, 'initial', true), s(2, 'steer', true), s(3, 'steer', true)],
+      [s(1, 'initial', false), s(2, 'steer', false), s(3, 'ask', true), s(4, 'steer', true)],
+      [s(1, 'initial', true), s(2, 'ask', false), s(3, 'steer', false)],
+    ];
+    for (const subs of cases) {
+      const m = /^Report v(\d+) of (\d+)$/.exec(reportVersionLabel(subs) ?? '');
+      expect(m).not.toBeNull();
+      expect(Number(m?.[1])).toBeLessThanOrEqual(Number(m?.[2]));
+    }
+  });
+
+  test('the Request tab points a host at the steer that holds its report', () => {
+    const subs = [s(1, 'initial', true), s(2, 'ask', false), s(3, 'steer', true), s(4, 'steer', false)];
+    expect(subs.map((x) => submissionReportLabel(subs, x.seq))).toEqual(['Yes', 'On #3', 'Yes', 'No']);
+    // A host still running with a joined steer: neither has a report yet.
+    const live = [s(1, 'initial', false), s(2, 'steer', false)];
+    expect(live.map((x) => submissionReportLabel(live, x.seq))).toEqual(['No', 'No']);
+    expect(submissionReportLabel(subs, 9)).toBe('No');
+  });
+});
+
+describe('stalled (D71)', () => {
+  const since = '2026-09-26T10:00:00.000Z';
+  const now = Date.parse(since) + 12 * 60_000 + 30_000;
+
+  test('the header reads stalled with a warning look; the phase or the status otherwise', () => {
+    expect(headerStatus({ status: 'running', phase: 'investigating', stalled: { reason: 'no_owner', since } })).toEqual({ text: 'stalled', look: STALLED_LOOK });
+    expect(STALLED_LOOK).toEqual({ tone: 'amber', icon: 'alert' });
+    expect(headerStatus({ status: 'running', phase: 'investigating' })).toEqual({ text: 'investigating', look: runStatusTone('running') });
+    expect(headerStatus({ status: 'failed', phase: 'failed' })).toEqual({ text: 'failed', look: runStatusTone('failed') });
+    // Stalled only applies while the run is running.
+    expect(headerStatus({ status: 'completed', phase: 'completed', stalled: { reason: 'no_progress', since } }).text).toBe('completed');
+  });
+
+  test('a stalled resume in flight reads resuming, whatever the phase is meanwhile (D72)', () => {
+    const resuming = { text: 'resuming', look: runStatusTone('running') };
+    expect(headerStatus({ status: 'stopped', phase: 'stopped' }, true)).toEqual(resuming);
+    expect(headerStatus({ status: 'running', phase: 'investigating', stalled: { reason: 'no_owner', since } }, true)).toEqual(resuming);
+  });
+
+  test('the runs list tags a stalled row like the header, and the phase otherwise', () => {
+    expect(listStatus({ phase: 'investigating', stalled: { reason: 'no_progress', since } })).toEqual({ text: 'stalled', look: STALLED_LOOK });
+    expect(listStatus({ phase: 'investigating' })).toEqual({ text: 'investigating', look: runStatusTone('running') });
+    expect(listStatus({ phase: 'needs_input' })).toEqual({ text: 'needs_input', look: runStatusTone('running') });
+    expect(listStatus({ phase: 'blocked' })).toEqual({ text: 'blocked', look: runStatusTone('blocked') });
+    expect(listStatus({ phase: 'completed', stalled: { reason: 'no_owner', since } }).text).toBe('completed');
+  });
+
+  test('the notice says why in one line, then what Resume does', () => {
+    const at = formatDateTime(since, new Date(now));
+    expect(stalledText({ reason: 'no_owner', since }, now)).toBe(
+      `No process has held this run since ${at}. Resume stops the current attempt and continues with your note.`,
+    );
+    expect(stalledText({ reason: 'no_progress', since }, now)).toBe(
+      `No activity since ${at} (12 min). Resume stops the current attempt and continues with your note.`,
+    );
+  });
+
+  test('the minutes never read 0, and an unreadable time leaves them out', () => {
+    expect(stalledText({ reason: 'no_progress', since }, Date.parse(since) + 5_000)).toContain('(1 min)');
+    expect(stalledText({ reason: 'no_progress', since: 'soon' }, now)).toBe(
+      'No activity since soon. Resume stops the current attempt and continues with your note.',
+    );
+  });
 });
 
 test('followUpPending waits for the newer submission, then for the run to settle', () => {

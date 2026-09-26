@@ -100,6 +100,8 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'TRIAGE_MAX_BYTES_PER_RUN', type: 'int', group: 'budgets', default: '20971520', min: 1 },
   { name: 'TRIAGE_RUN_TIMEOUT_MS', type: 'int', group: 'budgets', default: '900000', min: 1 },
   { name: 'TRIAGE_RUN_MAX_ATTEMPTS', type: 'int', group: 'budgets', default: '2', min: 1 },
+  // D71: a running run with no event for this long shows as stalled.
+  { name: 'TRIAGE_STALLED_AFTER_MS', type: 'int', group: 'budgets', default: '600000', min: 1000 },
   { name: 'TRIAGE_HTTP_TIMEOUT_MS', type: 'int', group: 'budgets', default: '30000', min: 1 },
   { name: 'TRIAGE_DEFAULT_LOOKBACK_DAYS', type: 'int', group: 'budgets', default: '7', min: 1 },
 

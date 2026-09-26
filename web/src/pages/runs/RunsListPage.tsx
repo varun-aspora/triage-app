@@ -12,9 +12,8 @@ import { Panel } from '../../components/Panel.tsx';
 import { StatusTag } from '../../components/StatusTag.tsx';
 import { CATEGORIES, FEEDBACK_VERDICTS, RUN_STATUSES } from '../../lib/constants.ts';
 import { formatDateTime, shortRunId } from '../../lib/format.ts';
-import { runPhaseTone } from '../../lib/status.ts';
 import { useApi } from '../../lib/useApi.ts';
-import { CREATED_RANGES, DEFAULT_CREATED, isCreatedRange, listCost, sinceFor } from './run-logic.ts';
+import { CREATED_RANGES, DEFAULT_CREATED, isCreatedRange, listCost, listStatus, sinceFor } from './run-logic.ts';
 import './runs.css';
 
 const PAGE_SIZE = 50;
@@ -209,6 +208,7 @@ export default function RunsListPage() {
               <tbody>
                 {data.runs.map((r) => {
                   const cost = listCost(r);
+                  const status = listStatus(r);
                   return (
                     <tr key={r.run_id}>
                       <td>
@@ -218,7 +218,7 @@ export default function RunsListPage() {
                       </td>
                       <td style={{ whiteSpace: 'nowrap', color: 'var(--text-2)' }}>{formatDateTime(r.created_at)}</td>
                       <td>
-                        <StatusTag look={runPhaseTone(r.phase)}>{r.phase}</StatusTag>
+                        <StatusTag look={status.look}>{status.text}</StatusTag>
                       </td>
                       <td className="mono" style={{ fontSize: 13 }}>
                         {r.category ?? <Dash />}

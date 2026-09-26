@@ -333,6 +333,76 @@ export const runStoreContract: readonly ContractCase[] = [
       assert.equal(run.worker_pid, 4242);
       assert.ok(Date.parse(run.updated_at) > Date.parse(run.created_at));
       await assert.rejects(() => store.setPhase(RUN_A, 'nonsense' as never), (err: unknown) => err instanceof RunStoreError);
+      // null clears the pid (D71: a dispatch from a process that is not a worker); setPhaseIf the same.
+      await store.setPhase(RUN_A, 'dispatched', { worker_pid: null });
+      assert.equal((await store.getRun(RUN_A))?.worker_pid, undefined);
+      await store.setPhase(RUN_A, 'investigating', { worker_pid: 4343 });
+      assert.equal(await store.setPhaseIf(RUN_A, ['investigating'], 'dispatched', { worker_pid: null }), true);
+      assert.equal((await store.getRun(RUN_A))?.worker_pid, undefined);
+    },
+  },
+  {
+    name: 'setPhaseIf writes only from a listed phase, and reports whether it wrote',
+    async run(store, clock) {
+      await newRun(store, RUN_A);
+      await store.setPhase(RUN_A, 'investigating', { worker_pid: 4242, reason: 'x' });
+      clock.advance(1000);
+      assert.equal(await store.setPhaseIf(RUN_A, ['dispatched', 'investigating'], 'failed', { reason: 'AgentRunError' }), true);
+      let run = await store.getRun(RUN_A);
+      assert.equal(run?.phase, 'failed');
+      assert.equal(run?.phase_reason, 'AgentRunError');
+      assert.equal(run?.worker_pid, 4242);
+      assert.equal(run?.updated_at, new Date(clock.now()).toISOString());
+
+      // Not a listed phase: nothing is written, updated_at included.
+      clock.advance(1000);
+      assert.equal(await store.setPhaseIf(RUN_A, ['investigating'], 'completed'), false);
+      run = await store.getRun(RUN_A);
+      assert.equal(run?.phase, 'failed');
+      assert.equal(run?.phase_reason, 'AgentRunError');
+      assert.equal(run?.updated_at, new Date(clock.now() - 1000).toISOString());
+
+      // A write with no reason clears it, and a new pid replaces the old one, as setPhase does.
+      assert.equal(await store.setPhaseIf(RUN_A, ['completed', 'failed'], 'investigating', { worker_pid: 5151 }), true);
+      run = await store.getRun(RUN_A);
+      assert.equal(run?.phase, 'investigating');
+      assert.equal(run?.phase_reason, undefined);
+      assert.equal(run?.worker_pid, 5151);
+
+      // A parked run is left alone unless its phase is listed.
+      await store.putInputRequest(RUN_A, p(sampleInputRequest('q1')));
+      assert.equal(await store.setPhaseIf(RUN_A, ['dispatched'], 'investigating'), false);
+      assert.equal((await store.getRun(RUN_A))?.phase, 'needs_input');
+      assert.equal((await store.getRun(RUN_A))?.input_request?.question_id, 'q1');
+
+      // resume is not read: a stopped run is written only when 'stopped' is listed.
+      await newRun(store, RUN_B);
+      await store.setPhase(RUN_B, 'investigating');
+      await store.markStopped(RUN_B, 'cancelled', p(sampleResolution('cancelled')));
+      assert.equal(await store.setPhaseIf(RUN_B, ['investigating', 'completed'], 'dispatched', { resume: true }), false);
+      assert.equal((await store.getRun(RUN_B))?.phase, 'stopped');
+      assert.equal(await store.setPhaseIf(RUN_B, ['stopped'], 'dispatched'), true);
+      assert.equal((await store.getRun(RUN_B))?.phase, 'dispatched');
+
+      const storeError = (err: unknown) => err instanceof RunStoreError && !(err instanceof RunNotFoundError);
+      await assert.rejects(() => store.setPhaseIf(RUN_A, [], 'completed'), storeError);
+      await assert.rejects(() => store.setPhaseIf(RUN_A, ['nonsense' as never], 'completed'), storeError);
+      await assert.rejects(() => store.setPhaseIf(RUN_A, ['investigating'], 'nonsense' as never), storeError);
+      await assert.rejects(() => store.setPhaseIf(RUN_C, ['investigating'], 'completed'), (err: unknown) => err instanceof RunNotFoundError);
+    },
+  },
+  {
+    name: 'setPhaseIf is a compare-and-set: of two racing writes from one phase, one wins',
+    async run(store) {
+      await newRun(store, RUN_A);
+      await store.setPhase(RUN_A, 'investigating');
+      const results = await Promise.all([
+        store.setPhaseIf(RUN_A, ['investigating'], 'completed'),
+        store.setPhaseIf(RUN_A, ['investigating'], 'failed', { reason: 'AgentRunError' }),
+      ]);
+      assert.deepEqual([...results].sort(), [false, true]);
+      const run = await store.getRun(RUN_A);
+      assert.equal(run?.phase, results[0] ? 'completed' : 'failed');
     },
   },
   {
@@ -620,6 +690,43 @@ export const runStoreContract: readonly ContractCase[] = [
       assert.equal(run.submissions[1]?.question_id, 'q2');
       assert.equal(run.submissions[1]?.answer, undefined);
       assert.equal(run.submissions[0]?.report, null);
+    },
+  },
+  {
+    name: 'setSubmissionFlueId records the Flue id on one submission and leaves updated_at alone (D71)',
+    async run(store, clock) {
+      await newRun(store, RUN_A);
+      const s1 = await store.addSubmission(RUN_A, p({ kind: 'initial' as const }));
+      const s2 = await store.addSubmission(RUN_A, p({ kind: 'steer' as const, note: 'check the payout too' }));
+      const before = (await store.getRun(RUN_A))?.updated_at;
+      assert.equal((await store.getRun(RUN_A))?.submissions[0]?.flue_submission_id, undefined);
+
+      clock.advance(5_000);
+      // A ULID holds digit runs the persisted profile would mask; the id is kept as sent.
+      await store.setSubmissionFlueId(RUN_A, s1, 'sub_01K5ZQ3123456789ABCDEFGHJK');
+      await store.setSubmissionFlueId(RUN_A, s2, 'sub_ik_0123456789abcdef0123456789abcdef');
+      let run = await store.getRun(RUN_A);
+      assert.ok(run);
+      assert.equal(run.updated_at, before);
+      assert.equal(run.submissions[0]?.flue_submission_id, 'sub_01K5ZQ3123456789ABCDEFGHJK');
+      assert.equal(run.submissions[1]?.kind, 'steer');
+      assert.equal(run.submissions[1]?.note, 'check the payout too');
+      assert.equal(run.submissions[1]?.flue_submission_id, 'sub_ik_0123456789abcdef0123456789abcdef');
+
+      // A second call replaces the id and touches no other field.
+      await store.setSubmissionFlueId(RUN_A, s1, 'sub-retry');
+      run = await store.getRun(RUN_A);
+      assert.equal(run?.submissions[0]?.flue_submission_id, 'sub-retry');
+      assert.equal(run?.submissions[0]?.kind, 'initial');
+      assert.equal(run?.submissions[0]?.report, null);
+
+      const storeError = (err: unknown) => err instanceof RunStoreError && !(err instanceof RunNotFoundError);
+      await assert.rejects(() => store.setSubmissionFlueId(RUN_A, 9, 'sub_x'), storeError);
+      await assert.rejects(() => store.setSubmissionFlueId(RUN_A, 0, 'sub_x'), storeError);
+      await assert.rejects(() => store.setSubmissionFlueId(RUN_A, s1, 'not an id'), storeError);
+      await assert.rejects(() => store.setSubmissionFlueId(RUN_A, s1, ''), storeError);
+      await assert.rejects(() => store.setSubmissionFlueId(RUN_B, 1, 'sub_x'), (err: unknown) => err instanceof RunNotFoundError);
+      assert.equal((await store.getRun(RUN_A))?.submissions[0]?.flue_submission_id, 'sub-retry');
     },
   },
   {
@@ -933,6 +1040,7 @@ export const runStoreContract: readonly ContractCase[] = [
       await assert.rejects(() => store.putUsage(RUN_A, seq, [sampleUsageRow()], true), notFound);
       await assert.rejects(() => store.putClassification(RUN_A, p(sampleClassification())), notFound);
       await assert.rejects(() => store.setPhase(RUN_A, 'failed'), notFound);
+      await assert.rejects(() => store.setSubmissionFlueId(RUN_A, seq, 'sub_x'), notFound);
 
       assert.equal(await store.getRun(RUN_A), null);
       assert.deepEqual(await store.findSimilar({ vector: [1, 0], model: 'ollama/x' }), []);
@@ -994,6 +1102,45 @@ export const runStoreContract: readonly ContractCase[] = [
         (await store.listRuns({ since: new Date(CONTRACT_EPOCH + 1) })).map((r) => r.run_id),
         [RUN_B],
       );
+    },
+  },
+  {
+    name: 'listRuns gives a working run the stalled check inputs: the latest non-steer and steer Flue ids and the pid (D71)',
+    async run(store, clock) {
+      await newRun(store, RUN_A);
+      const s1 = await store.addSubmission(RUN_A, p({ kind: 'initial' as const }));
+      await store.setSubmissionFlueId(RUN_A, s1, 'sub_host_one');
+      await store.setPhase(RUN_A, 'investigating', { worker_pid: 4242 });
+      let row = (await store.listRuns()).find((r) => r.run_id === RUN_A);
+      assert.equal(row?.flue_submission_id, 'sub_host_one');
+      assert.equal(row?.steer_flue_submission_id, undefined);
+      assert.equal(row?.worker_pid, 4242);
+      assert.equal(row?.stalled, undefined);
+
+      // A steer with a Flue id after the host is given too; one without an id (a failed dispatch) is not.
+      const s2 = await store.addSubmission(RUN_A, p({ kind: 'steer' as const, note: 'check the payout' }));
+      await store.setSubmissionFlueId(RUN_A, s2, 'sub_steer_two');
+      await store.addSubmission(RUN_A, p({ kind: 'steer' as const, note: 'and the ledger' }));
+      row = (await store.listRuns()).find((r) => r.run_id === RUN_A);
+      assert.equal(row?.flue_submission_id, 'sub_host_one');
+      assert.equal(row?.steer_flue_submission_id, 'sub_steer_two');
+
+      // A later non-steer submission without its receipt yet: no head id, and the older steer no longer counts.
+      await store.addSubmission(RUN_A, p({ kind: 'resume' as const }));
+      row = (await store.listRuns()).find((r) => r.run_id === RUN_A);
+      assert.equal(row?.flue_submission_id, undefined);
+      assert.equal(row?.steer_flue_submission_id, undefined);
+      assert.equal(row?.worker_pid, 4242);
+      assert.equal(row?.submissions, 4);
+
+      // Any other phase: none of them.
+      clock.advance(1000);
+      await store.setPhase(RUN_A, 'completed');
+      row = (await store.listRuns()).find((r) => r.run_id === RUN_A);
+      assert.equal(row?.flue_submission_id, undefined);
+      assert.equal(row?.steer_flue_submission_id, undefined);
+      assert.equal(row?.worker_pid, undefined);
+      assert.equal(row?.phase, 'completed');
     },
   },
   {

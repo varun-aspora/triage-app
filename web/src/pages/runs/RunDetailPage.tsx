@@ -2,7 +2,7 @@ import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router';
 import { ApiError } from '../../api/client.ts';
 import { getRun } from '../../api/endpoints.ts';
-import type { RunDetail } from '../../api/types.ts';
+import type { ResumeResponse, RunDetail } from '../../api/types.ts';
 import { Button, LinkButton } from '../../components/Button.tsx';
 import { EmptyState } from '../../components/EmptyState.tsx';
 import { Icon } from '../../components/Icon.tsx';
@@ -22,14 +22,36 @@ import {
   SuggestedFixSection,
   TimelineSection,
 } from './ReportSections.tsx';
-import { blockHistory, openBlock, resumeFrom, shownBlock, submissionKindLabel } from './block-logic.ts';
+import {
+  blockHistory,
+  openBlock,
+  type PendingResume,
+  RESUMING_TEXT,
+  type ResumeFrom,
+  resumeFrom,
+  resumePending,
+  shownBlock,
+  startsResuming,
+  submissionKindLabel,
+} from './block-logic.ts';
 import { BlockHistoryPanel, BlockPanel, ResumeForm, ResumePanel } from './RunBlock.tsx';
 import { AskForm, SlackPostPanel } from './RunForms.tsx';
 import { StepsPanel } from './RunSteps.tsx';
 import { VerdictPanel } from './RunVerdict.tsx';
 import { verdictLabel } from './verdict-logic.ts';
 import { ClassificationPanel, Dash, EvidencePanel, IdChainPanel, KV, PhaseStepper, RequestPanel, RunHeader, UsagePanel } from './RunParts.tsx';
-import { blockedSteps, deriveInvestigators, followUpPending, inferFailure, investigatorLook, permalinkHref, runningSteps, submissionCost } from './run-logic.ts';
+import {
+  blockedSteps,
+  deriveInvestigators,
+  followUpPending,
+  inferFailure,
+  investigatorLook,
+  permalinkHref,
+  runningSteps,
+  stalledText,
+  submissionCost,
+  submissionReportLabel,
+} from './run-logic.ts';
 import './runs.css';
 
 const POLL_MS = 3000;
@@ -43,17 +65,33 @@ export default function RunDetailPage() {
   const [pendingAsk, setPendingAsk] = useState<PendingAsk | null>(null);
   const pendingRef = useRef(pendingAsk);
   pendingRef.current = pendingAsk;
+  // A stalled run's resume (D72): the server answers at once and stops, aborts
+  // and resumes it in the background, so the run reads stopped for a while.
+  const [resuming, setResuming] = useState<PendingResume | null>(null);
+  const resumingRef = useRef(resuming);
+  resumingRef.current = resuming;
 
   const { data, error, loading, reload } = useApi((signal) => getRun(runId, { signal }), [runId], {
     pollMs: POLL_MS,
     pollWhile: (run) => {
       if (run.status === 'running') return true;
+      const r = resumingRef.current;
+      if (r !== null && resumePending(run, r, Date.now())) return true;
       const p = pendingRef.current;
       return p !== null && Date.now() < p.until && followUpPending(run, p.afterSeq);
     },
   });
 
-  useEffect(() => setPendingAsk(null), [runId]);
+  useEffect(() => {
+    setPendingAsk(null);
+    setResuming(null);
+  }, [runId]);
+
+  // Once the resume is through (or the page gave up on it), a later stall shows the Resume form again.
+  const resumingNow = data !== undefined && resuming !== null && resumePending(data, resuming, Date.now());
+  useEffect(() => {
+    if (resuming !== null && data !== undefined && !resumingNow) setResuming(null);
+  }, [data, resuming, resumingNow]);
 
   if (data === undefined) {
     if (error instanceof ApiError && (error.status === 404 || error.status === 400)) {
@@ -90,10 +128,20 @@ export default function RunDetailPage() {
     reload();
   };
 
+  // A stalled run's resume shows as Resuming until the run runs again; any other resume polls like a follow-up.
+  const onResumed = (from: ResumeFrom, res: ResumeResponse) => {
+    if (!startsResuming(from, res)) return onFollowUp();
+    const lastSeq = data.submissions.reduce((m, s) => Math.max(m, s.seq), 0);
+    setResuming({ afterSeq: lastSeq, startedAt: Date.now() });
+    reload();
+  };
+
   // A stored report means a submission already finished, so a running,
   // blocked or failed status here is a follow-up: keep the report and forms in view.
   if (data.report === undefined) {
-    if (data.status === 'running') return <RunningView run={data} refreshError={refreshError} onChanged={reload} />;
+    if (data.status === 'running' || resumingNow) {
+      return <RunningView run={data} refreshError={refreshError} onChanged={reload} onResumed={onResumed} resuming={resumingNow} />;
+    }
     if (data.status === 'blocked') return <BlockedView run={data} refreshError={refreshError} onChanged={reload} onFollowUp={onFollowUp} />;
     if (data.status === 'failed' || data.status === 'stopped') {
       return <FailedView run={data} refreshError={refreshError} onChanged={reload} onFollowUp={onFollowUp} />;
@@ -104,7 +152,9 @@ export default function RunDetailPage() {
       run={data}
       refreshError={refreshError}
       askInFlight={pendingAsk !== null && Date.now() < pendingAsk.until && followUpPending(data, pendingAsk.afterSeq)}
+      resuming={resumingNow}
       onFollowUp={onFollowUp}
+      onResumed={onResumed}
       onFeedback={reload}
     />
   );
@@ -122,14 +172,41 @@ function useNow(ms: number): number {
   return now;
 }
 
-function RunningView({ run, refreshError, onChanged }: { run: RunDetail; refreshError: ReactNode; onChanged: () => void }) {
+function RunningView({
+  run,
+  refreshError,
+  onChanged,
+  onResumed,
+  resuming,
+}: {
+  run: RunDetail;
+  refreshError: ReactNode;
+  onChanged: () => void;
+  onResumed: (from: ResumeFrom, res: ResumeResponse) => void;
+  /** A stalled run's resume is in flight (D72); the run may read stopped meanwhile. */
+  resuming: boolean;
+}) {
   const now = useNow(1000);
   const investigators = deriveInvestigators(run);
+  // A note while it investigates (D72), or Resume once it stalled (D71); nothing before the first dispatch or while it waits on an answer.
+  // While a stalled run's resume is in flight the Resume form stays, disabled, so it cannot be sent twice.
+  const from = resuming ? 'stalled' : resumeFrom(run);
+  const resumePanel = from !== null && (
+    <ResumePanel runId={run.run_id} from={from} onResumed={(res) => onResumed(from, res)} onRefused={onChanged} disabled={resuming} />
+  );
+  const stalled = !resuming && run.stalled !== undefined;
   return (
     <>
-      <RunHeader run={run} extraMeta={<span>Updated {formatRelative(run.updated_at, now)}</span>} />
+      <RunHeader run={run} resuming={resuming} extraMeta={<span>Updated {formatRelative(run.updated_at, now)}</span>} />
       {refreshError}
-      <PhaseStepper steps={runningSteps(run.phase)} />
+      {resuming ? (
+        <Notice variant="info" title="Resuming…">
+          {RESUMING_TEXT}
+        </Notice>
+      ) : (
+        run.stalled !== undefined && <Notice variant="warn">{stalledText(run.stalled, now)}</Notice>
+      )}
+      <PhaseStepper steps={runningSteps(resuming ? 'investigating' : run.phase)} />
       <div className="runs-cols">
         <div className="runs-main">
           <Panel title="Investigators" description="Per-entity agents the Triage agent sent out.">
@@ -149,11 +226,15 @@ function RunningView({ run, refreshError, onChanged }: { run: RunDetail; refresh
               ))
             )}
           </Panel>
+          {/* One slot for both forms, so the confirmation stays when a resumed run stops being stalled. */}
+          {resumePanel}
           <Panel>
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: 8, padding: '24px 0' }}>
               <h2 style={{ fontSize: 16, fontWeight: 600 }}>The report shows here when the run finishes</h2>
               <p className="hint" style={{ margin: 0, maxWidth: 420 }}>
-                This page checks for updates every few seconds. You can leave and come back; the run keeps going.
+                {stalled
+                  ? 'This page checks for updates every few seconds. Nothing is working on the run now, so it only moves on once it is resumed.'
+                  : 'This page checks for updates every few seconds. You can leave and come back; the run keeps going.'}
               </p>
             </div>
           </Panel>
@@ -336,13 +417,18 @@ function CompletedView({
   run,
   refreshError,
   askInFlight,
+  resuming,
   onFollowUp,
+  onResumed,
   onFeedback,
 }: {
   run: RunDetail;
   refreshError: ReactNode;
   askInFlight: boolean;
+  /** A stalled follow-up's resume is in flight (D72); the run may read stopped meanwhile. */
+  resuming: boolean;
   onFollowUp: () => void;
+  onResumed: (from: ResumeFrom, res: ResumeResponse) => void;
   onFeedback: () => void;
 }) {
   const [tab, setTab] = useState<TabId>('report');
@@ -359,12 +445,13 @@ function CompletedView({
   const asks = run.submissions.filter((s) => s.kind === 'ask');
   const reports = run.submissions.filter((s) => s.has_report).length;
   const report = run.report;
-  const from = resumeFrom(run);
+  const from = resuming ? 'stalled' : resumeFrom(run);
   const block = openBlock(run);
 
   const askForm = <AskForm runId={run.run_id} reports={reports} onAsked={onFollowUp} />;
   const feedbackForm = <VerdictPanel run={run} onSaved={onFeedback} />;
-  // A blocked follow-up shows what it waits on with the form; a failed or stopped one gets the form alone.
+  // A blocked follow-up shows what it waits on with the form; a failed, stopped,
+  // stalled or still running one gets the form alone (a note while running, D72).
   let resumePanel: ReactNode = null;
   if (from === 'blocked' && block !== null) {
     resumePanel = (
@@ -373,10 +460,18 @@ function CompletedView({
       </BlockPanel>
     );
   } else if (from !== null) {
-    resumePanel = <ResumePanel runId={run.run_id} from={from} onResumed={onFollowUp} onRefused={onFeedback} />;
+    resumePanel = (
+      <ResumePanel runId={run.run_id} from={from} onResumed={(res) => onResumed(from, res)} onRefused={onFeedback} disabled={resuming} />
+    );
   }
   let askNotice: ReactNode = null;
-  if (run.status === 'blocked') {
+  if (resuming) {
+    askNotice = (
+      <Notice variant="info" title="Resuming…">
+        {RESUMING_TEXT} The report below is from before it.
+      </Notice>
+    );
+  } else if (run.status === 'blocked') {
     askNotice = (
       <Notice variant="warn" title="The follow-up is waiting on a system">
         A system did not answer and the follow-up could not go on. The report below is from before it. Resume it once the system is back.
@@ -395,6 +490,12 @@ function CompletedView({
         again.
       </Notice>
     );
+  } else if (run.status === 'running' && run.stalled !== undefined) {
+    askNotice = (
+      <Notice variant="warn" title="The follow-up is stalled">
+        {stalledText(run.stalled, now)} The report below is from before it.
+      </Notice>
+    );
   } else if (run.status === 'running' || askInFlight) {
     askNotice = (
       <Notice variant="info" title="Follow-up running">
@@ -410,7 +511,7 @@ function CompletedView({
 
   return (
     <>
-      <RunHeader run={run} />
+      <RunHeader run={run} resuming={resuming} />
       {refreshError}
       {askNotice}
       <Tabs
@@ -636,7 +737,7 @@ function RequestTab({ run }: { run: RunDetail }) {
                     <td>{submissionKindLabel(s.kind)}</td>
                     <td style={{ fontSize: 13 }}>{s.question ?? <Dash />}</td>
                     <td style={{ whiteSpace: 'nowrap' }}>{formatDateTime(s.created_at)}</td>
-                    <td>{s.has_report ? 'Yes' : 'No'}</td>
+                    <td>{submissionReportLabel(run.submissions, s.seq)}</td>
                     <td className="num" style={{ whiteSpace: 'nowrap' }}>
                       {submissionCost(run.usage, s.seq)}
                     </td>

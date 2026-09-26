@@ -3,13 +3,15 @@
 // createTriageRoutes(deps) returns a Hono app with:
 //   POST /triage                       -> 202 {run_id} (or {run_id, deduplicated: true})
 //   GET  /triage                       -> {runs: RunSummary[], next_cursor} (filters in run-list.ts);
-//                                          each row has usd_total, tokens_total and usd_partial once usage is stored
+//                                          each row has usd_total, tokens_total and usd_partial once usage is stored,
+//                                          and stalled? while it is running but nobody works on it (D71)
 //   GET  /triage/:run_id               -> {run_id, status, phase, classification, id_chain, report?,
 //                                          created_at, updated_at, requested_by, submissions, feedback,
-//                                          block, block_history, usage, ...}
+//                                          block, block_history, usage, stalled?, ...}
 //   GET  /triage/:run_id/events        -> {events, next, more}; ?after=<next>&limit=<n>, the run's events.jsonl
 //   POST /triage/:run_id/ask           -> 202 {run_id, submission_id}; 409 while the run is blocked
-//   POST /triage/:run_id/resume        -> 202 {run_id, submission_id}; 409 when the run cannot be resumed (D55)
+//   POST /triage/:run_id/resume        -> 202 {run_id, submission_id, mode}; submission_id null for a stalled run (D72);
+//                                          409 when the run cannot be resumed (D55, D72) or a resume of it is starting
 //   POST /triage/:run_id/feedback      -> 200 {run_id, verdict, count}; any time, not only after the report
 //   POST /triage/:run_id/stop          -> 200 {run_id, stopped_from, aborted, feedback_count, gaps}; 409 when finished
 //   POST /triage/:run_id/post-to-slack -> 403, or 501 when enabled (v1)
@@ -26,10 +28,34 @@
 //
 // A follow-up (ask) and a resume answer 202 as soon as Flue accepts the
 // message, with Flue's submission id. A resume is refused with 409 unless the
-// run is blocked, failed after it was dispatched, or stopped: the same rule
-// resumeRun applies, checked here first so nothing starts for a refusal. It
-// is also 409 when resumeRun finds the SSFB tunnel down in local mode (D56);
-// the hint carries the fix.
+// run is blocked, failed or stopped after it was dispatched, or still working
+// after it was dispatched: the same rule resumeRun applies, checked here
+// first so nothing starts for a refusal. A working run is steered with the
+// message, or stopped and resumed when it stalled (D72); the answer's mode
+// says which ('steer' or 'resume'). A working run that is not stalled is 409
+// without a message, since there is nothing to steer with. A resume is also
+// 409 when resumeRun finds the SSFB tunnel down in local mode (D56); the hint
+// carries the fix.
+//
+// The resume of a stalled run answers at once, with submission_id null and
+// mode 'resume': as soon as resumeRun has passed its own checks (the stalled
+// signal and the tunnel) and chosen to resume, before the stop. The stop, the
+// Flue abort, the wait of up to STALLED_ABORT_WAIT_MS for the old submission
+// to settle and the resume's dispatch then run on in the background, on the
+// same instance (the run id) and the same conversation; a failure there is
+// reported like any background run's. When resumeRun finds the run live again
+// and steers it instead, the answer waits for the steer's dispatch as usual.
+//
+// One resume at a time per run, in this process: from the request that
+// starts one until its dispatch (or its failure), a second resume of the same
+// run is 409 with RESUME_HINTS.in_progress. A stalled resume holds it through
+// the stop and the wait, while the run shows stopped, so a second press of
+// Resume does not resume that stopped run a second time. Across processes
+// (another server, or `triage resume`) resumeRefusal gives the same 409 while
+// the run's stalled stop is in flight (stalledStopInFlight in submit.ts). A
+// stalled resume that fails after its stop and before its dispatch leaves the
+// run failed with the D67 reason, as the CLI worker does, so it is resumable
+// again at once.
 //
 // GET /triage/:run_id passes the whole answer through one more
 // persisted-profile redaction, even though the store holds redacted text only.
@@ -39,9 +65,15 @@
 // live while the run is running and its worker is alive, and incomplete once
 // a run that stopped running, or whose worker died, left a submission without
 // its final count. The worker check is deps.isAlive; without it the status
-// alone decides.
+// alone decides. stalled (D71) is set while the run is dispatched or
+// investigating but nobody works on it (src/ingress/stalled.ts); the status
+// stays running. It holds a reason and a timestamp only, so it is added after
+// the redaction too.
 // GET /triage is not redacted: a RunSummary holds ids, enums, counts,
-// totals and timestamps, no free text.
+// totals and timestamps, no free text. Its working rows get stalled the same
+// way, from the Flue ids and worker pid listRuns returns for them, which the
+// answer then leaves out (withStalled in run-list.ts). deps.stalled takes a
+// full record, so the list does not use it; it reads this process's leases.
 //
 // post-to-slack never calls Slack and never reads the body, so a caller's
 // approved_by has no effect. A bearer holder asserting approval is not an
@@ -55,26 +87,31 @@ import { FeedbackError, recordFeedback as defaultRecordFeedback, type FeedbackDe
 import { EVIDENCE_KEYS, RunNotFoundError, type RunRecord, type RunStore } from '../../runstore/types.ts';
 import { RunIdSchema, type KnownIds, type RunId } from '../../types/core.ts';
 import type { RequestHints, RequestSource, ThreadMessage, TriageRequest } from '../../types/request.ts';
+import type { Stalled } from '../../types/stalled.ts';
 import { summariseUsage } from '../../usage/summary.ts';
 import { CONTEXT_AUTHOR, IngressInputError, NoEnabledEntityError, type InputHints } from '../normalise.ts';
 import { MAX_THREAD_FILE_BYTES, type PrepareInput, type PreparedSubmission } from '../prepare.ts';
 import { SlackFetchError } from '../slack.ts';
 import { SlackPermalinkError } from '../slack-url.ts';
+import { DEFAULT_STALLED_AFTER_MS, loadStalled, loadStalledSubject, oncePerPid, STALLABLE_PHASES, type StalledDeps } from '../stalled.ts';
 import { RunNotRunningError, stopRun } from '../stop.ts';
 import {
   askRun,
   className,
+  recordStalledResumeFailed,
   resumeRefusal,
   resumeRun,
+  RESUME_HINTS,
   RunNotResumableError,
   type Dispatcher,
   type ResumeInput,
+  type ResumeMode,
   type SettleDeps,
   type SubmissionResult,
 } from '../submit.ts';
 import { findingRefs } from '../../report/finding-refs.ts';
 import { readRunEvents } from '../../runlog/read.ts';
-import { filterRuns, parseListQuery, statusOfPhase, storeQuery } from './run-list.ts';
+import { filterRuns, parseListQuery, statusOfPhase, storeQuery, withStalled } from './run-list.ts';
 import {
   AskBodySchema,
   checkIdempotencyKey,
@@ -101,6 +138,9 @@ export type AskStart = {
   readonly settled: Promise<unknown>;
 };
 
+/** A resume that has been started (D72): mode resolves once resumeRun has chosen to steer or resume, before the dispatch. */
+export type ResumeStart = AskStart & { readonly mode?: Promise<ResumeMode> };
+
 /** What ran in the background when a failure is reported. */
 export type BackgroundWork = 'submission' | 'ask' | 'resume';
 
@@ -112,8 +152,8 @@ export type TriageRouteDeps = {
   readonly submit: (prepared: PreparedSubmission) => Promise<unknown>;
   /** Starts a follow-up. startAsk() builds one from SettleDeps. */
   readonly ask: (runId: RunId, question: string, by: string) => AskStart;
-  /** Sends a blocked, failed or stopped run on (D55). startResume() builds one from SettleDeps. */
-  readonly resume: (runId: RunId, input: ResumeInput) => AskStart;
+  /** Sends a blocked, failed or stopped run on (D55), or steers a working one (D72). startResume() builds one from SettleDeps. */
+  readonly resume: (runId: RunId, input: ResumeInput) => ResumeStart;
   /** TRIAGE_HOME, for the feedback eval draft. */
   readonly home: string;
   /** TRIAGE_HTTP_ALLOW_SLACK_POST. */
@@ -130,6 +170,13 @@ export type TriageRouteDeps = {
   readonly onBackgroundError?: (runId: string, what: BackgroundWork, err: unknown) => void;
   /** True when a process with this pid exists: the CLI's pidAlive. Left out: every worker counts as alive. */
   readonly isAlive?: (pid: number) => boolean;
+  /** TRIAGE_STALLED_AFTER_MS (D71). Left out: the key's default. */
+  readonly stalledAfterMs?: number;
+  /**
+   * The run's stalled signal (D71). Defaults to loadStalled with
+   * stalledAfterMs, runsDir, isAlive and this process's Flue leases.
+   */
+  readonly stalled?: (run: RunRecord) => Promise<Stalled | null>;
 };
 
 export type TriageRouteDepsSource = TriageRouteDeps | (() => TriageRouteDeps | Promise<TriageRouteDeps>);
@@ -137,6 +184,8 @@ export type TriageRouteDepsSource = TriageRouteDeps | (() => TriageRouteDeps | P
 export function createTriageRoutes(source: TriageRouteDepsSource): Hono {
   const load = memoise(source);
   const app = new Hono();
+  // Runs with a resume between its request and its dispatch (D72).
+  const resuming = new Set<RunId>();
   const limit = bodyLimit({
     maxSize: MAX_THREAD_FILE_BYTES,
     onError: (c) => c.json({ error: 'body too large' }, 413),
@@ -185,7 +234,9 @@ export function createTriageRoutes(source: TriageRouteDepsSource): Hono {
     // volumes are small, so this costs little; push the filters into the store
     // if Postgres volumes grow.
     const rows = await deps.store.listRuns(storeQuery(parsed.value));
-    return c.json(filterRuns(rows, parsed.value));
+    // stalled (D71) is read for the page's working rows only, side by side.
+    const isAlive = deps.isAlive !== undefined ? oncePerPid(deps.isAlive) : undefined;
+    return c.json(await withStalled(filterRuns(rows, parsed.value), (row) => loadStalledSubject(row, stalledDeps(deps, isAlive))));
   });
 
   app.get('/triage/:run_id', async (c) => {
@@ -194,7 +245,9 @@ export function createTriageRoutes(source: TriageRouteDepsSource): Hono {
     const deps = await load();
     const run = await deps.store.getRun(runId);
     if (run === null) return notFound(c);
-    return c.json(runView(run, deps.isAlive));
+    // The usage view and the stalled check ask about the same worker pid; it is checked once.
+    const isAlive = deps.isAlive !== undefined ? oncePerPid(deps.isAlive) : undefined;
+    return c.json(runView(run, isAlive, await stalledFor(deps, run, isAlive)));
   });
 
   app.get('/triage/:run_id/events', async (c) => {
@@ -252,13 +305,45 @@ export function createTriageRoutes(source: TriageRouteDepsSource): Hono {
     const deps = await load();
     const run = await deps.store.getRun(runId);
     if (run === null) return notFound(c);
-    // The check resumeRun makes, made here first so a refusal starts nothing.
-    const refusal = resumeRefusal(run);
-    if (refusal !== null) return notResumable(c, refusal);
-
     const note = parsed.value.note;
-    const started = deps.resume(runId, { by: parsed.value.requested_by, ...(note !== undefined && note !== '' ? { note } : {}) });
-    const first = await firstOf(started);
+    const hasNote = note !== undefined && note !== '';
+    // The check resumeRun makes, made here first so a refusal starts nothing.
+    // A working run with no message is refused unless it stalled (D72).
+    const stalled = STALLABLE_PHASES.includes(run.phase) ? await stalledFor(deps, run, deps.isAlive) : null;
+    const refusal = resumeRefusal(run, { ...(hasNote ? { note } : {}), stalled });
+    if (refusal !== null) return notResumable(c, refusal);
+    // Checked and claimed with no await between, after the reads above.
+    if (resuming.has(runId)) return notResumable(c, new RunNotResumableError(runId, run.phase, RESUME_HINTS.in_progress));
+    resuming.add(runId);
+
+    let started: ResumeStart;
+    try {
+      started = deps.resume(runId, { by: parsed.value.requested_by, ...(hasNote ? { note } : {}) });
+    } catch (err) {
+      resuming.delete(runId);
+      throw err;
+    }
+    // Held until the resume has dispatched or failed. firstOf never rejects.
+    void firstOf(started).then(() => {
+      resuming.delete(runId);
+    });
+    // Still running: report a later failure, never leave it unhandled.
+    const inBackground = (): void => {
+      started.settled.catch((err: unknown) => backgroundError(deps, runId, 'resume', err));
+    };
+
+    const early = stalled !== null ? await firstOrMode(started) : await firstOf(started);
+    // A stalled run: answered once resumeRun chose to resume it, before the stop (D72).
+    if (early.kind === 'mode' && early.mode === 'resume') {
+      // A failure after the stop and before the dispatch leaves the run failed, not stopped as stalled.
+      started.settled.catch(async (err: unknown) => {
+        await recordStalledResumeFailed(deps.store, runId, err);
+        backgroundError(deps, runId, 'resume', err);
+      });
+      return c.json({ run_id: runId, submission_id: null, mode: 'resume' }, 202);
+    }
+    // Live again after all: the steer's dispatch gives the submission id.
+    const first = early.kind === 'mode' ? await firstOf(started) : early;
     if (first.kind === 'error') {
       if (first.err instanceof RunNotFoundError) return notFound(c);
       // The run moved on between the check above and the resume.
@@ -266,8 +351,8 @@ export function createTriageRoutes(source: TriageRouteDepsSource): Hono {
       if (first.err instanceof IngressInputError) return invalid(c, [first.err.key === 'by' ? 'requested_by' : first.err.key], first.err.reason);
       throw first.err;
     }
-    started.settled.catch((err: unknown) => backgroundError(deps, runId, 'resume', err));
-    return c.json({ run_id: runId, submission_id: submissionIdOf(first) }, 202);
+    inBackground();
+    return c.json({ run_id: runId, submission_id: submissionIdOf(first), mode: await modeOf(started, first) }, 202);
   });
 
   app.post('/triage/:run_id/feedback', limit, async (c) => {
@@ -345,10 +430,21 @@ export function startAsk(
   return { dispatched: tracked.dispatched, settled: ask(runId, question, by, tracked.deps) };
 }
 
-/** The same for resumeRun (D55): `dispatched` resolves once Flue accepts the resume signal. */
-export function startResume(runId: RunId, input: ResumeInput, deps: SettleDeps, resume: typeof resumeRun = resumeRun): AskStart {
+/**
+ * The same for resumeRun (D55): `dispatched` resolves once Flue accepts the
+ * resume signal or the steer, and `mode` once resumeRun has chosen which (D72).
+ */
+export function startResume(runId: RunId, input: ResumeInput, deps: SettleDeps, resume: typeof resumeRun = resumeRun): ResumeStart {
   const tracked = trackDispatch(deps);
-  return { dispatched: tracked.dispatched, settled: resume(runId, input, tracked.deps) };
+  let resolveMode!: (mode: ResumeMode) => void;
+  const mode = new Promise<ResumeMode>((resolve) => {
+    resolveMode = resolve;
+  });
+  const onResumeMode = (m: ResumeMode): void => {
+    resolveMode(m);
+    deps.onResumeMode?.(m);
+  };
+  return { dispatched: tracked.dispatched, mode, settled: resume(runId, input, { ...tracked.deps, onResumeMode }) };
 }
 
 /** Wraps the dispatcher so the first dispatch receipt resolves `dispatched`. */
@@ -375,12 +471,28 @@ function trackDispatch(deps: SettleDeps): { readonly deps: SettleDeps; readonly 
   return { deps: { ...deps, dispatcher }, dispatched };
 }
 
+/** The run's stalled signal from deps.stalled, or loadStalled over the route deps. */
+function stalledFor(deps: TriageRouteDeps, run: RunRecord, isAlive: ((pid: number) => boolean) | undefined): Promise<Stalled | null> {
+  if (deps.stalled !== undefined) return deps.stalled(run).catch(() => null);
+  return loadStalled(run, stalledDeps(deps, isAlive));
+}
+
+/** loadStalled's deps from the route deps: the configured wait, the runs dir and the pid check. */
+function stalledDeps(deps: TriageRouteDeps, isAlive: ((pid: number) => boolean) | undefined): StalledDeps {
+  return {
+    stalledAfterMs: deps.stalledAfterMs ?? DEFAULT_STALLED_AFTER_MS,
+    ...(deps.runsDir !== undefined ? { runsDir: deps.runsDir } : {}),
+    ...(isAlive !== undefined ? { isAlive } : {}),
+  };
+}
+
 /**
- * The GET answer. Everything but the run id and usage goes through the
- * persisted profile again. isAlive checks the run's worker pid, so a running
- * run whose worker died shows its open usage as incomplete, not live.
+ * The GET answer. Everything but the run id, usage and stalled goes through
+ * the persisted profile again. isAlive checks the run's worker pid, so a
+ * running run whose worker died shows its open usage as incomplete, not live.
+ * stalled (D71) is the caller's, from loadStalled; the view reads nothing.
  */
-export function runView(run: RunRecord, isAlive?: (pid: number) => boolean): Record<string, unknown> {
+export function runView(run: RunRecord, isAlive?: (pid: number) => boolean, stalled?: Stalled | null): Record<string, unknown> {
   // Optional access throughout: older or partial records (and test fixtures)
   // may lack parts of the request or classification.
   const request = run.request as Partial<TriageRequest> | undefined;
@@ -442,7 +554,7 @@ export function runView(run: RunRecord, isAlive?: (pid: number) => boolean): Rec
   // A run with no recorded pid is still running as far as anyone can tell.
   const running = status === 'running' && (run.worker_pid === undefined || isAlive === undefined || isAlive(run.worker_pid));
   const usage = summariseUsage(run.usage ?? [], { running });
-  return { run_id: run.run_id, ...redactPersisted(view).value, usage };
+  return { run_id: run.run_id, ...redactPersisted(view).value, usage, ...(stalled !== undefined && stalled !== null ? { stalled } : {}) };
 }
 
 /** One thread message in the run view. at is present only when the stored ts still parses (the persisted profile masks Slack ts digits). */
@@ -570,6 +682,31 @@ function firstOf(started: AskStart): Promise<First> {
       (err: unknown): First => ({ kind: 'error', err }),
     ),
   ]);
+}
+
+/**
+ * For a stalled run (D72): the mode resumeRun chose, or the dispatch or the
+ * result when either comes first (a deps.resume that tells no mode).
+ */
+function firstOrMode(started: ResumeStart): Promise<First | { readonly kind: 'mode'; readonly mode: ResumeMode }> {
+  const first = firstOf(started);
+  if (started.mode === undefined) return first;
+  return Promise.race([started.mode.then((mode) => ({ kind: 'mode' as const, mode })), first]);
+}
+
+/**
+ * The resume's mode (D72): from the result when the reply came first, else
+ * from started.mode, which resumeRun settles before it dispatches. A deps.resume
+ * that tells no mode answers 'resume'.
+ */
+async function modeOf(started: ResumeStart, first: Exclude<First, { kind: 'error' }>): Promise<ResumeMode> {
+  if (first.kind === 'settled') {
+    const mode = (first.value as Partial<SubmissionResult> | null)?.mode;
+    if (mode === 'steer' || mode === 'resume') return mode;
+  }
+  // Already settled by the time Flue accepted the message; the second entry only keeps a missing one from hanging.
+  const told = started.mode === undefined ? undefined : await Promise.race([started.mode, Promise.resolve(undefined)]);
+  return told ?? 'resume';
 }
 
 const NOT_JSON = Symbol('not json');

@@ -4,7 +4,7 @@
 // real .env is read, no worker process is started and nothing reaches the
 // network.
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -16,7 +16,7 @@ import { redactPersisted } from '../../gate/redact.ts';
 import { WorkerSpawnError } from '../../ingress/detach.ts';
 import { prepareDeps, prepareRequest, type PrepareInput, type PreparedSubmission } from '../../ingress/prepare.ts';
 import { SlackFetchError, THREAD_FILE_HINT } from '../../ingress/slack.ts';
-import { ResumeNotReadyError, RunNotResumableError, type AnswerInput, type SubmissionResult } from '../../ingress/submit.ts';
+import { RESUME_HINTS, ResumeNotReadyError, RunNotResumableError, type AnswerInput, type SubmissionResult } from '../../ingress/submit.ts';
 import type { WorkerPayload } from '../../ingress/worker-payload.ts';
 import { sampleBlock, sampleClassification, sampleInputRequest, sampleReport, SYNTHETIC_PHONE } from '../../runstore/contract.ts';
 import { createRunStore } from '../../runstore/index.ts';
@@ -491,14 +491,15 @@ describe('worker', () => {
         throw new Error('runSubmission must not be called');
       },
       askRun: async (...args) => {
-        calls.push(args.slice(0, 3));
+        // Every payload hands the pid to the dispatch (D71).
+        calls.push([...args.slice(0, 3), args[3].workerPid]);
         return { run_id: RUN_ID, status: 'failed', submission_seq: 2, submission_id: 's2', error: 'AgentRunError', gaps: [] };
       },
     });
     const stdin = Readable.from([JSON.stringify({ kind: 'ask', run_id: RUN_ID, question: 'did the retry go out?', by: 'ops-reviewer' })]);
     const r = await cli([worker], ['__worker', RUN_ID], { config: () => h.config, stdin });
     expect(r.code).toBe(EXIT.ERROR);
-    expect(calls).toEqual([[RUN_ID, 'did the retry go out?', 'ops-reviewer']]);
+    expect(calls).toEqual([[RUN_ID, 'did the retry go out?', 'ops-reviewer', 888]]);
     expect((await (await createRunStore(h.config)).getRun(RUN_ID))?.worker_pid).toBe(888);
   });
 
@@ -534,7 +535,6 @@ describe('worker', () => {
 
   test('a resume payload on a run that cannot be resumed is refused before its pid is written; one that lost the race leaves the run alone', async () => {
     const h = home();
-    await seed(h, { phase: 'investigating', pid: 4242 });
     let resumed = 0;
     const worker = createWorkerCommand({
       boot: async () => undefined,
@@ -542,27 +542,211 @@ describe('worker', () => {
       pid: () => 1313,
       resumeRun: async () => {
         resumed++;
-        throw new RunNotResumableError(RUN_ID, 'investigating', 'the run is still working; follow it with triage wait');
+        throw new RunNotResumableError(RUN_ID, 'blocked', 'the run was sent on by another resume');
       },
     });
     const payload = JSON.stringify({ kind: 'resume', run_id: RUN_ID, by: 'ops-reviewer' });
-    const busy = await cli([worker], ['__worker', RUN_ID], { config: () => h.config, stdin: Readable.from([payload]) });
-    expect(busy.code).toBe(EXIT.ERROR);
-    expect(busy.err).toContain('cannot be resumed');
+    const run = async () => cli([worker], ['__worker', RUN_ID], { config: () => h.config, stdin: Readable.from([payload]) });
+
+    // A question, a finished run and a run with no submission are refused here, with nothing written.
+    const store = await seed(h, { phase: 'needs_input', pid: 4242 });
+    for (const phase of ['needs_input', 'completed'] as const) {
+      await store.setPhase(RUN_ID, phase);
+      const refused = await run();
+      expect([phase, refused.code]).toEqual([phase, EXIT.ERROR]);
+      expect(refused.err).toContain('cannot be resumed');
+      expect((await store.getRun(RUN_ID))?.phase).toBe(phase);
+    }
+    await store.createRun(OTHER_RUN, redactPersisted((await store.getRun(RUN_ID))!.request as never));
+    await store.setPhase(OTHER_RUN, 'failed', { reason: 'PreflightError' });
+    const never = await cli([worker], ['__worker', OTHER_RUN], {
+      config: () => h.config,
+      stdin: Readable.from([JSON.stringify({ kind: 'resume', run_id: OTHER_RUN, by: 'ops-reviewer' })]),
+    });
+    expect(never.code).toBe(EXIT.ERROR);
+    expect(never.err).toContain('never started an investigation');
     expect(resumed).toBe(0);
-    const store = await createRunStore(h.config);
     expect((await store.getRun(RUN_ID))?.worker_pid).toBe(4242);
+    expect((await store.getRun(OTHER_RUN))?.worker_pid).toBeUndefined();
 
     // The check passed (the run was blocked) but resumeRun found it sent on by another resume.
+    await store.setPhase(RUN_ID, 'investigating');
     await store.putBlock(RUN_ID, redactPersisted(sampleBlock('b1')));
-    const lost = await cli([worker], ['__worker', RUN_ID], { config: () => h.config, stdin: Readable.from([payload]) });
+    const lost = await run();
     expect(lost.code).toBe(EXIT.ERROR);
     expect(lost.err).toContain('cannot be resumed');
     expect(resumed).toBe(1);
+    const after = await store.getRun(RUN_ID);
+    expect(after?.phase).toBe('blocked');
+    expect(after?.phase_reason).toBeUndefined();
+    expect(after?.block?.block_id).toBe('b1');
+  });
+
+  test('a resume payload on a working run (D72) writes no pid or phase before resumeRun, and hands it the pid for the dispatch', async () => {
+    const h = home();
+    for (const phase of ['dispatched', 'investigating'] as const) {
+      const store = await seed(h, { phase, pid: 4242 });
+      const seen: unknown[] = [];
+      const worker = createWorkerCommand({
+        boot: async () => undefined,
+        deps: () => ({}) as never,
+        pid: () => 1616,
+        resumeRun: async (_id, input, deps) => {
+          const run = await store.getRun(RUN_ID);
+          seen.push([run?.phase, run?.worker_pid, deps.workerPid, typeof deps.onResumeMode, input]);
+          return { run_id: RUN_ID, status: 'completed', submission_seq: 2, submission_id: 's2', gaps: [], mode: 'steer', joined: true };
+        },
+      });
+      const stdin = Readable.from([JSON.stringify({ kind: 'resume', run_id: RUN_ID, note: 'look at the bank reply', by: 'ops-reviewer' })]);
+      const r = await cli([worker], ['__worker', RUN_ID], { config: () => h.config, stdin });
+      expect(r.code).toBe(EXIT.OK);
+      expect(seen).toEqual([[phase, 4242, 1616, 'function', { by: 'ops-reviewer', note: 'look at the bank reply' }]]);
+      expect((await store.getRun(RUN_ID))?.worker_pid).toBe(4242);
+    }
+  });
+
+  test('a steer that throws (D72) leaves the working run as it is: not failed, the pid kept', async () => {
+    const h = home();
+    const store = await seed(h, { phase: 'investigating', pid: 4242 });
+    const worker = createWorkerCommand({
+      boot: async () => undefined,
+      deps: () => ({}) as never,
+      pid: () => 1717,
+      resumeRun: async (_id, _input, deps) => {
+        deps.onResumeMode?.('steer');
+        throw new Error('queue closed');
+      },
+    });
+    const stdin = Readable.from([JSON.stringify({ kind: 'resume', run_id: RUN_ID, note: 'look', by: 'ops-reviewer' })]);
+    const r = await cli([worker], ['__worker', RUN_ID], { config: () => h.config, stdin });
+    expect(r.code).toBe(EXIT.ERROR);
+    expect(r.err).toContain('queue closed');
     const run = await store.getRun(RUN_ID);
-    expect(run?.phase).toBe('blocked');
+    expect(run?.phase).toBe('investigating');
     expect(run?.phase_reason).toBeUndefined();
-    expect(run?.block?.block_id).toBe('b1');
+    expect(run?.worker_pid).toBe(4242);
+
+    // A runtime that fails to start before resumeRun chose a mode leaves it too: someone else works on it.
+    const noBoot = createWorkerCommand({
+      boot: async () => {
+        throw new Error('no runtime');
+      },
+      pid: () => 1818,
+    });
+    const again = await cli([noBoot], ['__worker', RUN_ID], {
+      config: () => h.config,
+      stdin: Readable.from([JSON.stringify({ kind: 'resume', run_id: RUN_ID, note: 'look', by: 'ops-reviewer' })]),
+    });
+    expect(again.code).toBe(EXIT.ERROR);
+    expect((await store.getRun(RUN_ID))?.phase).toBe('investigating');
+  });
+
+  test('a stalled resume that fails after its own stop (D72) marks the run failed from stopped', async () => {
+    const h = home();
+    const store = await seed(h, { phase: 'investigating', pid: 4242 });
+    const worker = createWorkerCommand({
+      boot: async () => undefined,
+      deps: () => ({}) as never,
+      pid: () => 1919,
+      resumeRun: async (_id, _input, deps) => {
+        deps.onResumeMode?.('resume');
+        await store.setPhaseIf(RUN_ID, ['investigating'], 'stopped', { reason: 'stalled' });
+        throw new Error('store went away');
+      },
+    });
+    const stdin = Readable.from([JSON.stringify({ kind: 'resume', run_id: RUN_ID, by: 'ops-reviewer' })]);
+    const r = await cli([worker], ['__worker', RUN_ID], { config: () => h.config, stdin });
+    expect(r.code).toBe(EXIT.ERROR);
+    const run = await store.getRun(RUN_ID);
+    expect(run?.phase).toBe('failed');
+    expect(run?.phase_reason).toBe('Error: store went away');
+  });
+
+  test('a resume payload on a run another resume stopped as stalled a moment ago (D72) is refused as in progress, and writes nothing', async () => {
+    const h = home();
+    const store = await seed(h, { phase: 'investigating', pid: 4242 });
+    // The other resume, in another process, stopped it and is waiting for the old submission.
+    await store.setPhaseIf(RUN_ID, ['investigating'], 'stopped', { reason: 'stalled' });
+    const before = await store.getRun(RUN_ID);
+    let resumed = 0;
+    const worker = createWorkerCommand({
+      boot: async () => undefined,
+      deps: () => ({}) as never,
+      pid: () => 2222,
+      resumeRun: async () => {
+        resumed += 1;
+        return { run_id: RUN_ID, status: 'completed', submission_seq: 2, submission_id: 's2', gaps: [] };
+      },
+    });
+    const stdin = Readable.from([JSON.stringify({ kind: 'resume', run_id: RUN_ID, by: 'ops-reviewer' })]);
+    const r = await cli([worker], ['__worker', RUN_ID], { config: () => h.config, stdin });
+    expect(r.code).toBe(EXIT.ERROR);
+    expect(r.err).toContain(RESUME_HINTS.in_progress);
+    expect(resumed).toBe(0);
+    const after = await store.getRun(RUN_ID);
+    expect([after?.phase, after?.phase_reason, after?.worker_pid, after?.updated_at]).toEqual(['stopped', 'stalled', 4242, before?.updated_at]);
+  });
+
+  test('a resume payload on a run left stopped as stalled keeps its updated_at, so its own resume is not taken for a stop in flight', async () => {
+    const h = home();
+    const store = await seed(h, { phase: 'investigating', pid: 4242 });
+    await store.setPhaseIf(RUN_ID, ['investigating'], 'stopped', { reason: 'stalled' });
+    await new Promise((r) => setTimeout(r, 5));
+    // The earlier resume added its submission and then died.
+    await store.addSubmission(RUN_ID, redactPersisted({ kind: 'resume' as const }));
+    const before = await store.getRun(RUN_ID);
+    const seen: unknown[] = [];
+    const worker = createWorkerCommand({
+      boot: async () => undefined,
+      deps: () => ({}) as never,
+      pid: () => 2323,
+      resumeRun: async (_id, _input, deps) => {
+        const run = await store.getRun(RUN_ID);
+        seen.push([run?.updated_at === before?.updated_at, run?.worker_pid, deps.workerPid]);
+        return { run_id: RUN_ID, status: 'completed', submission_seq: 3, submission_id: 's3', gaps: [] };
+      },
+    });
+    const stdin = Readable.from([JSON.stringify({ kind: 'resume', run_id: RUN_ID, by: 'ops-reviewer' })]);
+    const r = await cli([worker], ['__worker', RUN_ID], { config: () => h.config, stdin });
+    expect(r.code).toBe(EXIT.OK);
+    expect(seen).toEqual([[true, 4242, 2323]]);
+  });
+
+  test('a resume payload on a parked run records the pid on the phase as read, and never over a phase that moved', async () => {
+    const h = home();
+    const store = await seed(h, { phase: 'stopped', reason: 'cancelled', pid: 4242 });
+    const worker = createWorkerCommand({
+      boot: async () => undefined,
+      deps: () => ({}) as never,
+      pid: () => 2020,
+      resumeRun: async () => ({ run_id: RUN_ID, status: 'completed', submission_seq: 2, submission_id: 's2', gaps: [] }),
+    });
+    const payload = JSON.stringify({ kind: 'resume', run_id: RUN_ID, by: 'ops-reviewer' });
+    expect((await cli([worker], ['__worker', RUN_ID], { config: () => h.config, stdin: Readable.from([payload]) })).code).toBe(EXIT.OK);
+    const run = await store.getRun(RUN_ID);
+    expect([run?.phase, run?.phase_reason, run?.worker_pid]).toEqual(['stopped', 'cancelled', 2020]);
+
+    // Between the worker's read and its write the run moved on (another resume): the pid write is skipped.
+    const moving: RunStore = new Proxy(store, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop, target) as unknown;
+        if (prop !== 'setPhaseIf' || typeof value !== 'function') return typeof value === 'function' ? value.bind(target) : value;
+        return async (...args: Parameters<RunStore['setPhaseIf']>) => {
+          await target.setPhase(RUN_ID, 'dispatched', { resume: true });
+          return target.setPhaseIf(...args);
+        };
+      },
+    });
+    const racing = createWorkerCommand({
+      openStore: async () => moving,
+      boot: async () => undefined,
+      deps: () => ({}) as never,
+      pid: () => 2121,
+      resumeRun: async () => ({ run_id: RUN_ID, status: 'completed', submission_seq: 3, submission_id: 's3', gaps: [] }),
+    });
+    expect((await cli([racing], ['__worker', RUN_ID], { config: () => h.config, stdin: Readable.from([payload]) })).code).toBe(EXIT.OK);
+    const moved = await store.getRun(RUN_ID);
+    expect([moved?.phase, moved?.worker_pid]).toEqual(['dispatched', 2020]);
   });
 
   test('a resume refused because the SSFB tunnel is down leaves the run parked and says how to fix it', async () => {
@@ -818,7 +1002,10 @@ describe('status', () => {
       tier_final: 'strong',
       submissions: 1,
       preflight_warnings: [{ entity: 'ssfb', step: 'tunnel', message: 'tunnel was down' }],
+      // D71: the same run as seen by the stalled check; the log is empty, so since is the run's updated_at.
+      stalled: { reason: 'no_owner', since: (await (await createRunStore(h.config)).getRun(RUN_ID))?.updated_at },
     });
+    // status and the stalled check share one pid check.
     expect(checked).toEqual([4242]);
 
     const alive = await cli([createStatusCommand({ isAlive: () => true })], ['status', RUN_ID, '--json'], { config: () => h.config });
@@ -874,6 +1061,86 @@ describe('status', () => {
     const doc = jsonLine(r.out);
     expect(v.is(StatusOutputSchema, doc)).toBe(true);
     expect(doc).toMatchObject({ status: 'running', tier_final: null, submissions: 0, preflight_warnings: [] });
+  });
+
+  test('stalled no_progress (D71): a quiet events.jsonl, status stays running, in --json and the human form', async () => {
+    const h = home();
+    await seed(h, { phase: 'investigating' });
+    const quiet = '2026-09-26T10:00:00.000Z';
+    mkdirSync(join(h.config.paths.runsDir, RUN_ID), { recursive: true });
+    writeFileSync(join(h.config.paths.runsDir, RUN_ID, 'events.jsonl'), `${JSON.stringify({ ts: quiet, source: 'pipeline', type: 'phase', data: {} })}\n`);
+    const at = (ms: number) => createStatusCommand({ isAlive: () => true, now: () => Date.parse(quiet) + ms });
+
+    const later = h.config.budgets.stalledAfterMs;
+    const doc = v.parse(StatusOutputSchema, jsonLine((await cli([at(later)], ['status', RUN_ID, '--json'], { config: () => h.config })).out));
+    expect(doc.status).toBe('running');
+    expect(doc.stalled).toEqual({ reason: 'no_progress', since: quiet });
+    const human = await cli([at(later)], ['status', RUN_ID], { config: () => h.config });
+    expect(human.out).toContain(`stalled: no progress since ${quiet}\n`);
+
+    const early = jsonLine((await cli([at(later - 1)], ['status', RUN_ID, '--json'], { config: () => h.config })).out);
+    expect(early).not.toHaveProperty('stalled');
+  });
+
+  test('stalled no_owner (D71): the lease of the latest Flue submission expired, status stays running', async () => {
+    const h = home();
+    const store = await seed(h, { phase: 'investigating' });
+    await store.setSubmissionFlueId(RUN_ID, 1, 'sub_one');
+    const expired = Date.parse('2026-09-26T10:00:00.000Z');
+    const asked: string[] = [];
+    let closed = 0;
+    const cmd = createStatusCommand({
+      isAlive: () => true,
+      now: () => expired + 5 * 60_000,
+      openLeases: async () => ({
+        lease: async (id) => {
+          asked.push(id);
+          return { status: 'running', leaseExpiresAt: expired, ownerId: 'gone' };
+        },
+        close: async () => {
+          closed++;
+        },
+      }),
+    });
+    const doc = v.parse(StatusOutputSchema, jsonLine((await cli([cmd], ['status', RUN_ID, '--json'], { config: () => h.config })).out));
+    expect(doc.status).toBe('running');
+    expect(doc.stalled).toEqual({ reason: 'no_owner', since: new Date(expired).toISOString() });
+    expect(asked).toEqual(['sub_one']);
+    expect(closed).toBe(1);
+    const human = await cli([cmd], ['status', RUN_ID], { config: () => h.config });
+    expect(human.out).toContain(`stalled: no process is working on the run (since ${new Date(expired).toISOString()})`);
+  });
+
+  test('stalled (D71) opens no Flue database for a finished run or one with no Flue id yet', async () => {
+    const h = home();
+    await seed(h, { phase: 'completed', report: true });
+    await seed(h, { runId: OTHER_RUN, phase: 'investigating' });
+    let opened = 0;
+    const cmd = createStatusCommand({
+      isAlive: () => true,
+      openLeases: async () => {
+        opened++;
+        throw new Error('must not open');
+      },
+    });
+    expect(jsonLine((await cli([cmd], ['status', RUN_ID, '--json'], { config: () => h.config })).out)).not.toHaveProperty('stalled');
+    expect(jsonLine((await cli([cmd], ['status', OTHER_RUN, '--json'], { config: () => h.config })).out)).not.toHaveProperty('stalled');
+    expect(opened).toBe(0);
+  });
+
+  test('stalled (D71) is left out when the Flue database cannot be opened', async () => {
+    const h = home();
+    const store = await seed(h, { phase: 'investigating' });
+    await store.setSubmissionFlueId(RUN_ID, 1, 'sub_one');
+    const cmd = createStatusCommand({
+      isAlive: () => true,
+      openLeases: async () => {
+        throw new Error('database is down');
+      },
+    });
+    const r = await cli([cmd], ['status', RUN_ID, '--json'], { config: () => h.config });
+    expect(r.code).toBe(EXIT.OK);
+    expect(jsonLine(r.out)).not.toHaveProperty('stalled');
   });
 
   test('an unknown run exits 1', async () => {

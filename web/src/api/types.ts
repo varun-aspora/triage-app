@@ -65,6 +65,8 @@ export type RunSummary = {
   tokens_total?: number;
   /** Set when usd_total leaves out at least one unpriced row. */
   usd_partial?: true;
+  /** D71: set while the run is running but nobody is working on it. Absent otherwise, and from older servers. */
+  stalled?: StalledView;
 };
 
 export type ListRunsQuery = {
@@ -86,7 +88,8 @@ export type ListRunsResponse = { runs: RunSummary[]; next_cursor: string | null 
 export type SubmissionView = {
   seq: number;
   /** resume: the run was sent on after a block, a failure or a stop (D55). */
-  kind: 'initial' | 'ask' | 'answer' | 'resume';
+  /** steer: a note sent while the run was still working, joined into its live response (D72). */
+  kind: 'initial' | 'ask' | 'answer' | 'resume' | 'steer';
   question?: string;
   created_at: string;
   has_report: boolean;
@@ -173,6 +176,8 @@ export type RunDetail = {
   report_md?: string;
   /** Tokens and cost of every model call in the run (D59). Absent from a server older than D59. */
   usage?: RunUsageView;
+  /** D71: set while the run is running but nobody is working on it. Absent otherwise, and from older servers. */
+  stalled?: StalledView;
 };
 
 export type ThreadMessageInput = { ts: string; author: string; text: string; is_parent?: boolean };
@@ -200,7 +205,19 @@ export type AskResponse = { run_id: string; submission_id: string | null };
 
 /** POST /triage/:run_id/resume. 409 (error, phase, hint) unless the run is blocked, or failed or stopped after it started. */
 export type ResumeBody = { requested_by: string; note?: string };
-export type ResumeResponse = { run_id: string; submission_id: string | null };
+/**
+ * mode (D72): 'steer' when the run was still working and the note joined its
+ * live response; 'resume' when the run was sent on (a stalled run is stopped
+ * first). Absent from a server older than D72.
+ *
+ * A stalled run's resume answers at once with mode 'resume' and
+ * submission_id null: the stop, abort and resume carry on on the server, on
+ * the same Flue instance and session, while the page polls.
+ */
+export type ResumeResponse = { run_id: string; submission_id: string | null; mode?: 'steer' | 'resume' };
+
+/** D71: a running run nobody is working on. The status stays running. */
+export type StalledView = { reason: 'no_owner' | 'no_progress'; since: string };
 
 export type FeedbackBody = {
   verdict: FeedbackVerdict;

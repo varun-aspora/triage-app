@@ -33,6 +33,10 @@ export const PIPELINE_EVENT_TYPES = [
   'usage_write_failed',
   'usage_missing',
   'usage_unassigned',
+  'usage_unmapped',
+  'steer_failed',
+  'flue_id_write_failed',
+  'settle_listener_failed',
   'server_shutdown',
 ] as const;
 
