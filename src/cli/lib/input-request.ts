@@ -88,13 +88,14 @@ export async function startAnswer(
   spawn: (payload: WorkerPayload) => Promise<{ pid: number }>,
   input: AnswerStartInput,
 ): Promise<AnswerStart> {
+  const skipped = input.answer.kind === 'skip';
   const ids = input.ids !== undefined && Object.keys(input.ids).length > 0 ? { ids: input.ids } : {};
   const payload: WorkerPayload = {
     kind: 'answer',
     run_id: input.runId,
     question_id: input.questionId,
     by: input.by,
-    ...(input.answer.kind === 'skip' ? { skip: true as const } : { answer: input.answer.answer }),
+    ...(skipped ? { skip: true as const } : { answer: input.answer.answer }),
     ...ids,
   };
   const { pid } = await spawn(payload);
@@ -104,7 +105,7 @@ export async function startAnswer(
     run_id: input.runId,
     question_id: input.questionId,
     submission_id: input.submissions + 1,
-    skipped: input.answer.kind === 'skip',
+    skipped,
     pid,
   };
 }
