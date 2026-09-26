@@ -16,8 +16,8 @@
 // Messages name entities, services and env var names, never a URL, host or
 // token. A failed request keeps the fetch error's own words with the URL,
 // host, header values and addresses taken out. A non-2xx answer is not an
-// error: its status and body go back to the model as the result. In mock mode the fixture answers through withMock and fetch is never
-// called.
+// error: its status and body go back to the model as the result. In mock
+// mode the fixture answers through withMock and fetch is never called.
 import type { Config } from '../../config/env.ts';
 import type { Registry } from '../../config/registry.ts';
 import { CBS_SERVICE, type HttpDecision } from '../../gate/http.ts';
@@ -121,7 +121,7 @@ export function createHttpConnector(deps: HttpConnectorDeps): HttpConnector {
     const where = `${entity}:${service}`;
 
     if (service === CBS_SERVICE) throw refused(`${where}: finacle has no HTTP route; use cbs_call`);
-    if (decision === undefined || decision === null || decision.ok !== true || decision.action !== 'allow') {
+    if (decision?.ok !== true || decision.action !== 'allow') {
       throw refused(`${where}: the call has no allow decision from the rules`);
     }
     if (request.method !== decision.method) {
@@ -145,27 +145,27 @@ export function createHttpConnector(deps: HttpConnectorDeps): HttpConnector {
       throw refused(`${where}: the fixture key does not match the request`);
     }
 
-    const hasBody = request.body !== undefined;
-    if (hasBody && NO_BODY_METHODS.has(decision.method)) throw refused(`${where}: ${decision.method} takes no body`);
+    const method = decision.method;
     let payload: string | undefined;
-    if (hasBody) {
+    if (request.body !== undefined) {
+      if (NO_BODY_METHODS.has(method)) throw refused(`${where}: ${method} takes no body`);
       try {
         payload = JSON.stringify(request.body);
       } catch {
-        payload = undefined;
+        // Left undefined and refused below.
       }
       if (payload === undefined) throw refused(`${where}: the body must be JSON-serialisable`);
     }
 
-    // Checked here so a bad id is refused in mock mode too.
-    const headerCheck = connectorHeaders({
+    const customer = {
       ...(spec.customer_header !== undefined ? { customerHeader: spec.customer_header } : {}),
       ...(request.customerId !== undefined ? { customerId: request.customerId } : {}),
-    });
+    };
+    // Checked here so a bad id is refused in mock mode too.
+    const headerCheck = connectorHeaders(customer);
     if (!headerCheck.ok) throw new ConnectorError(headerCheck.code, `${where}: ${headerCheck.message}`);
 
     const url = new URL(request.url.href);
-    const method = decision.method;
     const rule_index = decision.rule_index;
     const timeoutMs = config.budgets.httpTimeoutMs;
 
@@ -175,8 +175,7 @@ export function createHttpConnector(deps: HttpConnectorDeps): HttpConnector {
       if (!auth.ok) throw new ConnectorError(auth.code, `${where}: ${auth.message}`);
       const headers = connectorHeaders({
         ...(auth.auth !== undefined ? { auth: auth.auth } : {}),
-        ...(spec.customer_header !== undefined ? { customerHeader: spec.customer_header } : {}),
-        ...(request.customerId !== undefined ? { customerId: request.customerId } : {}),
+        ...customer,
         jsonBody: payload !== undefined,
       });
       if (!headers.ok) throw new ConnectorError(headers.code, `${where}: ${headers.message}`);
