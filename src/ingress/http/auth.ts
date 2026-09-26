@@ -26,7 +26,10 @@ const BEARER_RE = /^Bearer ([^\s]+)$/i;
 
 /** Returns the bearer token, or throws a key-only ConfigError when it is blank or whitespace. */
 export function assertHttpConfig(config: Pick<Config, 'http'>): string {
-  const token = config.http.authToken;
+  return requireToken(config.http.authToken);
+}
+
+function requireToken(token: unknown): string {
   if (typeof token !== 'string' || token.trim() === '') {
     throw ConfigError.of(AUTH_TOKEN_KEY, 'is blank; the HTTP API needs a bearer token');
   }
@@ -49,15 +52,11 @@ export function tokensMatch(given: string, expected: string): boolean {
 
 /** The token from an Authorization header, or undefined for any other shape. */
 export function bearerToken(header: string | undefined): string | undefined {
-  if (header === undefined) return undefined;
-  const m = BEARER_RE.exec(header);
-  return m?.[1];
+  return header === undefined ? undefined : BEARER_RE.exec(header)?.[1];
 }
 
 export function bearerAuth(token: string): MiddlewareHandler {
-  if (typeof token !== 'string' || token.trim() === '') {
-    throw ConfigError.of(AUTH_TOKEN_KEY, 'is blank; the HTTP API needs a bearer token');
-  }
+  requireToken(token);
   return async (c, next) => {
     const given = bearerToken(c.req.header('authorization'));
     if (given === undefined || !tokensMatch(given, token)) {

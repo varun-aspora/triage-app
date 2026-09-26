@@ -76,15 +76,7 @@ export function parseListQuery(query: Readonly<Record<string, string | undefined
   };
   const fail = (field: string, reason: string): ListQueryResult => ({ ok: false, field, reason });
 
-  const out: {
-    status?: RunStatus;
-    phase?: RunPhase;
-    category?: Category;
-    feedback?: FeedbackFilter;
-    since?: Date;
-    cursor?: RunCursor;
-    limit: number;
-  } = { limit: DEFAULT_LIST_LIMIT };
+  const out: { -readonly [K in keyof ListQuery]: ListQuery[K] } = { limit: DEFAULT_LIST_LIMIT };
 
   const status = get('status');
   if (status !== undefined) {
@@ -173,10 +165,7 @@ export function storeQuery(q: ListQuery): RunQuery {
 export function filterRuns(rows: readonly RunSummary[], q: ListQuery): RunPage {
   const kept = rows.filter((row) => {
     if (q.status !== undefined && statusOfPhase(row.phase) !== q.status) return false;
-    if (q.feedback !== undefined) {
-      const verdict = row.feedback_verdict ?? 'none';
-      if (verdict !== q.feedback) return false;
-    }
+    if (q.feedback !== undefined && (row.feedback_verdict ?? 'none') !== q.feedback) return false;
     if (q.cursor !== undefined && !isAfter(row, q.cursor)) return false;
     return true;
   });
