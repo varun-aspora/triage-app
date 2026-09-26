@@ -6,6 +6,8 @@
 // Detectors are plain regex plus small checks (Luhn, digit counts). They see
 // raw text only; decoding is redact-decode.ts's job.
 
+import { lastDigits } from './id-patterns.ts';
+
 export const PATTERN_NAMES = [
   'credential',
   'email',
@@ -61,10 +63,6 @@ function groupSpans(re: RegExp, s: string, keep?: (value: string) => boolean): S
     out.push({ start: at[0], end: at[1] });
   }
   return out;
-}
-
-function lastDigits(text: string, n: number): string {
-  return text.replace(/\D/g, '').slice(-n);
 }
 
 function maskLast4(text: string): string {

@@ -144,25 +144,27 @@ function maskRaw(s: string, scan: Scan): Redacted {
  */
 function redactText(s: string, scan: Scan, depth: number): Redacted {
   const hits = new Set<PatternName>();
-  let t = s;
-  if (depth < MAX_DECODE_DEPTH) {
-    t = replaceBase64Blobs(t, (blob, decoded) => {
-      const inner = redactText(decoded, scan, depth + 1);
-      if (inner.text === decoded) return blob;
-      for (const h of inner.hits) hits.add(h);
-      return inner.text;
-    });
+  const decodes = depth < MAX_DECODE_DEPTH;
+  const t = !decodes
+    ? s
+    : replaceBase64Blobs(s, (blob, decoded) => {
+        const inner = redactText(decoded, scan, depth + 1);
+        if (inner.text === decoded) return blob;
+        for (const h of inner.hits) hits.add(h);
+        return inner.text;
+      });
+  const raw = maskRaw(t, scan);
+  if (decodes) {
     for (const decode of [urlDecode, jsonUnescape]) {
       const d = decode(t);
       if (d === t) continue;
       const inner = redactText(d, scan, depth + 1);
-      if (decode(maskRaw(t, scan).text) !== inner.text) {
+      if (decode(raw.text) !== inner.text) {
         for (const h of inner.hits) hits.add(h);
         return { text: inner.text, hits };
       }
     }
   }
-  const raw = maskRaw(t, scan);
   for (const h of raw.hits) hits.add(h);
   return { text: raw.text, hits };
 }

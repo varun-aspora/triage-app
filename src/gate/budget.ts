@@ -116,7 +116,9 @@ export function createRunBudget(limits: RunBudgetLimits): RunBudget {
   const entityCalls = new Map<Entity, number>();
   let exhaustedReason: ExhaustedReason | undefined;
 
-  const refuse = (reason: BudgetRefusalReason): BudgetDecision => ({
+  const refuse = <R extends BudgetRefusalReason>(
+    reason: R,
+  ): { ok: false; message: typeof BUDGET_EXHAUSTED_MESSAGE; reason: R } => ({
     ok: false,
     message: BUDGET_EXHAUSTED_MESSAGE,
     reason,
@@ -173,14 +175,12 @@ export function createRunBudget(limits: RunBudgetLimits): RunBudget {
 
     accountBytes(n) {
       const size = requireRequest('bytes', n);
-      if (exhaustedReason !== undefined) {
-        return { ok: false, message: BUDGET_EXHAUSTED_MESSAGE, reason: exhaustedReason };
-      }
+      if (exhaustedReason !== undefined) return refuse(exhaustedReason);
       const truncate = size > maxBytesPerCall;
       const keepBytes = Math.min(size, maxBytesPerCall);
       if (bytes + keepBytes > maxBytesPerRun) {
         exhaust('bytes');
-        return { ok: false, message: BUDGET_EXHAUSTED_MESSAGE, reason: 'bytes' };
+        return refuse('bytes');
       }
       bytes += keepBytes;
       return { ok: true, truncate, keepBytes };

@@ -60,17 +60,14 @@ function chainValues(key: KnownIdKey, value: string): { group: Group; value: str
 }
 
 function build(base: ScopeSet | undefined, chain: IdChain): ScopeSet {
-  const uuid = new Set(base?.uuid);
-  const num = new Set(base?.num);
-  const email = new Set(base?.email);
-  const groups = { uuid, num, email };
+  const groups = { uuid: new Set(base?.uuid), num: new Set(base?.num), email: new Set(base?.email) };
   // Only chain.ids carries values; hops name keys only. Every id is taken
   // whatever the status of the hop that produced it.
   for (const [key, value] of Object.entries(chain.ids)) {
     if (typeof value !== 'string') continue;
     for (const entry of chainValues(key as KnownIdKey, value)) groups[entry.group].add(entry.value);
   }
-  return Object.freeze({ uuid, num, email });
+  return Object.freeze(groups);
 }
 
 // Built from the IdChain only. There is deliberately no way to add a value
