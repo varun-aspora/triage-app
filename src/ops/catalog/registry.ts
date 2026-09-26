@@ -214,7 +214,7 @@ function format(value: unknown, depth: number, path: readonly string[]): string 
   if (typeof value === 'object' && value !== null) {
     const entries = Object.entries(value);
     if (entries.length === 0) return '{}';
-    const alwaysOpen = depth === 0 || (path.length >= 1 && path[0] === 'services' && path.length <= 2);
+    const alwaysOpen = depth === 0 || (path[0] === 'services' && path.length <= 2);
     if (!alwaysOpen && entries.every(([, x]) => isPlain(x) || (Array.isArray(x) && x.every(isPlain)))) {
       return `{ ${entries.map(([k, x]) => `${JSON.stringify(k)}: ${format(x, depth + 1, [...path, k])}`).join(', ')} }`;
     }
