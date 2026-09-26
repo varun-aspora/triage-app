@@ -206,12 +206,16 @@ function checkSpec(key: string, spec: string | undefined, config: Config, allowT
 
 let active: Config | undefined = loadAtImport();
 
+function loadAndRegister(): Config {
+  const config = loadConfig();
+  registerProviders(config);
+  registerCachedModels(config);
+  return config;
+}
+
 function loadAtImport(): Config | undefined {
   try {
-    const config = loadConfig();
-    registerProviders(config);
-    registerCachedModels(config);
-    return config;
+    return loadAndRegister();
   } catch (err) {
     if (isHomeUnset(err)) return undefined;
     throw err;
@@ -230,10 +234,5 @@ function isHomeUnset(err: unknown): boolean {
 
 // The config loaded at import, or loaded now if TRIAGE_HOME was unset then.
 function activeConfig(): Config {
-  if (active === undefined) {
-    active = loadConfig();
-    registerProviders(active);
-    registerCachedModels(active);
-  }
-  return active;
+  return (active ??= loadAndRegister());
 }

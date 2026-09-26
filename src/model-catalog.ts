@@ -118,8 +118,9 @@ function isModel(value: unknown, provider: string): value is Model<Api> {
 /** Models in a published catalog file that the base provider lacks, on an API it serves. */
 export function extraModels(base: Provider, catalog: unknown): Model<Api>[] {
   if (typeof catalog !== 'object' || catalog === null) return [];
-  const known = new Set(base.getModels().map((m) => m.id));
-  const apis = new Set(base.getModels().map((m) => m.api));
+  const baseModels = base.getModels();
+  const known = new Set(baseModels.map((m) => m.id));
+  const apis = new Set(baseModels.map((m) => m.api));
   const out: Model<Api>[] = [];
   for (const group of Object.values(catalog as Record<string, unknown>)) {
     if (typeof group !== 'object' || group === null) continue;
