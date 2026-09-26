@@ -1,7 +1,7 @@
 // triage status <run_id> [--json]
 //
 // Prints {run_id, status, phase, tier_final, submissions, preflight_warnings,
-// input_request?, block?, usage?} from the run store. status is the phase
+// input_request?, block?, reason?, usage?} from the run store. status is the phase
 // folded into running, completed, failed or stopped, plus 'needs_input'
 // (parked on a question for the requester; the worker is gone by design, P6 §4.5),
 // 'blocked' (parked on a system that did not answer, D55; `triage resume`
@@ -168,8 +168,16 @@ export function statusOutput(run: RunRecord, isAlive: PidChecker): StatusOutput 
     preflight_warnings: (run.classification?.preflight_warnings ?? []).map((w) => ({ ...w })),
     ...(run.input_request !== null ? { input_request: { ...run.input_request, options: [...run.input_request.options] } } : {}),
     ...(run.block !== null ? { block: copyBlock(run.block) } : {}),
+    ...reasonField(run, status),
     ...usageField(usageViewOf(run, status)),
   };
+}
+
+/** { reason } for a failed or stopped run, with the same fallbacks as `triage wait`. */
+function reasonField(run: Pick<RunRecord, 'phase_reason'>, status: RunStatus): { reason?: string } {
+  if (status === 'failed') return { reason: run.phase_reason ?? 'unknown failure' };
+  if (status === 'stopped') return { reason: run.phase_reason ?? 'stopped' };
+  return {};
 }
 
 /** Checks the run id argument. Prints the usage error and returns false when it is bad. */
@@ -219,6 +227,7 @@ export function createStatusCommand(options: StatusCommandOptions = {}): CliComm
       } else {
         printHuman(io, [
           `run ${out.run_id}: ${out.status} (phase ${out.phase}${isTerminalPhase(out.phase) ? '' : ', not finished'})`,
+          ...(out.reason !== undefined ? [`reason: ${out.reason}`] : []),
           `tier: ${out.tier_final ?? 'not decided yet'}`,
           `submissions: ${out.submissions}`,
           ...usageLines(out.usage ?? usageViewOf(run, out.status), now()),

@@ -103,7 +103,7 @@ function oneLine(text: string): string {
 export type ResumeFrom =
   /** Parked by stop_blocked; the block names the systems. */
   | { readonly kind: 'blocked'; readonly block: Pick<BlockRecord, 'block_id' | 'systems' | 'reason'> }
-  /** Failed after it was dispatched; the reason is the stored phase reason (an error class name). */
+  /** Failed after it was dispatched; the reason is the stored phase reason (class name and masked error text, D67). */
   | { readonly kind: 'failed'; readonly reason?: string }
   /** Stopped by a person. */
   | { readonly kind: 'stopped' };

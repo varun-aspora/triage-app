@@ -12,7 +12,8 @@
 // The parent ignores this process's stdout and stderr, so the outcome lives
 // in the run store: runSubmission and askRun record completed or failed, and
 // any error they do not record (a failed runtime start, for example) is
-// recorded here as failed with the error class name. One exception: a resume
+// recorded here as failed with failureReason (class name and masked text,
+// D67). One exception: a resume
 // that finds the run already sent on (another resume got there first, or the
 // run moved on since `triage resume` checked it) leaves the run as that other
 // process has it.
@@ -26,7 +27,7 @@ import { WORKER_COMMAND } from '../../ingress/detach.ts';
 import {
   answerRun,
   askRun,
-  className,
+  failureReason,
   resumeRefusal,
   resumeRun,
   RunNotResumableError,
@@ -144,9 +145,9 @@ export function createWorkerCommand(options: WorkerCommandOptions = {}): CliComm
         // could not start leaves the stopped run failed, where the next
         // `triage wait` shows it.
         await store
-          .setPhase(runId, 'failed', { reason: className(err), ...(payload.kind === 'resume' ? { resume: true } : {}) })
+          .setPhase(runId, 'failed', { reason: failureReason(err), ...(payload.kind === 'resume' ? { resume: true } : {}) })
           .catch(() => undefined);
-        printError(io, json, 'ERROR', `run ${runId} failed: ${className(err)}`);
+        printError(io, json, 'ERROR', `run ${runId} failed: ${failureReason(err)}`);
         return EXIT.ERROR;
       }
       // A run parked on a question or on a system that did not answer, or

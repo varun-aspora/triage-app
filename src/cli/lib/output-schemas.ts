@@ -98,6 +98,8 @@ export const StatusOutputSchema = v.strictObject({
   input_request: v.optional(InputRequestSchema),
   /** The open block, with status blocked. */
   block: v.optional(BlockRecordSchema),
+  /** Why the run failed or was stopped, with status failed or stopped. Same text as `triage wait`. */
+  reason: v.optional(v.string()),
   /** The run's usage, when any is recorded. Absent for a run from before D59. */
   usage: v.optional(UsageViewSchema),
 });

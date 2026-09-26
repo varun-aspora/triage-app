@@ -242,11 +242,11 @@ describe('a run blocked on a system that did not answer', () => {
 
     const first = await submit.runSubmission(preparedFor(id), deps);
 
-    expect(first).toMatchObject({ run_id: id, status: 'failed', submission_seq: 1, error: 'AgentRunError' });
+    expect(first).toMatchObject({ run_id: id, status: 'failed', submission_seq: 1, error: expect.stringMatching(/^AgentRunError: /) });
     expect(signalsIn(s.callsFor('triage')[1])).toBe(1);
     const failed = await b.store.getRun(id);
     expect(failed?.phase).toBe('failed');
-    expect(failed?.phase_reason).toBe('AgentRunError');
+    expect(failed?.phase_reason).toBe(first.error);
     expect(failed?.block).toBeNull();
 
     const s2 = scriptAgents(fake, { triage: [finish(reportDraft(triageInit(id))), text('report written')] });
@@ -259,7 +259,7 @@ describe('a run blocked on a system that did not answer', () => {
     expect(calls2).toHaveLength(2);
     const signal = calls2[0]?.userTexts.at(-1) ?? '';
     expect(signal).toContain(`<signal type="${BLOCK_RESUME_SIGNAL}">`);
-    expect(signal).toContain('This run failed (AgentRunError) before it finished.');
+    expect(signal).toContain(`This run failed (${first.error}) before it finished.`);
     expect(signal).toContain(`${RESUMED_BY} resumed it at ${RESUMED_AT}.`);
     expect(signal).not.toContain('Message from');
     // The failed response's reminder is still in the conversation, and the resume gets no new one.
