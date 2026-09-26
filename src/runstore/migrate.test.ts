@@ -18,7 +18,7 @@ const DSN = 'postgresql://triage_rw:not-a-real-password@db.invalid:5432/triage';
 const MIGRATIONS_DIR = fileURLToPath(new URL('./migrations/', import.meta.url));
 const INIT_SQL = readFileSync(join(MIGRATIONS_DIR, '0001_init.sql'), 'utf8');
 /** Every shipped migration, in order. */
-const ALL_VERSIONS = ['0001_init', '0002_submission_flue_id'];
+const ALL_VERSIONS = ['0001_init', '0002_submission_flue_id', '0003_submission_trace_span'];
 
 // ------------------------------------------------------------------ fake database
 

@@ -7,7 +7,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import type { EmbedUsage, Embedder } from '../embed/index.ts';
+import type { ClientOptions, EmbedUsage, Embedder } from '../embed/index.ts';
 import { redactPersisted, type Persisted } from '../gate/redact.ts';
 import {
   CONTRACT_EPOCH,
@@ -375,6 +375,38 @@ describe('priorCasesFor usage (D59)', () => {
     const seen: EmbedUsage[] = [];
     await priorCasesFor(OFF, folderStore(), meteredEmbedder(), RUN_A, { onUsage: (u) => seen.push(u) });
     expect(seen).toEqual([]);
+  });
+});
+
+describe('priorCasesFor tracing (D82)', () => {
+  // Records the options each embed call got; the span itself is tested in src/embed/embed.test.ts.
+  function optionsEmbedder(): { embedder: Embedder; seen: (ClientOptions | undefined)[] } {
+    const seen: (ClientOptions | undefined)[] = [];
+    const embedder: Embedder = {
+      model: MODEL,
+      embed: async (texts, opts) => {
+        seen.push(opts);
+        return texts.map(() => [1, 0, 0]);
+      },
+    };
+    return { embedder, seen };
+  }
+
+  test('traced asks embed() to trace the call for the current run', async () => {
+    const store = folderStore();
+    await seedCurrent(store);
+    const { embedder, seen } = optionsEmbedder();
+    await priorCasesFor(ON, store, embedder, RUN_A, { traced: true });
+    expect(seen.map((o) => o?.trace)).toEqual([{ runId: RUN_A, purpose: 'prior_cases' }]);
+  });
+
+  test('without traced the embed call carries no trace option', async () => {
+    const store = folderStore();
+    await seedCurrent(store);
+    const { embedder, seen } = optionsEmbedder();
+    await priorCasesFor(ON, store, embedder, RUN_A);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.trace).toBeUndefined();
   });
 });
 

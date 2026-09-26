@@ -65,6 +65,8 @@ export type PriorCasesOptions = {
   readonly now?: () => number;
   /** Passed to embed(): what the one embedding call used (D59). */
   readonly onUsage?: (u: EmbedUsage) => void;
+  /** Records the embedding call as a trace span for runId (D82). Set by ingress only. */
+  readonly traced?: boolean;
 };
 
 export type PriorCasesResult = {
@@ -110,6 +112,7 @@ async function retrieve(
   const opts = {
     ...(options.signal !== undefined ? { signal: options.signal } : {}),
     ...(options.onUsage !== undefined ? { onUsage: options.onUsage } : {}),
+    ...(options.traced === true ? { trace: { runId, purpose: 'prior_cases' } } : {}),
   };
   const vectors = await embedder.embed([text], opts);
   const vector = vectors[0];
