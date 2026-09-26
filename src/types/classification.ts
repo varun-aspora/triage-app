@@ -4,6 +4,7 @@ import * as v from 'valibot';
 import {
   EntitySchema,
   NonEmptyStringSchema,
+  NonNegativeIntSchema,
   ReportStatusSchema,
   TierSchema,
 } from './core.ts';
@@ -65,7 +66,7 @@ export const PriorCaseSchema = v.strictObject({
   matched_pattern_id: v.optional(NonEmptyStringSchema),
   escalated: v.optional(v.boolean()),
   feedback_verdict: v.optional(v.picklist(['correct', 'partial', 'pending'])),
-  age_days: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  age_days: NonNegativeIntSchema,
   similarity: v.pipe(v.number(), v.minValue(0), v.maxValue(1)),
 });
 export type PriorCase = v.InferOutput<typeof PriorCaseSchema>;

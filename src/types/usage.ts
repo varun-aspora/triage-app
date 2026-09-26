@@ -11,6 +11,7 @@
 // UsageRowSchema allows only a model spec, an agent name, a fixed purpose and
 // numbers instead.
 import * as v from 'valibot';
+import { NonNegativeIntSchema, TakenAtSchema } from './core.ts';
 
 // 'identify' is the id decision of the ingress identity step (D69). The store
 // keeps purpose as plain text, so a new purpose needs no migration.
@@ -26,20 +27,23 @@ export const UsageModelSchema = v.pipe(v.string(), v.regex(USAGE_MODEL_PATTERN))
 export const USAGE_AGENT_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 export const UsageAgentSchema = v.pipe(v.string(), v.regex(USAGE_AGENT_PATTERN));
 
-const Count = v.pipe(v.number(), v.integer(), v.minValue(0));
+// The counts a row carries and a total sums.
+const USAGE_COUNT_ENTRIES = {
+  /** Model calls, failed attempts included. */
+  calls: NonNegativeIntSchema,
+  failed_calls: NonNegativeIntSchema,
+  /** Uncached input, as pi-ai reports it (cache reads and writes are counted apart). */
+  input_tokens: NonNegativeIntSchema,
+  output_tokens: NonNegativeIntSchema,
+  cache_read_tokens: NonNegativeIntSchema,
+  cache_write_tokens: NonNegativeIntSchema,
+};
 
 export const UsageRowSchema = v.object({
   model: UsageModelSchema,
   agent: UsageAgentSchema,
   purpose: UsagePurposeSchema,
-  /** Model calls, failed attempts included. */
-  calls: Count,
-  failed_calls: Count,
-  /** Uncached input, as pi-ai reports it (cache reads and writes are counted apart). */
-  input_tokens: Count,
-  output_tokens: Count,
-  cache_read_tokens: Count,
-  cache_write_tokens: Count,
+  ...USAGE_COUNT_ENTRIES,
   /** null: no price is known for the model. Finite, so it survives a JSON round trip. */
   usd: v.nullable(v.pipe(v.number(), v.finite(), v.minValue(0))),
 });
@@ -47,21 +51,16 @@ export type UsageRow = v.InferOutput<typeof UsageRowSchema>;
 
 export const SubmissionUsageSchema = v.object({
   /** 0 = intake, before the first submission. */
-  seq: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  seq: NonNegativeIntSchema,
   rows: v.array(UsageRowSchema),
-  updated_at: v.pipe(v.string(), v.isoTimestamp()),
+  updated_at: TakenAtSchema,
   /** false: a live snapshot while the submission runs, or a caller-abort write. */
   final: v.boolean(),
 });
 export type SubmissionUsage = v.InferOutput<typeof SubmissionUsageSchema>;
 
 export const UsageTotalsSchema = v.object({
-  calls: Count,
-  failed_calls: Count,
-  input_tokens: Count,
-  output_tokens: Count,
-  cache_read_tokens: Count,
-  cache_write_tokens: Count,
+  ...USAGE_COUNT_ENTRIES,
   /** Sum of the priced rows. */
   usd: v.pipe(v.number(), v.minValue(0)),
   /** Models with at least one row that has no price, sorted. */
@@ -86,6 +85,6 @@ export const RunUsageViewSchema = v.object({
   /** A non-final submission on a run that is no longer running (a stalled worker counts as not running). */
   incomplete: v.boolean(),
   /** The newest SubmissionUsage.updated_at; null when nothing is recorded. */
-  updated_at: v.nullable(v.pipe(v.string(), v.isoTimestamp())),
+  updated_at: v.nullable(TakenAtSchema),
 });
 export type RunUsageView = v.InferOutput<typeof RunUsageViewSchema>;

@@ -2,7 +2,14 @@
 // tokens never appear: target is the name of the env var that holds the
 // connection (for example SSFB_HARBOR_DB_URL), never its value.
 import * as v from 'valibot';
-import { EntitySchema, InterfaceSchema, NonEmptyStringSchema, RunIdSchema, TakenAtSchema } from './core.ts';
+import {
+  EntitySchema,
+  InterfaceSchema,
+  NonEmptyStringSchema,
+  NonNegativeIntSchema,
+  RunIdSchema,
+  TakenAtSchema,
+} from './core.ts';
 
 export const AUDIT_DECISIONS = ['allow', 'deny'] as const;
 export const AuditDecisionSchema = v.picklist(AUDIT_DECISIONS);
@@ -37,10 +44,10 @@ export const AuditLineSchema = v.pipe(
     // Result code: a process exit code or a short status word.
     exit: v.union([v.pipe(v.number(), v.integer()), NonEmptyStringSchema]),
     // HTTP decisions: index of the matching rule, or 'default'.
-    rule_index: v.optional(v.union([v.pipe(v.number(), v.integer(), v.minValue(0)), v.literal('default')])),
+    rule_index: v.optional(v.union([NonNegativeIntSchema, v.literal('default')])),
     action: v.optional(v.picklist(['allow', 'block'])),
     // decrypt_fields records a count only.
-    count: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0))),
+    count: v.optional(NonNegativeIntSchema),
     // sql_select failures: the Postgres SQLSTATE, e.g. 42703.
     sqlstate: v.optional(v.pipe(v.string(), v.regex(/^[0-9A-Z]{5}$/))),
   }),

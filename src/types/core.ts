@@ -37,6 +37,9 @@ export type TakenAt = v.InferOutput<typeof TakenAtSchema>;
 export const NonEmptyStringSchema = v.pipe(v.string(), v.trim(), v.minLength(1));
 export type NonEmptyString = v.InferOutput<typeof NonEmptyStringSchema>;
 
+// A count, an index or a token total.
+export const NonNegativeIntSchema = v.pipe(v.number(), v.integer(), v.minValue(0));
+
 // A run id is also a folder name under the runs dir, so only a safe charset is
 // allowed. ULIDs match.
 export const RunIdSchema = v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{1,64}$/));
