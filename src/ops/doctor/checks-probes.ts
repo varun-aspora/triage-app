@@ -89,6 +89,8 @@ const probeSets = new WeakMap<DoctorContext, Probes>();
 const repoReports = new WeakMap<DoctorContext, Promise<ReposStatusReport>>();
 const runners = new WeakMap<DoctorContext, ExecRunner>();
 
+const signalOf = (ctx: DoctorContext): { signal?: AbortSignal } => (ctx.signal !== undefined ? { signal: ctx.signal } : {});
+
 // A registry that does not load is reported by the env check (T11.6); these
 // checks then skip.
 function registryOf(ctx: DoctorContext): RegistryResult {
@@ -125,7 +127,7 @@ export function probesFor(ctx: DoctorContext, registry: Registry): Probes {
       fetch: ctx.fetch ?? ((url, init) => fetch(url, init)),
       ...(ctx.sql !== undefined ? { sql: ctx.sql } : {}),
       ...(ctx.tcpConnect !== undefined ? { tcpConnect: ctx.tcpConnect } : {}),
-      ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
+      ...signalOf(ctx),
     });
   }
   probeSets.set(ctx, probes);
@@ -145,8 +147,8 @@ function runnerOf(ctx: DoctorContext): ExecRunner {
 function repoReportOf(ctx: DoctorContext): Promise<ReposStatusReport> {
   const known = repoReports.get(ctx);
   if (known !== undefined) return known;
-  const run = ctx.ops?.repoStatus ?? ((deps: ReposDeps) => repoStatus(deps));
-  const pending = run({ config: ctx.config, runner: runnerOf(ctx), ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}) });
+  const run = ctx.ops?.repoStatus ?? repoStatus;
+  const pending = run({ config: ctx.config, runner: runnerOf(ctx), ...signalOf(ctx) });
   repoReports.set(ctx, pending);
   return pending;
 }
@@ -267,7 +269,7 @@ async function quickwitQwRow(ctx: DoctorContext, registry: Registry, entity: Ent
   const shown = bin === QW_DEFAULT_BIN ? QW_DEFAULT_BIN : `$${QW_BIN_KEY}`;
   const loginFix = `${shown} login --context $${contextKey}`;
   const runner = runnerOf(ctx);
-  const opts = { timeoutMs: QW_TIMEOUT_MS, maxOutputBytes: QW_MAX_OUTPUT, ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}) };
+  const opts = { timeoutMs: QW_TIMEOUT_MS, maxOutputBytes: QW_MAX_OUTPUT, ...signalOf(ctx) };
 
   const version = await runner.run(bin, ['--version'], opts);
   if (version.spawnError !== undefined) {
@@ -359,7 +361,7 @@ async function tunnelCheck(ctx: DoctorContext): Promise<DoctorCheck[]> {
     config: ctx.config,
     runner: runnerOf(ctx),
     tcpProbe,
-    ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
+    ...signalOf(ctx),
   });
   return withId('tunnel', [tunnelRow(res)]);
 }
@@ -368,7 +370,7 @@ async function tunnelCheck(ctx: DoctorContext): Promise<DoctorCheck[]> {
 
 async function codegraphCheck(ctx: DoctorContext): Promise<DoctorCheck[]> {
   const version = ctx.ops?.codegraphVersion ?? codegraphVersion;
-  const v = await version({ config: ctx.config, runner: runnerOf(ctx), ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}) });
+  const v = await version({ config: ctx.config, runner: runnerOf(ctx), ...signalOf(ctx) });
   if (v.status === 'not_configured') return withId('codegraph', [row('disabled', [v.key], `code tools off: ${v.message}`)]);
   const rows: Row[] = [];
   if (v.status === 'ok') {
