@@ -68,6 +68,8 @@ beforeAll(() => {
   symlinkSync(join(repoDir, 'src', 'app.go'), join(repoDir, 'link-ok.go'));
   // A repo directory that is itself a symlink out of TRIAGE_REPOS_DIR.
   symlinkSync(join(base, 'outside'), join(reposDir, 'rhythm'));
+  // A repo directory that is a symlink to another repo inside TRIAGE_REPOS_DIR.
+  symlinkSync(repoDir, join(reposDir, 'guardian-link'));
 
   // Catastrophic backtracking bait for (a+)+$.
   const evil = Array.from({ length: 200 }, () => `${'a'.repeat(40)}b`).join('\n');
@@ -211,6 +213,12 @@ describe('resolveInRepo', () => {
     if (!r.ok) expect(r.code).toBe('outside');
   });
 
+  test('refuses a repo directory that is a symlink to another repo under TRIAGE_REPOS_DIR', () => {
+    expect(resolveRepoRoot(reposDir, 'guardian-link')).toMatchObject({ ok: false, code: 'outside' });
+    expect(resolveInRepo(reposDir, 'guardian-link', 'src/app.go')).toMatchObject({ ok: false, code: 'outside' });
+    expect(resolveRepoRoot(reposDir, REPO).ok).toBe(true);
+  });
+
   test('refuses bad repo names, a missing repo and a blank repos dir', () => {
     expect(resolveRepoRoot(reposDir, '../harbor')).toMatchObject({ ok: false, code: 'bad_repo' });
     expect(resolveRepoRoot(reposDir, '.git')).toMatchObject({ ok: false, code: 'bad_repo' });
@@ -229,16 +237,17 @@ describe('resolveInRepo', () => {
 // ------------------------------------------------------------------ module shape
 
 describe('tool modules', () => {
-  test('mount on code_walker and investigator_deep and pass the input-schema conformance rules', () => {
+  test('mount on code_walker and investigator (deep inherits it) and pass the input-schema conformance rules', () => {
     for (const m of [readModule, grepModule]) {
-      expect(m.mounts).toEqual(['code_walker', 'investigator_deep']);
+      expect(m.mounts).toEqual(['code_walker', 'investigator']);
       const ctx = makeToolContext({ config: home.config, registry: home.registry });
       expect(m.enabled(ctx, 'code_walker')).toEqual({ on: true });
       // create() must not touch deps: the default fake deps throw on any access.
       const tool: ToolDefinition = m.create(ctx, 'code_walker');
       expect(conformanceProblems(m, tool)).toEqual([]);
-      const deep = makeToolContext({ config: home.config, registry: home.registry, entity: 'ssfb' });
-      expect(conformanceProblems(m, m.create(deep, 'investigator_deep'))).toEqual([]);
+      const inv = makeToolContext({ config: home.config, registry: home.registry, entity: 'ssfb' });
+      expect(conformanceProblems(m, m.create(inv, 'investigator'))).toEqual([]);
+      expect(conformanceProblems(m, m.create(inv, 'investigator_deep'))).toEqual([]);
     }
   });
 
@@ -269,6 +278,24 @@ describe('tool modules', () => {
     const atspl = rig({ entity: 'atspl' });
     const tool = readModule.create(atspl.ctx, 'investigator_deep');
     expect(v.safeParse(tool.input as v.GenericSchema, { repo: REPO, path: 'src/app.go' }).success).toBe(false);
+  });
+
+  test('an investigator reads its own entity repo and is refused a repo of another entity', async () => {
+    // harbor is pinned to ssfb only.
+    const ssfb = rig({ entity: 'ssfb' });
+    const own = await call(readModule, ssfb, { repo: REPO, path: 'src/app.go', start_line: 10, end_line: 10 }, 'investigator');
+    expect(own.output.status).toBe('ok');
+
+    const rtl = rig({ entity: 'rtl' });
+    for (const m of [readModule, grepModule]) {
+      const tool = m.create(rtl.ctx, 'investigator');
+      expect(v.safeParse(tool.input as v.GenericSchema, { repo: REPO, path: 'src/app.go', pattern: 'x' }).success).toBe(false);
+      // Past the schema, run() refuses it too and audits the deny.
+      const run = tool.run as (c: unknown) => Promise<ToolEnvelope>;
+      const env = await run({ data: { repo: REPO, path: 'src/app.go', pattern: 'Handle' }, toolCallId: 'c', log });
+      expect(env.output.status).toBe('refused');
+      expect(rtl.audit.lines.at(-1)).toMatchObject({ decision: 'deny', reason: 'unknown repo', entity: 'rtl' });
+    }
   });
 
   test('deny: a repo that slips past the schema is refused in run() too', async () => {

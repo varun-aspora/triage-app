@@ -109,7 +109,8 @@ function description(ctx: ToolContext, entity: Entity): string {
       'together with count or group_by.',
     'Returns hits (only listed fields), a count, or groups with counts, plus num_hits, window, truncated and taken_at. ' +
       'The full result is also written to /data/<call id>.json in the sandbox.',
-    '"Refused" means the query was not run: fix what the message says. "not configured" means logs are not set up ' +
+    '"Refused" means the query was not run or Quickwit rejected it: fix what the message says and retry. ' +
+      '"did not answer" carries the reason: retry once or narrow the window. "not configured" means logs are not set up ' +
       `for ${entity}: record the gap and use another source.`,
   ];
   try {

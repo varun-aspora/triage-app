@@ -121,6 +121,7 @@ const CodeQueryResultSchema = v.object({
   truncated: v.optional(v.boolean(), false),
   commit: v.optional(v.nullable(v.string()), null),
   exit_code: v.optional(v.number()),
+  error: v.optional(v.string()),
   index_sync: v.optional(v.string()),
 });
 
@@ -176,6 +177,9 @@ function render(spec: CodeToolSpec, ctx: ToolContext, repo: string, text: string
     output: cut ? answer.output.slice(0, cap) : answer.output,
     truncated: cut || answer.truncated,
     ...(answer.exit_code !== undefined ? { exit_code: answer.exit_code } : {}),
+    ...(answer.exit_code !== undefined && answer.error !== undefined
+      ? { error: answer.error, hint: 'codegraph failed on this query. Try a plainer symbol name or phrase, or use repo_grep and repo_read on the same repo.' }
+      : {}),
     ...(answer.index_sync !== undefined ? { index_sync: answer.index_sync } : {}),
   };
 }

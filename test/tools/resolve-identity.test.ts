@@ -474,6 +474,28 @@ describe('resolve_identity: unreachable', () => {
       expect(IDENTITY_ENVS).toContain(line.target);
     }
     expect(h.audit.lines.map(serializeAuditLine).join('\n')).not.toContain('tunnel down');
+    // The model is told why, once per hop and reason, with a hint.
+    const data = dataOf(env) as unknown as { errors?: { hop: string; source: string; code: string; error: string }[]; errors_hint?: string };
+    expect(data.errors?.length).toBeGreaterThan(0);
+    expect(data.errors![0]).toMatchObject({ code: 'unreachable', error: 'tunnel down' });
+    expect(data.errors![0]!.source).toContain(':');
+    expect(data.errors_hint).toContain('sql_select');
+  });
+
+  test('a hop error text is scrubbed of DSNs, tokens and addresses before the model sees it', async () => {
+    const leaky = `could not connect to postgres://u:${FAKE_PASSWORD}@${FAKE_HOST}:5432/db at 10.2.3.4:5432 with Bearer abcdefgh.ijklmnop`;
+    const sql = fakeSql(new ConnectorError('unreachable', leaky));
+    const h = setup({ env: { TRIAGE_MOCK_MODE: 'false' }, sql });
+    const env = await call(h.tool, { ids: { account_form_id: FORM } });
+    const text = JSON.stringify(env);
+    for (const secret of [FAKE_PASSWORD, FAKE_HOST, '10.2.3.4', 'abcdefgh.ijklmnop']) expect(text).not.toContain(secret);
+    expect(text).toContain('could not connect to <url> at <host> with Bearer <redacted>');
+  });
+
+  test('no errors field when every hop answered', async () => {
+    const h = setup({ fixtures: FORM_FIXTURES });
+    const env = await call(h.tool, { ids: { account_form_id: FORM } });
+    expect(Object.keys(dataOf(env))).not.toContain('errors');
   });
 
   test('a blank DSN and no connector mark hops unreachable without a throw', async () => {

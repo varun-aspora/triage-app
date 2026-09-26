@@ -511,7 +511,7 @@ describe('http_call allowed calls', () => {
     expect(s.fetchCalls[0]!.url.href).toBe(HARBOR_BASE);
   });
 
-  test('an unreachable service answers unreachable without its message', async () => {
+  test('an unreachable service answers unreachable with its reason but without the base URL', async () => {
     const s = setup({
       real: true,
       fetchImpl: async () => {
@@ -520,6 +520,9 @@ describe('http_call allowed calls', () => {
     });
     const env = await call(s, { service: 'harbor', path: '/admin/v1/x' });
     expect(env.output.status).toBe('unreachable');
+    const message = env.output.status === 'unreachable' ? env.output.message : '';
+    expect(message).toContain('the request failed: connect ECONNREFUSED');
+    expect(message).toContain('try another source');
     expect(JSON.stringify(env)).not.toContain('harbor.test.invalid');
   });
 });

@@ -24,13 +24,16 @@ const FAKE_REPOS_DIR = '/triage-test/repos';
 const ENC_KEY = 'SSFB_HARBOR_FIELD_ENC_KEY';
 const CBS_FLAG = 'SSFB_CBS_VIA_KUBECTL_ENABLED';
 
-const BASE_INVESTIGATOR = ['http_call', 'logs_search', 'note_evidence', 'sql_select'];
+// repo_grep and repo_read are on both investigator variants, scoped to the entity's repos.
+const REPO_TOOLS = ['repo_grep', 'repo_read'];
+const BASE_INVESTIGATOR = ['http_call', 'logs_search', 'note_evidence', 'sql_select', ...REPO_TOOLS];
 const SSFB_ALWAYS = ['detect_silent_reversals', 'get_account_statement'];
 const SSFB_CRYPTO = ['decrypt_fields', 'encrypt_lookup_value'];
 // Scoped to ssfb in their module. The crypto tools serve any entity with a field-encryption service (D48).
 const SSFB_SCOPED = [...SSFB_ALWAYS, 'cbs_call'];
 const SSFB_ONLY = [...SSFB_SCOPED, ...SSFB_CRYPTO];
-const CODE_TOOLS = ['code_explore', 'code_impact', 'code_node', 'repo_grep', 'repo_read'];
+const CODEGRAPH_TOOLS = ['code_explore', 'code_impact', 'code_node'];
+const CODE_TOOLS = [...CODEGRAPH_TOOLS, ...REPO_TOOLS];
 const MOUNTS: readonly Mount[] = ['triage', 'investigator', 'investigator_deep', 'code_walker'];
 
 const names = (tools: readonly ToolDefinition[]): string[] => tools.map((t) => t.name).sort();
@@ -95,7 +98,7 @@ describe('per-mount and per-entity membership', () => {
     for (const h of [plain, allOn]) {
       expect(names(toolsFor('investigator', ctxFrom(h, entity)))).toEqual(sorted(BASE_INVESTIGATOR));
       const deep = names(toolsFor('investigator_deep', ctxFrom(h, entity)));
-      expect(deep).toEqual(sorted([...BASE_INVESTIGATOR, ...CODE_TOOLS]));
+      expect(deep).toEqual(sorted([...BASE_INVESTIGATOR, ...CODEGRAPH_TOOLS]));
       for (const name of SSFB_ONLY) expect(deep).not.toContain(name);
       // Same answer from mountPlan: the SSFB modules are not even considered, and the
       // crypto tools are off because no service of this entity has field encryption.
@@ -113,17 +116,17 @@ describe('per-mount and per-entity membership', () => {
     for (const m of allToolModules.filter((x) => x.entities !== 'all')) expect(m.entities).toEqual(['ssfb']);
   });
 
-  test.each([...ENTITIES])('the %s deep set is its investigator set plus the five code tools', (entity) => {
+  test.each([...ENTITIES])('the %s deep set is its investigator set plus the three CodeGraph tools', (entity) => {
     for (const h of [plain, allOn]) {
       const base = names(toolsFor('investigator', ctxFrom(h, entity)));
-      expect(names(toolsFor('investigator_deep', ctxFrom(h, entity)))).toEqual(sorted([...base, ...CODE_TOOLS]));
+      expect(names(toolsFor('investigator_deep', ctxFrom(h, entity)))).toEqual(sorted([...base, ...CODEGRAPH_TOOLS]));
     }
   });
 
-  test('the investigator sets hold no triage-only or code tool', () => {
+  test('the investigator sets hold no triage-only or CodeGraph tool', () => {
     for (const entity of ENTITIES) {
       const set = names(toolsFor('investigator', ctxFrom(allOn, entity)));
-      for (const name of [...CODE_TOOLS, 'resolve_identity', 'finish_report']) expect(set).not.toContain(name);
+      for (const name of [...CODEGRAPH_TOOLS, 'resolve_identity', 'finish_report']) expect(set).not.toContain(name);
     }
   });
 

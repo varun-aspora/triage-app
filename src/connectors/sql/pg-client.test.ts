@@ -3,7 +3,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inspect } from 'node:util';
 import { loadRegistry } from '../../config/registry.ts';
-import { buildReadOnlyTxn, wrapWithCap } from '../../gate/sql-txn.ts';
+import { masksValues } from '../../gate/sql-errors.ts';
+import { buildReadOnlyTxn, explainStatement, wrapWithCap } from '../../gate/sql-txn.ts';
 import type { SqlSelectFacts } from '../../mock/key.ts';
 import { makeTestConfig } from '../../../test/support/fake-tool-context.ts';
 import type { MockLookup, MockPort } from '../mock.ts';
@@ -12,6 +13,9 @@ import { ConnectorError, envVarName, MAX_SQL_RESULT_BYTES, type ConnectorContext
 import {
   capRows,
   createSqlConnector,
+  dsnSecrets,
+  mapPgError,
+  SqlStateError,
   type PgQuery,
   type RetryInfo,
   type RetryTarget,
@@ -169,7 +173,10 @@ describe('rollback and release', () => {
     const err = await failure(connector.runSelect(ctxOf(), input()));
     expect(err.code).toBe('refused');
     expect(err.message).toContain('42703');
+    // Postgres's own words come back: the column is the model's own input.
     expect(err.message).toContain('column "nope" does not exist');
+    expect(err).toBeInstanceOf(SqlStateError);
+    expect((err as SqlStateError).category).toBe('query');
     const [select] = pg.selectClients();
     expect(select!.queries.map((q) => q.text).slice(-1)).toEqual(['ROLLBACK']);
     expect(select!.queries.map((q) => q.text)).not.toContain('COMMIT');
@@ -234,7 +241,7 @@ describe('a socket that closes under a query', () => {
     const { pg, connector } = setup({}, { fake: { drop: (q) => q.text.startsWith('SELECT * FROM') } });
     const err = await failure(connector.runSelect(ctxOf(), input()));
     expect(err.code).toBe('unreachable');
-    expect(err.message).toBe('atspl:package: the connection to ATSPL_PACKAGE_DB_URL dropped');
+    expect(err.message).toStartWith('atspl:package: the connection to ATSPL_PACKAGE_DB_URL dropped');
     expectNoSecret(everyForm(err));
     const [select] = pg.selectClients();
     expect(select!.queries.map((q) => q.text)).not.toContain('ROLLBACK');
@@ -492,6 +499,25 @@ describe('plan refusals happen before any checkout', () => {
     const { connector } = setup();
     await connector.runSelect(ctxOf(), input({ plan: goodPlan(100, 50) }));
   });
+
+  test('accepts an EXPLAIN as the data statement and runs it unwrapped in the read-only transaction', async () => {
+    const { pg, connector } = setup({}, {
+      fake: { respond: (q) => (q.text.startsWith('EXPLAIN') ? { rows: [{ 'QUERY PLAN': 'Seq Scan on t' }], fields: [{ name: 'QUERY PLAN' }] } : undefined) },
+    });
+    const text = explainStatement(`EXPLAIN (ANALYZE, BUFFERS) ${INNER}`);
+    const plan = buildReadOnlyTxn({ statementTimeoutMs: 12345, lockTimeoutMs: 678 }, text);
+    const out = await connector.runSelect(ctxOf(), input({ plan, params: ['cust-1'] }));
+    const [select] = pg.selectClients();
+    expect(select!.queries.map((q) => q.text)).toEqual([
+      'BEGIN READ ONLY',
+      'SET LOCAL statement_timeout = 12345',
+      'SET LOCAL lock_timeout = 678',
+      text,
+      'COMMIT',
+    ]);
+    expect(dataQueryOf(select!.queries)).toEqual({ text, values: ['cust-1'], queryMode: 'extended' });
+    expect(out.data).toEqual({ rows: [{ 'QUERY PLAN': 'Seq Scan on t' }], row_count: 1, columns: ['QUERY PLAN'] });
+  });
 });
 
 describe('not_configured', () => {
@@ -665,24 +691,175 @@ describe('abort', () => {
 });
 
 describe('Postgres error mapping', () => {
-  const cases: [string, string, string][] = [
-    ['57014', 'canceling statement due to statement timeout', 'timeout'],
-    ['55P03', 'could not obtain lock on relation', 'timeout'],
-    ['25006', 'cannot execute INSERT in a read-only transaction', 'refused'],
-    ['42501', 'permission denied for table t', 'refused'],
-    ['08006', 'connection failure', 'unreachable'],
-    ['57P01', 'terminating connection due to administrator command', 'unreachable'],
+  // [SQLSTATE, a Postgres message, connector code, category]. Each message
+  // names a DSN part (user, password or host), which must be scrubbed, next
+  // to a value (valueX), which must come back unless it is quoted in a class
+  // that can echo stored row values (22, P0, XX, ...), where it is masked.
+  const cases: [string, string, string, string][] = [
+    ['42703', `column "valueX" does not exist near ${FAKE_HOST}`, 'refused', 'query'],
+    ['42P01', `relation "valueX" does not exist for ${FAKE_USER}`, 'refused', 'query'],
+    ['42883', `function lower(valueX) does not exist ${FAKE_PASSWORD}`, 'refused', 'query'],
+    ['42601', `syntax error at or near "valueX" ${FAKE_HOST}`, 'refused', 'query'],
+    ['42804', `argument of WHERE must be type boolean, not valueX ${FAKE_USER}`, 'refused', 'query'],
+    ['22P02', `invalid input syntax for type uuid: "valueX" ${FAKE_PASSWORD}`, 'refused', 'query'],
+    ['22003', `value valueX is out of range for type integer ${FAKE_HOST}`, 'refused', 'query'],
+    ['22008', `date/time field value out of range: "valueX" ${FAKE_USER}`, 'refused', 'query'],
+    ['54000', `target lists can have at most 1664 entries valueX ${FAKE_HOST}`, 'refused', 'query'],
+    ['57014', `canceling statement due to statement timeout valueX ${FAKE_HOST}`, 'timeout', 'timeout'],
+    ['55P03', `could not obtain lock on relation valueX ${FAKE_USER}`, 'timeout', 'timeout'],
+    ['28P01', `password authentication failed for user "${FAKE_USER}" valueX`, 'refused', 'access'],
+    ['28000', `no pg_hba.conf entry for host "${FAKE_HOST}" valueX`, 'refused', 'access'],
+    ['3D000', `database "fake_package_db" does not exist valueX ${FAKE_HOST}`, 'refused', 'access'],
+    ['42501', `permission denied for table valueX ${FAKE_USER}`, 'refused', 'access'],
+    ['25006', `cannot execute INSERT in a read-only transaction valueX ${FAKE_PASSWORD}`, 'refused', 'access'],
+    ['08006', `connection failure valueX ${FAKE_HOST}`, 'unreachable', 'unavailable'],
+    ['57P01', `terminating connection due to administrator command valueX ${FAKE_HOST}`, 'unreachable', 'unavailable'],
+    ['53300', `too many connections valueX ${FAKE_USER}`, 'unreachable', 'unavailable'],
+    ['40001', `canceling statement due to conflict with recovery valueX ${FAKE_HOST}`, 'unreachable', 'retryable'],
+    ['40P01', `deadlock detected valueX ${FAKE_HOST}`, 'unreachable', 'retryable'],
+    ['53100', `could not extend file: No space left on device valueX ${FAKE_HOST}`, 'unreachable', 'retryable'],
+    ['53200', `out of memory valueX ${FAKE_HOST}`, 'unreachable', 'retryable'],
+    ['XX000', `internal error valueX ${FAKE_HOST}`, 'refused', 'other'],
   ];
-  for (const [code, message, expected] of cases) {
-    test(`${code} maps to ${expected}`, async () => {
+  for (const [code, message, expected, category] of cases) {
+    test(`${code} maps to ${expected} (${category}) and keeps the scrubbed Postgres text`, async () => {
       const { connector } = setup({}, {
         fake: { respond: (q) => (q.text.startsWith('SELECT * FROM') ? Promise.reject(Object.assign(new Error(message), { code })) : undefined) },
       });
       const err = await failure(connector.runSelect(ctxOf(), input()));
       expect(err.code).toBe(expected as ConnectorError['code']);
-      expect(err.message).toContain(code);
+      expect(err).toBeInstanceOf(SqlStateError);
+      expect((err as SqlStateError).sqlstate).toBe(code);
+      expect((err as SqlStateError).category).toBe(category as SqlStateError['category']);
+      expect(err.message).toContain(`SQLSTATE ${code}`);
+      expect(err.message).toContain('atspl:package');
+      if (masksValues(code) && message.includes('"valueX"')) {
+        expect(everyForm(err)).not.toContain('valueX');
+        expect((err as SqlStateError).serverMessage).toContain('"<value>"');
+      } else {
+        expect(err.message).toContain('valueX');
+        expect((err as SqlStateError).serverMessage).toContain('valueX');
+      }
+      expect((err as SqlStateError).serverMessage).toContain('<redacted>');
+      const all = everyForm(err);
+      for (const secret of SECRETS) expect(all).not.toContain(secret);
     });
   }
+
+  test('the detail and hint fields come back after the message', () => {
+    const pgErr = Object.assign(new Error('column "stauts" does not exist'), {
+      code: '42703',
+      detail: 'There is a column named "status" in table "t".',
+      hint: 'Perhaps you meant to reference the column "t.status".',
+    });
+    const err = mapPgError(pgErr, 'atspl:package', envVarName('ATSPL_PACKAGE_DB_URL'), []) as SqlStateError;
+    expect(err.serverMessage).toBe(
+      'column "stauts" does not exist. Detail: There is a column named "status" in table "t". Hint: Perhaps you meant to reference the column "t.status".',
+    );
+  });
+
+  test('a data exception over a stored column never echoes the stored value (systemic cast)', async () => {
+    // SELECT count(*) FROM t WHERE recipient_name::int = 1 hits another customer's row.
+    const stored = 'Asha Verma, +91 98765 43210';
+    const { connector } = setup({}, {
+      fake: {
+        respond: (q) =>
+          q.text.startsWith('SELECT * FROM')
+            ? Promise.reject(Object.assign(new Error(`invalid input syntax for type integer: "${stored}"`), { code: '22P02' }))
+            : undefined,
+      },
+    });
+    const err = (await failure(connector.runSelect(ctxOf(), input()))) as SqlStateError;
+    expect(err.serverMessage).toBe('invalid input syntax for type integer: "<value>".');
+    expect(err.message).toContain('invalid input syntax for type integer: "<value>"');
+    const all = everyForm(err);
+    for (const part of ['Asha', 'Verma', '98765', '43210']) expect(all).not.toContain(part);
+  });
+
+  test('detail and hint are masked per class: a JSON token detail loses its value, a class 42 hint keeps its column', () => {
+    const json = mapPgError(
+      Object.assign(new Error('invalid input syntax for type json'), { code: '22P02', detail: 'Token "Asha" is invalid.' }),
+      'atspl:package',
+      envVarName('ATSPL_PACKAGE_DB_URL'),
+      [],
+    ) as SqlStateError;
+    expect(json.serverMessage).toBe('invalid input syntax for type json. Detail: Token "<value>" is invalid.');
+    const range = mapPgError(
+      Object.assign(new Error('value "98765432109" is out of range for type integer'), { code: '22003' }),
+      'atspl:package',
+      envVarName('ATSPL_PACKAGE_DB_URL'),
+      [],
+    ) as SqlStateError;
+    expect(range.serverMessage).toBe('value "<value>" is out of range for type integer.');
+    const raised = mapPgError(
+      Object.assign(new Error('customer "Asha Verma" not eligible'), { code: 'P0001', hint: 'Check "asha@example.com".' }),
+      'atspl:package',
+      envVarName('ATSPL_PACKAGE_DB_URL'),
+      [],
+    ) as SqlStateError;
+    expect(everyForm(raised)).not.toContain('Asha');
+    expect(everyForm(raised)).not.toContain('asha@');
+  });
+
+  test('a DSN in keyword form has its host, user, password and database scrubbed', () => {
+    const dsn = "host=kw-db.internal.example port=5432 user=kw_ro password='kw-pass-99' dbname=kw_app";
+    const secrets = dsnSecrets(dsn);
+    for (const part of ['kw-db.internal.example', 'kw_ro', 'kw-pass-99', 'kw_app']) expect(secrets).toContain(part);
+    const err = mapPgError(
+      Object.assign(new Error('connection to kw-db.internal.example failed for kw_ro'), { code: 'ECONNREFUSED' }),
+      'atspl:package',
+      envVarName('ATSPL_PACKAGE_DB_URL'),
+      secrets,
+    );
+    expect(err.message).not.toContain('kw-db');
+    expect(err.message).not.toContain('kw_ro');
+  });
+
+  test('a TLS error loses the DSN host and the certificate names', () => {
+    const err = mapPgError(
+      new Error(`Hostname/IP does not match certificate's altnames: Host: ${FAKE_HOST}. is not in the cert's altnames: DNS:*.rds.example.com, DNS:other.example.net`),
+      'atspl:package',
+      envVarName('ATSPL_PACKAGE_DB_URL'),
+      dsnSecrets(FAKE_DSN),
+    );
+    expect(err.code).toBe('unreachable');
+    expect(err.message).toContain("does not match certificate's altnames");
+    for (const part of [FAKE_HOST, 'rds.example.com', 'other.example.net']) expect(err.message).not.toContain(part);
+  });
+
+  test('a long Postgres message is capped', () => {
+    const long = `syntax error at or near "${'x'.repeat(5000)}"`;
+    const err = mapPgError(Object.assign(new Error(long), { code: '42601' }), 'atspl:package', envVarName('ATSPL_PACKAGE_DB_URL'), []) as SqlStateError;
+    expect(err.serverMessage.length).toBeLessThanOrEqual(1503);
+    expect(err.serverMessage.endsWith('...')).toBe(true);
+    expect(err.message.length).toBeLessThanOrEqual(1503);
+  });
+
+  test('a network error keeps no sqlstate and its message loses the address', () => {
+    const err = mapPgError(
+      Object.assign(new Error(`connect ECONNREFUSED 10.0.0.9:5432 (${FAKE_HOST})`), { code: 'ECONNREFUSED' }),
+      'atspl:package',
+      envVarName('ATSPL_PACKAGE_DB_URL'),
+      SECRETS,
+    );
+    expect(err.code).toBe('unreachable');
+    expect(err).not.toBeInstanceOf(SqlStateError);
+    expect(err.message).toBe('atspl:package: could not reach ATSPL_PACKAGE_DB_URL (ECONNREFUSED): connect ECONNREFUSED <host> (<redacted>)');
+  });
+
+  test('errno codes that look like a SQLSTATE (EPIPE, EPERM, EBUSY) are network errors, not SQLSTATEs', () => {
+    for (const code of ['EPIPE', 'EPERM', 'EBUSY', 'EACCES']) {
+      const err = mapPgError(Object.assign(new Error(`write ${code}`), { code }), 'atspl:package', envVarName('ATSPL_PACKAGE_DB_URL'), []);
+      expect(err.code).toBe('unreachable');
+      expect(err).not.toBeInstanceOf(SqlStateError);
+      expect(err.message).toContain(`(${code})`);
+    }
+  });
+
+  test('an existing ConnectorError passes through unchanged', () => {
+    const original = new ConnectorError('not_configured', 'x');
+    expect(mapPgError(original, 'atspl:package', envVarName('ATSPL_PACKAGE_DB_URL'), [])).toBe(original);
+  });
 });
 
 describe('mock mode', () => {

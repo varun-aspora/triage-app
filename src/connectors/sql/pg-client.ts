@@ -6,7 +6,7 @@
 //   BEGIN READ ONLY
 //   SET LOCAL statement_timeout = <ms>
 //   SET LOCAL lock_timeout = <ms>
-//   <one capped SELECT, parameters bound as $n>
+//   <one capped SELECT, or an EXPLAIN of one, parameters bound as $n>
 //   COMMIT
 //
 // Any other shape is refused before a client is checked out. All statements
@@ -32,7 +32,14 @@
 // override that field inside pg, so it is refused.
 //
 // Nothing here puts the DSN, or any part of it, into an error, result or
-// callback. Errors name the entity, service and env var name only.
+// callback. Errors name the entity, service and env var name, plus the
+// server's own words: the Postgres message, detail and hint, or the network
+// error, after scrub() takes out every DSN part (the host too, so a TLS or
+// DNS error does not name it) and anything shaped like a credential
+// (src/connectors/error-text.ts). For a data exception, and any other class
+// whose text can quote a stored row value, the quoted values are masked
+// first (maskSqlValues in src/gate/sql-errors.ts), so another customer's
+// data never reaches the model, the audit line or the run log.
 import pg from 'pg';
 import type { Config } from '../../config/env.ts';
 import type { Capability, Registry } from '../../config/registry.ts';
@@ -47,9 +54,11 @@ import {
   type RetryPolicy,
   type Sleep,
 } from '../../db/pg-retry.ts';
+import { classifySqlState, isSqlState, maskSqlValues, type SqlErrorCategory } from '../../gate/sql-errors.ts';
 import { MAX_TIMEOUT_MS, readOnlyConnectionOptions } from '../../gate/sql-txn.ts';
 import type { SqlSelectFacts } from '../../mock/key.ts';
 import type { Entity } from '../../types/core.ts';
+import { safeErrorText, scrubSecrets, stripAddresses } from '../error-text.ts';
 import { withMock } from '../mock.ts';
 import {
   ConnectorError,
@@ -144,7 +153,7 @@ export const defaultPgFactory: PgPoolFactory = (config) => {
 const DATA_INDEX = 3;
 const STATEMENT_TIMEOUT = /^SET LOCAL statement_timeout = ([1-9][0-9]{0,9})$/;
 const LOCK_TIMEOUT = /^SET LOCAL lock_timeout = ([1-9][0-9]{0,9})$/;
-const DATA_START = /^\s*(SELECT|WITH)\b/i;
+const DATA_START = /^\s*(SELECT|WITH|EXPLAIN)\b/i;
 
 function refusePlan(reason: string): never {
   throw new ConnectorError('refused', `Refused: ${reason}`);
@@ -167,7 +176,7 @@ export function checkReadOnlyPlan(plan: unknown, limits: Config['sql']): readonl
   if (steps.length !== 5) refusePlan('the plan must hold exactly one data statement between the SET LOCAL timeouts and COMMIT');
   if (steps[4] !== 'COMMIT') refusePlan('the plan must end with COMMIT');
   const data = steps[DATA_INDEX] as string;
-  if (!DATA_START.test(data)) refusePlan('the data statement must be a SELECT');
+  if (!DATA_START.test(data)) refusePlan('the data statement must be a SELECT or an EXPLAIN');
   return steps;
 }
 
@@ -230,8 +239,30 @@ function serialise(row: unknown): string {
 
 /** pg's own words for a socket that closed under a query, and for a client it then refuses to use. */
 const CONNECTION_LOST = /^(Connection terminated|Client has encountered a connection error)/;
-const SQLSTATE = /^[0-9A-Z]{5}$/;
-const MAX_MESSAGE = 300;
+
+// errno codes from node (EPIPE, EPERM, EBUSY). Five of them look like a
+// SQLSTATE, so they are checked first.
+const ERRNO = /^E[A-Z0-9_]+$/;
+
+/**
+ * A ConnectorError that came from a Postgres SQLSTATE. The code stays one of
+ * the shared connector codes; sqlstate and category say what went wrong, so
+ * the tool pipeline can tell a query the model can fix from a config gap
+ * without reading the message. serverMessage is Postgres's own text (message,
+ * detail, hint), already scrubbed.
+ */
+export class SqlStateError extends ConnectorError {
+  readonly sqlstate: string;
+  readonly category: SqlErrorCategory;
+  readonly serverMessage: string;
+
+  constructor(code: ConnectorError['code'], message: string, sqlstate: string, category: SqlErrorCategory, serverMessage = '') {
+    super(code, message);
+    this.sqlstate = sqlstate;
+    this.category = category;
+    this.serverMessage = serverMessage;
+  }
+}
 
 /** Pieces of a DSN that must never show up in text we pass on. */
 export function dsnSecrets(dsn: string): string[] {
@@ -248,40 +279,84 @@ export function dsnSecrets(dsn: string): string[] {
       }
     }
   } catch {
-    // Not a URL (keyword form). The whole string is still scrubbed.
+    // Not a URL: keyword form (host=db.internal user=ro password=...). The
+    // whole string is scrubbed, and each value too.
+    for (const m of dsn.matchAll(/\b(host|hostaddr|user|password|dbname|port)\s*=\s*('[^']*'|"[^"]*"|[^\s]+)/gi)) {
+      const value = (m[2] as string).replace(/^['"]|['"]$/g, '');
+      if (m[1]?.toLowerCase() !== 'port') out.add(value);
+      if (m[1]?.toLowerCase() === 'host') for (const h of value.split(',')) out.add(h);
+    }
   }
   return [...out].filter((s) => s.length >= 3).sort((a, b) => b.length - a.length);
 }
 
+/** Takes the DSN parts and anything shaped like a credential out of text, and caps it. */
 export function scrub(text: string, secrets: readonly string[]): string {
-  let out = text;
-  for (const s of secrets) out = out.split(s).join('<redacted>');
-  return out.length > MAX_MESSAGE ? `${out.slice(0, MAX_MESSAGE)}...` : out;
+  return safeErrorText(text, secrets);
 }
 
-/** Maps a pg or network error to a ConnectorError. Only SQLSTATE query errors keep Postgres's text, scrubbed. */
+function stringField(err: unknown, field: string): string {
+  const value = (err as Record<string, unknown> | null | undefined)?.[field];
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+/**
+ * Postgres's message with its detail and hint, as one line. Each part is
+ * scrubbed of the DSN parts, then has its stored values masked for the
+ * SQLSTATE's class, before they are joined.
+ */
+function pgText(err: unknown, sqlstate: string, secrets: readonly string[]): string {
+  const field = (name: string): string => maskSqlValues(sqlstate, scrubSecrets(stringField(err, name), secrets));
+  const parts = [field('message')];
+  const detail = field('detail');
+  const hint = field('hint');
+  if (detail !== '') parts.push(`Detail: ${detail}`);
+  if (hint !== '') parts.push(`Hint: ${hint}`);
+  return parts.filter((p) => p !== '').map((p) => (/[.!?]$/.test(p) ? p : `${p}.`)).join(' ');
+}
+
+/**
+ * Maps a pg or network error to a ConnectorError. Network and errno codes
+ * come first. A SQLSTATE error becomes a SqlStateError that keeps the code,
+ * its category and Postgres's own text, scrubbed. A network error keeps its
+ * message with addresses taken out.
+ */
 export function mapPgError(err: unknown, where: string, envName: EnvVarName, secrets: readonly string[]): ConnectorError {
   if (isConnectorError(err)) return err;
   const code = typeof (err as { code?: unknown })?.code === 'string' ? (err as { code: string }).code : '';
-  const pgMessage = typeof (err as { message?: unknown })?.message === 'string' ? (err as { message: string }).message : '';
+  const pgMessage = stringField(err, 'message');
+  const said = (text: string): string => {
+    const safe = scrub(stripAddresses(text), secrets);
+    return safe === '' ? '' : `: ${safe}`;
+  };
 
-  if (SQLSTATE.test(code)) {
-    if (code === '57014') return new ConnectorError('timeout', `${where}: the statement timed out or was cancelled (57014)`);
-    if (code === '55P03') return new ConnectorError('timeout', `${where}: lock_timeout reached (55P03)`);
-    if (code === '25006') {
-      return new ConnectorError('refused', `${where}: Postgres refused a write inside the read-only transaction (25006)`);
-    }
-    if (code.startsWith('08') || code === '53300' || code.startsWith('57P')) {
-      return new ConnectorError('unreachable', `${where}: could not use the database behind ${envName} (${code})`);
-    }
-    if (code.startsWith('28') || code === '3D000') {
-      return new ConnectorError('refused', `${where}: the server refused the login for ${envName} (${code})`);
-    }
-    return new ConnectorError('refused', `${where}: query failed (${code}): ${scrub(pgMessage, secrets)}`);
+  if (NETWORK_CODES.has(code) || ERRNO.test(code)) {
+    return new ConnectorError('unreachable', `${where}: could not reach ${envName} (${code})${said(pgMessage)}`);
   }
-  if (NETWORK_CODES.has(code)) return new ConnectorError('unreachable', `${where}: could not reach ${envName} (${code})`);
-  if (CONNECTION_LOST.test(pgMessage)) return new ConnectorError('unreachable', `${where}: the connection to ${envName} dropped`);
-  return new ConnectorError('unreachable', `${where}: the call through ${envName} failed`);
+  if (isSqlState(code)) {
+    const info = classifySqlState(code);
+    const server = scrub(pgText(err, code, secrets), secrets);
+    const made = (kind: ConnectorError['code'], text: string): SqlStateError =>
+      new SqlStateError(
+        kind,
+        scrub(`${where}: ${text} (SQLSTATE ${code})${server !== '' ? `: ${server}` : ''}`, secrets),
+        code,
+        info.category,
+        server,
+      );
+    if (code === '57014') return made('timeout', 'the statement timed out or was cancelled');
+    if (code === '55P03') return made('timeout', 'lock_timeout reached');
+    if (code === '25006') return made('refused', 'Postgres refused a write inside the read-only transaction');
+    if (code.startsWith('08') || code === '53300' || code.startsWith('57P')) {
+      return made('unreachable', `could not use the database behind ${envName}`);
+    }
+    if (info.category === 'retryable') return made('unreachable', `the database behind ${envName} could not finish the query now`);
+    if (code.startsWith('28') || code === '3D000') return made('refused', `the server refused the login for ${envName}`);
+    if (code === '42501') return made('refused', `the role behind ${envName} lacks a privilege for this query`);
+    return made('refused', `query failed: ${info.description}`);
+  }
+  if (CONNECTION_LOST.test(pgMessage)) return new ConnectorError('unreachable', `${where}: the connection to ${envName} dropped${said(pgMessage)}`);
+  return new ConnectorError('unreachable', `${where}: the call through ${envName} failed${said(pgMessage)}`);
 }
 
 // ------------------------------------------------------------ abort helpers

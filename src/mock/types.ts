@@ -44,11 +44,17 @@ export type HttpMethod = v.InferOutput<typeof HttpMethodSchema>;
 const CanonicalPath = v.pipe(v.string(), v.regex(/^\/$|^(\/[^/]+)+$/));
 
 // Params are stored as text (null stays null), matching how pg sends them.
+// explain is set only for an EXPLAIN ('plan') or EXPLAIN ANALYZE ('analyze'),
+// so a plain SELECT keeps the key it had before EXPLAIN was admitted and an
+// EXPLAIN never answers with the SELECT's rows.
+export const SQL_EXPLAIN_KINDS = ['plan', 'analyze'] as const;
+export type SqlExplainKind = (typeof SQL_EXPLAIN_KINDS)[number];
 export const SqlSelectKeySchema = v.strictObject({
   entity: EntitySchema,
   service: Text,
   tables: v.pipe(v.array(Text), v.minLength(1)),
   params: v.array(v.nullable(v.string())),
+  explain: v.optional(v.picklist(SQL_EXPLAIN_KINDS)),
 });
 export type SqlSelectKey = v.InferOutput<typeof SqlSelectKeySchema>;
 

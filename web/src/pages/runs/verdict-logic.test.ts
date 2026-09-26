@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test';
+import { isErrorEvent as srcIsErrorEvent } from '../../../../src/runlog/errors.ts';
+import { ERROR_EVENT_CASES } from '../../../../test/support/error-event-cases.ts';
 import type { FindingRef, RunEvent } from '../../api/types.ts';
 import {
   appendEvents,
@@ -103,6 +105,16 @@ describe('steps', () => {
   });
 });
 
+describe('errors rule matches src/runlog/errors.ts', () => {
+  for (const c of ERROR_EVENT_CASES) {
+    test(c.name, () => {
+      const e = { type: c.type, data: c.data };
+      expect(isErrorEvent(e)).toBe(c.error);
+      expect(srcIsErrorEvent(e)).toBe(c.error);
+    });
+  }
+});
+
 describe('lifecycle summaries', () => {
   const ev = (type: string, data: unknown): RunEvent => ({ index: 0, ts: '2026-09-25T10:00:00.000Z', source: 'flue', type, data });
   test('say where the event ran instead of printing the whole event', () => {
@@ -121,5 +133,8 @@ describe('lifecycle summaries', () => {
       'by Asha from blocked (b1) · harbor is back',
     );
     expect(summariseStep(ev('resume', { kind: 'resume', from: 'stopped', by: 'Asha' }))).toBe('by Asha from stopped');
+    expect(summariseStep(ev('server_shutdown', { signal: 'SIGTERM', active_runs: 2, attempt: 1, phase: 'investigating' }))).toBe(
+      'server stopped (SIGTERM) · 2 active runs · in investigating · attempt 1',
+    );
   });
 });

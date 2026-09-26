@@ -193,7 +193,7 @@ describe('resolvePod', () => {
     expect(err.message).not.toContain('app=eventbus');
   });
 
-  test('kubectl failures map to unreachable or timeout without echoing stderr', async () => {
+  test('kubectl failures map to unreachable or timeout; stderr is kept without the env values', async () => {
     const cases = [
       [{ exitCode: 1, stderr: 'error: context test-ctx not found' }, 'unreachable'],
       [{ exitCode: null, spawnError: 'ENOENT' }, 'unreachable'],
@@ -205,6 +205,11 @@ describe('resolvePod', () => {
       const err = await rejectsWith(resolvePod(runner, KUBE, signal), code);
       expect(err.message).not.toContain('test-ctx');
     }
+    const runner = createFakeRunner([
+      { bin: 'kubectl', argv: PODS_ARGV, result: { exitCode: 1, stderr: 'error: context test-ctx not found at https://10.1.2.3:6443' } },
+    ]);
+    const err = await rejectsWith(resolvePod(runner, KUBE, signal), 'unreachable');
+    expect(err.message).toBe('kubectl get pods exited with code 1: error: context <redacted> not found at <url>');
   });
 });
 
@@ -274,6 +279,16 @@ describe('podCurl', () => {
     await rejectsWith(run({ stdout: 'body without status' }), 'unreachable');
     await rejectsWith(run({ stdout: `x${STATUS_MARKER}000` }), 'unreachable');
     await rejectsWith(run({ stdout: 'x'.repeat(10), truncated: true, exitCode: null }), 'cap_exceeded');
+  });
+
+  test('curl stderr naming the gateway host loses it', async () => {
+    for (const stderr of ['curl: (7) Failed to connect to gw.test port 8443 after 2 ms: Connection refused', 'curl: (6) Could not resolve host: gw.test']) {
+      const runner = createFakeRunner([{ bin: 'kubectl', argv: EXEC_ARGV, result: { exitCode: 7, stderr } }]);
+      const err = await podCurl(runner, KUBE, POD, REQ, { signal, maxTimeSec: 30 }).catch((e: unknown) => e);
+      expect(isConnectorError(err, 'unreachable')).toBe(true);
+      expect((err as Error).message).toContain('curl: (');
+      expect((err as Error).message).not.toContain('gw.test');
+    }
   });
 
   test('the exec timeout covers curl --max-time plus the kubectl limit', async () => {

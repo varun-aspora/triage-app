@@ -8,7 +8,9 @@
 //
 // Order: signal -> budget (one tool call) -> at least one id -> one
 // resolveIdChain() per model-supplied id -> scope decision -> widen the run
-// IdChain -> model-facing redaction -> envelope.
+// IdChain -> model-facing redaction -> envelope. A hop that failed comes back
+// as unreachable, and the result's errors list says why (the connector's
+// text, scrubbed and capped) with a hint for what to try instead.
 //
 // The core does the mock branch (per-hop 'resolve_identity' fixtures, a strict
 // miss throws) and writes one audit line per fixed statement with the DSN's env
@@ -27,6 +29,7 @@ import { defineTool, type ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
 import type { SqlConnector } from '../connectors/sql/pg-client.ts';
 import { mockPortFromFixtures } from '../connectors/mock.ts';
+import { safeErrorText, stripAddresses } from '../connectors/error-text.ts';
 import { ConnectorError } from '../connectors/types.ts';
 import { makeAuditLine } from '../gate/audit.ts';
 import { extractIdShaped } from '../gate/id-patterns.ts';
@@ -107,7 +110,8 @@ const description =
   'are fixed. Each id comes back with a status: in_chain (already known, re-resolved), linked (a lookup tied ' +
   'it to the run customer, so it and the ids it led to were added), unverified (it resolved but nothing ties ' +
   'it to the run customer; it was NOT added and other tools will refuse it), not_found, or unreachable (a ' +
-  'database did not answer; record the gap). Returns the updated id_chain with per-hop status and taken_at.';
+  'database did not answer; errors says why). Returns the updated id_chain with per-hop status and taken_at, ' +
+  'and errors when a lookup failed: look those ids up with sql_select or logs_search, or record the gap.';
 
 // ------------------------------------------------------------ results
 
@@ -353,12 +357,37 @@ async function runResolveIdentity(ctx: ToolContext, flue: RunInput): Promise<Too
     audit('deny', 'refused', `${RESOLVE_IDENTITY}: ${left.length} id(s) not added`, `scope: not added to the ID chain (${list})`);
   }
 
+  const errors = hopErrors(seeds);
   const data = {
     results: merged.results,
     id_chain: chain,
+    ...(errors.length > 0 ? { errors, errors_hint: HOP_ERRORS_HINT } : {}),
     ...(flue.data.entity_hint !== undefined ? { entity_hint: flue.data.entity_hint } : {}),
   };
   return ok(JSON.parse(JSON.stringify(redactModelFacing(data))) as unknown, now);
+}
+
+// ------------------------------------------------------------ hop errors
+
+const HOP_ERRORS_HINT =
+  'These statements failed, so the ids they would have given are missing. Look the ids up with sql_select or logs_search on the ' +
+  'same service, or retry resolve_identity later; record the gap if nothing else answers.';
+
+/**
+ * Why hops failed, one entry per hop and reason across all seeds. The text
+ * is the connector's (DSN parts already scrubbed), scrubbed again and capped
+ * here; the model-facing redaction runs over the whole result after.
+ */
+function hopErrors(seeds: readonly Seed[]): { hop: string; source: string; code: string; error: string }[] {
+  const out = new Map<string, { hop: string; source: string; code: string; error: string }>();
+  for (const seed of seeds) {
+    for (const e of seed.result.errors ?? []) {
+      const error = safeErrorText(stripAddresses(e.error));
+      const key = `${e.hop}\u0000${e.code}\u0000${error}`;
+      if (!out.has(key)) out.set(key, { hop: e.hop, source: e.source, code: e.code, error });
+    }
+  }
+  return [...out.values()];
 }
 
 // ------------------------------------------------------------ the module

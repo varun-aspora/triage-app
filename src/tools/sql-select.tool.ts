@@ -1,5 +1,6 @@
-// sql_select: one read-only SELECT against one of the investigator's service
-// databases (HLD 02 §2 and §3; LLD 04 §2.6; D3, D7, D26, D33).
+// sql_select: one read-only SELECT, or an EXPLAIN of one, against one of the
+// investigator's service databases (HLD 02 §2 and §3; LLD 04 §2.6; D3, D7,
+// D26, D33).
 //
 // Input is { service, sql, params?, scope? }. service is a picklist of the
 // closure entity's services that have a database in the registry; entity and
@@ -15,17 +16,25 @@
 //
 // The row cap is TRIAGE_SQL_MAX_ROWS (through the run budget). The wrapped
 // query asks for one row more than the cap, so a cut result is reported as
-// truncated. Fixture rows beyond the cap are cut the same way.
+// truncated. Fixture rows beyond the cap are cut the same way. An EXPLAIN is
+// not wrapped (EXPLAIN inside a subquery is not SQL); its plan lines come
+// back as rows and are cut to the cap in render like any other result.
+//
+// A query Postgres rejects comes back as "Query failed on <entity>:<service>:
+// <Postgres message> (SQLSTATE <code>, <description>)" with what to check
+// next; the pipeline builds that text from src/gate/sql-errors.ts, with the
+// message scrubbed, capped and passed through the model-facing redaction.
 
 import type { FlueLogger } from '@flue/runtime';
 import { defineTool, type ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
+import { safeErrorText } from '../connectors/error-text.ts';
 import type { SqlConnector } from '../connectors/sql/pg-client.ts';
 import type { MockPort } from '../connectors/mock.ts';
 import { ConnectorError, type ConnectorContext } from '../connectors/types.ts';
 import { MAX_SQL_LENGTH, type SqlCheck, type SqlRefusalCode, validateSelect } from '../gate/sql.ts';
-import { buildReadOnlyTxn, wrapWithCap } from '../gate/sql-txn.ts';
-import { semanticKey } from '../mock/key.ts';
+import { buildReadOnlyTxn, explainStatement, wrapWithCap } from '../gate/sql-txn.ts';
+import { semanticKey, type SqlSelectFacts } from '../mock/key.ts';
 import type { Entity } from '../types/core.ts';
 import type { ToolEnvelope } from '../types/tool-result.ts';
 import { type BackingRef, type GateDecision, runIoTool, type StagingHarness } from './_lib/pipeline.ts';
@@ -50,7 +59,7 @@ const WRITE_ADVICE = 'If a write is needed, recommend it under actions in the re
 const NOT_A_SELECT: Readonly<Partial<Record<SqlRefusalCode, string>>> = Object.freeze({
   NOT_SELECT: 'INSERT, UPDATE, DELETE, MERGE and other writes never run.',
   MULTI_STATEMENT: 'Send exactly one statement, with at most one trailing semicolon.',
-  UTILITY: 'SET, RESET, SHOW, EXPLAIN, COPY, DDL and other utility statements are refused.',
+  UTILITY: 'SET, RESET, SHOW, COPY, DDL and other utility statements are refused; EXPLAIN may wrap only a SELECT.',
   DATA_MODIFYING_CTE: 'INSERT, UPDATE, DELETE and MERGE are refused inside WITH as well.',
   INTO: 'SELECT ... INTO creates a table; drop the INTO clause.',
 });
@@ -59,11 +68,16 @@ const description = (maxRows: number): string =>
   "Run one read-only SELECT against one of this entity's service databases. " +
   'Send exactly one SELECT (WITH ... SELECT is fine); writes, SET/RESET/SHOW and more than one statement are ' +
   `refused. Put every value in params and refer to it as $1, $2, ... in order; never write ids into the SQL text. ` +
+  'Unsure of a column? Read information_schema.columns (column_name, data_type WHERE table_name = $1) first; ' +
+  'pg_catalog stays refused. EXPLAIN or EXPLAIN ANALYZE of a SELECT returns its plan as rows. ' +
+  'ANALYZE runs the whole query on production with no row cap, so use it only on a query already narrowed by ids or time. ' +
   'Ids must come from the brief or the ID chain. For counts across customers set scope to "systemic" and select ' +
   'only aggregates (count, sum, avg, min/max of non-id columns, grouped by non-id columns). ' +
   `At most ${maxRows} rows come back; truncated is true when there were more, and the full result is ` +
   'in staged_file in the sandbox. Returns rows, row_count, truncated and taken_at. ' +
   '"Refused: ..." means the gate stopped the call: read the reason, fix the query and try again, or record the gap. ' +
+  '"Query failed ... (SQLSTATE <code>, ...)" carries the database\'s own message: fix what it names and retry. ' +
+  '"did not answer" carries the reason too: retry once or use another source. ' +
   '"not configured for <entity>:<service>" means that database is not set up here: record it as a gap and use ' +
   `another source. ${WRITE_ADVICE}`;
 
@@ -91,7 +105,7 @@ function inputSchema(services: readonly string[]) {
       v.string(),
       v.minLength(1),
       v.maxLength(MAX_SQL_LENGTH),
-      v.description('One SELECT. Values go in params as $1, $2, ...; no ids written into the text.'),
+      v.description('One SELECT, or EXPLAIN [ANALYZE] of one. Values go in params as $1, $2, ...; no ids written into the text.'),
     ),
     params: v.optional(
       v.pipe(v.array(ParamSchema), v.maxLength(MAX_PARAMS), v.description('Bind values for $1..$n, in order.')),
@@ -155,22 +169,36 @@ function gateFor(
     };
   }
   try {
+    const timeouts = { statementTimeoutMs: config.sql.statementTimeoutMs, lockTimeoutMs: config.sql.lockTimeoutMs };
+    if (check.explain !== undefined) {
+      // Same read-only transaction and timeouts; no cap parameter.
+      onPlan({ statements: buildReadOnlyTxn(timeouts, explainStatement(sql)), params: [...params] });
+      return { ok: true };
+    }
     const wrapped = wrapWithCap(sql, check.paramCount);
-    const statements = buildReadOnlyTxn(
-      { statementTimeoutMs: config.sql.statementTimeoutMs, lockTimeoutMs: config.sql.lockTimeoutMs },
-      wrapped.sql,
-    );
+    const statements = buildReadOnlyTxn(timeouts, wrapped.sql);
     // One more row than the cap, so a cut result can be told apart.
     onPlan({ statements, params: [...params, cap + 1] });
     return { ok: true };
   } catch (err) {
+    // Our own code's error (sql-txn.ts), which names the check that failed
+    // and never the SQL; scrubbed and capped all the same.
     const name = err instanceof Error ? err.name : 'error';
+    const why = safeErrorText(err instanceof Error ? err.message : String(err), [], 300);
     return {
       ok: false,
-      message: 'Refused: the query could not be wrapped for a read-only run. Send one plain SELECT.',
-      reason: `sql: wrap failed (${name})`,
+      message: `Refused: the query could not be wrapped for a read-only run${why !== '' ? ` (${why})` : ''}. Send one plain SELECT.`,
+      reason: `sql: wrap failed (${name})${why !== '' ? `: ${why}` : ''}`,
     };
   }
+}
+
+// The fixture key facts. An EXPLAIN gets its own key, so in mock mode it never
+// answers with the rows recorded for the plain SELECT.
+function keyFacts(entity: Entity, service: string, check: SqlCheck, params: readonly Param[]): SqlSelectFacts {
+  if (!check.ok) return { entity, service, tables: [], params: [...params] };
+  const explain = check.explain === undefined ? {} : { explain: check.explain.analyze ? ('analyze' as const) : ('plan' as const) };
+  return { entity, service, tables: check.tables, params: [...params], ...explain };
 }
 
 // ------------------------------------------------------------ backing
@@ -238,7 +266,7 @@ async function runSqlSelect(ctx: ToolContext, entity: Entity, services: readonly
       },
       fixture: () => ({
         kind: 'sql_select',
-        key: semanticKey('sql_select', { entity, service, tables: check.ok ? check.tables : [], params: [...params] }),
+        key: semanticKey('sql_select', keyFacts(entity, service, check, params)),
       }),
       real: async (signal) => {
         const connector = deps.connectors.sql;
@@ -256,7 +284,7 @@ async function runSqlSelect(ctx: ToolContext, entity: Entity, services: readonly
           service,
           plan: plan.statements,
           params: plan.params,
-          keyInput: { entity, service, tables: check.tables, params: [...params] },
+          keyInput: keyFacts(entity, service, check, params),
         });
         if (outcome.fixture_miss === true) throw new ConnectorError('refused', 'sql connector answered from fixtures in real mode');
         if (outcome.role_warning !== undefined) flue.log.warn(`${SQL_SELECT} ${where}: the database role can write`);
@@ -284,7 +312,8 @@ async function runSqlSelect(ctx: ToolContext, entity: Entity, services: readonly
       summary: (value) => {
         const rows = parseAnswer(value).rows.length;
         const tables = check.ok ? check.tables.join(',') : '';
-        return `${SQL_SELECT} ${where} tables=${tables} rows=${Math.min(rows, cap)}${systemic ? ' systemic' : ''}`;
+        const explain = check.ok && check.explain !== undefined ? (check.explain.analyze ? ' explain_analyze' : ' explain') : '';
+        return `${SQL_SELECT} ${where} tables=${tables} rows=${Math.min(rows, cap)}${systemic ? ' systemic' : ''}${explain}`;
       },
     },
     {

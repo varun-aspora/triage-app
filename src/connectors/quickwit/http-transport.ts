@@ -5,9 +5,13 @@
 //
 // Auth is none or bearer. The Authorization header is set only for bearer,
 // and bearer without a token is not_configured. Error messages name env keys
-// and HTTP statuses, never the URL or the token.
+// and HTTP statuses, never the URL or the token. A non-2xx answer keeps an
+// excerpt of Quickwit's own error (its JSON "message", or the body text), and
+// a failed fetch keeps its cause, both with the URL, host, token and
+// addresses taken out, so the model can see why a query was rejected.
 import type { LogsQueryMode } from '../../gate/quickwit.ts';
 import type { TimeWindow } from '../../types/core.ts';
+import { errorText, safeErrorText, scrubSecrets, stripAddresses } from '../error-text.ts';
 import { ConnectorError, MAX_HTTP_BODY_BYTES } from '../types.ts';
 import type { LogGroup, LogHit, TransportResult } from './client.ts';
 
@@ -98,11 +102,12 @@ export async function httpSearch(fetchImpl: FetchLike, req: HttpSearchRequest, n
     controller.abort();
   }, req.timeoutMs);
 
+  const secrets = secretsOf(req, url);
   const fail = (err: unknown): never => {
     if (err instanceof ConnectorError) throw err;
     if (req.signal.aborted) throw req.signal.reason ?? err;
     if (timedOut) throw new ConnectorError('timeout', `Quickwit did not answer within ${req.timeoutMs} ms`, { cause: err });
-    throw new ConnectorError('unreachable', `Quickwit at ${names.url} could not be reached`, { cause: err });
+    throw new ConnectorError('unreachable', `Quickwit at ${names.url} could not be reached${said(errorText(err), secrets)}`, { cause: err });
   };
 
   try {
@@ -112,7 +117,7 @@ export async function httpSearch(fetchImpl: FetchLike, req: HttpSearchRequest, n
     } catch (err) {
       return fail(err);
     }
-    checkStatus(res, names);
+    await checkStatus(res, names, secrets);
     let text: string;
     try {
       text = await readCapped(res, MAX_HTTP_BODY_BYTES);
@@ -126,21 +131,89 @@ export async function httpSearch(fetchImpl: FetchLike, req: HttpSearchRequest, n
   }
 }
 
-function checkStatus(res: Response, names: HttpEnvNames): void {
+/** The URL, host and token, which never go into a message. */
+function secretsOf(req: HttpSearchRequest, url: string): string[] {
+  const out = [req.url, url];
+  try {
+    const parsed = new URL(req.url);
+    out.push(parsed.origin, parsed.host, parsed.hostname);
+  } catch {
+    // searchUrl already refused a bad URL.
+  }
+  if (req.token !== undefined) out.push(req.token, req.token.trim());
+  return out;
+}
+
+/** ": <scrubbed excerpt>", or '' when there is nothing to say. */
+function said(text: string, secrets: readonly string[]): string {
+  const safe = safeErrorText(stripAddresses(scrubSecrets(text, secrets)), [], ERROR_BODY_CHARS);
+  return safe === '' ? '' : `: ${safe}`;
+}
+
+/** Bytes of an error body read for the message. */
+const ERROR_BODY_BYTES = 8 * 1024;
+const ERROR_BODY_CHARS = 1000;
+
+/** Quickwit's own error from a non-2xx body: its JSON message, or the text. Never throws. */
+async function errorBody(res: Response): Promise<string> {
+  let text = '';
+  try {
+    text = await readPrefix(res, ERROR_BODY_BYTES);
+  } catch {
+    return '';
+  }
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (isObject(parsed)) {
+      for (const key of ['message', 'error', 'reason']) {
+        const value = parsed[key];
+        if (typeof value === 'string' && value.trim() !== '') return value;
+      }
+    }
+  } catch {
+    // Not JSON: use the text.
+  }
+  return text;
+}
+
+/** The first max bytes of the body as text; the rest is cancelled. */
+async function readPrefix(res: Response, max: number): Promise<string> {
+  if (res.body === null) return '';
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (total < max) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const part = value.subarray(0, max - total);
+    chunks.push(part);
+    total += part.byteLength;
+  }
+  await reader.cancel().catch(() => {});
+  const all = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) {
+    all.set(c, at);
+    at += c.byteLength;
+  }
+  return new TextDecoder().decode(all);
+}
+
+async function checkStatus(res: Response, names: HttpEnvNames, secrets: readonly string[]): Promise<void> {
   const s = res.status;
   if (res.type === 'opaqueredirect' || (s >= 300 && s < 400)) {
     void res.body?.cancel().catch(() => {});
     throw new ConnectorError('refused', `Quickwit at ${names.url} answered with a redirect; redirects are refused`);
   }
   if (s >= 200 && s < 300) return;
-  void res.body?.cancel().catch(() => {});
+  const body = said(await errorBody(res), secrets);
   if (s === 401 || s === 403) {
     const check = names.token === undefined ? names.auth : `${names.auth} and ${names.token}`;
-    throw new ConnectorError('unreachable', `Quickwit refused the credentials (HTTP ${s}); check ${check}`);
+    throw new ConnectorError('unreachable', `Quickwit refused the credentials (HTTP ${s}); check ${check}${body}`);
   }
-  if (s === 400) throw new ConnectorError('refused', 'Quickwit rejected the query (HTTP 400)');
-  if (s === 404) throw new ConnectorError('unreachable', 'Quickwit has no such index (HTTP 404)');
-  throw new ConnectorError('unreachable', `Quickwit answered HTTP ${s}`);
+  if (s === 400) throw new ConnectorError('refused', `Quickwit rejected the query (HTTP 400)${body}`);
+  if (s === 404) throw new ConnectorError('unreachable', `Quickwit has no such index (HTTP 404)${body}`);
+  throw new ConnectorError('unreachable', `Quickwit answered HTTP ${s}${body}`);
 }
 
 /** Reads the body as text, stopping with cap_exceeded once it passes max bytes. */

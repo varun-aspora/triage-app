@@ -247,12 +247,57 @@ describe('qwSearch failures', () => {
     expect(err.message).toContain('qw login');
   });
 
-  test('any other non-zero exit is unreachable and leaves stderr out', async () => {
+  test('any other non-zero exit is unreachable and keeps stderr without addresses or URLs', async () => {
     const r = req();
-    const err = await errorOf(qwSearch(createFakeRunner([step(r, { exitCode: 2, stderr: 'dial tcp 10.1.2.3:443: refused' })]), r));
+    const err = await errorOf(
+      qwSearch(createFakeRunner([step(r, { exitCode: 2, stderr: 'dial tcp 10.1.2.3:443: connection refused (https://qw-endpoint.internal/api)' })]), r),
+    );
     expect(err.code).toBe('unreachable');
-    expect(err.message).toContain('exit code 2');
-    expect(err.message).not.toContain('10.1.2.3');
+    expect(err.message).toBe('qw search failed with exit code 2: dial tcp <host>: connection refused (<url>)');
+  });
+
+  test('stderr saying Quickwit rejected the query is a refusal with the reason, so the model can fix the query', async () => {
+    const r = req();
+    const stderr = 'Error: HTTP 400 Bad Request from https://qw-endpoint.internal: failed to parse query: `level:ERROR AND (`. Unexpected end of input\n';
+    const err = await errorOf(qwSearch(createFakeRunner([step(r, { exitCode: 1, stderr })]), r));
+    expect(err.code).toBe('refused');
+    expect(err.message).toStartWith('Quickwit rejected the qw search query (exit code 1): Error: HTTP 400 Bad Request from <url>');
+    expect(err.message).toContain('failed to parse query: `level:ERROR AND (`. Unexpected end of input');
+    expect(err.message).not.toContain('qw-endpoint');
+  });
+
+  test('a failed OIDC token refresh is an auth outage, not a rejected query, even with 400 Bad Request in it', async () => {
+    const r = req();
+    const stderr =
+      'Error: token refresh failed: 400 Bad Request: {"error":"invalid_grant","error_description":"Token is not active","refresh_token":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl"} from https://sso.internal/token\n';
+    const err = await errorOf(qwSearch(createFakeRunner([step(r, { exitCode: 1, stderr })]), r));
+    expect(err.code).toBe('unreachable');
+    expect(err.message).toStartWith('qw could not authenticate for context ssfb-prod; run qw login --context ssfb-prod on the host');
+    expect(err.message).toContain('invalid_grant');
+    expect(err.message).not.toContain('eyJ');
+    expect(err.message).not.toContain('sso.internal');
+  });
+
+  test('401, 403, forbidden and oidc wordings are auth outages too', async () => {
+    for (const stderr of ['Error: HTTP 403 Forbidden', 'oidc provider error: invalid_client', 'status code 401', 'authentication failed for user']) {
+      const r = req();
+      const err = await errorOf(qwSearch(createFakeRunner([step(r, { exitCode: 1, stderr })]), r));
+      expect([stderr, err.code, err.message.startsWith('qw could not authenticate')]).toEqual([stderr, 'unreachable', true]);
+    }
+  });
+
+  test('a query parser "unexpected token" is still a rejected query', async () => {
+    const r = req();
+    const stderr = 'Error: HTTP 400 Bad Request: failed to parse query: unexpected token at position 12\n';
+    const err = await errorOf(qwSearch(createFakeRunner([step(r, { exitCode: 1, stderr })]), r));
+    expect(err.code).toBe('refused');
+  });
+
+  test('a long stderr is capped', async () => {
+    const r = req();
+    const err = await errorOf(qwSearch(createFakeRunner([step(r, { exitCode: 3, stderr: 'z'.repeat(20_000) })]), r));
+    expect(err.message.length).toBeLessThan(1100);
+    expect(err.message).toEndWith('...');
   });
 
   test('a timeout is timeout', async () => {

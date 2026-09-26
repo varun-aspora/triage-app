@@ -50,6 +50,8 @@ export type AuditInput = {
   readonly action?: 'allow' | 'block';
   /** Count-only tools: how many values were handled. */
   readonly count?: number;
+  /** sql_select failures: the Postgres SQLSTATE. */
+  readonly sqlstate?: string;
 };
 
 /** Thrown when an audit line cannot be built. Carries field names only. */
@@ -124,6 +126,7 @@ export function makeAuditLine(input: AuditInput, opts: PersistedOptions = {}): A
     candidate.action = input.action;
   }
   if (input.count !== undefined) candidate.count = input.count;
+  if (input.sqlstate !== undefined) candidate.sqlstate = input.sqlstate;
 
   return assertAuditLine(candidate);
 }

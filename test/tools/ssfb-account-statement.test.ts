@@ -156,12 +156,23 @@ describe('pagination', () => {
     expect(out['page']).toBe(3);
   });
 
-  test('a non-2xx page is reported as an error without its body', async () => {
-    const w = world({ mock: false, respond: () => json({ message: 'account missing' }, 404) });
+  test('a non-2xx page is reported as an error with a scrubbed excerpt of its body', async () => {
+    const w = world({
+      mock: false,
+      respond: () => json({ message: 'account missing', upstream: 'https://core.internal/x', auth: 'Bearer abcdefgh12345678' }, 404),
+    });
     const out = data(await callTool(toolModule, w, { account_id: ACCOUNT }));
-    expect(out['error']).toBe('rhythm answered HTTP 404 on page 1');
+    expect(String(out['error'])).toStartWith('rhythm answered HTTP 404 on page 1: ');
+    expect(String(out['error'])).toContain('account missing');
+    expect(String(out['error'])).not.toContain('core.internal');
+    expect(String(out['error'])).not.toContain('abcdefgh12345678');
     expect(out['transaction_count']).toBe(0);
-    expect(JSON.stringify(out)).not.toContain('account missing');
+  });
+
+  test('a long non-2xx body is capped', async () => {
+    const w = world({ mock: false, respond: () => json({ message: 'x'.repeat(5000) }, 500) });
+    const out = data(await callTool(toolModule, w, { account_id: ACCOUNT }));
+    expect(String(out['error']).length).toBeLessThan(400);
   });
 });
 

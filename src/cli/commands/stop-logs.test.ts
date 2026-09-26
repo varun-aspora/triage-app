@@ -9,6 +9,7 @@ import { Readable } from 'node:stream';
 import { makeTestHome, type TestHome } from '../../../test/support/home.ts';
 import { redactPersisted } from '../../gate/redact.ts';
 import { flushRunEventLog, uninstallRunEventLog } from '../../runlog/event-log.ts';
+import { FLUE_EVENT_TYPES, PIPELINE_EVENT_TYPES } from '../../runlog/event-types.ts';
 import { sampleRequest } from '../../runstore/contract.ts';
 import { createFolderRunStore } from '../../runstore/folder.ts';
 import type { RunStore } from '../../runstore/types.ts';
@@ -155,6 +156,56 @@ describe('triage logs', () => {
     expect(sleeps).toBe(1);
     expect(r.out.trim().split('\n')).toHaveLength(2);
     expect(r.out).toContain('settled');
+  });
+
+  const mixed = [
+    { ts: at, source: 'pipeline', type: 'phase', data: { phase: 'investigating' } },
+    { ts: at, source: 'flue', type: 'tool', data: { toolName: 'sql_select', isError: true, durationMs: 5 } },
+    { ts: at, source: 'flue', type: 'tool', data: { toolName: 'sql_select', isError: false, durationMs: 5 } },
+    { ts: at, source: 'flue', type: 'log', data: { level: 'warn', message: 'slow' } },
+    { ts: at, source: 'flue', type: 'log', data: { level: 'info', message: 'fine' } },
+    { ts: at, source: 'flue', type: 'submission_settled', data: { outcome: 'aborted' } },
+    { ts: at, source: 'pipeline', type: 'settled', data: { status: 'failed' } },
+  ];
+  const indexes = (out: string) => out.trim().split('\n').map((l) => JSON.parse(l).index);
+
+  test('--errors keeps only error lines, by the web Errors tab rule', async () => {
+    const e = await env('completed');
+    writeLog(e, mixed);
+    const logs = createLogsCommand({ openStore: async () => e.store });
+    const r = await cli(e, logs, ['logs', RUN, '--errors', '--json']);
+    expect(r.code).toBe(EXIT.OK);
+    expect(indexes(r.out)).toEqual([1, 3, 5, 6]);
+    const after = await cli(e, logs, ['logs', RUN, '--errors', '--after', '4', '--json']);
+    expect(indexes(after.out)).toEqual([5, 6]);
+  });
+
+  test('--errors with --type keeps lines that match both', async () => {
+    const e = await env('completed');
+    writeLog(e, mixed);
+    const logs = createLogsCommand({ openStore: async () => e.store });
+    const r = await cli(e, logs, ['logs', RUN, '--errors', '--type', 'tool', '--type', 'log', '--json']);
+    expect(indexes(r.out)).toEqual([1, 3]);
+    const none = await cli(e, logs, ['logs', RUN, '--errors', '--type', 'phase']);
+    expect(none.code).toBe(EXIT.OK);
+    expect(none.out).toBe('');
+  });
+
+  test('--help lists the event types by source and explains --errors', async () => {
+    const e = await env();
+    const r = await cli(e, createLogsCommand({ openStore: async () => e.store }), ['logs', '--help']);
+    expect(r.code).toBe(EXIT.OK);
+    expect(r.out).toContain('--errors');
+    expect(r.out).toContain('--type matches the name exactly');
+    const pipeline = r.out.indexOf('  pipeline:');
+    const flue = r.out.indexOf('  flue:');
+    expect(pipeline).toBeGreaterThan(-1);
+    expect(flue).toBeGreaterThan(pipeline);
+    const listed = (from: number, to: number) => new Set(r.out.slice(from, to).split(/[\s,:]+/));
+    for (const t of PIPELINE_EVENT_TYPES) expect(listed(pipeline, flue).has(t)).toBe(true);
+    const end = r.out.indexOf('--errors keeps');
+    expect(end).toBeGreaterThan(flue);
+    for (const t of FLUE_EVENT_TYPES) expect(listed(flue, end).has(t)).toBe(true);
   });
 
   test('an unknown run and a bad --after are refused', async () => {

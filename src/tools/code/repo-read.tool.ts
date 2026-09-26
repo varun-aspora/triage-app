@@ -1,5 +1,7 @@
 // repo_read: read a line range of one file in a checked-out repo, under the
 // realpath jail in _lib/jail.ts (HLD 02 §2, D11). Local disk only.
+// Mounted on code_walker and on both investigators (the deep variant gets
+// the investigator set); on an investigator the repo list is its entity's.
 
 import { readFile } from 'node:fs/promises';
 import { defineTool } from '@flue/runtime/tool';
@@ -38,7 +40,15 @@ export async function readRange(reposDir: string | undefined, input: ReadInput, 
     buf = await readFile(jailed.path, signal !== undefined ? { signal } : {});
   } catch (err) {
     signal?.throwIfAborted();
-    return { ok: false, message: 'file could not be read', reason: `read failed (${err instanceof Error ? err.name : 'error'})` };
+    // The errno code is the reason (EACCES, EISDIR); the message is left out
+    // because it holds the absolute path, which jail messages never echo.
+    const code = (err as { code?: unknown } | null)?.code;
+    const why = typeof code === 'string' && /^E[A-Z0-9_]{1,20}$/.test(code) ? code : err instanceof Error ? err.name : 'error';
+    return {
+      ok: false,
+      message: `file could not be read (${why}). Check the path with repo_grep, or read another file.`,
+      reason: `read failed (${why})`,
+    };
   }
   if (looksBinary(buf)) return { ok: false, message: 'file looks binary and is not read', reason: 'binary file' };
 
@@ -88,7 +98,7 @@ export async function readRange(reposDir: string | undefined, input: ReadInput, 
 
 export const toolModule: ToolModule = {
   name: NAME,
-  mounts: ['code_walker', 'investigator_deep'],
+  mounts: ['code_walker', 'investigator'],
   entities: 'all',
   enabled: (ctx) => codeToolEnabled(ctx),
   create: (ctx) => {

@@ -203,7 +203,7 @@ export const toolModule: ToolModule = {
         "APIs do not show. path must start with '/' and use only letters, digits and / _ . - (no query string, " +
         "no '..'); any id in it must come from the brief or the ID chain. GET is the default; other methods are " +
         'refused unless the SSFB rules file allows them. Returns status and body (size-capped). "Refused" names the ' +
-        'rule; do not retry the same call. "unreachable" means kubectl or the pod did not answer; record the gap.',
+        'rule; do not retry the same call. "unreachable" means kubectl or the pod did not answer; the message says why: retry once, else record the gap.',
       input: v.object({
         path: v.pipe(
           v.string(),

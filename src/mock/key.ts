@@ -15,6 +15,7 @@ import {
   type FixtureKind,
   type LogsMode,
   type SemanticKey,
+  type SqlExplainKind,
 } from './types.ts';
 
 export const HASH_LENGTH = 16;
@@ -27,6 +28,8 @@ export type SqlSelectFacts = {
   readonly service: string;
   readonly tables: readonly string[];
   readonly params: readonly Scalar[];
+  /** Set for an EXPLAIN of the SELECT; left out for the SELECT itself. */
+  readonly explain?: SqlExplainKind;
 };
 
 export type HttpCallFacts = {
@@ -122,6 +125,7 @@ const BUILDERS: { [K in FixtureKind]: (facts: SemanticKeyFacts[K]) => unknown } 
     service: trim(f.service),
     tables: sortedSet(f.tables.map(trim)),
     params: [...f.params.map(paramText)].sort(compareNullable),
+    explain: f.explain,
   }),
   http_call: (f) => ({
     entity: f.entity,

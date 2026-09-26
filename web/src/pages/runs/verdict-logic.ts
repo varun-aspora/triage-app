@@ -117,10 +117,15 @@ const TOOL_TYPES = new Set(['tool_start', 'tool', 'task_start', 'task']);
 type Data = Record<string, unknown>;
 const dataOf = (e: Pick<RunEvent, 'data'>): Data => (typeof e.data === 'object' && e.data !== null ? (e.data as Data) : {});
 
+/**
+ * The Errors filter. A copy of src/runlog/errors.ts (`triage logs --errors`),
+ * since no runtime code from src/ goes into the bundle; verdict-logic.test.ts
+ * checks the two agree.
+ */
 export function isErrorEvent(e: Pick<RunEvent, 'type' | 'data'>): boolean {
   const d = dataOf(e);
   if (d.isError === true) return true;
-  if (e.type === 'failed' || e.type === 'submission_recovery') return true;
+  if (e.type === 'failed' || e.type === 'submission_recovery' || e.type === 'server_shutdown') return true;
   if (e.type === 'submission_settled' && d.outcome !== 'completed') return true;
   if (e.type === 'settled' && d.status === 'failed') return true;
   if (e.type === 'log' && (d.level === 'error' || d.level === 'warn')) return true;
@@ -189,6 +194,13 @@ export function summariseStep(e: Pick<RunEvent, 'type' | 'data'>): string {
       return `${s(d.verdict)}${d.cancelled === true ? ' (cancel)' : ''}${d.notes !== undefined ? ` · ${excerpt(d.notes)}` : ''}`;
     case 'stop':
       return `by ${s(d.by)} from ${s(d.stopped_from)}`;
+    case 'server_shutdown':
+      return [
+        `server stopped (${s(d.signal)})`,
+        `${s(d.active_runs)} active runs`,
+        ...(d.phase !== undefined ? [`in ${s(d.phase)}`] : []),
+        ...(d.attempt !== undefined ? [`attempt ${s(d.attempt)}`] : []),
+      ].join(' · ');
     case 'blocked':
       return `${s(d.block_id)} · ${Array.isArray(d.systems) ? d.systems.map(s).join(', ') : ''}`;
     case 'resume':

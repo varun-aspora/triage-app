@@ -521,14 +521,19 @@ describe('timeout and abort', () => {
     expect(fetch.calls.length).toBe(0);
   });
 
-  test('a network error is unreachable with a fixed message', async () => {
+  test('a network error is unreachable and keeps its reason without the base URL, host, token or address', async () => {
     const fetch = fakeFetch(() => {
-      throw new TypeError(`fetch failed for ${BRO_BASE} with ${TOKEN}`);
+      throw new TypeError(`fetch failed for ${BRO_BASE} with ${TOKEN}`, {
+        cause: Object.assign(new Error('connect ECONNREFUSED 10.20.30.40:443'), { code: 'ECONNREFUSED' }),
+      });
     });
     const err = await refusal(connector(fetch).send(context(), broRequest()));
     expect(err.code).toBe('unreachable');
+    expect(err.message).toContain('the request failed: fetch failed');
+    expect(err.message).toContain('connect ECONNREFUSED <host>');
     expect(err.message).not.toContain('bro.example.invalid');
     expect(err.message).not.toContain(TOKEN);
+    expect(err.message).not.toContain('10.20.30.40');
     expect(err.cause).toBeUndefined();
   });
 });

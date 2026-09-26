@@ -1,5 +1,7 @@
 // repo_grep: search one checked-out repo with a regular expression, in
 // process over the jailed tree (HLD 02 §2, D11). No grep binary is run.
+// Mounted on code_walker and on both investigators (the deep variant gets
+// the investigator set); on an investigator the repo list is its entity's.
 
 import { defineTool } from '@flue/runtime/tool';
 import * as v from 'valibot';
@@ -11,7 +13,7 @@ const NAME = 'repo_grep';
 
 export const toolModule: ToolModule = {
   name: NAME,
-  mounts: ['code_walker', 'investigator_deep'],
+  mounts: ['code_walker', 'investigator'],
   entities: 'all',
   enabled: (ctx) => codeToolEnabled(ctx),
   create: (ctx) => {

@@ -49,7 +49,7 @@ knowledge/
 | Agent | Instruction (`method/`, always on) | Skills (on demand) |
 |---|---|---|
 | `Triage` | `orchestrator.md`, `brief-template.md`, `report-format.md` | `<entity>-overview` for each enabled entity, `patterns`, `frontend-routing` |
-| `investigate_<entity>` and `investigate_<entity>_deep` | `investigator.md`, `logs.md`, `logs-<entity>.md` | `<entity>-<service>` for the registry's services |
+| `investigate_<entity>` and `investigate_<entity>_deep` | `investigator.md`, `logs.md`, `logs-<entity>.md` | `<entity>-<service>` for the registry's services, `repo-map`; `codegraph-limits` on the deep variant only |
 | `code_walker` | `code-walker.md` | `repo-map`, `codegraph-limits`, `frontend-routing` |
 
 Instruction text is for what an agent always needs. Skills are for knowledge

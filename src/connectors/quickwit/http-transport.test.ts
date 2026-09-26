@@ -193,13 +193,15 @@ describe('timeout and abort', () => {
     await expect(httpSearch(hanging, req({ signal: ac.signal, timeoutMs: 5000 }), NAMES)).rejects.toThrow('run cancelled');
   });
 
-  test('a network error is unreachable naming the URL key only', async () => {
+  test('a network error is unreachable naming the URL key and the reason, without the host or address', async () => {
     const f = fakeFetch(() => {
-      throw new TypeError('fetch failed: getaddrinfo ENOTFOUND quickwit.example.test');
+      throw new TypeError('fetch failed', {
+        cause: Object.assign(new Error('getaddrinfo ENOTFOUND quickwit.example.test (10.9.8.7)'), { code: 'ENOTFOUND' }),
+      });
     });
     const err = await errorOf(httpSearch(f, req(), NAMES));
     expect(err.code).toBe('unreachable');
-    expect(err.message).toContain('ATSPL_QUICKWIT_URL');
+    expect(err.message).toBe('Quickwit at ATSPL_QUICKWIT_URL could not be reached: fetch failed: getaddrinfo ENOTFOUND <host> (<host>)');
     expectNoSecrets(err);
   });
 });
@@ -220,6 +222,22 @@ describe('response', () => {
     const body = { num_hits: 9, hits: [], aggregations: { [GROUPS_AGG]: { buckets: [{ key: 'a', doc_count: 2 }, { key: 'b', doc_count: 5 }], sum_other_doc_count: 2 } } };
     const out = await httpSearch(fakeFetch(() => json(body)), req({ mode: 'histogram', groupBy: 'service' }), NAMES);
     expect(out).toEqual({ kind: 'groups', groups: [{ key: 'b', count: 5 }, { key: 'a', count: 2 }], num_hits: 9, truncated: true });
+  });
+
+  test('a 400 keeps Quickwit\'s own message, so the model can fix the query', async () => {
+    const body = { message: 'failed to parse query: `service:harbor AND (`. unexpected end of input' };
+    const err = await errorOf(httpSearch(fakeFetch(() => json(body, 400)), req(), NAMES));
+    expect(err.code).toBe('refused');
+    expect(err.message).toBe('Quickwit rejected the query (HTTP 400): failed to parse query: `service:harbor AND (`. unexpected end of input');
+  });
+
+  test('an error body that is not JSON is kept as text, capped, with the URL and token scrubbed', async () => {
+    const text = `upstream error at ${BASE} with Bearer ${TOKEN}: ${'q'.repeat(20_000)}`;
+    const err = await errorOf(httpSearch(fakeFetch(() => new Response(text, { status: 502 })), req(), NAMES));
+    expect(err.code).toBe('unreachable');
+    expect(err.message).toStartWith('Quickwit answered HTTP 502: upstream error at <redacted> with Bearer <redacted>: qqq');
+    expect(err.message.length).toBeLessThan(1100);
+    expectNoSecrets(err);
   });
 
   test('400 is refused, 404 and 5xx are unreachable', async () => {

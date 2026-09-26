@@ -512,6 +512,34 @@ describe('qw and http transports', () => {
     expect(lastAudit(http).summary_redacted).toContain('via http');
   });
 
+  test('a query Quickwit rejects reaches the model with its reason on both transports', async () => {
+    const reason = 'failed to parse query: `service:harbor AND (`. unexpected end of input';
+    const qwHome = home();
+    const httpHome = home({ overrides: HTTP_ENV });
+    const exec: ExecRunner = {
+      run: async () => ({
+        exitCode: 1,
+        stdout: '',
+        stderr: `Error: HTTP 400 Bad Request from ${FAKE_URL}: ${reason}`,
+        timedOut: false,
+        truncated: false,
+        aborted: false,
+      }),
+    };
+    const fetchImpl = (async () => new Response(JSON.stringify({ message: reason }), { status: 400 })) as unknown as FetchLike;
+    const qw = setup({ h: qwHome, mockMode: false, connector: createQuickwitConnector({ registry: qwHome.registry, config: qwHome.config, exec, fetchImpl: noFetch, backoffMs: 0 }) });
+    const http = setup({ h: httpHome, mockMode: false, connector: createQuickwitConnector({ registry: httpHome.registry, config: httpHome.config, exec: noExec, fetchImpl, backoffMs: 0 }) });
+    for (const s of [qw, http]) {
+      const env = await s.call({ service: 'harbor', message: 'doc fetch failed' });
+      expect(env.output.status).toBe('refused');
+      const message = env.output.status === 'refused' ? env.output.message : '';
+      expect(message).toContain(reason);
+      expect(message).toContain('retry');
+      expect(message).not.toContain('quickwit.example.test');
+      expect(lastAudit(s).reason).toContain('failed to parse query');
+    }
+  });
+
   test('qw upper-bound note', async () => {
     const qw = setup({ fixture: HITS_FIXTURE, requestWindow: PAST_REQUEST_WINDOW });
     const out = dataOf(await qw.call({ service: 'harbor', message: 'doc fetch failed' }));

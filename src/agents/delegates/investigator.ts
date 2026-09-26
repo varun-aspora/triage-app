@@ -13,9 +13,15 @@
 // throw inside a delegate render, and the sandbox is inherited from the root.
 //
 // The normal variant has no model override and inherits the run's tier
-// model. The deep variant runs on MODEL_TIER_STRONG with thinking high and
-// also gets the code tools (toolsFor('investigator_deep') is the investigator
-// set plus the code tools).
+// model. Both variants get repo_grep and repo_read over their own entity's
+// repos, so a failed read (an unknown column, a missing table) can be looked
+// up in migrations and models without a code_walker round trip. The deep
+// variant runs on MODEL_TIER_STRONG with thinking high and also gets the
+// CodeGraph tools (toolsFor('investigator_deep') is the investigator set plus
+// code_explore, code_node and code_impact).
+//
+// Skills: the entity's service notes and repo-map on both variants, and
+// codegraph-limits on the deep variant, the only one with CodeGraph tools.
 
 import { defineSubagent, useSkill, useTool, type SkillDefinition, type SubagentDefinition } from '@flue/runtime';
 import type { ToolDefinition } from '@flue/runtime/tool';
@@ -27,7 +33,7 @@ import { toolsFor } from '../../tools/index.ts';
 import type { Mount, ToolContext, ToolDeps } from '../../tools/types.ts';
 import { EntitySchema, RunIdSchema, type Entity, type RunId } from '../../types/core.ts';
 import { deployManifestLines } from '../deploy-manifests.ts';
-import { currentKnowledge, methodDoc, serviceSkills, type Knowledge } from '../skills.ts';
+import { codegraphLimitsSkill, currentKnowledge, methodDoc, repoMapSkill, serviceSkills, type Knowledge } from '../skills.ts';
 
 /** Thinking level of the deep variant (HLD §1.3). */
 export const DEEP_THINKING = 'high' as const;
@@ -129,6 +135,11 @@ export function investigatorMounts(
   const services = env.registry.services(entity);
   const notes = serviceSkills(entity, services, knowledge);
   const tools = toolsFor(mount, ctx);
+  const skills = [
+    ...notes.skills,
+    repoMapSkill(knowledge),
+    ...(deep ? [codegraphLimitsSkill(knowledge)] : []),
+  ].filter((s): s is SkillDefinition => s !== undefined);
 
   const docs = investigatorDocs(entity)
     .map((file) => methodDoc(file, knowledge))
@@ -146,7 +157,7 @@ export function investigatorMounts(
 
   return Object.freeze({
     tools: Object.freeze(tools),
-    skills: notes.skills,
+    skills: Object.freeze(skills),
     instructions: `${[...docs, footer].join('\n\n')}\n`,
   });
 }
@@ -189,7 +200,7 @@ function describeInvestigator(entity: Entity, deep: boolean): string {
     );
   }
   return (
-    `Investigates one question about ${who} with its admin API, database and log tools, and records EntityFindings. ` +
+    `Investigates one question about ${who} with its admin API, database and log tools, reads the ${entity} repos when a source falls short, and records EntityFindings. ` +
     'It sees only the brief, so send a complete one: entity, question, ids, window, services in play and what to return.'
   );
 }
