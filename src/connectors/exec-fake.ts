@@ -3,7 +3,7 @@
 // scripted result and recorded. A call nobody scripted throws, so a test
 // cannot quietly fall through to a real process.
 
-import { checkCommand, type ExecOptions, type ExecResult, type ExecRunner } from './exec.ts';
+import { checkCommand, emptyResult, type ExecOptions, type ExecResult, type ExecRunner } from './exec.ts';
 
 export type FakeCall = {
   readonly bin: string;
@@ -82,10 +82,10 @@ export function createFakeRunner(script: readonly FakeStep[]): FakeRunner {
       match.used++;
       calls.push(call);
       if (opts.signal?.aborted) {
-        return { exitCode: null, stdout: '', stderr: '', timedOut: false, truncated: false, aborted: true };
+        return emptyResult({ aborted: true });
       }
       const scripted = typeof match.step.result === 'function' ? match.step.result(call) : (match.step.result ?? {});
-      return { exitCode: 0, stdout: '', stderr: '', timedOut: false, truncated: false, aborted: false, ...scripted };
+      return emptyResult({ exitCode: 0, ...scripted });
     },
   };
 }

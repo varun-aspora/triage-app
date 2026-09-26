@@ -17,13 +17,13 @@
 // error echoes back (22P02 quotes the bad input) came from the model's own
 // call, so returning them is not a new exposure. Pure: no I/O.
 
+import { ConnectorError } from './types.ts';
+
 /** Most characters of error detail that reach the model. */
 export const MAX_ERROR_TEXT_CHARS = 1500;
 
 /** The placeholder a scrubbed value becomes. */
 export const SCRUBBED = '<redacted>';
-
-import { ConnectorError } from './types.ts';
 
 // scheme://user:password@ or scheme://token@: the whole userinfo goes.
 const URL_USERINFO = /\b([A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/)[^\s\/@'"`]{1,512}@/g;
