@@ -17,6 +17,7 @@
 import { open, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import * as v from 'valibot';
+import { hasCode } from '../runstore/atomic.ts';
 import { RunIdSchema } from '../types/core.ts';
 import { EVENTS_FILE, RUN_EVENT_SOURCES, type RunEventLine } from './event-log.ts';
 
@@ -53,12 +54,10 @@ export async function readRunEvents(runsDir: string, runId: string, options: Rea
   try {
     text = await readFile(join(runsDir, runId, EVENTS_FILE), 'utf8');
   } catch (err) {
-    if ((err as { code?: unknown } | null)?.code === 'ENOENT') return { events: [], next: after, more: false };
+    if (hasCode(err, 'ENOENT')) return { events: [], next: after, more: false };
     throw err;
   }
-  // Only lines that end in a newline are complete.
-  const lines = text.split('\n');
-  lines.pop();
+  const lines = completeLines(text);
   const events: NumberedRunEvent[] = [];
   let index = after;
   for (; index < lines.length && events.length < limit; index++) {
@@ -67,6 +66,13 @@ export async function readRunEvents(runsDir: string, runId: string, options: Rea
     events.push({ ...parsed, index });
   }
   return { events, next: index, more: index < lines.length };
+}
+
+/** The lines that end in a newline; the text after the last one is not complete yet. */
+function completeLines(text: string): string[] {
+  const lines = text.split('\n');
+  lines.pop();
+  return lines;
 }
 
 function parseLine(line: string): RunEventLine | null {
@@ -92,7 +98,7 @@ export async function lastRunEventAt(runsDir: string, runId: string): Promise<nu
   try {
     handle = await open(join(runsDir, runId, EVENTS_FILE), 'r');
   } catch (err) {
-    if ((err as { code?: unknown } | null)?.code === 'ENOENT') return null;
+    if (hasCode(err, 'ENOENT')) return null;
     throw err;
   }
   try {
@@ -115,9 +121,7 @@ export async function lastRunEventAt(runsDir: string, runId: string): Promise<nu
  * tail of a longer line. Undefined when no line in the chunk can be read.
  */
 function lastLineTime(text: string, fromFileStart: boolean): number | undefined {
-  // Only lines that end in a newline are complete.
-  const lines = text.split('\n');
-  lines.pop();
+  const lines = completeLines(text);
   const first = fromFileStart ? 0 : 1;
   for (let i = lines.length - 1; i >= first; i--) {
     const line = parseLine(lines[i] ?? '');
