@@ -14,8 +14,8 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import * as v from 'valibot';
 import { hashKeyString, keyString, semanticKey, type SemanticKeyFacts } from './key.ts';
 import {
-  FIXTURE_ENTITIES,
-  FIXTURE_KINDS,
+  FixtureEntitySchema,
+  FixtureKindSchema,
   FixtureSchema,
   type Fixture,
   type FixtureEntity,
@@ -80,7 +80,13 @@ export class FixtureStoreError extends Error {
 }
 
 const CASE_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
-const FILE_NAME = /^([0-9a-f]{16})\.json$/;
+/** A fixture file name, <16 hex>.json; the capture is the hash. */
+export const FIXTURE_FILE_NAME = /^([0-9a-f]{16})\.json$/;
+
+/** A case id is one safe folder name and never the _unreviewed/ folder. */
+export function isValidCaseId(caseId: string): boolean {
+  return typeof caseId === 'string' && CASE_ID.test(caseId) && caseId !== UNREVIEWED_DIR;
+}
 
 export function resolveFixturesDir(fixturesDir: string, home?: string): string {
   let dir: string;
@@ -96,7 +102,7 @@ export function resolveFixturesDir(fixturesDir: string, home?: string): string {
 export function createFixtureStore(options: StoreOptions): FixtureStore {
   const root = resolveFixturesDir(options.fixturesDir, options.home);
   const { caseId } = options;
-  if (caseId !== undefined && (!CASE_ID.test(caseId) || caseId === UNREVIEWED_DIR)) {
+  if (caseId !== undefined && !isValidCaseId(caseId)) {
     throw new FixtureStoreError('case id must match [A-Za-z0-9][A-Za-z0-9_.-]*');
   }
 
@@ -109,8 +115,8 @@ export function createFixtureStore(options: StoreOptions): FixtureStore {
     entity: FixtureEntity,
     key: SemanticKey<K>,
   ): Promise<LoadedFixture<K> | null> {
-    if (!(FIXTURE_KINDS as readonly string[]).includes(kind)) throw new FixtureStoreError('unknown fixture kind');
-    if (!(FIXTURE_ENTITIES as readonly string[]).includes(entity)) throw new FixtureStoreError('unknown fixture entity');
+    if (!v.is(FixtureKindSchema, kind)) throw new FixtureStoreError('unknown fixture kind');
+    if (!v.is(FixtureEntitySchema, entity)) throw new FixtureStoreError('unknown fixture entity');
     // Normalising again is a no-op for a key from semanticKey() and guards a hand-built one.
     const wanted = keyString(semanticKey(kind, key as SemanticKeyFacts[K]));
     const hash = hashKeyString(wanted);
@@ -134,27 +140,23 @@ export function createFixtureStore(options: StoreOptions): FixtureStore {
     for (const { scope, dir } of scopes) {
       for (const kind of await subdirs(dir)) {
         const kindDir = join(dir, kind);
-        if (!(FIXTURE_KINDS as readonly string[]).includes(kind)) {
+        if (!v.is(FixtureKindSchema, kind)) {
           throw new FixtureLoadError(kindDir, 'is not a known fixture kind folder');
         }
         for (const entity of await subdirs(kindDir)) {
           const entityDir = join(kindDir, entity);
-          if (!(FIXTURE_ENTITIES as readonly string[]).includes(entity)) {
+          if (!v.is(FixtureEntitySchema, entity)) {
             throw new FixtureLoadError(entityDir, 'is not a known entity folder');
           }
           for (const name of await files(entityDir)) {
             const path = join(entityDir, name);
-            const match = FILE_NAME.exec(name);
+            const match = FIXTURE_FILE_NAME.exec(name);
             if (match === null) throw new FixtureLoadError(path, 'file name is not <16 hex>.json', ['name']);
             const hash = match[1] as string;
             const text = await readIfPresent(path);
             if (text === null) continue;
             await assertInsideReviewedTree(root, path);
-            const fixture = parseFixture(path, text, {
-              kind: kind as FixtureKind,
-              entity: entity as FixtureEntity,
-              hash,
-            });
+            const fixture = parseFixture(path, text, { kind, entity, hash });
             const id = `${kind}/${entity}/${hash}`;
             if (seen.has(id)) continue;
             seen.add(id);

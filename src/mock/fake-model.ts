@@ -182,11 +182,7 @@ export function createFakeModel(opts: FakeModelOptions = {}): FakeModel {
       setProvider(faux.provider);
     },
     script(steps) {
-      const expanded: FakeStep[] = [];
-      for (const step of steps) {
-        if (isRouter(step)) for (let i = 0; i < step.size; i++) expanded.push(step);
-        else expanded.push(step);
-      }
+      const expanded = steps.flatMap((step): FakeStep[] => (isRouter(step) ? Array(step.size).fill(step) : [step]));
       scripted = expanded.length;
       faux.setResponses([...expanded, exhausted]);
     },

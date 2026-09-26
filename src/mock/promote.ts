@@ -29,7 +29,7 @@ import { DRAFT_REPORT_FILE } from '../report/feedback.ts';
 import { writeFileAtomic } from '../report/run-folder.ts';
 import { RunIdSchema } from '../types/core.ts';
 import { canonicalJson, hashKeyString, keyString, semanticKey, SemanticKeyError } from './key.ts';
-import { CASES_DIR, parseFixture, SHARED_DIR, UNREVIEWED_DIR } from './store.ts';
+import { CASES_DIR, FIXTURE_FILE_NAME, isValidCaseId, parseFixture, SHARED_DIR, UNREVIEWED_DIR } from './store.ts';
 import { FixtureSchema, type Fixture } from './types.ts';
 
 /** The token the persisted profile leaves in place of a masked id. */
@@ -98,9 +98,6 @@ export type PromoteResult =
 
 export type DeclineResult = { readonly status: 'declined'; readonly type: ReviewItem['type']; readonly path: string };
 
-const CASE_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
-const FIXTURE_FILE = /^([0-9a-f]{16})\.json$/;
-
 /** The review dirs from config: TRIAGE_FIXTURES_DIR and <TRIAGE_HOME>/evals. */
 export function reviewDirsFrom(config: {
   readonly home: string;
@@ -147,7 +144,7 @@ async function loadFixtureItem(
   name: string,
 ): Promise<FixtureReviewItem> {
   const path = join(fixturesDir, UNREVIEWED_DIR, runId, kind, entity, name);
-  const hash = FIXTURE_FILE.exec(name)?.[1] ?? name.slice(0, -'.json'.length);
+  const hash = FIXTURE_FILE_NAME.exec(name)?.[1] ?? name.slice(0, -'.json'.length);
   const base = { type: 'fixture' as const, fixturesDir, runId, path, kind, entity, hash };
   const loaded = await readFixture(path);
   if (!loaded.ok) return { ...base, fixture: null, problem: loaded.reason };
@@ -157,7 +154,7 @@ async function loadFixtureItem(
 
 function layoutProblem(runId: string, kind: string, entity: string, name: string, f: Fixture): string | null {
   if (!v.is(RunIdSchema, runId)) return 'run folder name is not a valid run id';
-  if (!FIXTURE_FILE.test(name)) return 'file name is not <16 hex>.json';
+  if (!FIXTURE_FILE_NAME.test(name)) return 'file name is not <16 hex>.json';
   if (f.kind !== kind) return 'kind does not match its folder';
   if (f.entity !== entity) return 'entity does not match its folder';
   return null;
@@ -176,13 +173,13 @@ export async function promote(item: ReviewItem, options: PromoteOptions): Promis
   });
   const reviewer = typeof options.reviewer === 'string' ? options.reviewer.trim() : '';
   if (reviewer === '') return refuse('a reviewer name is required');
-  if (options.caseId !== undefined && !validCaseId(options.caseId)) {
+  if (options.caseId !== undefined && !isValidCaseId(options.caseId)) {
     return refuse('case id must match [A-Za-z0-9][A-Za-z0-9_.-]*');
   }
   const check = options.check ?? ((value: unknown) => checkEgress(value, { names: options.names }));
-  const now = options.now ?? (() => new Date());
-  if (item.type === 'fixture') return promoteFixture(item, { ...options, reviewer, check, now }, refuse);
-  if (item.type === 'eval_case') return promoteEvalCase(item, { ...options, reviewer, check, now }, refuse);
+  const resolved: Resolved = { ...options, reviewer, check, now: options.now ?? (() => new Date()) };
+  if (item.type === 'fixture') return promoteFixture(item, resolved, refuse);
+  if (item.type === 'eval_case') return promoteEvalCase(item, resolved, refuse);
   return refuse('unknown review item type');
 }
 
@@ -258,7 +255,7 @@ async function promoteEvalCase(item: EvalCaseReviewItem, o: Resolved, refuse: Re
   if (!source.ok) return refuse(source.reason);
 
   const caseId = o.caseId ?? item.runId;
-  if (!validCaseId(caseId)) return refuse('case id must match [A-Za-z0-9][A-Za-z0-9_.-]*');
+  if (!isValidCaseId(caseId)) return refuse('case id must match [A-Za-z0-9][A-Za-z0-9_.-]*');
 
   const walked = await walkFiles(source.path);
   if (walked.symlinks.length > 0) return refuse(`draft holds symlinks: ${walked.symlinks.join(', ')}`);
@@ -456,10 +453,7 @@ type Walked = { files: string[]; symlinks: string[] };
 
 async function walkFiles(dir: string, prefix = ''): Promise<Walked> {
   const out: Walked = { files: [], symlinks: [] };
-  const list = await readdir(dir, { withFileTypes: true }).catch((err: unknown) => {
-    if (errCode(err) === 'ENOENT' || errCode(err) === 'ENOTDIR') return [];
-    throw err;
-  });
+  const list = await entriesOrNone(dir);
   for (const entry of [...list].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
     const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
     if (entry.isSymbolicLink()) out.symlinks.push(rel);
@@ -473,11 +467,16 @@ async function walkFiles(dir: string, prefix = ''): Promise<Walked> {
 }
 
 async function dirNames(dir: string): Promise<string[]> {
-  const list = await readdir(dir, { withFileTypes: true }).catch((err: unknown) => {
+  const list = await entriesOrNone(dir);
+  return list.filter((e) => e.isDirectory() && !e.name.startsWith('.')).map((e) => e.name).sort();
+}
+
+// A missing folder lists as empty.
+async function entriesOrNone(dir: string) {
+  return readdir(dir, { withFileTypes: true }).catch((err: unknown) => {
     if (errCode(err) === 'ENOENT' || errCode(err) === 'ENOTDIR') return [];
     throw err;
   });
-  return list.filter((e) => e.isDirectory() && !e.name.startsWith('.')).map((e) => e.name).sort();
 }
 
 async function fileNames(dir: string): Promise<string[]> {
@@ -501,10 +500,6 @@ function parseJsonOr(text: string): unknown {
   } catch {
     return text;
   }
-}
-
-function validCaseId(caseId: string): boolean {
-  return typeof caseId === 'string' && CASE_ID.test(caseId) && caseId !== UNREVIEWED_DIR;
 }
 
 function absolute(name: string, dir: string): string {
