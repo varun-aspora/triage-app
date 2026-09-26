@@ -6,11 +6,15 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { makeTestHome, type TestHome } from '../../test/support/home.ts';
+import type { Config } from '../config/env.ts';
 import { checkEgress, redactPersisted, type Persisted } from '../gate/redact.ts';
+import { stopRun } from '../ingress/stop.ts';
+import { EVENTS_FILE, flushRunEventLog, installRunEventLog, uninstallRunEventLog } from '../runlog/event-log.ts';
 import { sampleRequest } from '../runstore/contract.ts';
 import { createFolderRunStore } from '../runstore/folder.ts';
 import type { Feedback, RunStore } from '../runstore/types.ts';
 import type { EntityFindings } from '../types/findings.ts';
+import type { FeedbackExport, RunFeedbackTrace, TracingConfig } from '../tracing/braintrust.ts';
 import type { Report } from '../types/report.ts';
 import {
   buildFrontMatter,
@@ -563,5 +567,164 @@ describe('front-matter parse round trip', () => {
     expect(fm.input.problem).toBe('none');
     expect(fm.input.ref).toBe('https://example.invalid/archives/C1/p1');
     expect(fm.ground_truth).toEqual({ verdict: 'pending' });
+  });
+});
+
+// ------------------------------------------------------------------ Braintrust (D82)
+
+describe('verdicts to Braintrust as scores', () => {
+  // A Braintrust row id: 16 hex characters.
+  const SPAN = 'ec025e77d7ac0536';
+  const LATER_SPAN = '5b0c1d2e3f405162';
+
+  function tracing(over: Partial<TracingConfig> = {}): TracingConfig {
+    const base: Config['tracing'] = { enabled: true, apiKey: 'test-key', projectName: 'triage-app', content: 'metadata' };
+    return { ...base, ...over };
+  }
+
+  type Sent = { tracing: TracingConfig; feedback: RunFeedbackTrace; putsBefore: number };
+
+  // A stand-in for logRunFeedback: records what it gets and answers `answer`.
+  function fakeExport(s: Setup, answer: () => Promise<FeedbackExport> = async () => ({ sent: true })) {
+    const sent: Sent[] = [];
+    const exportFeedback = async (t: TracingConfig, feedback: RunFeedbackTrace): Promise<FeedbackExport> => {
+      sent.push({ tracing: t, feedback, putsBefore: s.puts.length });
+      return answer();
+    };
+    return { sent, exportFeedback };
+  }
+
+  async function withSpans(s: Setup): Promise<void> {
+    await s.store.setSubmissionTraceSpanId(RUN, 1, SPAN);
+    await s.store.setSubmissionTraceSpanId(NO_REPORT_RUN, 1, SPAN);
+  }
+
+  function pipelineLines(s: Setup, runId: string): { type: string; data: Record<string, unknown> }[] {
+    const path = join(s.h.config.paths.runsDir, runId, EVENTS_FILE);
+    if (!existsSync(path)) return [];
+    return readFileSync(path, 'utf8')
+      .split('\n')
+      .filter((l) => l !== '')
+      .map((l) => JSON.parse(l))
+      .filter((l) => l.source === 'pipeline');
+  }
+
+  afterEach(() => {
+    uninstallRunEventLog();
+  });
+
+  test('an accept is sent after the store write, with finding scores and masked notes', async () => {
+    const s = await setup();
+    await withSpans(s);
+    const fake = fakeExport(s);
+    const t = tracing();
+    const r = await recordFeedback(
+      RUN,
+      {
+        ...valid,
+        notes: `called back on ${PHONE}`,
+        actual_root_cause: `account ${ACCOUNT} was held`,
+        findings: [
+          { id: 'ssfb.v1.e2', verdict: 'wrong', note: `see ${PHONE}` },
+          { id: 'root_cause', verdict: 'correct' },
+        ],
+      },
+      { ...s.deps, tracing: t, exportFeedback: fake.exportFeedback },
+    );
+    expect(fake.sent).toHaveLength(1);
+    const [call] = fake.sent;
+    expect(call?.putsBefore).toBe(1);
+    expect(call?.tracing).toBe(t);
+    expect(call?.feedback).toMatchObject({
+      runId: RUN,
+      spanId: SPAN,
+      verdict: 'correct',
+      findings: [
+        { id: 'ssfb.v1.e2', verdict: 'wrong' },
+        { id: 'root_cause', verdict: 'correct' },
+      ],
+    });
+    expect(call?.feedback.cancelled).toBeUndefined();
+    // What reaches the tracing helper is the stored, masked copy.
+    expect(checkEgress(call?.feedback)).toEqual({ ok: true });
+    expect(call?.feedback.notes).toContain(r.record.notes);
+    expect(call?.feedback.findings?.[0]?.note).toBe(r.record.findings?.[0]?.note);
+    expect(r.draft_dir).not.toBeNull();
+  });
+
+  test('a reject before the report is sent too', async () => {
+    const s = await setup();
+    await withSpans(s);
+    const fake = fakeExport(s);
+    const r = await recordFeedback(NO_REPORT_RUN, { ...valid, verdict: 'wrong' }, { ...s.deps, tracing: tracing(), exportFeedback: fake.exportFeedback });
+    expect(r.draft_dir).toBeNull();
+    expect(fake.sent.map((c) => [c.feedback.verdict, c.feedback.spanId, c.putsBefore])).toEqual([['wrong', SPAN, 1]]);
+    expect(fake.sent[0]?.feedback.findings).toBeUndefined();
+  });
+
+  test('the latest submission with a span is used', async () => {
+    const s = await setup();
+    await withSpans(s);
+    await s.store.addSubmission(RUN, redactPersisted({ kind: 'ask' as const, question: 'and the refund?', by: 'reviewer-a' }));
+    await s.store.setSubmissionTraceSpanId(RUN, 2, LATER_SPAN);
+    // A third submission without a span (a steer Flue joined into the running response) is skipped.
+    await s.store.addSubmission(RUN, redactPersisted({ kind: 'ask' as const, question: 'and the fee?', by: 'reviewer-a' }));
+    const fake = fakeExport(s);
+    await recordFeedback(RUN, valid, { ...s.deps, tracing: tracing(), exportFeedback: fake.exportFeedback });
+    expect(fake.sent.map((c) => c.feedback.spanId)).toEqual([LATER_SPAN]);
+  });
+
+  test('a cancel through stopRun is sent with cancelled', async () => {
+    const s = await setup();
+    await withSpans(s);
+    const fake = fakeExport(s);
+    const t = tracing();
+    const result = await stopRun(
+      NO_REPORT_RUN,
+      { by: 'reviewer-a', interface: 'cli' },
+      { store: s.store, home: s.h.config.home, tracing: t, exportFeedback: fake.exportFeedback },
+    );
+    expect(result.feedback?.record.cancelled).toBe(true);
+    expect(fake.sent).toHaveLength(1);
+    expect(fake.sent[0]?.tracing).toBe(t);
+    expect(fake.sent[0]?.feedback).toMatchObject({ runId: NO_REPORT_RUN, spanId: SPAN, verdict: 'wrong', cancelled: true });
+  });
+
+  test('nothing is sent when tracing is left out or off, or no span is stored', async () => {
+    const s = await setup();
+    const fake = fakeExport(s);
+    await recordFeedback(RUN, valid, { ...s.deps, tracing: tracing(), exportFeedback: fake.exportFeedback });
+    await withSpans(s);
+    await recordFeedback(RUN, valid, { ...s.deps, exportFeedback: fake.exportFeedback });
+    await recordFeedback(RUN, valid, { ...s.deps, tracing: tracing({ enabled: false }), exportFeedback: fake.exportFeedback });
+    expect(fake.sent).toHaveLength(0);
+    expect(s.puts).toHaveLength(3);
+  });
+
+  test('a failed or throwing export writes a pipeline line and leaves the result alone', async () => {
+    const s = await setup();
+    await withSpans(s);
+    installRunEventLog({ runsDir: s.h.config.paths.runsDir, observe: () => () => {} });
+    const plain = await recordFeedback(RUN, valid, s.deps);
+
+    const failed = fakeExport(s, async () => ({ sent: false, reason: 'failed', error: 'RangeError' }));
+    const a = await recordFeedback(RUN, valid, { ...s.deps, tracing: tracing(), exportFeedback: failed.exportFeedback });
+    const throwing = fakeExport(s, async () => {
+      throw new TypeError(`no route to ${PHONE}`);
+    });
+    const b = await recordFeedback(RUN, valid, { ...s.deps, tracing: tracing(), exportFeedback: throwing.exportFeedback });
+    // Expected outcomes are not failures.
+    const quiet = fakeExport(s, async () => ({ sent: false, reason: 'nothing_to_send' }));
+    await recordFeedback(RUN, { ...valid, verdict: 'pending' }, { ...s.deps, tracing: tracing(), exportFeedback: quiet.exportFeedback });
+
+    for (const r of [a, b]) {
+      expect(r.draft_dir).toBe(plain.draft_dir);
+      expect(r.record.verdict).toBe('correct');
+    }
+    expect([a.count, b.count]).toEqual([2, 3]);
+    await flushRunEventLog();
+    const lines = pipelineLines(s, RUN).filter((l) => l.type === 'feedback_trace_failed');
+    expect(lines.map((l) => l.data)).toEqual([{ error: 'RangeError' }, { error: 'TypeError' }]);
+    expect(JSON.stringify(lines)).not.toContain('98765');
   });
 });

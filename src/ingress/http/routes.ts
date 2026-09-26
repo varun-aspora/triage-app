@@ -158,6 +158,8 @@ export type TriageRouteDeps = {
   readonly home: string;
   /** TRIAGE_HTTP_ALLOW_SLACK_POST. */
   readonly allowSlackPost: boolean;
+  /** Config.tracing, so verdicts and Cancels also go to Braintrust (D82). Left out: they do not. */
+  readonly tracing?: FeedbackDeps['tracing'];
   /** Defaults to recordFeedback from src/report/feedback.ts. */
   readonly recordFeedback?: (runId: string, input: FeedbackInput, deps: FeedbackDeps) => Promise<FeedbackResult>;
   /** A durable Flue abort of the run's instance, for a stop. Left out: the stop only marks the store. */
@@ -365,7 +367,11 @@ export function createTriageRoutes(source: TriageRouteDepsSource): Hono {
     const deps = await load();
     const record = deps.recordFeedback ?? defaultRecordFeedback;
     try {
-      const result = await record(runId, { ...parsed.value, interface: 'http' }, { store: deps.store, home: deps.home });
+      const result = await record(runId, { ...parsed.value, interface: 'http' }, {
+        store: deps.store,
+        home: deps.home,
+        ...(deps.tracing !== undefined ? { tracing: deps.tracing } : {}),
+      });
       return c.json({ run_id: runId, verdict: result.record.verdict, count: result.count });
     } catch (err) {
       if (!(err instanceof FeedbackError)) throw err;
@@ -388,7 +394,12 @@ export function createTriageRoutes(source: TriageRouteDepsSource): Hono {
       const result = await stopRun(
         runId,
         { by: parsed.value.given_by, interface: 'http', ...(parsed.value.verdict !== undefined ? { verdict: parsed.value.verdict } : {}) },
-        { store: deps.store, home: deps.home, ...(deps.abortRun !== undefined ? { abort: deps.abortRun } : {}) },
+        {
+          store: deps.store,
+          home: deps.home,
+          ...(deps.abortRun !== undefined ? { abort: deps.abortRun } : {}),
+          ...(deps.tracing !== undefined ? { tracing: deps.tracing } : {}),
+        },
       );
       return c.json({
         run_id: runId,

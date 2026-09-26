@@ -27,6 +27,18 @@
 //      evals/cases; promotion is `triage fixtures review` (D42). A verdict
 //      given before the report has no draft.
 //
+// After the store write, the verdict also goes to Braintrust as scores
+// (D82): accepted, and finding:<id> per finding, on the root span of the
+// latest submission that has one (trace_span_id). The notes go with it only
+// in 'redacted' content mode and only when the run's ingress names are
+// known, which logRunFeedback decides. It is skipped when deps.tracing is
+// left out or off, or no span is stored. It is best effort: a failure
+// writes a feedback_trace_failed line and never changes the result or
+// throws. In `triage feedback` and `triage stop`, logRunFeedback waits for
+// the row to be sent, so a failed send (a bad key, no network) is such a
+// failure. In the server the row goes out with the next background flush,
+// and a failed send there is only counted in braintrustStatus().
+//
 // The draft leaves out report.cost (D59): promoted drafts are committed to
 // git, and token counts and spend are run data, not case data. Nothing that
 // grades evals reads cost from a stored case.
@@ -47,12 +59,14 @@ import {
   FINDING_VERDICTS,
   FeedbackVerdictSchema,
   FindingVerdictSchema,
+  latestTraceSpanId,
   type Feedback,
   type FindingFeedback,
   type RunPhase,
   type RunRecord,
   type RunStore,
 } from '../runstore/types.ts';
+import { logRunFeedback, type FeedbackExport, type RunFeedbackTrace, type TracingConfig } from '../tracing/braintrust.ts';
 import type { Report } from '../types/report.ts';
 import { findingIdProblem, findingRefs } from './finding-refs.ts';
 import { evalDraftDir, isRunId, writeFileAtomic } from './run-folder.ts';
@@ -104,6 +118,10 @@ export type FeedbackDeps = {
   readonly home: string;
   /** Defaults to the system clock. */
   readonly now?: () => Date;
+  /** Config.tracing (D82). Left out: nothing is sent to Braintrust. */
+  readonly tracing?: TracingConfig;
+  /** Sends the verdict to Braintrust. Defaults to logRunFeedback from src/tracing/braintrust.ts. */
+  readonly exportFeedback?: (tracing: TracingConfig, feedback: RunFeedbackTrace) => Promise<FeedbackExport>;
 };
 
 export type FeedbackOptions = {
@@ -177,11 +195,13 @@ export async function recordFeedback(
 
   if (run.report === null) {
     await deps.store.putFeedback(runId, record);
+    await traceFeedback(runId, run, findings, record.value, deps);
     return { run_id: runId, record: record.value, count: records.length, draft_dir: null, draft_files: null };
   }
 
   const md = redactPersisted(renderFeedbackMd(runId, run, records));
   await deps.store.putFeedback(runId, record, md);
+  await traceFeedback(runId, run, findings, record.value, deps);
 
   const dir = evalDraftDir(deps.home, runId);
   await mkdir(dir, { recursive: true });
@@ -199,6 +219,48 @@ export async function recordFeedback(
     draft_dir: dir,
     draft_files: { feedback_md: feedbackPath, report_json: reportPath },
   };
+}
+
+// Best effort (D82): skipped when tracing is off or no span is stored; a
+// failure is a pipeline line, never an error. The free text sent is the
+// stored, already-masked copy; logRunFeedback masks it again with the run's
+// names. Finding ids come from the checked input, since masking could change
+// an id and the score key must match the run's finding.
+async function traceFeedback(
+  runId: string,
+  run: RunRecord,
+  findings: readonly FindingFeedback[],
+  record: Feedback,
+  deps: FeedbackDeps,
+): Promise<void> {
+  const tracing = deps.tracing;
+  if (tracing === undefined || !tracing.enabled) return;
+  const spanId = latestTraceSpanId(run);
+  if (spanId === undefined) return;
+  let result: FeedbackExport;
+  try {
+    const send = deps.exportFeedback ?? logRunFeedback;
+    result = await send(tracing, {
+      runId,
+      spanId,
+      verdict: record.verdict,
+      ...(findings.length > 0
+        ? {
+            findings: findings.map((f, i) => {
+              const note = record.findings?.[i]?.note;
+              return { id: f.id, verdict: f.verdict, ...(note !== undefined ? { note } : {}) };
+            }),
+          }
+        : {}),
+      notes: [record.notes, record.actual_root_cause, record.faster_path],
+      ...(record.cancelled === true ? { cancelled: true } : {}),
+    });
+  } catch (err) {
+    result = { sent: false, reason: 'failed', error: err instanceof Error ? err.name : typeof err };
+  }
+  if (!result.sent && result.reason === 'failed') {
+    logRunEvent(runId, 'feedback_trace_failed', { error: result.error ?? 'unknown' });
+  }
 }
 
 /** The report as the eval draft holds it: every key but cost (D59). */
