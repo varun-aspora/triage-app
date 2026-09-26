@@ -15,6 +15,7 @@ import {
   providerEnv,
   type Config,
 } from './env.ts';
+import { childEnv } from './child-env.ts';
 import { ConfigError } from './errors.ts';
 import { DEPLOY_MODE_KEY, ENTITY_KEY_PATTERN, KEYS, PROVIDER_KEYS } from './keys.ts';
 
@@ -401,6 +402,7 @@ describe('no values in errors, inspect or JSON', () => {
     SSFB_BRO_ADMIN_TOKEN: 'fake-bro-admin-1u2v',
     SSFB_HARBOR_FIELD_ENC_KEY: 'fake-enc-key-3w4x',
     ATSPL_QUICKWIT_TOKEN: 'fake-qw-token-5y6z',
+    BRAINTRUST_API_KEY: 'fake-braintrust-k3y-9e0f',
     [DEPLOY_MODE_KEY]: 'fake-deploy-mode-7a8b',
   };
   const secretValues = Object.values(secrets);
@@ -447,6 +449,61 @@ describe('no values in errors, inspect or JSON', () => {
     }
     expect(err.keys).toContain('TRIAGE_DB_PROVIDER');
     expect(err.keys).toContain('TRIAGE_MAX_BYTES_PER_RUN');
+  });
+});
+
+describe('tracing (D82)', () => {
+  test('is off by default: project triage-app, content metadata, no key or app url', () => {
+    expect({ ...fromRecord({}).tracing }).toEqual({ enabled: false, apiKey: undefined, projectName: 'triage-app', content: 'metadata', appUrl: undefined });
+  });
+
+  test('enabled without a key is a config error naming BRAINTRUST_API_KEY; blank counts as unset', () => {
+    for (const key of [undefined, '', '   ']) {
+      const record: Record<string, string> = { TRIAGE_BRAINTRUST_ENABLED: 'true', ...(key !== undefined ? { BRAINTRUST_API_KEY: key } : {}) };
+      expect(configError(() => fromRecord(record)).keys).toContain('BRAINTRUST_API_KEY');
+    }
+  });
+
+  test('enabled with a key loads, and a key alone does not turn tracing on', () => {
+    const on = fromRecord({
+      TRIAGE_BRAINTRUST_ENABLED: 'true',
+      BRAINTRUST_API_KEY: 'fake-braintrust-k3y-1a2b',
+      BRAINTRUST_PROJECT_NAME: 'triage-app-dev',
+      TRIAGE_BRAINTRUST_CONTENT: 'redacted',
+      BRAINTRUST_APP_URL: 'https://braintrust.example.com',
+    });
+    expect({ ...on.tracing }).toEqual({
+      enabled: true,
+      apiKey: 'fake-braintrust-k3y-1a2b',
+      projectName: 'triage-app-dev',
+      content: 'redacted',
+      appUrl: 'https://braintrust.example.com',
+    });
+    expect(fromRecord({ BRAINTRUST_API_KEY: 'fake-braintrust-k3y-1a2b' }).tracing.enabled).toBe(false);
+  });
+
+  test('an unknown content mode or a bad flag is refused', () => {
+    expect(configError(() => fromRecord({ TRIAGE_BRAINTRUST_CONTENT: 'full' })).keys).toEqual(['TRIAGE_BRAINTRUST_CONTENT']);
+    expect(configError(() => fromRecord({ TRIAGE_BRAINTRUST_ENABLED: 'yes' })).keys).toEqual(['TRIAGE_BRAINTRUST_ENABLED']);
+  });
+
+  test('BRAINTRUST_API_KEY is secret: never in process.env, childEnv(), inspect or JSON', () => {
+    const value = 'fake-braintrust-k3y-3c4d';
+    const saved = process.env.BRAINTRUST_API_KEY;
+    delete process.env.BRAINTRUST_API_KEY;
+    try {
+      expect(KEYS.find((k) => k.name === 'BRAINTRUST_API_KEY')?.secret).toBe(true);
+      const c = loadConfig({ home: makeHome(`TRIAGE_BRAINTRUST_ENABLED=true\nBRAINTRUST_API_KEY=${value}\n`) });
+      expect(c.tracing.apiKey).toBe(value);
+      expect(process.env.BRAINTRUST_API_KEY).toBeUndefined();
+      expect(JSON.stringify(childEnv({}))).not.toContain(value);
+      for (const out of [inspect(c, { depth: Infinity }), JSON.stringify(c), inspect(c.tracing), JSON.stringify(c.tracing)]) {
+        expect(out).not.toContain(value);
+      }
+    } finally {
+      if (saved === undefined) delete process.env.BRAINTRUST_API_KEY;
+      else process.env.BRAINTRUST_API_KEY = saved;
+    }
   });
 });
 
