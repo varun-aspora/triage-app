@@ -43,6 +43,16 @@
 //   back, else 0. When decide() fails before that (no key, bad questions,
 //   already aborted), nothing was sent and there is no call.
 // A callback that throws is ignored; it never changes the classification.
+//
+// Tracing (D82): the model call on either path is an llm span tagged with
+// input.runId. The decision path passes it to decide(), which records
+// 'decision:<model>'. The completion path records 'decision:<spec>' here,
+// with the prompt texts as input (never the images), the message usage and
+// the cost from src/usage/price.ts. Both pass input.redactionNames, so in
+// 'redacted' content mode the span masks the ingress names even where the
+// prompt keeps them (the model-facing profile). A message with stopReason
+// 'error' or 'aborted' is recorded as a failed span. With tracing off both
+// are plain calls.
 import { createModels, type AssistantMessage, type Context, type ImageContent, type Provider, type TextContent } from '@earendil-works/pi-ai';
 import { anthropicProvider } from '@earendil-works/pi-ai/providers/anthropic';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
@@ -55,9 +65,12 @@ import { decisionProviderFor, isDecisionSpec } from '../decisions/registry.ts';
 import type { DecisionProvider, DecisionUsage } from '../decisions/types.ts';
 import { redactPersisted } from '../gate/redact.ts';
 import { acceptsImages, decisionModel, ollamaProvider, parseSpec, type ModelLookup } from '../models.ts';
+import { traceModelCall, type ModelCallRecord } from '../tracing/braintrust.ts';
 import { ClassificationSchema, type Classification } from '../types/classification.ts';
+import type { RunId } from '../types/core.ts';
 import type { BasicStateItem, IdChain } from '../types/id-chain.ts';
 import type { ThreadMessage } from '../types/request.ts';
+import { priceUsage } from '../usage/price.ts';
 import { classificationFromAnswers, classifierQuestions, issuePaths } from './decision.ts';
 import { buildClassifierPrompt, buildDecisionState, loadCategories, type CategoryEntry, type DecisionStateInput } from './prompt.ts';
 
@@ -75,6 +88,8 @@ export type ClassifyInput = {
   readonly images: readonly ClassifierImage[];
   /** Names from ingress, masked when the classifier runs on openrouter or typesafe. */
   readonly redactionNames?: readonly string[];
+  /** The run being classified. Tags the trace span (D82); the classification never reads it. */
+  readonly runId?: RunId;
 };
 
 /** One completion call. Rejects or returns stopReason 'error' when the provider fails. */
@@ -153,7 +168,7 @@ async function classifyOnce(input: ClassifyInput, deps: ClassifyDeps): Promise<C
     ...(input.redactionNames === undefined ? {} : { redactionNames: input.redactionNames }),
   };
   const timeoutMs = deps.timeoutMs ?? DEFAULT_CLASSIFIER_TIMEOUT_MS;
-  if (isDecisionSpec(spec)) return classifyByDecision(stateInput, deps, spec, categories, timeoutMs);
+  if (isDecisionSpec(spec)) return classifyByDecision(stateInput, deps, spec, categories, timeoutMs, input);
   const sendImages = input.images.length > 0 && acceptsImages(spec, deps.imageLookup);
   const prompt = buildClassifierPrompt({ ...stateInput, categories, imagesAttached: sendImages });
 
@@ -166,7 +181,13 @@ async function classifyOnce(input: ClassifyInput, deps: ClassifyDeps): Promise<C
     messages: [{ role: 'user', content, timestamp: Date.now() }],
   };
 
-  const complete = deps.complete ?? defaultComplete(deps.config);
+  const complete = traced(deps.complete ?? defaultComplete(deps.config), {
+    systemPrompt: prompt.systemPrompt,
+    userText: prompt.userText,
+    images: sendImages ? input.images.length : 0,
+    names: input.redactionNames ?? [],
+    ...(input.runId === undefined ? {} : { runId: input.runId }),
+  });
   const outcome = await callWithTimeout(complete, spec, context, timeoutMs, deps.signal);
   if (!outcome.ok) return unknownClassification(outcome.error);
 
@@ -197,6 +218,7 @@ async function classifyByDecision(
   spec: string,
   categories: readonly CategoryEntry[],
   timeoutMs: number,
+  trace: Pick<ClassifyInput, 'runId' | 'redactionNames'>,
 ): Promise<Classification> {
   const { state } = buildDecisionState(stateInput);
   const questions = classifierQuestions(categories, deps.config.entities);
@@ -206,7 +228,15 @@ async function classifyByDecision(
     const result = await decide(
       watched(decider, call),
       { state, questions },
-      { timeoutMs, ...(deps.signal === undefined ? {} : { signal: deps.signal }) },
+      {
+        timeoutMs,
+        ...(deps.signal === undefined ? {} : { signal: deps.signal }),
+        trace: {
+          purpose: 'classify',
+          names: trace.redactionNames ?? [],
+          ...(trace.runId === undefined ? {} : { runId: trace.runId }),
+        },
+      },
     );
     reportUsage(deps, decisionUsage(spec, false, result.usage));
     const outcome = classificationFromAnswers(result.answers);
@@ -391,6 +421,79 @@ async function callWithTimeout(
     clearTimeout(timer);
     if (onOuterAbort !== undefined) outer?.removeEventListener('abort', onOuterAbort);
   }
+}
+
+// ---------------------------------------------------------------- tracing
+
+type CompletionTrace = {
+  readonly systemPrompt: string;
+  readonly userText: string;
+  readonly images: number;
+  /** The ingress names, masked in the span in 'redacted' content mode. */
+  readonly names: readonly string[];
+  readonly runId?: RunId;
+};
+
+/** Thrown inside the traced call for a message that failed, so its span is an error; traced() turns it back. */
+class CompletionStopped extends Error {
+  override readonly name = 'CompletionStopped';
+  readonly assistant: AssistantMessage;
+  constructor(assistant: AssistantMessage) {
+    // The stop reason only: errorMessage is provider text and could echo the prompt.
+    super(`stop reason ${assistant.stopReason}`);
+    this.assistant = assistant;
+  }
+}
+
+// Wraps one completion in a trace span. The message or error the inner
+// function gives is what the caller gets, with tracing on or off.
+function traced(complete: CompleteFn, trace: CompletionTrace): CompleteFn {
+  return async (spec, context, options) => {
+    try {
+      return await traceModelCall(
+        'decision',
+        {
+          model: spec,
+          input: { system: trace.systemPrompt, user: trace.userText },
+          metadata: { purpose: 'classify', path: 'completion', images: trace.images },
+          names: trace.names,
+          ...(trace.runId === undefined ? {} : { runId: trace.runId }),
+        },
+        async () => {
+          const message = await complete(spec, context, options);
+          if (message.stopReason === 'error' || message.stopReason === 'aborted') throw new CompletionStopped(message);
+          return message;
+        },
+        (message) => completionRecord(spec, message),
+      );
+    } catch (err) {
+      if (err instanceof CompletionStopped) return err.assistant;
+      throw err;
+    }
+  };
+}
+
+function completionRecord(spec: string, message: AssistantMessage): ModelCallRecord {
+  const u = message.usage;
+  const counts = {
+    input: tokens(u.input),
+    output: tokens(u.output),
+    cacheRead: tokens(u.cacheRead),
+    cacheWrite: tokens(u.cacheWrite),
+    ...(u.cacheWrite1h === undefined ? {} : { cacheWrite1h: tokens(u.cacheWrite1h) }),
+  };
+  let costUsd: number | null = null;
+  try {
+    costUsd = priceUsage(spec, counts);
+  } catch {
+    // An unpriceable record leaves the cost off the span.
+  }
+  return {
+    output: textOf(message),
+    usage: { input: counts.input, output: counts.output, cacheRead: counts.cacheRead, cacheWrite: counts.cacheWrite },
+    costUsd,
+    responseModel: message.responseModel ?? message.model,
+  };
 }
 
 // ---------------------------------------------------------------- completion functions

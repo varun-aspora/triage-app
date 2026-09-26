@@ -1,5 +1,8 @@
-import { describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import * as bt from 'braintrust';
 
+import { checkEgress } from '../gate/redact.ts';
+import { installBraintrust, uninstallBraintrust } from '../tracing/braintrust.ts';
 import { choice, decide, DecisionError, score, yesNo } from './decide.ts';
 import { fakeDecisionProvider } from './fake.ts';
 import type { DecisionProvider } from './types.ts';
@@ -93,5 +96,132 @@ describe('decide', () => {
     expect(err.code).toBe('provider');
     expect(err.message).not.toContain('secret');
     expect(err.detail).toBe('TypeError');
+  });
+});
+
+// ---------------------------------------------------------------- tracing (D82)
+
+// Braintrust's in-memory background logger: nothing leaves the process. The
+// name, email and account below are synthetic.
+describe('decide tracing', () => {
+  const T = bt._exportsForTestingOnly;
+  const NAME = 'Asha Testuser';
+  const EMAIL = 'asha.testuser@example.com';
+  const ACCOUNT = '001234567890';
+  // A run id with a 6+ digit run, which the persisted profile would mask.
+  const RUN = '01M3EN7034701234ABCDEFGHJK';
+  const STATE = { thread: [`${NAME} (${EMAIL}) says account ${ACCOUNT} was debited twice`] };
+
+  type Row = Record<string, any>;
+  let memory: ReturnType<typeof T.useTestBackgroundLogger>;
+
+  const priced: DecisionProvider = {
+    id: 'typesafe',
+    model: 'typesafe/jev-1.13',
+    decide: async () => ({
+      answers: {
+        category: { kind: 'choice', choice: 'payments' },
+        money_moved: { kind: 'yes_no', yes: 0.9 },
+        urgency: { kind: 'score', score: 1 },
+      },
+      model: 'jev-1.13-20260901',
+      usage: { inputTokens: 120, outputTokens: 8, costUsd: 0.0004 },
+    }),
+  };
+
+  async function tracingOn(content: 'metadata' | 'redacted' = 'metadata'): Promise<void> {
+    await installBraintrust(
+      { tracing: { enabled: true, apiKey: 'test-braintrust-key', projectName: 'triage-app', content } },
+      { load: async () => bt, instrument: () => async () => undefined, names: () => [NAME], projectId: 'test-project-id' },
+    );
+  }
+
+  const rows = async (): Promise<Row[]> => (await memory.drain()) as Row[];
+
+  beforeAll(async () => {
+    await T.simulateLoginForTests();
+  });
+  beforeEach(() => {
+    memory = T.useTestBackgroundLogger();
+  });
+  afterEach(async () => {
+    await uninstallBraintrust();
+    T.clearTestBackgroundLogger();
+  });
+  afterAll(() => {
+    T.simulateLogoutForTests();
+  });
+
+  test('with tracing off the result is the same and nothing is recorded', async () => {
+    const r = await decide(priced, { state: STATE, questions }, { trace: { runId: RUN, purpose: 'classify' } });
+    expect(r.answers.category.choice).toBe('payments');
+    expect(r.usage).toEqual({ inputTokens: 120, outputTokens: 8, costUsd: 0.0004 });
+    expect(await rows()).toEqual([]);
+  });
+
+  test("one llm span with run id, purpose, usage and the provider's cost; 'metadata' mode sends no content", async () => {
+    await tracingOn();
+    const r = await decide(priced, { state: STATE, questions }, { trace: { runId: RUN, purpose: 'classify' } });
+    expect(r.answers.category.choice).toBe('payments');
+    const all = await rows();
+    expect(all).toHaveLength(1);
+    const row = all[0] as Row;
+    expect(row.span_attributes).toMatchObject({ name: 'decision:typesafe/jev-1.13', type: 'llm' });
+    expect(row.metadata).toMatchObject({
+      kind: 'decision',
+      model: 'typesafe/jev-1.13',
+      run_id: RUN,
+      purpose: 'classify',
+      provider: 'typesafe',
+      questions: 3,
+      response_model: 'jev-1.13-20260901',
+    });
+    expect(row.metrics).toMatchObject({ prompt_tokens: 120, completion_tokens: 8, tokens: 128, estimated_cost: 0.0004 });
+    const json = JSON.stringify(row);
+    for (const marker of [NAME, EMAIL, ACCOUNT, 'debited', 'payments']) expect(json).not.toContain(marker);
+  });
+
+  test("'redacted' mode sends the state and answers redacted with the run names", async () => {
+    await tracingOn('redacted');
+    await decide(priced, { state: STATE, questions }, { trace: { runId: RUN } });
+    const row = (await rows())[0] as Row;
+    expect(JSON.stringify(row.input)).toContain('was debited twice');
+    expect(row.output.category.choice).toBe('payments');
+    const { run_id: _run, model: _model, response_model: _response, ...rest } = row.metadata;
+    expect(checkEgress({ input: row.input, output: row.output, metadata: rest }, { names: [NAME] })).toEqual({ ok: true });
+  });
+
+  test("'redacted' mode masks trace.names without a run id, and sends only sizes with neither", async () => {
+    await installBraintrust(
+      { tracing: { enabled: true, apiKey: 'test-braintrust-key', projectName: 'triage-app', content: 'redacted' } },
+      { load: async () => bt, instrument: () => async () => undefined, names: () => [], projectId: 'test-project-id' },
+    );
+    await decide(priced, { state: STATE, questions }, { trace: { purpose: 'identity', names: [NAME] } });
+    await decide(priced, { state: STATE, questions });
+    const [named, bare] = (await rows()) as [Row, Row];
+    expect(JSON.stringify(named.input)).toContain('was debited twice');
+    expect(JSON.stringify(named.input)).not.toContain('Asha');
+    expect(bare.input).toEqual({ omitted: 'object', keys: 1 });
+  });
+
+  test('an invalid answer is a failed span, and decide still throws its DecisionError', async () => {
+    await tracingOn();
+    const p = fakeDecisionProvider(() => ({ category: { kind: 'choice', choice: 'loans' } }) as never);
+    const err = await decisionError(decide(p, { state: '', questions }));
+    expect(err.code).toBe('invalid_response');
+    const row = (await rows())[0] as Row;
+    expect(row.span_attributes.name).toBe('decision:fake/decider');
+    expect(row.error).toBe('DecisionError');
+    expect(row.metadata.is_error).toBe(true);
+    expect(row.metadata.run_id).toBeUndefined();
+  });
+
+  test('a call that is never sent has no span', async () => {
+    await tracingOn();
+    const ctrl = new AbortController();
+    ctrl.abort();
+    expect((await decisionError(decide(priced, { state: '', questions }, { signal: ctrl.signal }))).code).toBe('aborted');
+    expect((await decisionError(decide(priced, { state: '', questions: {} }))).code).toBe('bad_request');
+    expect(await rows()).toEqual([]);
   });
 });

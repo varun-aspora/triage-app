@@ -1,7 +1,9 @@
-import { describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import * as bt from 'braintrust';
 import { ConfigError } from '../config/errors.ts';
 import { redactPersisted, type Persisted } from '../gate/redact.ts';
+import { installBraintrust, uninstallBraintrust } from '../tracing/braintrust.ts';
 import { makeTestHome } from '../../test/support/home.ts';
 import { cosine, hashEmbed, tokenize } from './hash.ts';
 import { USAGE_MODEL_PATTERN } from '../types/usage.ts';
@@ -603,5 +605,106 @@ describe('usage', () => {
     expect(await ollamaEmbedder(fakeFetch(() => json(OLLAMA_BODY))).embed(persisted('a', 'b'))).toEqual(
       OLLAMA_BODY['embeddings'] as number[][],
     );
+  });
+});
+
+// ---------------------------------------------------------------- tracing (D82)
+
+// Braintrust's in-memory background logger: nothing leaves the process. The
+// texts are synthetic.
+describe('tracing', () => {
+  const T = bt._exportsForTestingOnly;
+  // A run id with a 6+ digit run, which the persisted profile would mask.
+  const RUN = '01M3EN7034701234ABCDEFGHJK';
+  const TEXTS = ['welcome letter never arrived for Asha Testuser', 'second text'];
+  const TRACE = { runId: RUN, purpose: 'prior_cases' };
+  type Row = Record<string, any>;
+  let memory: ReturnType<typeof T.useTestBackgroundLogger>;
+  const savedHome = process.env.TRIAGE_HOME;
+
+  const openai = (fetch: FetchLike) =>
+    createEmbedder(cfg({ embedding: 'openai/text-embedding-3-small', openaiApiKey: KEY }), { fetch })!;
+
+  async function tracingOn(): Promise<void> {
+    await installBraintrust(
+      { tracing: { enabled: true, apiKey: 'test-braintrust-key', projectName: 'triage-app', content: 'metadata' } },
+      { load: async () => bt, instrument: () => async () => undefined, names: () => [], projectId: 'test-project-id' },
+    );
+  }
+
+  beforeAll(async () => {
+    // The traced path loads the pricer, which imports models.ts; that loads
+    // config at import, so a home exported in the shell must not be read.
+    delete process.env.TRIAGE_HOME;
+    await import('../usage/price.ts');
+    await T.simulateLoginForTests();
+  });
+  beforeEach(() => {
+    memory = T.useTestBackgroundLogger();
+  });
+  afterEach(async () => {
+    await uninstallBraintrust();
+    T.clearTestBackgroundLogger();
+  });
+  afterAll(() => {
+    T.simulateLogoutForTests();
+    if (savedHome !== undefined) process.env.TRIAGE_HOME = savedHome;
+  });
+
+  test('with tracing off a traced call sends the same request, returns the same vectors and records nothing', async () => {
+    const plain = fakeFetch(() => json(OPENAI_BODY));
+    const traced = fakeFetch(() => json(OPENAI_BODY));
+    const usage: EmbedUsage[] = [];
+    const a = await openai(plain).embed(persisted(...TEXTS));
+    const b = await openai(traced).embed(persisted(...TEXTS), { trace: TRACE, onUsage: (u) => void usage.push(u) });
+    expect(b).toEqual(a);
+    expect(traced.calls.map((c) => c.init.body)).toEqual(plain.calls.map((c) => c.init.body));
+    expect(usage).toEqual([{ model: 'openai/text-embedding-3-small', inputTokens: 17, failed: false }]);
+    expect(await memory.drain()).toEqual([]);
+  });
+
+  test("a traced call is one llm span with run id, tokens and cost, and no text in 'metadata' mode", async () => {
+    await tracingOn();
+    const vectors = await openai(fakeFetch(() => json(OPENAI_BODY))).embed(persisted(...TEXTS), { trace: TRACE });
+    expect(vectors).toHaveLength(2);
+    const all = (await memory.drain()) as Row[];
+    expect(all).toHaveLength(1);
+    const row = all[0] as Row;
+    expect(row.span_attributes).toMatchObject({ name: 'embed:openai/text-embedding-3-small', type: 'llm' });
+    expect(row.metadata).toMatchObject({ kind: 'embed', model: 'openai/text-embedding-3-small', run_id: RUN, purpose: 'prior_cases', texts: 2 });
+    expect(row.metrics).toMatchObject({ prompt_tokens: 17, tokens: 17 });
+    // EMBEDDING_PRICES: 0.02 USD per million input tokens.
+    expect(row.metrics.estimated_cost).toBeCloseTo((17 * 0.02) / 1_000_000, 12);
+    const sent = JSON.stringify(row);
+    for (const marker of ['welcome letter', 'second text']) expect(sent).not.toContain(marker);
+  });
+
+  test('a call without the trace option is not traced, with tracing on', async () => {
+    await tracingOn();
+    await openai(fakeFetch(() => json(OPENAI_BODY))).embed(persisted(...TEXTS));
+    await openai(fakeFetch(() => json(OPENAI_BODY))).embed([], { trace: TRACE });
+    expect(await memory.drain()).toEqual([]);
+  });
+
+  test('a failed call is rethrown as it was and its span holds the error class only', async () => {
+    await tracingOn();
+    const usage: EmbedUsage[] = [];
+    const err = await rejection(
+      openai(fakeFetch(() => json({ error: 'nope' }, 500))).embed(persisted(...TEXTS), { trace: TRACE, onUsage: (u) => void usage.push(u) }),
+    );
+    expect(err).toBeInstanceOf(EmbeddingError);
+    expect(usage).toEqual([{ model: 'openai/text-embedding-3-small', inputTokens: 0, failed: true }]);
+    const row = (await memory.drain())[0] as Row;
+    expect(row.error).toBe('EmbeddingError');
+    expect(row.metadata.is_error).toBe(true);
+  });
+
+  test('mock mode traces the hash embedder at no cost', async () => {
+    await tracingOn();
+    const e = createEmbedder(cfg({ embedding: 'openai/text-embedding-3-small', mock: true }), { fetch: fakeFetch(() => json({})) })!;
+    await e.embed(persisted(...TEXTS), { trace: TRACE });
+    const row = (await memory.drain())[0] as Row;
+    expect(row.span_attributes.name).toBe(`embed:${HASH_MODEL}`);
+    expect(row.metrics.estimated_cost).toBe(0);
   });
 });

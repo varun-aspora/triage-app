@@ -1,10 +1,12 @@
-import { afterAll, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AssistantMessage, Context, FauxResponseFactory } from '@earendil-works/pi-ai';
+import * as bt from 'braintrust';
 import * as v from 'valibot';
 
 import { configFromRecord, type Config } from '../config/env.ts';
+import { installBraintrust, uninstallBraintrust } from '../tracing/braintrust.ts';
 import { createFakeModel, text } from '../mock/fake-model.ts';
 import { CATEGORIES, ClassificationSchema } from '../types/classification.ts';
 import type { IdChain } from '../types/id-chain.ts';
@@ -586,5 +588,93 @@ describe('prompt', () => {
   test('a categories list with an unknown id is refused', () => {
     expect(() => parseCategories([{ ...CATS[0], id: 'loans' }])).toThrow();
     expect(() => parseCategories([])).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------- tracing (D82)
+
+// The completion path's span, with Braintrust's in-memory background logger:
+// nothing leaves the process. The decision path is in classify-decision.test.ts.
+describe('tracing the completion call', () => {
+  const T = bt._exportsForTestingOnly;
+  // A run id with a 6+ digit run, which the persisted profile would mask.
+  const RUN = '01M3EN7034701234ABCDEFGHJK';
+  type Row = Record<string, any>;
+  let memory: ReturnType<typeof T.useTestBackgroundLogger>;
+
+  async function tracingOn(content: 'metadata' | 'redacted' = 'metadata', runNames: readonly string[] = [NAME]): Promise<void> {
+    await installBraintrust(
+      { tracing: { enabled: true, apiKey: 'test-braintrust-key', projectName: 'triage-app', content } },
+      { load: async () => bt, instrument: () => async () => undefined, names: () => runNames, projectId: 'test-project-id' },
+    );
+  }
+
+  const failing: FauxResponseFactory = () => {
+    throw new Error('upstream 503');
+  };
+
+  beforeAll(async () => {
+    await T.simulateLoginForTests();
+  });
+  beforeEach(() => {
+    memory = T.useTestBackgroundLogger();
+  });
+  afterEach(async () => {
+    await uninstallBraintrust();
+    T.clearTestBackgroundLogger();
+  });
+  afterAll(() => {
+    T.simulateLogoutForTests();
+  });
+
+  const run = (script: Parameters<typeof fake.script>[0]) => {
+    fake.script(script);
+    return classify({ ...INPUT, runId: RUN }, { config: config(), complete: completeWith(fake.provider), categories: CATS });
+  };
+
+  test('with tracing on or off the classification is the same; off records nothing', async () => {
+    const off = await run([text(JSON.stringify(VALID))]);
+    const offFailed = await run([failing]);
+    expect(await memory.drain()).toEqual([]);
+    await tracingOn();
+    expect(await run([text(JSON.stringify(VALID))])).toEqual(off);
+    expect(await run([failing])).toEqual(offFailed);
+    expect(offFailed.classifier_error).toMatch(/^provider error: .*upstream 503/);
+  });
+
+  test("one llm span with run id, usage and the pricer's cost, and no content in 'metadata' mode", async () => {
+    await tracingOn();
+    await run([text(JSON.stringify(VALID))]);
+    const all = (await memory.drain()) as Row[];
+    expect(all).toHaveLength(1);
+    const row = all[0] as Row;
+    expect(row.span_attributes).toMatchObject({ name: 'decision:faux/classifier', type: 'llm' });
+    expect(row.metadata).toMatchObject({ kind: 'decision', model: 'faux/classifier', run_id: RUN, purpose: 'classify', path: 'completion', images: 0 });
+    expect(row.metrics.prompt_tokens).toBeGreaterThan(0);
+    // faux is free in src/usage/price.ts.
+    expect(row.metrics.estimated_cost).toBe(0);
+    expect(row.error).toBeUndefined();
+    const json = JSON.stringify(row);
+    for (const marker of [NAME, EMAIL, '900123', ACCOUNT, 'welcome letter']) expect(json).not.toContain(marker);
+  });
+
+  test("'redacted' mode masks the ingress names the classifier was given, though the prompt keeps them", async () => {
+    // No names known for the run in this process, and no run id: only input.redactionNames can mask the name.
+    await tracingOn('redacted', []);
+    const { seen, complete } = capturing(JSON.stringify(VALID));
+    await classify({ ...INPUT, redactionNames: [NAME] }, { config: config(), complete, categories: CATS });
+    // faux is not a persisted-profile provider, so the model sees the name.
+    expect(userTextOf(seen[0] as Context)).toContain('Asha');
+    const row = (await memory.drain())[0] as Row;
+    expect(JSON.stringify(row.input)).not.toContain('Asha');
+    expect(JSON.stringify(row.input)).toContain('welcome letter');
+  });
+
+  test('a message with stopReason error is a failed span holding the stop reason only', async () => {
+    await tracingOn();
+    await run([failing]);
+    const row = (await memory.drain())[0] as Row;
+    expect(row.error).toBe('CompletionStopped');
+    expect(row.metadata.is_error).toBe(true);
   });
 });
