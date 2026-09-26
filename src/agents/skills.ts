@@ -142,34 +142,21 @@ function buildSkill(dir: string, problems: KnowledgeProblem[]): SkillDefinition 
   const { fields, body } = parsed;
   const dirName = basename(dir);
   const bad = (reason: string) => problems.push({ path: skillPath, reason });
+  const before = problems.length;
 
   const name = fields['name'];
   const description = fields['description'];
-  let ok = true;
-  if (typeof name !== 'string' || name === '') {
-    bad('frontmatter has no name');
-    ok = false;
-  } else if (name !== dirName) {
-    bad(`name '${name}' does not match directory '${dirName}'`);
-    ok = false;
-  } else if (!SKILL_NAME.test(name) || name.length > 64) {
+  if (typeof name !== 'string' || name === '') bad('frontmatter has no name');
+  else if (name !== dirName) bad(`name '${name}' does not match directory '${dirName}'`);
+  else if (!SKILL_NAME.test(name) || name.length > 64) {
     bad(`name '${name}' must be lowercase letters, digits and single hyphens, at most 64 characters`);
-    ok = false;
   }
-  if (typeof description !== 'string' || description.trim() === '') {
-    bad('frontmatter has an empty description');
-    ok = false;
-  } else if (description.length > 1024) {
-    bad('description is longer than 1024 characters');
-    ok = false;
-  }
-  if (body === '') {
-    bad('SKILL.md has no instructions after the frontmatter');
-    ok = false;
-  }
+  if (typeof description !== 'string' || description.trim() === '') bad('frontmatter has an empty description');
+  else if (description.length > 1024) bad('description is longer than 1024 characters');
+  if (body === '') bad('SKILL.md has no instructions after the frontmatter');
   const optional = optionalFields(fields, bad);
   const files = readSupportingFiles(dir, problems);
-  if (!ok || !optional || !files) return undefined;
+  if (problems.length > before || !optional || !files) return undefined;
 
   try {
     return defineSkill({
@@ -227,25 +214,22 @@ function readSupportingFiles(
   problems: KnowledgeProblem[],
 ): Record<string, string | Uint8Array> | undefined {
   const files: Record<string, string | Uint8Array> = {};
-  let ok = true;
+  const before = problems.length;
   const walk = (current: string): void => {
     for (const entry of sortedEntries(current)) {
       const path = join(current, entry);
       const rel = relative(dir, path).split(sep).join('/');
       if (SECRET_NAME.test(entry)) {
         problems.push({ path, reason: 'secret-looking file in a skill directory' });
-        ok = false;
         continue;
       }
       if (entry.startsWith('.')) continue;
       const stat = lstatSync(path);
       if (stat.isSymbolicLink()) {
         problems.push({ path, reason: 'symbolic links are not allowed in a skill directory' });
-        ok = false;
       } else if (stat.isDirectory()) {
         if (isFile(join(path, SKILL_FILE))) {
           problems.push({ path, reason: `nested ${SKILL_FILE} inside skill ${basename(dir)}` });
-          ok = false;
         } else walk(path);
       } else if (stat.isFile() && rel !== SKILL_FILE) {
         const bytes = readFileSync(path);
@@ -256,7 +240,7 @@ function readSupportingFiles(
     }
   };
   walk(dir);
-  return ok ? files : undefined;
+  return problems.length === before ? files : undefined;
 }
 
 // ------------------------------------------------------------ frontmatter

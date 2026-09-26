@@ -615,13 +615,7 @@ async function download(
     deps.signal.throwIfAborted();
     return { skipped: 'download_failed' };
   }
-  const bytes = new Uint8Array(total);
-  let at = 0;
-  for (const c of chunks) {
-    bytes.set(c, at);
-    at += c.byteLength;
-  }
-  return { bytes };
+  return { bytes: Buffer.concat(chunks, total) };
 }
 
 function str(x: unknown): string {

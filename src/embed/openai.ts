@@ -3,7 +3,7 @@
 // { data: [{ index, embedding }], usage: { prompt_tokens } }. The fetch is
 // injected and the key only ever goes into the Authorization header.
 
-import { EmbeddingError, isVector, postJson, reportedTokens, type EmbedClient, type FetchLike } from './spec.ts';
+import { EmbeddingError, isVector, postJson, reportedTokens, sameDims, type EmbedClient, type FetchLike } from './spec.ts';
 
 export const OPENAI_EMBEDDINGS_URL = 'https://api.openai.com/v1/embeddings';
 
@@ -52,7 +52,6 @@ export function parseOpenAiResponse(body: unknown, expected: number): number[][]
     out[index] = item.embedding;
   }
   const vectors = out as number[][];
-  const dims = vectors[0]!.length;
-  if (!vectors.every((v) => v.length === dims)) throw new EmbeddingError('openai', 'malformed');
+  if (!sameDims(vectors)) throw new EmbeddingError('openai', 'malformed');
   return vectors;
 }

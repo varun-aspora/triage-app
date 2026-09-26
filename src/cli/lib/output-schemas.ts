@@ -122,10 +122,13 @@ export const UsageOutputSchema = v.strictObject({
 });
 export type UsageOutput = v.InferOutput<typeof UsageOutputSchema>;
 
+/** The run store seq a follow-up, answer or resume gets. */
+const SubmissionIdSchema = v.pipe(v.number(), v.integer(), v.minValue(1));
+
 /** `triage ask --json`. submission_id is the run store seq the follow-up gets. */
 export const AskOutputSchema = v.strictObject({
   run_id: RunIdSchema,
-  submission_id: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  submission_id: SubmissionIdSchema,
 });
 export type AskOutput = v.InferOutput<typeof AskOutputSchema>;
 
@@ -133,7 +136,7 @@ export type AskOutput = v.InferOutput<typeof AskOutputSchema>;
 export const InputOutputSchema = v.strictObject({
   run_id: RunIdSchema,
   question_id: QuestionIdSchema,
-  submission_id: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  submission_id: SubmissionIdSchema,
   skipped: v.boolean(),
 });
 export type InputOutput = v.InferOutput<typeof InputOutputSchema>;
@@ -145,7 +148,7 @@ export type InputOutput = v.InferOutput<typeof InputOutputSchema>;
  */
 export const ResumeOutputSchema = v.strictObject({
   run_id: RunIdSchema,
-  submission_id: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  submission_id: SubmissionIdSchema,
   mode: v.picklist(['steer', 'resume']),
 });
 export type ResumeOutput = v.InferOutput<typeof ResumeOutputSchema>;

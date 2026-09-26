@@ -2,7 +2,7 @@
 // answered with { embeddings: number[][], prompt_eval_count }. The fetch is
 // injected.
 
-import { EmbeddingError, isVector, postJson, reportedTokens, type EmbedClient, type FetchLike } from './spec.ts';
+import { EmbeddingError, isVector, postJson, reportedTokens, sameDims, type EmbedClient, type FetchLike } from './spec.ts';
 
 export type OllamaClientConfig = {
   readonly baseUrl: string;
@@ -45,10 +45,8 @@ export function ollamaInputTokens(body: unknown): number | null {
 
 export function parseOllamaResponse(body: unknown, expected: number): number[][] {
   const embeddings = (body as { embeddings?: unknown } | null)?.embeddings;
-  if (!Array.isArray(embeddings) || embeddings.length !== expected || !embeddings.every(isVector)) {
+  if (!Array.isArray(embeddings) || embeddings.length !== expected || !embeddings.every(isVector) || !sameDims(embeddings)) {
     throw new EmbeddingError('ollama', 'malformed');
   }
-  const dims = embeddings[0]!.length;
-  if (!embeddings.every((e) => e.length === dims)) throw new EmbeddingError('ollama', 'malformed');
   return embeddings;
 }

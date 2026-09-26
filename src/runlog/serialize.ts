@@ -75,8 +75,11 @@ function clip(text: string, max: number): string {
 
 // ------------------------------------------------------------------ trimming
 
+const DROPPED = ['text_delta', 'thinking_delta', 'toolcall_delta'] as const;
+export type DroppedEventType = (typeof DROPPED)[number];
+
 /** Streaming fragments: the completed message, thinking block or tool call carries the same text. */
-export const DROPPED_EVENT_TYPES: ReadonlySet<string> = new Set(['text_delta', 'thinking_delta', 'toolcall_delta']);
+export const DROPPED_EVENT_TYPES: ReadonlySet<string> = new Set(DROPPED);
 
 /** What was last written for one session, so the system prompt and tool list are written only when they change. */
 export type SessionMemory = { systemPrompt?: string; tools?: string };

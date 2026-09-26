@@ -25,7 +25,6 @@ import { defineTool, type ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
 import { safeErrorText, stripAddresses } from '../../connectors/error-text.ts';
 import type { HttpConnector } from '../../connectors/http/client.ts';
-import type { MockPort } from '../../connectors/mock.ts';
 import type { SqlConnector } from '../../connectors/sql/pg-client.ts';
 import { ConnectorError, type ConnectorContext } from '../../connectors/types.ts';
 import { decideHttp, type HttpDecision } from '../../gate/http.ts';
@@ -33,6 +32,7 @@ import { loadRulesFile } from '../../gate/rules-file.ts';
 import type { ApiRule } from '../../gate/rules.ts';
 import { semanticKey } from '../../mock/key.ts';
 import type { ToolEnvelope } from '../../types/tool-result.ts';
+import { realConnectorContext } from '../_lib/connector-context.ts';
 import { type BackingRef, type GateDecision, runIoTool, type StagingHarness } from '../_lib/pipeline.ts';
 import { findStatementItems, normaliseLeg, type StatementTransaction } from '../_lib/reversal-join.ts';
 import type { Mount, ToolContext, ToolDeps, ToolModule } from '../types.ts';
@@ -163,24 +163,7 @@ export function ssfbRules(ctx: ToolContext): RulesResult {
 
 // The connectors answer real calls only: runIoTool has already resolved mock
 // mode through the tool's own fixture, and it records the tool-level result.
-const REAL_ONLY_PORT: MockPort = Object.freeze({
-  enabled: false,
-  strict: false,
-  async lookup(): Promise<never> {
-    throw new ConnectorError('refused', 'the SSFB statement tools look fixtures up at the tool level');
-  },
-});
-
-export function connectorContext(ctx: ToolContext, signal: AbortSignal): ConnectorContext {
-  const deps = ctx.deps;
-  return {
-    signal,
-    now: deps.now,
-    mock: REAL_ONLY_PORT,
-    runId: ctx.runId,
-    redactionNames: deps.run.redactionNames,
-  };
-}
+export const connectorContext: (ctx: ToolContext, signal: AbortSignal) => ConnectorContext = realConnectorContext;
 
 // ------------------------------------------------------------ statement fetch
 

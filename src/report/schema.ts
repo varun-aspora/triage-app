@@ -21,8 +21,9 @@ import {
 // Placeholder check
 
 // A placeholder is $NAME or ${NAME}. Positional SQL parameters ($1) are not.
-const PLACEHOLDER_START = /^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})/;
-const PLACEHOLDER_ONLY = /^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$/;
+const PLACEHOLDER = String.raw`\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})`;
+const PLACEHOLDER_START = new RegExp(`^${PLACEHOLDER}`);
+const PLACEHOLDER_ONLY = new RegExp(`^${PLACEHOLDER}$`);
 
 // Database URL schemes. Any literal use is a DSN; the command must read the
 // DSN from a variable instead (psql "$SSFB_HARBOR_DB_URL").
@@ -300,9 +301,14 @@ export function checkPlaceholders(command: string, kind: SuggestedFixKind): stri
   return [...new Set(problems)];
 }
 
+/** True when the text calls curl somewhere (as a command word, not inside another word). */
+export function runsCurl(text: string): boolean {
+  return /(?:^|[\s;|&(])curl\s/.test(text);
+}
+
 // verify_with is a query or a curl call; it gets the rules of whichever it is.
 function verifyKind(text: string): SuggestedFixKind {
-  return /(?:^|[\s;|&(])curl\s/.test(text) ? 'curl' : 'sql';
+  return runsCurl(text) ? 'curl' : 'sql';
 }
 
 // ---------------------------------------------------------------------------

@@ -333,10 +333,13 @@ export function envNamesOf(spec: EntityRegistry): readonly string[] {
   for (const s of Object.values(spec.services)) {
     out.push(...defined(s.db, s.api, s.auth?.token_env, s.field_encryption?.key_env));
   }
-  const q = spec.quickwit;
-  out.push(...defined(q.transport, q.index, q.max_concurrency, q.max_hits, q.http?.url, q.http?.auth, q.http?.token, q.qw?.context));
+  out.push(...quickwitEnvNames(spec.quickwit));
   out.push(...defined(spec.cbs?.enabled_flag, spec.kube.context_env, spec.kube.aws_profile_env, spec.infra_repo));
   return [...new Set(out)];
+}
+
+function quickwitEnvNames(q: QuickwitSpec): string[] {
+  return defined(q.transport, q.index, q.max_concurrency, q.max_hits, q.http?.url, q.http?.auth, q.http?.token, q.qw?.context);
 }
 
 /**
@@ -346,18 +349,10 @@ export function envNamesOf(spec: EntityRegistry): readonly string[] {
  * transport unset, blank or invalid, every name stays required.
  */
 function requiredEnvNamesOf(spec: EntityRegistry, look: (name: string) => EnvLookup): readonly string[] {
-  const q = spec.quickwit;
-  const l = look(q.transport);
-  const transport = l.state === 'set' ? l.value.trim() : undefined;
-  let active = q;
-  if (transport === 'http' && q.qw !== undefined) {
-    const { qw: _unused, ...rest } = q;
-    active = rest;
-  } else if (transport === 'qw' && q.http !== undefined) {
-    const { http: _unused, ...rest } = q;
-    active = rest;
-  }
-  return active === q ? envNamesOf(spec) : envNamesOf({ ...spec, quickwit: active });
+  const transport = setValue(look(spec.quickwit.transport));
+  const { qw, http, ...rest } = spec.quickwit;
+  const quickwit = transport === 'http' ? { ...rest, http } : transport === 'qw' ? { ...rest, qw } : spec.quickwit;
+  return envNamesOf({ ...spec, quickwit });
 }
 
 // Keys with a fixed format must be well formed when set. Blank is allowed.
@@ -365,8 +360,8 @@ function valueProblems(spec: EntityRegistry, look: (name: string) => EnvLookup):
   const out: RegistryProblem[] = [];
   const check = (name: string | undefined, ok: (value: string) => boolean, reason: string): void => {
     if (name === undefined) return;
-    const l = look(name);
-    if (l.state === 'set' && !ok(l.value.trim())) out.push({ key: name, reason });
+    const value = setValue(look(name));
+    if (value !== undefined && !ok(value)) out.push({ key: name, reason });
   };
   const q = spec.quickwit;
   check(q.transport, (x) => x === 'qw' || x === 'http', 'must be qw or http');
@@ -441,9 +436,7 @@ function makeRegistry(
     quickwitFields: (entity) => specOf(entity).quickwit_fields,
     cbsEnabled(entity) {
       const flag = enabledSpec(entity).cbs?.enabled_flag;
-      if (flag === undefined) return false;
-      const l = look(flag);
-      return l.state === 'set' && l.value.trim() === 'true';
+      return flag !== undefined && setValue(look(flag)) === 'true';
     },
     kube(entity) {
       const k = enabledSpec(entity).kube;
@@ -457,10 +450,10 @@ function makeRegistry(
     infraRepo(entity) {
       const name = enabledSpec(entity).infra_repo;
       if (name === undefined) return undefined;
-      const l = look(name);
-      if (l.state !== 'set') return Object.freeze({ status: 'disabled', envName: name, reason: 'blank' });
+      const value = setValue(look(name));
+      if (value === undefined) return Object.freeze({ status: 'disabled', envName: name, reason: 'blank' });
       // Validated at load for enabled entities.
-      const parsed = parseInfraRepo(l.value.trim()) as { repo: string; path: string };
+      const parsed = parseInfraRepo(value) as { repo: string; path: string };
       return Object.freeze({ status: 'ok', envName: name, ...parsed });
     },
     capabilityReport: (entity) => report(specOf(entity), enabledList.includes(entity), look),
@@ -504,10 +497,7 @@ function resolveQuickwitAny(q: QuickwitSpec, look: (name: string) => EnvLookup):
     Object.freeze({ status: 'disabled', reason, envNames: Object.freeze(envNames) });
   const bad = (status: 'invalid' | 'missing', name: string, reason: string): QuickwitResolution =>
     Object.freeze({ status, reason: `${name} ${reason}`, envNames: Object.freeze([name]) });
-  const read = (name: string): string | undefined => {
-    const l = look(name);
-    return l.state === 'set' ? l.value.trim() : undefined;
-  };
+  const read = (name: string): string | undefined => setValue(look(name));
 
   for (const name of defined(q.transport, q.index, q.max_concurrency, q.max_hits)) {
     if (look(name).state === 'missing') return bad('missing', name, 'is absent from the .env');
@@ -556,10 +546,12 @@ function resolveQuickwitAny(q: QuickwitSpec, look: (name: string) => EnvLookup):
 
 function report(spec: EntityRegistry, enabled: boolean, look: (name: string) => EnvLookup): CapabilityReport {
   const rows: CapabilityRow[] = [];
+  const row = (capability: CapabilityKind, envNames: string[], status: CapabilityStatus, reason?: string, service?: string): void => {
+    rows.push(Object.freeze({ capability, ...(service === undefined ? {} : { service }), envNames: Object.freeze(envNames), status, ...(reason === undefined ? {} : { reason }) }));
+  };
   const single = (capability: CapabilityKind, name: string, service?: string, reason?: string): void => {
     const l = look(name);
-    const status: CapabilityStatus = l.state === 'set' ? 'ok' : l.state;
-    rows.push(Object.freeze({ capability, ...(service === undefined ? {} : { service }), envNames: Object.freeze([name]), status, ...(reason === undefined ? {} : { reason }) }));
+    row(capability, [name], l.state === 'set' ? 'ok' : l.state, reason, service);
   };
 
   for (const [service, s] of Object.entries(spec.services)) {
@@ -569,40 +561,26 @@ function report(spec: EntityRegistry, enabled: boolean, look: (name: string) => 
     if (s.field_encryption !== undefined) single('field_encryption', s.field_encryption.key_env, service);
   }
 
-  const q = spec.quickwit;
-  const qwNames = defined(q.transport, q.index, q.max_concurrency, q.max_hits, q.http?.url, q.http?.auth, q.http?.token, q.qw?.context);
-  const qr = resolveQuickwitAny(q, look);
-  rows.push(Object.freeze({
-    capability: 'quickwit',
-    envNames: Object.freeze(qwNames),
-    status: qr.status,
-    ...(qr.status === 'ok' ? {} : { reason: qr.reason }),
-  }));
+  const qr = resolveQuickwitAny(spec.quickwit, look);
+  row('quickwit', quickwitEnvNames(spec.quickwit), qr.status, qr.status === 'ok' ? undefined : qr.reason);
 
   if (spec.cbs !== undefined) {
     const flag = spec.cbs.enabled_flag;
     const l = look(flag);
-    const value = l.state === 'set' ? l.value.trim() : undefined;
-    const row = (status: CapabilityStatus, reason?: string): CapabilityRow =>
-      Object.freeze({ capability: 'cbs', envNames: Object.freeze([flag]), status, ...(reason === undefined ? {} : { reason }) });
-    if (l.state === 'missing') rows.push(row('missing', `${flag} is absent from the .env`));
-    else if (value === 'true') rows.push(row('ok'));
-    else if (value === undefined || value === 'false') rows.push(row('disabled', `${flag} is not true`));
-    else rows.push(row('invalid', `${flag} must be true or false`));
+    const value = setValue(l);
+    if (l.state === 'missing') row('cbs', [flag], 'missing', `${flag} is absent from the .env`);
+    else if (value === 'true') row('cbs', [flag], 'ok');
+    else if (value === undefined || value === 'false') row('cbs', [flag], 'disabled', `${flag} is not true`);
+    else row('cbs', [flag], 'invalid', `${flag} must be true or false`);
   }
 
   single('kube_context', spec.kube.context_env);
   single('aws_profile', spec.kube.aws_profile_env);
   if (spec.infra_repo !== undefined) {
     const name = spec.infra_repo;
-    const l = look(name);
-    const bad = l.state === 'set' && parseInfraRepo(l.value.trim()) === undefined;
-    rows.push(Object.freeze({
-      capability: 'infra_repo',
-      envNames: Object.freeze([name]),
-      status: bad ? 'invalid' : l.state === 'set' ? 'ok' : l.state,
-      ...(bad ? { reason: `${name} ${INFRA_REPO_FORMAT}` } : {}),
-    }));
+    const value = setValue(look(name));
+    if (value !== undefined && parseInfraRepo(value) === undefined) row('infra_repo', [name], 'invalid', `${name} ${INFRA_REPO_FORMAT}`);
+    else single('infra_repo', name);
   }
   return Object.freeze({ entity: spec.entity, enabled, rows: Object.freeze(rows) });
 }
@@ -631,6 +609,11 @@ export function parseInfraRepo(value: string): { readonly repo: string; readonly
 
 function defined(...xs: (string | undefined)[]): string[] {
   return xs.filter((x): x is string => x !== undefined);
+}
+
+/** The trimmed value of a set key; undefined when missing or blank. */
+function setValue(l: EnvLookup): string | undefined {
+  return l.state === 'set' ? l.value.trim() : undefined;
 }
 
 function isPositiveInt(x: string): boolean {

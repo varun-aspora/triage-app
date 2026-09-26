@@ -65,7 +65,7 @@ export function parseRequestArgs(opts: Readonly<Record<string, unknown>>, deps: 
     threadFile: stringOpt(opts, 'threadFile', '--thread-file'),
     text: stringOpt(opts, 'text', '--text'),
   };
-  const count = [given.slackUrl, given.threadFile, given.text].filter((x) => x !== undefined).length;
+  const count = Object.values(given).filter((x) => x !== undefined).length;
   if (count !== 1) {
     const what = count === 0 ? 'none was given' : 'more than one was given';
     throw new UsageError(`give exactly one of ${INPUT_FLAGS.join(', ')} (${what})`);
@@ -105,11 +105,12 @@ export function parseRequestArgs(opts: Readonly<Record<string, unknown>>, deps: 
 export function requestedByOf(opts: Readonly<Record<string, unknown>>, deps: Pick<RequestArgsDeps, 'defaultRequestedBy'>): string | undefined {
   const flag = stringOpt(opts, 'requestedBy', '--requested-by');
   if (flag !== undefined) {
-    if (flag.trim() === '') throw new UsageError('--requested-by is empty');
-    return flag.trim();
+    const who = flag.trim();
+    if (who === '') throw new UsageError('--requested-by is empty');
+    return who;
   }
-  const fallback = (deps.defaultRequestedBy ?? osUserName)();
-  return fallback !== undefined && fallback.trim() !== '' ? fallback.trim() : undefined;
+  const fallback = (deps.defaultRequestedBy ?? osUserName)()?.trim();
+  return fallback === '' ? undefined : fallback;
 }
 
 /**

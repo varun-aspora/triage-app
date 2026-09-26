@@ -102,7 +102,6 @@ function readGuide(dir: string, name: string): GuideInfo {
   if ('error' in parsed) return { ...fallback, dir, problem: parsed.error };
 
   const { fields, body } = parsed;
-  const str = (x: unknown): string | undefined => (typeof x === 'string' ? x : undefined);
   const metadata = typeof fields['metadata'] === 'object' && !Array.isArray(fields['metadata']) ? fields['metadata'] : {};
   const description = str(fields['description'])?.trim() ?? '';
   const status = str(metadata['status']);
@@ -120,6 +119,8 @@ function readGuide(dir: string, name: string): GuideInfo {
   const problem = skillProblem(name, fields['name'], description, body);
   return problem === undefined ? info : { ...info, problem };
 }
+
+const str = (x: unknown): string | undefined => (typeof x === 'string' ? x : undefined);
 
 // The checks buildSkill in src/agents/skills.ts applies; a file failing any
 // of them stops the next boot.
@@ -194,11 +195,20 @@ const YAML_NON_STRING = /^(?:true|false|yes|no|on|off|y|n|null)$/i;
 export function renderSkill(input: SkillInput): string {
   const plain = (s: string): string => (YAML_NON_STRING.test(s) ? JSON.stringify(s) : s);
   const lines = ['---', `name: ${input.name}`, `description: ${JSON.stringify(input.description)}`, 'metadata:'];
-  lines.push(`  kind: ${input.kind}`, `  entity: ${input.entity}`);
-  if (input.kind === 'service' && input.service !== undefined) lines.push(`  service: ${plain(input.service)}`);
-  if (input.sources !== undefined) lines.push(`  sources: ${JSON.stringify(input.sources)}`);
-  lines.push(`  status: ${input.status}`, '---', '', input.body.trim(), '');
+  for (const [key, value] of Object.entries(metadataOf(input))) {
+    lines.push(`  ${key}: ${key === 'sources' ? JSON.stringify(value) : plain(value)}`);
+  }
+  lines.push('---', '', input.body.trim(), '');
   return lines.join('\n');
+}
+
+/** The metadata map a SKILL.md for input holds, in file order. */
+function metadataOf(input: SkillInput): Record<string, string> {
+  const out: Record<string, string> = { kind: input.kind, entity: input.entity };
+  if (input.kind === 'service' && input.service !== undefined) out['service'] = input.service;
+  if (input.sources !== undefined) out['sources'] = input.sources;
+  out['status'] = input.status;
+  return out;
 }
 
 /**
@@ -210,18 +220,14 @@ export function validateRendered(text: string, input: SkillInput): string | unde
   const parsed = parseSkillFile(text);
   if ('error' in parsed) return parsed.error;
   const { fields, body } = parsed;
-  const problem = skillProblem(input.name, fields['name'], typeof fields['description'] === 'string' ? fields['description'].trim() : '', body);
+  const problem = skillProblem(input.name, fields['name'], str(fields['description'])?.trim() ?? '', body);
   if (problem !== undefined) return problem;
   const bad = oneLineProblem(input.description, MAX_DESCRIPTION, 1);
   if (bad !== undefined) return `description ${bad}`;
   if (fields['description'] !== input.description || body !== input.body.trim()) return 'the file does not read back as written';
   const metadata = fields['metadata'];
   if (typeof metadata !== 'object' || Array.isArray(metadata)) return 'metadata does not read back as a map';
-  const expected: Record<string, string> = { kind: input.kind, entity: input.entity };
-  if (input.kind === 'service' && input.service !== undefined) expected['service'] = input.service;
-  if (input.sources !== undefined) expected['sources'] = input.sources;
-  expected['status'] = input.status;
-  if (JSON.stringify(metadata) !== JSON.stringify(expected)) return 'metadata does not read back as written';
+  if (JSON.stringify(metadata) !== JSON.stringify(metadataOf(input))) return 'metadata does not read back as written';
   return undefined;
 }
 

@@ -46,20 +46,32 @@ import {
   FeedbackSchema,
   RUNSTORE_SCHEMA_VERSION,
   RunMetaSchema,
-  RunPhaseSchema,
   RunStoreError,
   RunNotFoundError,
   RunStoppedError,
   SubmissionInputSchema,
   SubmissionMetaSchema,
+  assertBlockId,
   assertClean,
   assertEvidenceKey,
+  assertFlueSubmissionId,
   assertPersisted,
+  assertPhaseList,
+  assertQuestionId,
   assertRunId,
+  BlockNotOpenError,
+  BlockOpenError,
   byUsageKey,
+  cancelledBlockResolution,
+  checkPhaseChange,
   checkUsage,
   cosine,
+  InputRequestNotOpenError,
+  InputRequestOpenError,
   isTerminalPhase,
+  parseRecord,
+  positiveInt,
+  WORKING_PHASES,
   type ClassificationRecord,
   type EmbeddingInput,
   type EmbeddingMeta,
@@ -80,18 +92,6 @@ import {
   type Submission,
   type SubmissionInput,
   type SubmissionMeta,
-} from './types.ts';
-import {
-  assertBlockId,
-  assertFlueSubmissionId,
-  assertPhaseList,
-  assertQuestionId,
-  BlockNotOpenError,
-  BlockOpenError,
-  cancelledBlockResolution,
-  InputRequestNotOpenError,
-  InputRequestOpenError,
-  WORKING_PHASES,
 } from './types.ts';
 import {
   InputRequestSchema,
@@ -177,19 +177,6 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-/** Validates a store record. The error names the failing paths, never the values. */
-function parseRecord<S extends v.GenericSchema>(schema: S, value: unknown, label: string): v.InferOutput<S> {
-  const result = v.safeParse(schema, value);
-  if (result.success) return result.output;
-  const paths = [...new Set(result.issues.map((i) => v.getDotPath(i) ?? '(root)'))];
-  throw new RunStoreError(`invalid ${label}: ${paths.join(', ')}`);
-}
-
-function positiveInt(n: number, label: string): number {
-  if (!Number.isSafeInteger(n) || n < 1) throw new RunStoreError(`invalid ${label}`);
-  return n;
-}
-
 function sha256(text: string): string {
   return createHash('sha256').update(text).digest('hex');
 }
@@ -203,6 +190,7 @@ const IdempotencyClaimSchema = v.object({
 type IdempotencyClaim = v.InferOutput<typeof IdempotencyClaimSchema>;
 
 const VERSION_FILE = /^(.+)\.v(\d+)\.json$/;
+const CLAIM_FILE = /^[0-9a-f]{64}\.json$/;
 const USAGE_FILE = /^(0|[1-9][0-9]*)\.json$/;
 
 // ------------------------------------------------------------------ provider
@@ -268,9 +256,7 @@ class FolderRunStore implements RunStore {
   }
 
   async setPhase(runId: RunId, phase: RunPhase, detail: PhaseDetail = {}): Promise<boolean> {
-    parseRecord(RunPhaseSchema, phase, 'phase');
-    if (detail.reason !== undefined) assertClean(detail.reason, 'phase reason');
-    if (detail.worker_pid !== undefined && detail.worker_pid !== null) positiveInt(detail.worker_pid, 'worker pid');
+    checkPhaseChange(phase, detail);
     return serial(this.#lock(runId), async () => {
       const meta = await this.#requireRun(runId);
       // The lock is per process; a second process can still race this read.
@@ -282,9 +268,7 @@ class FolderRunStore implements RunStore {
 
   async setPhaseIf(runId: RunId, fromPhases: readonly RunPhase[], phase: RunPhase, detail: PhaseDetail = {}): Promise<boolean> {
     const from = assertPhaseList(fromPhases);
-    parseRecord(RunPhaseSchema, phase, 'phase');
-    if (detail.reason !== undefined) assertClean(detail.reason, 'phase reason');
-    if (detail.worker_pid !== undefined && detail.worker_pid !== null) positiveInt(detail.worker_pid, 'worker pid');
+    checkPhaseChange(phase, detail);
     return serial(this.#lock(runId), async () => {
       const meta = await this.#requireRun(runId);
       // Atomic within this process only, like every folder write: the lock is per process.
@@ -298,16 +282,23 @@ class FolderRunStore implements RunStore {
   async #writePhase(meta: RunMeta, phase: RunPhase, detail: PhaseDetail): Promise<void> {
     // Left out keeps the recorded pid; null clears it.
     const pid = detail.worker_pid === null ? undefined : (detail.worker_pid ?? meta.worker_pid);
-    const next: RunMeta = {
-      schema_version: meta.schema_version,
-      run_id: meta.run_id,
-      created_at: meta.created_at,
-      updated_at: this.#iso(),
+    await this.#writeMeta(meta, {
       phase,
       ...(detail.reason !== undefined ? { phase_reason: detail.reason } : {}),
       ...(pid !== undefined ? { worker_pid: pid } : {}),
       ...inputFields(meta),
       ...blockFields(meta),
+    });
+  }
+
+  /** meta.json with the run's fixed fields, a new updated_at and these fields. The caller holds the run's lock. */
+  async #writeMeta(meta: RunMeta, fields: Omit<RunMeta, 'schema_version' | 'run_id' | 'created_at' | 'updated_at'>): Promise<void> {
+    const next: RunMeta = {
+      schema_version: meta.schema_version,
+      run_id: meta.run_id,
+      created_at: meta.created_at,
+      updated_at: this.#iso(),
+      ...fields,
     };
     await writeFileAtomic(join(this.#dir(meta.run_id), 'meta.json'), json(next));
   }
@@ -318,18 +309,13 @@ class FolderRunStore implements RunStore {
       const meta = await this.#requireRun(runId);
       if (meta.phase === 'stopped') throw new RunStoppedError(runId);
       if (meta.input_request !== undefined) throw new InputRequestOpenError(runId, meta.input_request.question_id);
-      const next: RunMeta = {
-        schema_version: meta.schema_version,
-        run_id: meta.run_id,
-        created_at: meta.created_at,
-        updated_at: this.#iso(),
+      await this.#writeMeta(meta, {
         phase: 'needs_input',
         ...(meta.worker_pid !== undefined ? { worker_pid: meta.worker_pid } : {}),
         input_request: value,
         ...(meta.input_history !== undefined ? { input_history: meta.input_history } : {}),
         ...blockFields(meta),
-      };
-      await writeFileAtomic(join(this.#dir(runId), 'meta.json'), json(next));
+      });
     });
   }
 
@@ -340,18 +326,13 @@ class FolderRunStore implements RunStore {
       const meta = await this.#requireRun(runId);
       const open = meta.input_request;
       if (open === undefined || open.question_id !== questionId) throw new InputRequestNotOpenError(runId, questionId);
-      const next: RunMeta = {
-        schema_version: meta.schema_version,
-        run_id: meta.run_id,
-        created_at: meta.created_at,
-        updated_at: this.#iso(),
+      await this.#writeMeta(meta, {
         phase: meta.phase,
         ...(meta.phase_reason !== undefined ? { phase_reason: meta.phase_reason } : {}),
         ...(meta.worker_pid !== undefined ? { worker_pid: meta.worker_pid } : {}),
         input_history: [...(meta.input_history ?? []), { ...open, ...value }],
         ...blockFields(meta),
-      };
-      await writeFileAtomic(join(this.#dir(runId), 'meta.json'), json(next));
+      });
     });
   }
 
@@ -362,18 +343,13 @@ class FolderRunStore implements RunStore {
       if (meta.phase === 'stopped') throw new RunStoppedError(runId);
       if (meta.block !== undefined) throw new BlockOpenError(runId, meta.block.block_id);
       if (meta.input_request !== undefined) throw new InputRequestOpenError(runId, meta.input_request.question_id);
-      const next: RunMeta = {
-        schema_version: meta.schema_version,
-        run_id: meta.run_id,
-        created_at: meta.created_at,
-        updated_at: this.#iso(),
+      await this.#writeMeta(meta, {
         phase: 'blocked',
         ...(meta.worker_pid !== undefined ? { worker_pid: meta.worker_pid } : {}),
         ...inputFields(meta),
         block: value,
         ...(meta.block_history !== undefined ? { block_history: meta.block_history } : {}),
-      };
-      await writeFileAtomic(join(this.#dir(runId), 'meta.json'), json(next));
+      });
     });
   }
 
@@ -384,18 +360,13 @@ class FolderRunStore implements RunStore {
       const meta = await this.#requireRun(runId);
       const open = meta.block;
       if (open === undefined || open.block_id !== blockId) throw new BlockNotOpenError(runId, blockId);
-      const next: RunMeta = {
-        schema_version: meta.schema_version,
-        run_id: meta.run_id,
-        created_at: meta.created_at,
-        updated_at: this.#iso(),
+      await this.#writeMeta(meta, {
         phase: meta.phase,
         ...(meta.phase_reason !== undefined ? { phase_reason: meta.phase_reason } : {}),
         ...(meta.worker_pid !== undefined ? { worker_pid: meta.worker_pid } : {}),
         ...inputFields(meta),
         block_history: [...(meta.block_history ?? []), { ...open, ...value }],
-      };
-      await writeFileAtomic(join(this.#dir(runId), 'meta.json'), json(next));
+      });
     });
   }
 
@@ -411,18 +382,13 @@ class FolderRunStore implements RunStore {
       const block = meta.block;
       const blocks =
         block !== undefined ? [...(meta.block_history ?? []), { ...block, ...cancelledBlockResolution(value) }] : meta.block_history;
-      const next: RunMeta = {
-        schema_version: meta.schema_version,
-        run_id: meta.run_id,
-        created_at: meta.created_at,
-        updated_at: this.#iso(),
+      await this.#writeMeta(meta, {
         phase: 'stopped',
         phase_reason: reason,
         ...(meta.worker_pid !== undefined ? { worker_pid: meta.worker_pid } : {}),
         ...(history !== undefined ? { input_history: history } : {}),
         ...(blocks !== undefined ? { block_history: blocks } : {}),
-      };
-      await writeFileAtomic(join(this.#dir(runId), 'meta.json'), json(next));
+      });
       return meta.phase;
     });
   }
@@ -734,9 +700,7 @@ class FolderRunStore implements RunStore {
 
   async clearExpiredIdempotencyKeys(): Promise<number> {
     let cleared = 0;
-    for (const name of await listDir(this.#idemDir)) {
-      if (!/^[0-9a-f]{64}\.json$/.test(name)) continue;
-      const path = join(this.#idemDir, name);
+    for (const path of await this.#claimFiles()) {
       const done = await this.#withReplaceLock(path, async () => {
         const held = await this.#readClaim(path);
         if (held === undefined || held.expires_at > this.#now()) return false;
@@ -748,10 +712,12 @@ class FolderRunStore implements RunStore {
     return cleared;
   }
 
+  async #claimFiles(): Promise<string[]> {
+    return (await listDir(this.#idemDir)).filter((name) => CLAIM_FILE.test(name)).map((name) => join(this.#idemDir, name));
+  }
+
   async #dropClaimsFor(runId: string): Promise<void> {
-    for (const name of await listDir(this.#idemDir)) {
-      if (!/^[0-9a-f]{64}\.json$/.test(name)) continue;
-      const path = join(this.#idemDir, name);
+    for (const path of await this.#claimFiles()) {
       await this.#withReplaceLock(path, async () => {
         const held = await this.#readClaim(path);
         if (held?.run_id === runId) await unlink(path).catch(() => {});

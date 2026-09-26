@@ -33,7 +33,7 @@ import {
 } from '@typesafe-ai/sdk';
 import * as v from 'valibot';
 
-import { DecisionError } from '../decide.ts';
+import { DecisionError, type DecisionErrorCode } from '../decide.ts';
 import type { DecisionAnswer, DecisionProvider, DecisionQuestion, DecisionRequest, DecisionResult } from '../types.ts';
 
 export const TYPESAFE_BASE_URL = 'https://api.typesafe.ai';
@@ -91,9 +91,7 @@ export function typesafeProvider(options: TypeSafeProviderOptions): DecisionProv
 // ---------------------------------------------------------------- request
 
 function toQuestions(request: DecisionRequest): Questions {
-  const out: Record<string, Question> = {};
-  for (const [name, q] of Object.entries(request.questions)) out[name] = toQuestion(q);
-  return out;
+  return Object.fromEntries(Object.entries(request.questions).map(([name, q]) => [name, toQuestion(q)]));
 }
 
 function toQuestion(q: DecisionQuestion): Question {
@@ -101,9 +99,11 @@ function toQuestion(q: DecisionQuestion): Question {
     case 'choice':
       return { type: 'choice', instructions: q.instructions as never, criteria: q.options as never };
     case 'yes_no':
-      return q.meaning === undefined
-        ? { type: 'noul', instructions: q.instructions as never }
-        : { type: 'noul', instructions: q.instructions as never, criteria: { true: q.meaning.yes as never, false: q.meaning.no as never } };
+      return {
+        type: 'noul',
+        instructions: q.instructions as never,
+        ...(q.meaning === undefined ? {} : { criteria: { true: q.meaning.yes as never, false: q.meaning.no as never } }),
+      };
     case 'score':
       return { type: 'score', instructions: q.instructions as never, criteria: q.levels as never };
   }
@@ -187,36 +187,31 @@ function levelArray(byLevel: Record<string, number>, levels: number): number[] {
 
 function toDecisionError(provider: string, err: unknown): DecisionError {
   if (err instanceof DecisionError) return err;
-  const opts = (status?: number, detail?: string) => ({
-    cause: err,
-    ...(status === undefined ? {} : { status }),
-    ...(detail === undefined ? {} : { detail }),
-  });
   // Order matters: APITimeoutError extends APIConnectionError.
-  if (err instanceof APIUserAbortError) return new DecisionError('aborted', provider, opts());
-  if (err instanceof APITimeoutError) return new DecisionError('timeout', provider, opts(undefined, 'attempt timed out'));
-  if (err instanceof APIConnectionError) return new DecisionError('unavailable', provider, opts(undefined, 'connection failed'));
+  if (err instanceof APIUserAbortError) return new DecisionError('aborted', provider, { cause: err });
+  if (err instanceof APITimeoutError) return new DecisionError('timeout', provider, { cause: err, detail: 'attempt timed out' });
+  if (err instanceof APIConnectionError) return new DecisionError('unavailable', provider, { cause: err, detail: 'connection failed' });
   if (err instanceof APIError) {
-    const detail = bodyMessage(err.body);
-    if (err instanceof AuthenticationError || err instanceof PermissionDeniedError || err.status === 402) {
-      return new DecisionError('auth', provider, opts(err.status, detail));
-    }
-    if (err instanceof RateLimitError) return new DecisionError('rate_limited', provider, opts(err.status, detail));
-    if (err instanceof BadRequestError || err instanceof UnprocessableEntityError || err instanceof NotFoundError || err.status === 413) {
-      return new DecisionError('bad_request', provider, opts(err.status, detail));
-    }
-    if (err instanceof InternalServerError) return new DecisionError('unavailable', provider, opts(err.status, detail));
-    return new DecisionError('provider', provider, opts(err.status, detail));
+    return new DecisionError(apiErrorCode(err), provider, { cause: err, status: err.status, detail: bodyMessage(err.body) });
   }
   // An aborted signal can also surface as a plain AbortError from fetch.
-  if (err instanceof Error && err.name === 'AbortError') return new DecisionError('aborted', provider, opts());
-  return new DecisionError('provider', provider, opts(undefined, err instanceof Error ? err.name : typeof err));
+  if (err instanceof Error && err.name === 'AbortError') return new DecisionError('aborted', provider, { cause: err });
+  return new DecisionError('provider', provider, { cause: err, detail: err instanceof Error ? err.name : typeof err });
+}
+
+function apiErrorCode(err: APIError): DecisionErrorCode {
+  if (err instanceof AuthenticationError || err instanceof PermissionDeniedError || err.status === 402) return 'auth';
+  if (err instanceof RateLimitError) return 'rate_limited';
+  if (err instanceof BadRequestError || err instanceof UnprocessableEntityError || err instanceof NotFoundError || err.status === 413) {
+    return 'bad_request';
+  }
+  if (err instanceof InternalServerError) return 'unavailable';
+  return 'provider';
 }
 
 // OpenRouter: { error: { message } }. TypeSafe: { detail } or { message }.
 function bodyMessage(body: unknown): string | undefined {
   if (body === null || typeof body !== 'object') return typeof body === 'string' ? body : undefined;
   const b = body as { error?: { message?: unknown }; message?: unknown; detail?: unknown };
-  for (const m of [b.error?.message, b.message, b.detail]) if (typeof m === 'string' && m.trim() !== '') return m;
-  return undefined;
+  return [b.error?.message, b.message, b.detail].find((m): m is string => typeof m === 'string' && m.trim() !== '');
 }

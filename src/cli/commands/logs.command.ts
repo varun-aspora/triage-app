@@ -75,18 +75,21 @@ export function createLogsCommand(options: LogsCommandOptions = {}): CliCommand 
       const store = await openStore(config);
       if ((await store.getRun(runId)) === null) return printNotFound(io, json, runId);
 
-      for (;;) {
+      // Prints the next page of kept lines and says whether more are waiting.
+      const printPage = async (): Promise<boolean> => {
         const page = await readRunEvents(config.paths.runsDir, runId, { after });
         for (const e of page.events) if (keep(e)) printLine(io, e, json);
         after = page.next;
-        if (page.more) continue;
+        return page.more;
+      };
+      for (;;) {
+        if (await printPage()) continue;
         if (opts.follow !== true) return EXIT.OK;
         const run = await store.getRun(runId);
         const settled = run === null || isTerminalPhase(run.phase) || run.phase === 'needs_input' || run.phase === 'blocked';
         if (settled) {
           // One more read picks up lines queued just before the settle.
-          const last = await readRunEvents(config.paths.runsDir, runId, { after });
-          for (const e of last.events) if (keep(e)) printLine(io, e, json);
+          await printPage();
           return EXIT.OK;
         }
         await sleep(pollMs);

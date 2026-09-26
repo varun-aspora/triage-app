@@ -34,7 +34,7 @@ import { RunIdSchema } from '../types/core.ts';
 import { hashKeyString, keyString, semanticKey, SemanticKeyError, type SemanticKeyFacts } from './key.ts';
 import type { RealIoOutcome, RecordContext, Recorder, RecordResult } from './resolve.ts';
 import { parseFixture, resolveFixturesDir, UNREVIEWED_DIR } from './store.ts';
-import { FIXTURE_ENTITIES, FIXTURE_KINDS, type Fixture, type FixtureEntity, type FixtureKind } from './types.ts';
+import { FixtureEntitySchema, FixtureKindSchema, type Fixture, type FixtureEntity, type FixtureKind } from './types.ts';
 
 export type RedactPersistedFn = <T>(value: T, opts: PersistedOptions) => Persisted<T>;
 export type CheckPersistedFn = (value: unknown, opts: PersistedOptions) => EgressResult;
@@ -146,10 +146,10 @@ export function createRecorder(options: RecorderOptions): FixtureRecorder {
 }
 
 function checkPathParts(ctx: RecordContext): { kind: FixtureKind; entity: FixtureEntity; run_id: string } {
-  if (!(FIXTURE_KINDS as readonly string[]).includes(ctx.kind)) {
+  if (!v.is(FixtureKindSchema, ctx.kind)) {
     throw new FixtureRecordRefusedError('kind', 'is not a known fixture kind');
   }
-  if (!(FIXTURE_ENTITIES as readonly string[]).includes(ctx.entity)) {
+  if (!v.is(FixtureEntitySchema, ctx.entity)) {
     throw new FixtureRecordRefusedError('entity', 'is not a known fixture entity');
   }
   if (ctx.run_id === undefined) throw new FixtureRecordRefusedError('run_id', 'is required to record');

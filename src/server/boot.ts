@@ -47,18 +47,14 @@ export type PreparedServer = {
  */
 export async function prepareServer(config: ServerConfig, deps: ServerDeps = {}): Promise<PreparedServer> {
   assertHttpConfig(config);
-  const port = config.http.port;
 
-  const createStore = deps.createStore ?? createRunStore;
-  const startTimer = deps.startTimer ?? startRetentionTimer;
-
-  const store = await createStore(config);
-  const timer = startTimer(store, config, deps.timer ?? {});
+  const store = await (deps.createStore ?? createRunStore)(config);
+  const timer = (deps.startTimer ?? startRetentionTimer)(store, config, deps.timer ?? {});
   const startRepoSync = deps.startRepoSync ?? ((c, o) => startRepoSyncTimer(c, () => ({ config: c, runner: createExecRunner() }), o));
   const repoSync = startRepoSync(config, deps.repoSyncTimer ?? {});
 
   return {
-    port,
+    port: config.http.port,
     stop() {
       timer.stop();
       repoSync.stop();

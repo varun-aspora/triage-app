@@ -5,14 +5,13 @@
 // global audit log and other runs that got this run as a prior case (D43).
 // An unknown run id exits non-zero with 'run not found' and deletes nothing.
 
-import * as v from 'valibot';
 import type { Config } from '../../config/env.ts';
 import { createRunStore } from '../../runstore/index.ts';
 import { eraseRun } from '../../runstore/retention.ts';
 import { RunNotFoundError, type RunStore } from '../../runstore/types.ts';
-import { RunIdSchema } from '../../types/core.ts';
-import { EXIT, printError, printHuman, printJson } from '../output.ts';
+import { EXIT, printHuman, printJson } from '../output.ts';
 import type { CliCommand } from '../types.ts';
+import { checkRunIdArg, printNotFound } from './status.command.ts';
 
 export type RunsDeleteOptions = {
   /** Builds the run store. Defaults to createRunStore(config). */
@@ -31,20 +30,14 @@ export function createRunsDeleteCommand(options: RunsDeleteOptions = {}): CliCom
       const { io } = ctx;
       const json = opts.json;
       const runId = args[0];
-      if (typeof runId !== 'string' || !v.is(RunIdSchema, runId)) {
-        printError(io, json, 'USAGE', 'run_id must be 1 to 64 letters, digits, _ or -');
-        return EXIT.USAGE;
-      }
+      if (!checkRunIdArg(io, json, runId)) return EXIT.USAGE;
 
       const store = await openStore(ctx.config());
       let result;
       try {
         result = await eraseRun(store, runId);
       } catch (err) {
-        if (err instanceof RunNotFoundError) {
-          printError(io, json, 'ERROR', `run not found: ${runId}`);
-          return EXIT.ERROR;
-        }
+        if (err instanceof RunNotFoundError) return printNotFound(io, json, runId);
         throw err;
       }
 

@@ -28,7 +28,7 @@ import { dirname, join, resolve } from 'node:path';
 import type { Config } from '../config/env.ts';
 import { lookupEnv } from '../config/env.ts';
 import { ConfigError, type ConfigProblem } from '../config/errors.ts';
-import { UnsafeArgError, assertSafeArg, type ExecResult, type ExecRunner } from '../connectors/exec.ts';
+import { UnsafeArgError, assertSafeArg, succeeded, type ExecResult, type ExecRunner } from '../connectors/exec.ts';
 
 export const TUNNEL_KEYS = Object.freeze({
   required: 'SSFB_DB_TUNNEL_REQUIRED',
@@ -322,15 +322,11 @@ async function probe(deps: TunnelDeps, cfg: EnabledTunnelConfig): Promise<boolea
 
 async function controlCheck(deps: TunnelDeps, cfg: EnabledTunnelConfig): Promise<boolean> {
   const res = await deps.runner.run(SSH_BIN, buildControlArgv(cfg, 'check'), runOpts(deps, TUNNEL_TIMEOUTS.checkMs));
-  return exitedCleanly(res);
+  return succeeded(res);
 }
 
 function runOpts(deps: TunnelDeps, timeoutMs: number): { timeoutMs: number; signal?: AbortSignal } {
   return deps.signal !== undefined ? { timeoutMs, signal: deps.signal } : { timeoutMs };
-}
-
-function exitedCleanly(res: ExecResult): boolean {
-  return res.exitCode === 0 && !res.timedOut && !res.aborted && res.spawnError === undefined;
 }
 
 const ADVICE_KEYS = [TUNNEL_KEYS.bastion, TUNNEL_KEYS.identityFile] as const;
@@ -399,7 +395,7 @@ export async function tunnelUp(deps: TunnelDeps): Promise<TunnelResult> {
   }
 
   const res = await deps.runner.run(SSH_BIN, buildTunnelUpArgv(cfg), runOpts(deps, TUNNEL_TIMEOUTS.upMs));
-  if (!exitedCleanly(res)) {
+  if (!succeeded(res)) {
     const { reason, keys } = describeFailure(res);
     return result({ state: 'down', localPort, message: 'SSFB DB tunnel did not start', error: reason, keys });
   }
@@ -482,7 +478,7 @@ export async function tunnelDown(deps: TunnelDeps): Promise<TunnelResult> {
   }
 
   const res = await deps.runner.run(SSH_BIN, buildControlArgv(cfg, 'exit'), runOpts(deps, TUNNEL_TIMEOUTS.exitMs));
-  if (!exitedCleanly(res)) {
+  if (!succeeded(res)) {
     const { reason } = describeFailure(res);
     return result({
       state: 'up',

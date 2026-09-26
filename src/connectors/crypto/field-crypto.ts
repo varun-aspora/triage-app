@@ -37,7 +37,7 @@ import { lookupEnv, type Config } from '../../config/env.ts';
 import { FIELD_VALUE_KINDS } from '../../mock/types.ts';
 import { withMock } from '../mock.ts';
 import { ConnectorError, type ConnectorContext, type ConnectorOutcome } from '../types.ts';
-import { AesSivError, SIV_TAG_BYTES, sivOpen, sivSeal } from './aes-siv.ts';
+import { AesSivError, sivOpen, sivSeal } from './aes-siv.ts';
 
 export const SIV_HKDF_INFO = 'vance-aes-siv-v1';
 export const ENC_PREFIX = 'enc:';
@@ -48,12 +48,13 @@ export const MAX_DECRYPT_VALUES = 20;
 export type FieldKind = (typeof FIELD_VALUE_KINDS)[number];
 export { FIELD_VALUE_KINDS as FIELD_KINDS };
 
+const DECRYPT_FAILURES = ['not_base64', 'too_short', 'auth_failed'] as const;
 /** Why one value could not be decrypted. Never carries the value. */
-export type DecryptFailure = 'not_base64' | 'too_short' | 'auth_failed';
+export type DecryptFailure = (typeof DECRYPT_FAILURES)[number];
 
 export const DecryptItemSchema = v.union([
   v.strictObject({ ok: v.literal(true), value: v.string(), passthrough: v.boolean() }),
-  v.strictObject({ ok: v.literal(false), error: v.picklist(['not_base64', 'too_short', 'auth_failed']) }),
+  v.strictObject({ ok: v.literal(false), error: v.picklist(DECRYPT_FAILURES) }),
 ]);
 export type DecryptItem = v.InferOutput<typeof DecryptItemSchema>;
 
@@ -163,6 +164,10 @@ type Engine = {
   decryptOne(stored: string): DecryptItem;
 };
 
+function failed(error: DecryptFailure): DecryptItem {
+  return Object.freeze({ ok: false, error });
+}
+
 function engineFor(derived: Uint8Array): Engine {
   const utf8 = new TextEncoder();
   // Not fatal, like Go's string(pt): harbor only stores UTF-8 text anyway.
@@ -175,13 +180,12 @@ function engineFor(derived: Uint8Array): Engine {
     decryptOne(stored) {
       if (!stored.startsWith(ENC_PREFIX)) return Object.freeze({ ok: true as const, value: stored, passthrough: true });
       const sealed = decodeBase64(stored.slice(ENC_PREFIX.length));
-      if (sealed === null) return Object.freeze({ ok: false as const, error: 'not_base64' as const });
-      if (sealed.length < SIV_TAG_BYTES) return Object.freeze({ ok: false as const, error: 'too_short' as const });
+      if (sealed === null) return failed('not_base64');
       try {
         const pt = sivOpen(derived, [], sealed);
         return Object.freeze({ ok: true as const, value: text.decode(pt), passthrough: false });
       } catch (err) {
-        if (err instanceof AesSivError) return Object.freeze({ ok: false as const, error: 'auth_failed' as const });
+        if (err instanceof AesSivError) return failed(err.reason === 'too_short' ? 'too_short' : 'auth_failed');
         throw err;
       }
     },
@@ -225,15 +229,9 @@ function mockOnlyEngine(keyEnv: string): Engine {
  */
 export function createFieldCrypto(options: CreateFieldCryptoOptions): FieldCryptoState {
   const { config, service, keyEnv } = options;
-  const mockOnly = config.mock.enabled;
-  let engine: Engine;
-  if (mockOnly) {
-    engine = mockOnlyEngine(keyEnv);
-  } else {
-    const built = realEngine(config, keyEnv);
-    if ('status' in built) return built;
-    engine = built;
-  }
+  const built = config.mock.enabled ? mockOnlyEngine(keyEnv) : realEngine(config, keyEnv);
+  if ('status' in built) return built;
+  const engine: Engine = built;
   const target = { target_env: keyEnv };
 
   async function encryptLookupValue(

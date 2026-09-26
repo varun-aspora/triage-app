@@ -169,11 +169,11 @@ const PROVIDER_KEYS: Readonly<Record<string, { key: string; value: (c: Config) =
   ollama: { key: 'OLLAMA_BASE_URL', value: (c) => c.providers.ollamaBaseUrl },
 };
 
-// Blank provider key for a valid spec, or undefined when the key is set or not needed.
-function blankProviderKey(config: Config, spec: string): string | undefined {
-  const provider = parseSpec(spec)?.provider;
-  const need = provider === undefined ? undefined : PROVIDER_KEYS[provider];
-  return need !== undefined && need.value(config) === undefined ? need.key : undefined;
+// The blank key a provider needs, or undefined when the key is set or not needed.
+function blankProviderKey(config: Config, provider: string): string | undefined {
+  const need = PROVIDER_KEYS[provider];
+  if (need === undefined || need.value(config) !== undefined) return undefined;
+  return need.key;
 }
 
 // One row for a model slot. validate() applies the src/models.ts rules and throws ConfigError.
@@ -190,7 +190,7 @@ function slotRow(config: Config, key: string, validate: () => string, lookup: Mo
     // The spec is still returned, so the image row reports it too.
     return { row: row('fail', [key], `${key} is not in the ${provider} catalog, even after a catalog refresh`), spec };
   }
-  const blank = blankProviderKey(config, spec);
+  const blank = blankProviderKey(config, provider);
   if (blank !== undefined) return { row: row('fail', [key, blank], `${key} needs ${blank}, which is blank`) };
   return { row: row('ok', [key], `${key} is set`), spec };
 }
@@ -255,7 +255,7 @@ function judgeRow(c: Config): Row {
   }
   const known = PROVIDER_KEYS[parsed.provider] !== undefined || hasProvider(parsed.provider);
   if (!known) return row('fail', [key], `${key} names a provider that is not built in and not registered`);
-  const blank = blankProviderKey(c, spec);
+  const blank = blankProviderKey(c, parsed.provider);
   if (blank !== undefined) return row('fail', [key, blank], `${key} needs ${blank}, which is blank`);
   return row('ok', [key], `${key} is set`);
 }
@@ -274,9 +274,9 @@ async function embeddingCheck(ctx: DoctorContext): Promise<DoctorCheck[]> {
   }
   if (spec === null) return one(row('disabled', [EMBEDDING_KEY], `embeddings off: ${EMBEDDING_KEY} is blank`));
 
-  const need = PROVIDER_KEYS[spec.provider];
-  if (need !== undefined && need.value(c) === undefined) {
-    return one(row('fail', [EMBEDDING_KEY, need.key], `${EMBEDDING_KEY} needs ${need.key}, which is blank`));
+  const blank = blankProviderKey(c, spec.provider);
+  if (blank !== undefined) {
+    return one(row('fail', [EMBEDDING_KEY, blank], `${EMBEDDING_KEY} needs ${blank}, which is blank`));
   }
   if (c.mock.enabled) return one(row('skipped', [EMBEDDING_KEY], `${EMBEDDING_KEY} is set; probe skipped in mock mode`));
   const embedder = ctx.embedder;

@@ -67,10 +67,9 @@ function push(lines: string[], label: string, value: string | undefined): void {
   if (value === undefined) return;
   const flat = value.replace(/\s+/g, ' ').trim();
   if (flat === '') return;
-  lines.push(`${label}: ${flat.length > LINE_CAP ? flat.slice(0, LINE_CAP) : flat}`);
+  lines.push(`${label}: ${flat.slice(0, LINE_CAP)}`);
 }
 
 function finish(lines: readonly string[]): Persisted<string> {
-  const text = lines.join('\n');
-  return redactPersisted(text.length > TEXT_CAP ? text.slice(0, TEXT_CAP) : text);
+  return redactPersisted(lines.join('\n').slice(0, TEXT_CAP));
 }

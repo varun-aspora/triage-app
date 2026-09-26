@@ -145,7 +145,11 @@ export function fakePg(options: FakePgOptions = {}): FakePg {
     outstanding: () => outstanding,
     connects: () => connects,
     ended: () => ended,
-    roleClients: () => clients.filter((c) => c.queries.some((q) => q.text === ROLE_CHECK_SQL)),
-    selectClients: () => clients.filter((c) => !c.queries.some((q) => q.text === ROLE_CHECK_SQL)),
+    roleClients: () => clients.filter(ranRoleCheck),
+    selectClients: () => clients.filter((c) => !ranRoleCheck(c)),
   };
+}
+
+function ranRoleCheck(client: FakeClientLog): boolean {
+  return client.queries.some((q) => q.text === ROLE_CHECK_SQL);
 }

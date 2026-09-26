@@ -90,7 +90,9 @@ export type SubmissionLeases = { readonly lease: SubmissionLeaseReader; close():
 export async function openSubmissionLeases(config: PersistenceConfig, deps: PersistenceDeps = {}): Promise<SubmissionLeases> {
   const none: SubmissionLeases = { lease: async () => null, close: async () => {} };
   if (submissionStoreConnected()) return { lease: submissionLease, close: async () => {} };
-  if (config.db.provider === 'sqlite') {
+  // Only the sqlite handle is ours to close; postgres runs on the shared pool.
+  const ownsHandle = config.db.provider === 'sqlite';
+  if (ownsHandle) {
     const path = sqlitePath(config);
     if (path !== ':memory:' && !existsSync(path)) return none;
   }
@@ -99,13 +101,13 @@ export async function openSubmissionLeases(config: PersistenceConfig, deps: Pers
   try {
     stores = await adapter.connect();
   } catch {
-    if (config.db.provider === 'sqlite') await closeQuietly(adapter);
+    if (ownsHandle) await closeQuietly(adapter);
     return none;
   }
   return {
     lease: (id) => readSubmissionLease(stores.submissionStore, id),
     close: async () => {
-      if (config.db.provider === 'sqlite') await closeQuietly(adapter);
+      if (ownsHandle) await closeQuietly(adapter);
     },
   };
 }

@@ -50,12 +50,23 @@ import {
   RunStoreError,
   RunSummarySchema,
   SubmissionInputSchema,
+  WORKING_PHASES,
+  assertBlockId,
   assertClean,
-  isTerminalPhase,
   assertEvidenceKey,
+  assertFlueSubmissionId,
   assertPersisted,
+  assertPhaseList,
+  assertQuestionId,
   assertRunId,
+  BlockNotOpenError,
+  BlockOpenError,
+  cancelledBlockResolution,
+  checkPhaseChange,
   checkUsage,
+  InputRequestNotOpenError,
+  InputRequestOpenError,
+  isTerminalPhase,
   type ClassificationRecord,
   type EmbeddingInput,
   type EmbeddingKind,
@@ -74,18 +85,6 @@ import {
   type SimilarQuery,
   type Submission,
   type SubmissionInput,
-} from './types.ts';
-import {
-  assertBlockId,
-  assertFlueSubmissionId,
-  assertPhaseList,
-  WORKING_PHASES,
-  assertQuestionId,
-  BlockNotOpenError,
-  BlockOpenError,
-  cancelledBlockResolution,
-  InputRequestNotOpenError,
-  InputRequestOpenError,
 } from './types.ts';
 import {
   InputRequestSchema,
@@ -429,6 +428,11 @@ function toInt(value: unknown, label: string): number {
   return n;
 }
 
+/** A NULL column; pg gives null, a missing field undefined. */
+function isNull(value: unknown): value is null | undefined {
+  return value === null || value === undefined;
+}
+
 function optText(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
@@ -451,7 +455,7 @@ function toFloat(value: unknown, label: string): number {
 function stalledInputs(row: Row): Pick<RunSummary, 'flue_submission_id' | 'steer_flue_submission_id' | 'worker_pid'> {
   const flueId = optText(row.flue_submission_id);
   const steerId = optText(row.steer_flue_submission_id);
-  const pid = row.worker_pid === null || row.worker_pid === undefined ? undefined : toInt(row.worker_pid, 'worker pid');
+  const pid = isNull(row.worker_pid) ? undefined : toInt(row.worker_pid, 'worker pid');
   return {
     ...(flueId !== undefined ? { flue_submission_id: flueId } : {}),
     ...(steerId !== undefined ? { steer_flue_submission_id: steerId } : {}),
@@ -478,7 +482,7 @@ function groupUsage(rows: readonly Row[]): SubmissionUsage[] {
         output_tokens: toInt(row.output_tokens, 'usage output tokens'),
         cache_read_tokens: toInt(row.cache_read_tokens, 'usage cache read tokens'),
         cache_write_tokens: toInt(row.cache_write_tokens, 'usage cache write tokens'),
-        usd: row.usd === null || row.usd === undefined ? null : toFloat(row.usd, 'usage usd'),
+        usd: isNull(row.usd) ? null : toFloat(row.usd, 'usage usd'),
       },
       'usage row',
     );
@@ -493,6 +497,12 @@ function groupUsage(rows: readonly Row[]): SubmissionUsage[] {
     }
   }
   return out;
+}
+
+/** The open question's id on a getRun row, for InputRequestOpenError. */
+function openQuestionId(run: Row): string {
+  const open = isNull(run.input_request) ? null : (fromJson(run.input_request, 'input request') as InputRequest);
+  return open?.question_id ?? '?';
 }
 
 type ModelInfo = { readonly model: string; readonly table: ModelTable; readonly dims: number };
@@ -537,9 +547,7 @@ class PostgresRunStore implements RunStore {
 
   async setPhase(runId: RunId, phase: RunPhase, detail: PhaseDetail = {}): Promise<boolean> {
     const id = assertRunId(runId);
-    parseRecord(RunPhaseSchema, phase, 'phase');
-    if (detail.reason !== undefined) assertClean(detail.reason, 'phase reason');
-    if (detail.worker_pid !== undefined && detail.worker_pid !== null) positiveInt(detail.worker_pid, 'worker pid');
+    checkPhaseChange(phase, detail);
     const rows = await this.#runner.query(SQL.setPhase, [
       id,
       phase,
@@ -553,17 +561,14 @@ class PostgresRunStore implements RunStore {
     ]);
     if (rows.length > 0) return true;
     // No row updated: the run is missing, or stopped.
-    const exists = await this.#runner.query(SQL.runExists, [id]);
-    if (exists.length === 0) throw new RunNotFoundError(id);
+    await this.#requireRun(this.#runner.query, SQL.runExists, id);
     return false;
   }
 
   async setPhaseIf(runId: RunId, fromPhases: readonly RunPhase[], phase: RunPhase, detail: PhaseDetail = {}): Promise<boolean> {
     const id = assertRunId(runId);
     const from = assertPhaseList(fromPhases);
-    parseRecord(RunPhaseSchema, phase, 'phase');
-    if (detail.reason !== undefined) assertClean(detail.reason, 'phase reason');
-    if (detail.worker_pid !== undefined && detail.worker_pid !== null) positiveInt(detail.worker_pid, 'worker pid');
+    checkPhaseChange(phase, detail);
     const rows = await this.#runner.query(SQL.setPhaseIf, [
       id,
       phase,
@@ -575,8 +580,7 @@ class PostgresRunStore implements RunStore {
     ]);
     if (rows.length > 0) return true;
     // No row updated: the run is missing, or in a phase not listed.
-    const exists = await this.#runner.query(SQL.runExists, [id]);
-    if (exists.length === 0) throw new RunNotFoundError(id);
+    await this.#requireRun(this.#runner.query, SQL.runExists, id);
     return false;
   }
 
@@ -629,8 +633,7 @@ class PostgresRunStore implements RunStore {
     const [run] = await this.#runner.query(SQL.getRun, [id]);
     if (run === undefined) throw new RunNotFoundError(id);
     if (run.phase === 'stopped') throw new RunStoppedError(id);
-    const open = run.input_request === null || run.input_request === undefined ? null : (fromJson(run.input_request, 'input request') as InputRequest);
-    throw new InputRequestOpenError(id, open?.question_id ?? '?');
+    throw new InputRequestOpenError(id, openQuestionId(run));
   }
 
   async resolveInputRequest(runId: RunId, questionId: string, resolution: Persisted<InputResolution>): Promise<void> {
@@ -639,8 +642,7 @@ class PostgresRunStore implements RunStore {
     const value = parseRecord(InputResolutionSchema, assertPersisted(resolution, 'input resolution'), 'input resolution');
     const rows = await this.#runner.query(SQL.resolveInputRequest, [id, questionId, JSON.stringify(value), this.#iso()]);
     if (rows.length > 0) return;
-    const exists = await this.#runner.query(SQL.runExists, [id]);
-    if (exists.length === 0) throw new RunNotFoundError(id);
+    await this.#requireRun(this.#runner.query, SQL.runExists, id);
     throw new InputRequestNotOpenError(id, questionId);
   }
 
@@ -653,14 +655,8 @@ class PostgresRunStore implements RunStore {
     const [run] = await this.#runner.query(SQL.getRun, [id]);
     if (run === undefined) throw new RunNotFoundError(id);
     if (run.phase === 'stopped') throw new RunStoppedError(id);
-    if (run.block !== null && run.block !== undefined) {
-      const open = fromJson(run.block, 'block') as BlockRecord;
-      throw new BlockOpenError(id, open.block_id);
-    }
-    const question = run.input_request === null || run.input_request === undefined
-      ? null
-      : (fromJson(run.input_request, 'input request') as InputRequest);
-    throw new InputRequestOpenError(id, question?.question_id ?? '?');
+    if (!isNull(run.block)) throw new BlockOpenError(id, (fromJson(run.block, 'block') as BlockRecord).block_id);
+    throw new InputRequestOpenError(id, openQuestionId(run));
   }
 
   async resolveBlock(runId: RunId, blockId: string, resolution: Persisted<BlockResolution>): Promise<void> {
@@ -669,8 +665,7 @@ class PostgresRunStore implements RunStore {
     const value = parseRecord(BlockResolutionSchema, assertPersisted(resolution, 'block resolution'), 'block resolution');
     const rows = await this.#runner.query(SQL.resolveBlock, [id, blockId, JSON.stringify(value), this.#iso()]);
     if (rows.length > 0) return;
-    const exists = await this.#runner.query(SQL.runExists, [id]);
-    if (exists.length === 0) throw new RunNotFoundError(id);
+    await this.#requireRun(this.#runner.query, SQL.runExists, id);
     throw new BlockNotOpenError(id, blockId);
   }
 
@@ -705,8 +700,7 @@ class PostgresRunStore implements RunStore {
     const flueId = assertFlueSubmissionId(flueSubmissionId);
     const rows = await this.#runner.query(SQL.setSubmissionFlueId, [id, n, flueId]);
     if (rows.length > 0) return;
-    const exists = await this.#runner.query(SQL.runExists, [id]);
-    if (exists.length === 0) throw new RunNotFoundError(id);
+    await this.#requireRun(this.#runner.query, SQL.runExists, id);
     throw new RunStoreError(`submission ${n} not found`);
   }
 
@@ -940,7 +934,7 @@ class PostgresRunStore implements RunStore {
       const blockId = optText(row.block_id);
       const note = optText(row.note);
       const flueId = optText(row.flue_submission_id);
-      const report = row.report === null || row.report === undefined ? null : (fromJson(row.report, 'report') as Report);
+      const report = isNull(row.report) ? null : (fromJson(row.report, 'report') as Report);
       return {
         kind: parseRecord(SubmissionInputSchema.entries.kind, row.kind, 'submission kind'),
         ...(question !== undefined ? { question } : {}),
@@ -978,20 +972,18 @@ class PostgresRunStore implements RunStore {
     const usage = groupUsage(await query(SQL.usage, [id]));
 
     const reason = optText(run.phase_reason);
-    const pid = run.worker_pid === null || run.worker_pid === undefined ? undefined : toInt(run.worker_pid, 'worker pid');
-    const classification = run.classification === null || run.classification === undefined
+    const pid = isNull(run.worker_pid) ? undefined : toInt(run.worker_pid, 'worker pid');
+    const classification = isNull(run.classification)
       ? null
       : (fromJson(run.classification, 'classification') as ClassificationRecord);
-    const inputRequest = run.input_request === null || run.input_request === undefined
+    const inputRequest = isNull(run.input_request)
       ? null
       : parseRecord(InputRequestSchema, fromJson(run.input_request, 'input request'), 'input request');
-    const inputHistory = run.input_history === null || run.input_history === undefined
+    const inputHistory = isNull(run.input_history)
       ? []
       : parseRecord(v.array(ResolvedInputRequestSchema), fromJson(run.input_history, 'input history'), 'input history');
-    const block = run.block === null || run.block === undefined
-      ? null
-      : parseRecord(BlockRecordSchema, fromJson(run.block, 'block'), 'block');
-    const blockHistory = run.block_history === null || run.block_history === undefined
+    const block = isNull(run.block) ? null : parseRecord(BlockRecordSchema, fromJson(run.block, 'block'), 'block');
+    const blockHistory = isNull(run.block_history)
       ? []
       : parseRecord(v.array(ResolvedBlockSchema), fromJson(run.block_history, 'block history'), 'block history');
     return {
@@ -1030,7 +1022,7 @@ class PostgresRunStore implements RunStore {
       const tier = optText(row.tier_final);
       const status = optText(row.report_status);
       const verdict = optText(row.feedback_verdict);
-      const priced = row.usd_total !== null && row.usd_total !== undefined;
+      const priced = !isNull(row.usd_total);
       const summary = {
         run_id: String(row.run_id),
         created_at: toIso(row.created_at, 'created_at'),
@@ -1042,9 +1034,7 @@ class PostgresRunStore implements RunStore {
         submissions: toInt(row.submissions, 'submission count'),
         ...(verdict !== undefined ? { feedback_verdict: verdict } : {}),
         ...(priced ? { usd_total: toFloat(row.usd_total, 'usage usd') } : {}),
-        ...(row.tokens_total !== null && row.tokens_total !== undefined
-          ? { tokens_total: toInt(row.tokens_total, 'usage token total') }
-          : {}),
+        ...(!isNull(row.tokens_total) ? { tokens_total: toInt(row.tokens_total, 'usage token total') } : {}),
         ...(priced && row.usd_unpriced === true ? { usd_partial: true } : {}),
         ...stalledInputs(row),
       };

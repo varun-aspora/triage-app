@@ -196,12 +196,12 @@ export function buildLogsQuery(cfg: QuickwitGateConfig, input: LogsQueryInput): 
 }
 
 function resolveService(cfg: QuickwitGateConfig, name: string): string | { reason: string } {
-  const known = Object.entries(cfg.services).filter((e): e is [string, string] => e[1] !== undefined);
   if (Object.hasOwn(cfg.services, name)) {
     const value = cfg.services[name];
     if (value === undefined) return { reason: `service ${name} has no log service name in the ${cfg.entity} registry` };
     return value;
   }
+  const known = Object.entries(cfg.services).filter((e): e is [string, string] => e[1] !== undefined);
   // The model sometimes passes the name the service logs under instead of the registry name.
   const byLogName = known.find(([, value]) => value === name);
   if (byLogName !== undefined) return byLogName[1];

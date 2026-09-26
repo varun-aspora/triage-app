@@ -38,6 +38,7 @@ export type RulesValidation = {
 
 export const HTTP_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE'] as const;
 export type HttpMethod = (typeof HTTP_METHODS)[number];
+const HTTP_METHOD_SET: ReadonlySet<string> = new Set(HTTP_METHODS);
 
 /** Methods allowed when no rule matches. */
 export const DEFAULT_ALLOWED_METHODS: readonly string[] = Object.freeze(['GET', 'HEAD']);
@@ -188,9 +189,9 @@ function checkEntry(raw: unknown, at: string, services: ReadonlySet<string>, err
   else if (service !== '*' && !services.has(service)) errors.push(`${at}: unknown service ${quote(service)}`);
 
   if (typeof method !== 'string') errors.push(`${at}: method must be a string`);
-  else if (method !== '*' && !(HTTP_METHODS as readonly string[]).includes(method)) {
+  else if (method !== '*' && !HTTP_METHOD_SET.has(method)) {
     const upper = method.toUpperCase();
-    if (upper !== method && (HTTP_METHODS as readonly string[]).includes(upper)) {
+    if (upper !== method && HTTP_METHOD_SET.has(upper)) {
       errors.push(`${at}: method ${quote(method)} must be upper case`);
     } else {
       errors.push(`${at}: unknown method ${quote(method)}`);

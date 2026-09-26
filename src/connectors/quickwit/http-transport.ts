@@ -12,6 +12,7 @@
 import type { LogsQueryMode } from '../../gate/quickwit.ts';
 import type { TimeWindow } from '../../types/core.ts';
 import { errorText, safeErrorText, scrubSecrets, stripAddresses } from '../error-text.ts';
+import { readCapped } from '../http/client.ts';
 import { ConnectorError, MAX_HTTP_BODY_BYTES } from '../types.ts';
 import type { LogGroup, LogHit, TransportResult } from './client.ts';
 
@@ -117,14 +118,17 @@ export async function httpSearch(fetchImpl: FetchLike, req: HttpSearchRequest, n
     } catch (err) {
       return fail(err);
     }
-    await checkStatus(res, names, secrets);
-    let text: string;
+    await checkStatus(res, names, secrets, controller.signal);
+    let read: Awaited<ReturnType<typeof readCapped>>;
     try {
-      text = await readCapped(res, MAX_HTTP_BODY_BYTES);
+      read = await readCapped(res, MAX_HTTP_BODY_BYTES, controller.signal);
     } catch (err) {
       return fail(err);
     }
-    return parseResponse(text, req);
+    if (read.truncated) {
+      throw new ConnectorError('cap_exceeded', `the Quickwit response passed the ${MAX_HTTP_BODY_BYTES} byte cap; narrow the query or lower max_hits`);
+    }
+    return parseResponse(new TextDecoder().decode(read.bytes), req);
   } finally {
     clearTimeout(timer);
     req.signal.removeEventListener('abort', onAbort);
@@ -155,13 +159,11 @@ const ERROR_BODY_BYTES = 8 * 1024;
 const ERROR_BODY_CHARS = 1000;
 
 /** Quickwit's own error from a non-2xx body: its JSON message, or the text. Never throws. */
-async function errorBody(res: Response): Promise<string> {
-  let text = '';
-  try {
-    text = await readPrefix(res, ERROR_BODY_BYTES);
-  } catch {
-    return '';
-  }
+async function errorBody(res: Response, signal: AbortSignal): Promise<string> {
+  const text = await readCapped(res, ERROR_BODY_BYTES, signal).then(
+    (read) => new TextDecoder().decode(read.bytes),
+    () => '',
+  );
   try {
     const parsed: unknown = JSON.parse(text);
     if (isObject(parsed)) {
@@ -176,37 +178,14 @@ async function errorBody(res: Response): Promise<string> {
   return text;
 }
 
-/** The first max bytes of the body as text; the rest is cancelled. */
-async function readPrefix(res: Response, max: number): Promise<string> {
-  if (res.body === null) return '';
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (total < max) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    const part = value.subarray(0, max - total);
-    chunks.push(part);
-    total += part.byteLength;
-  }
-  await reader.cancel().catch(() => {});
-  const all = new Uint8Array(total);
-  let at = 0;
-  for (const c of chunks) {
-    all.set(c, at);
-    at += c.byteLength;
-  }
-  return new TextDecoder().decode(all);
-}
-
-async function checkStatus(res: Response, names: HttpEnvNames, secrets: readonly string[]): Promise<void> {
+async function checkStatus(res: Response, names: HttpEnvNames, secrets: readonly string[], signal: AbortSignal): Promise<void> {
   const s = res.status;
   if (res.type === 'opaqueredirect' || (s >= 300 && s < 400)) {
     void res.body?.cancel().catch(() => {});
     throw new ConnectorError('refused', `Quickwit at ${names.url} answered with a redirect; redirects are refused`);
   }
   if (s >= 200 && s < 300) return;
-  const body = said(await errorBody(res), secrets);
+  const body = said(await errorBody(res, signal), secrets);
   if (s === 401 || s === 403) {
     const check = names.token === undefined ? names.auth : `${names.auth} and ${names.token}`;
     throw new ConnectorError('unreachable', `Quickwit refused the credentials (HTTP ${s}); check ${check}${body}`);
@@ -214,31 +193,6 @@ async function checkStatus(res: Response, names: HttpEnvNames, secrets: readonly
   if (s === 400) throw new ConnectorError('refused', `Quickwit rejected the query (HTTP 400)${body}`);
   if (s === 404) throw new ConnectorError('unreachable', `Quickwit has no such index (HTTP 404)${body}`);
   throw new ConnectorError('unreachable', `Quickwit answered HTTP ${s}${body}`);
-}
-
-/** Reads the body as text, stopping with cap_exceeded once it passes max bytes. */
-async function readCapped(res: Response, max: number): Promise<string> {
-  if (res.body === null) return '';
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > max) {
-      await reader.cancel().catch(() => {});
-      throw new ConnectorError('cap_exceeded', `the Quickwit response passed the ${max} byte cap; narrow the query or lower max_hits`);
-    }
-    chunks.push(value);
-  }
-  const all = new Uint8Array(total);
-  let at = 0;
-  for (const c of chunks) {
-    all.set(c, at);
-    at += c.byteLength;
-  }
-  return new TextDecoder().decode(all);
 }
 
 const isObject = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x);

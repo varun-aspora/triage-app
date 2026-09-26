@@ -23,7 +23,7 @@ import * as v from 'valibot';
 import { rawKeyState, type Config } from '../config/env.ts';
 import { loadRegistry, RepoNameSchema } from '../config/registry.ts';
 import { loadRepos } from '../config/repos.ts';
-import type { ExecResult, ExecRunner } from '../connectors/exec.ts';
+import { succeeded, type ExecResult, type ExecRunner } from '../connectors/exec.ts';
 
 export const CODEGRAPH_BIN_KEY = 'CODEGRAPH_BIN';
 export const REPOS_DIR_KEY = 'TRIAGE_REPOS_DIR';
@@ -100,11 +100,11 @@ function codegraphBin(config: Config): { bin: string } | CodegraphResult {
   return { bin };
 }
 
-function notConfigured(key: string): CodegraphResult {
+function notConfigured(key: string): Extract<CodegraphResult, { status: 'not_configured' }> {
   return Object.freeze({ status: 'not_configured', key, message: `codegraph not configured: ${key} is blank` });
 }
 
-function refused(message: string): CodegraphResult {
+function refused(message: string): Extract<CodegraphResult, { status: 'refused' }> {
   return Object.freeze({ status: 'refused', message });
 }
 
@@ -136,18 +136,18 @@ export function resolveRepoDir(
 ): RepoDir {
   const reposDir = deps.config.paths.reposDir;
   if (reposDir === undefined || reposDir.trim() === '') {
-    return notConfigured(REPOS_DIR_KEY) as RepoDir;
+    return notConfigured(REPOS_DIR_KEY);
   }
   const pins = manifest ?? manifestOf(deps);
   if (typeof repo !== 'string' || !pins.some((p) => p.repo === repo)) {
-    return refused('repo is not in resources/repos.json') as RepoDir;
+    return refused('repo is not in resources/repos.json');
   }
   if (!v.is(RepoNameSchema, repo)) {
-    return refused('repo is not a plain repo name') as RepoDir;
+    return refused('repo is not a plain repo name');
   }
   const root = resolve(reposDir);
   const dir = resolve(root, repo);
-  if (!isUnder(root, dir)) return refused(`repo resolves outside ${REPOS_DIR_KEY}`) as RepoDir;
+  if (!isUnder(root, dir)) return refused(`repo resolves outside ${REPOS_DIR_KEY}`);
   if (!existsSync(dir)) return Object.freeze({ status: 'ok', repo, dir, present: false });
 
   let realRoot: string;
@@ -156,16 +156,16 @@ export function resolveRepoDir(
     realRoot = realpathSync(root);
     realDir = realpathSync(dir);
   } catch {
-    return refused('repo path could not be resolved') as RepoDir;
+    return refused('repo path could not be resolved');
   }
-  if (!isUnder(realRoot, realDir)) return refused(`repo resolves outside ${REPOS_DIR_KEY}`) as RepoDir;
+  if (!isUnder(realRoot, realDir)) return refused(`repo resolves outside ${REPOS_DIR_KEY}`);
   let isDir = false;
   try {
     isDir = statSync(realDir).isDirectory();
   } catch {
     isDir = false;
   }
-  if (!isDir) return refused('repo path is not a directory') as RepoDir;
+  if (!isDir) return refused('repo path is not a directory');
   return Object.freeze({ status: 'ok', repo, dir: realDir, present: true });
 }
 
@@ -281,7 +281,7 @@ function held(path: string, token: string): LockAttempt {
 
 function fromExec(command: CodegraphCommand, repo: string | undefined, r: ExecResult): CodegraphResult {
   const base = repo === undefined ? {} : { repo };
-  if (r.exitCode === 0 && !r.timedOut && !r.aborted && r.spawnError === undefined) {
+  if (succeeded(r)) {
     return Object.freeze({ status: 'ok', command, ...base, output: tail(r.stdout, OUTPUT_TAIL_CHARS), truncated: r.truncated });
   }
   let message: string;

@@ -130,7 +130,7 @@ async function fromFixture<K extends FixtureKind, T>(deps: ResolverDeps, request
       fixture_miss: false,
     });
   }
-  const key_string = canonicalKeyString(kind, key);
+  const key_string = keyString(semanticKey(kind, key as SemanticKeyFacts[K]));
   if (deps.settings.strict) throw new FixtureMissError(kind, key_string);
   return Object.freeze({
     value: null,
@@ -173,8 +173,4 @@ async function recordSafely<K extends FixtureKind, T>(
       // A broken error sink must not fail a real call either.
     }
   }
-}
-
-function canonicalKeyString<K extends FixtureKind>(kind: K, key: SemanticKey<K>): string {
-  return keyString(semanticKey(kind, key as SemanticKeyFacts[K]));
 }

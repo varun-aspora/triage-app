@@ -20,6 +20,7 @@ import type { Config } from '../config/env.ts';
 import { DOCTOR_CHECKS, doctorReport, type DoctorReportOptions } from '../ops/doctor/report.ts';
 import { DOCTOR_SORTS, doctorCheckIds, type DoctorSort } from '../ops/doctor/run.ts';
 import type { CheckInput, DoctorReport } from '../ops/doctor/types.ts';
+import { internalError } from './internal-error.ts';
 
 export type DoctorRouteDeps = {
   readonly config: () => Config;
@@ -33,15 +34,12 @@ export function createDoctorRoutes(deps: DoctorRouteDeps): Hono {
   const app = new Hono();
   const checks = deps.checks ?? DOCTOR_CHECKS;
   const report = deps.report ?? doctorReport;
+  const known = doctorCheckIds(checks);
   const inFlight = new Map<string, Promise<DoctorReport>>();
 
-  app.onError((err, c) => {
-    console.error(`triage http: ${c.req.method} ${c.req.routePath} failed (${err instanceof Error ? err.name : 'error'})`);
-    return c.json({ error: 'internal error' }, 500);
-  });
+  app.onError(internalError);
 
   app.get('/doctor', async (c) => {
-    const known = doctorCheckIds(checks);
     const raw = c.req.queries('check');
     const only = raw?.flatMap((v) => v.split(',')).map((v) => v.trim()).filter((v) => v !== '');
     if (only !== undefined) {

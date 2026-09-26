@@ -66,6 +66,8 @@ export const FAUX_CALLERS: readonly FauxCaller[] = Object.freeze([
   ...ENTITIES.flatMap((e) => [`investigate_${e}` as const, `investigate_${e}_deep` as const]),
 ]);
 
+const KNOWN_CALLERS: ReadonlySet<string> = new Set(FAUX_CALLERS);
+
 /** Turns per caller, in the order that caller will ask for them. */
 export type FauxTurns = Partial<Record<FauxCaller, readonly FakeStep[]>>;
 
@@ -119,7 +121,7 @@ function userTextsOf(messages: readonly Message[]): string[] {
   return messages.flatMap((m) => (m.role === 'user' ? [textOf(m.content)] : []));
 }
 
-const DELEGATE_ENTITY = /^- Entity: (ssfb|atspl|rtl)\. /m;
+const DELEGATE_ENTITY = new RegExp(`^- Entity: (${ENTITIES.join('|')})\\. `, 'm');
 
 /** The caller of one model call, read from its context. Throws FakeModelError for an unknown one. */
 export function callerOf(context: Pick<Context, 'systemPrompt' | 'messages'>): FauxCaller {
@@ -158,9 +160,8 @@ function recordCall(caller: FauxCaller, context: Context, modelId: string): Faux
 
 /** Builds a script with one queue per caller. Unknown caller keys are refused. */
 export function fauxScript(turns: FauxTurns): FauxScript {
-  const known = new Set<string>(FAUX_CALLERS);
   for (const key of Object.keys(turns)) {
-    if (!known.has(key)) throw new FakeModelError(`faux script has an unknown caller "${key}"`);
+    if (!KNOWN_CALLERS.has(key)) throw new FakeModelError(`faux script has an unknown caller "${key}"`);
   }
   const queues = new Map<FauxCaller, FakeStep[]>(
     Object.entries(turns).map(([k, steps]) => [k as FauxCaller, [...(steps ?? [])]]),

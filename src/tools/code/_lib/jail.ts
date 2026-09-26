@@ -3,8 +3,9 @@
 // A path from the model is checked as text first (no NUL, not absolute, no
 // '..', no segment starting with '.'), then resolved with realpath, and the
 // result must still sit under the realpath of <TRIAGE_REPOS_DIR>/<repo> with
-// no dot segment. The repo directory itself must not be a symlink. Checking after realpath is what stops a symlink inside the
-// repo from pointing at a file outside it, or at .git/ or a dotfile inside it.
+// no dot segment. The repo directory itself must not be a symlink. Checking
+// after realpath is what stops a symlink inside the repo from pointing at a
+// file outside it, or at .git/ or a dotfile inside it.
 //
 // Refusal messages are fixed texts and never echo the path or the repo name.
 
@@ -82,6 +83,11 @@ export function isWithin(root: string, path: string): boolean {
   return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
 }
 
+/** `path` relative to `root`, with '/' separators; '' for the root itself. */
+export function relFromRoot(root: string, path: string): string {
+  return relative(root, path).split(sep).join('/');
+}
+
 /** True when some segment of a '/'-separated relative path starts with '.'. */
 export function hasDotSegment(rel: string): boolean {
   return rel.split('/').some((s) => s.startsWith('.'));
@@ -157,7 +163,7 @@ export function resolveInRepo(reposDir: string | undefined, repo: unknown, relPa
     return refuse('not_found');
   }
   if (!isWithin(root, real)) return refuse('outside');
-  const rel = relative(root, real).split(sep).join('/');
+  const rel = relFromRoot(root, real);
   // A symlink to .git/config or .env inside the repo lands here.
   if (hasDotSegment(rel)) return refuse('dotfile');
 

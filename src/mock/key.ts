@@ -124,7 +124,7 @@ const BUILDERS: { [K in FixtureKind]: (facts: SemanticKeyFacts[K]) => unknown } 
     entity: f.entity,
     service: trim(f.service),
     tables: sortedSet(f.tables.map(trim)),
-    params: [...f.params.map(paramText)].sort(compareNullable),
+    params: f.params.map(paramText).sort(compareNullable),
     explain: f.explain,
   }),
   http_call: (f) => ({

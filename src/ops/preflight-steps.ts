@@ -135,10 +135,12 @@ export async function tunnelStep(ctx: StepContext, out: Outcome): Promise<void> 
     return;
   }
   await runGuarded(out, 'tunnel', 'ssfb', async () => {
-    const deps: TunnelDeps = ctx.signal === undefined
-      ? { config: ctx.config, runner: ctx.runner, tcpProbe: ctx.tcpProbe }
-      : { config: ctx.config, runner: ctx.runner, tcpProbe: ctx.tcpProbe, signal: ctx.signal };
-    const r = await ctx.tunnel(deps);
+    const r = await ctx.tunnel({
+      config: ctx.config,
+      runner: ctx.runner,
+      tcpProbe: ctx.tcpProbe,
+      ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+    });
     // TunnelResult messages and errors name keys and the local port only.
     if (r.state === 'up') {
       out.step('tunnel', 'ssfb', 'ok');

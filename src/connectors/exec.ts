@@ -90,7 +90,13 @@ function checkEnv(env: unknown): void {
   }
 }
 
-function emptyResult(extra: Partial<ExecResult>): ExecResult {
+/** True when the run exited 0 without a timeout, an abort or a spawn error. */
+export function succeeded(r: ExecResult): boolean {
+  return r.exitCode === 0 && !r.timedOut && !r.aborted && r.spawnError === undefined;
+}
+
+/** A result with no exit code and no output, overlaid with extra. */
+export function emptyResult(extra: Partial<ExecResult>): ExecResult {
   return { exitCode: null, stdout: '', stderr: '', timedOut: false, truncated: false, aborted: false, ...extra };
 }
 

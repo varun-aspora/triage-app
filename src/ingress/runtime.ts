@@ -79,7 +79,7 @@ export function bootRuntime(options: BootOptions = {}): Promise<Flue> {
 
 async function startOnce(options: BootOptions): Promise<Flue> {
   await (options.ensureModels ?? ensureModels)();
-  const runsDir = options.eventLog === false ? undefined : (options.eventLog?.runsDir ?? runsDirOf());
+  const runsDir = options.eventLog === false ? undefined : (options.eventLog?.runsDir ?? configIfLoads()?.paths.runsDir);
   if (runsDir !== undefined) installRunEventLog({ runsDir });
   if (options.usageMeter !== false) installUsageMeter();
   if (options.settleListener !== false) {
@@ -90,24 +90,19 @@ async function startOnce(options: BootOptions): Promise<Flue> {
   return start({ agents: options.agents ?? [Triage], db });
 }
 
-function runsDirOf(): string | undefined {
+// A config that does not load is left to start() and doctor to report.
+function configIfLoads(): Config | undefined {
   try {
-    return loadConfig().paths.runsDir;
+    return loadConfig();
   } catch (err) {
     if (err instanceof ConfigError) return undefined;
     throw err;
   }
 }
 
-// A config that does not load is left to start() and doctor to report.
 async function ensureModels(): Promise<void> {
-  let config: Config;
-  try {
-    config = loadConfig();
-  } catch (err) {
-    if (err instanceof ConfigError) return;
-    throw err;
-  }
+  const config = configIfLoads();
+  if (config === undefined) return;
   try {
     for (const line of describeEnsure(await ensureConfiguredModels(config))) process.stderr.write(`${line}\n`);
   } catch (err) {

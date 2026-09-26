@@ -7,6 +7,7 @@ import {
   ConfidenceSchema,
   EntitySchema,
   NonEmptyStringSchema,
+  NonNegativeIntSchema,
   ReportStatusSchema,
   RunIdSchema,
   TakenAtSchema,
@@ -54,7 +55,7 @@ export type RootCause = v.InferOutput<typeof RootCauseSchema>;
 
 export const ImpactScopeSchema = v.object({
   kind: v.picklist(['single', 'systemic', 'unknown']),
-  affected_count: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0))),
+  affected_count: v.optional(NonNegativeIntSchema),
   how_measured: v.optional(v.string()),
 });
 export type ImpactScope = v.InferOutput<typeof ImpactScopeSchema>;
@@ -99,16 +100,14 @@ export const RepoCommitSchema = v.object({
 });
 export type RepoCommit = v.InferOutput<typeof RepoCommitSchema>;
 
-const TokenCount = v.pipe(v.number(), v.integer(), v.minValue(0));
-
 // Usage per model in the report (D59). The cache fields and usd are optional
 // so reports written before D59 still parse.
 export const ModelUsageSchema = v.object({
-  calls: TokenCount,
-  input_tokens: TokenCount,
-  output_tokens: TokenCount,
-  cache_read_tokens: v.optional(TokenCount),
-  cache_write_tokens: v.optional(TokenCount),
+  calls: NonNegativeIntSchema,
+  input_tokens: NonNegativeIntSchema,
+  output_tokens: NonNegativeIntSchema,
+  cache_read_tokens: v.optional(NonNegativeIntSchema),
+  cache_write_tokens: v.optional(NonNegativeIntSchema),
   // Absent when the model has no price; it is then listed in unpriced_models.
   usd: v.optional(v.pipe(v.number(), v.minValue(0))),
 });

@@ -18,7 +18,7 @@
 import type { Entity } from '../types/core.ts';
 import type { EvidenceLadderStep, EvidenceRef } from '../types/findings.ts';
 import type { SuggestedFixKind } from '../types/report.ts';
-import type { Report, SuggestedFix } from './schema.ts';
+import { runsCurl, type Report, type SuggestedFix } from './schema.ts';
 
 /** The level-2 headings of report.md, in the order they always appear. */
 export const REPORT_SECTIONS = [
@@ -265,7 +265,7 @@ function actions(r: Report): string {
 
 // verify_with is a query, a curl call, or for a manual fix a sentence.
 function verifyLang(fix: SuggestedFix): string {
-  if (/(?:^|[\s;|&(])curl\s/.test(fix.verify_with)) return 'bash';
+  if (runsCurl(fix.verify_with)) return 'bash';
   return fix.kind === 'manual' ? 'text' : 'sql';
 }
 
@@ -292,7 +292,7 @@ function suggestedFixes(r: Report): string {
   const fixes = r.suggested_fix.length === 0
     ? ['No suggested fixes.']
     : r.suggested_fix.map(suggestedFix);
-  return [SUGGESTED_FIX_BANNER, '', ...fixes.flatMap((f, i) => (i === 0 ? [f] : ['', f]))].join('\n');
+  return [SUGGESTED_FIX_BANNER, '', fixes.join('\n\n')].join('\n');
 }
 
 function escalationRecord(r: Report): string {

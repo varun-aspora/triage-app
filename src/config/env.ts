@@ -14,12 +14,12 @@ import { INTERFACES, type Interface } from '../types/core.ts';
 import { ConfigError, type ConfigProblem } from './errors.ts';
 import {
   DEPLOY_MODE_KEY,
-  ENTITY_KEY_PATTERN,
   HOME_KEY,
   KEY_BY_NAME,
   PROVIDER_KEYS,
   RENAMED_KEYS,
   THINKING_LEVELS,
+  isEntityKey,
   isTableKey,
   type KeySpec,
 } from './keys.ts';
@@ -342,7 +342,7 @@ export type EnvFileKeyState = 'missing' | 'blank' | 'set';
  */
 export function envFileKeyState(config: Config, name: string): EnvFileKeyState {
   if (isTableKey(name)) throw ConfigError.of(name, 'is a config key; read it from config, not envFileKeyState');
-  if (!ENTITY_KEY_PATTERN.test(name)) throw ConfigError.of(name, 'is not an entity key');
+  if (!isEntityKey(name)) throw ConfigError.of(name, 'is not an entity key');
   let fromFile: Record<string, string>;
   try {
     fromFile = parse(readFileSync(join(config.home, '.env'), 'utf8'));
@@ -541,23 +541,22 @@ class Reader {
 
   // A file path under the home for sqlite, a postgresql:// DSN for postgres.
   dbUrl(provider: DbProvider): string {
+    // Blank gives the sqlite default from keys.ts, which is not a DSN.
     const name = 'TRIAGE_DB_URL';
-    const spec = KEY_BY_NAME.get(name);
-    const set = this.rec[name]?.trim();
-    const value = set === undefined || set === '' ? undefined : set;
+    const value = this.requiredStr(name);
+    const isDsn = DSN.test(value);
     if (provider === 'postgres') {
-      if (value === undefined || !DSN.test(value)) {
+      if (!isDsn) {
         this.problem(name, 'must be a postgresql:// DSN when TRIAGE_DB_PROVIDER=postgres');
         return '';
       }
       return value;
     }
-    if (value !== undefined && DSN.test(value)) {
+    if (isDsn) {
       this.problem(name, 'is a postgres DSN but TRIAGE_DB_PROVIDER=sqlite');
       return '';
     }
-    const file = value ?? spec?.default ?? './.data/triage.sqlite';
-    return file === ':memory:' ? file : resolve(this.home, file);
+    return value === ':memory:' ? value : resolve(this.home, value);
   }
 
   private bounded(spec: KeySpec, n: number): number | undefined {

@@ -11,6 +11,7 @@
 
 import type { FlueObservation } from '@flue/runtime';
 import type { RunEventSource } from './event-log.ts';
+import type { DroppedEventType } from './serialize.ts';
 
 export const PIPELINE_EVENT_TYPES = [
   'run_created',
@@ -73,9 +74,7 @@ export const RUN_EVENT_TYPES: Readonly<Record<RunEventSource, readonly string[]>
   flue: FLUE_EVENT_TYPES,
 };
 
-// Keep in step with DROPPED_EVENT_TYPES in serialize.ts.
-type DroppedFlueType = 'text_delta' | 'thinking_delta' | 'toolcall_delta';
-type WrittenFlueType = Exclude<FlueObservation['type'], DroppedFlueType>;
+type WrittenFlueType = Exclude<FlueObservation['type'], DroppedEventType>;
 type Listed = (typeof FLUE_EVENT_TYPES)[number];
 // Both are `true` only while the list and Flue's union match exactly.
 const _noneMissing: [Exclude<WrittenFlueType, Listed>] extends [never] ? true : false = true;

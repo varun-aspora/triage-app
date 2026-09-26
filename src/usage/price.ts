@@ -89,7 +89,7 @@ export function usageCostUsd(model: CostModel, usage: UsageTokens): number {
     cacheRead,
     cacheWrite,
     totalTokens: input + output + cacheRead + cacheWrite,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    cost: { ...ZERO_RATES, total: 0 },
   };
   if (usage.cacheWrite1h !== undefined) fresh.cacheWrite1h = count(usage.cacheWrite1h, 'cacheWrite1h');
   // calculateCost writes into usage.cost, so it gets a fresh record. It reads

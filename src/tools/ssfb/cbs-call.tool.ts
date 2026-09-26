@@ -153,7 +153,7 @@ async function runCbsCall(
 ): Promise<ToolEnvelope> {
   const method: string = data.method ?? 'GET';
   const path = data.path;
-  const body = data.body;
+  const withBody = data.body !== undefined ? { body: data.body } : {};
   let decision: HttpAllowed | undefined;
 
   return runIoTool<'cbs_call', CbsResponse>(
@@ -164,22 +164,22 @@ async function runCbsCall(
       backing: backingFor(ctx),
       scope: {},
       gate: () => {
-        const out = cbsGate(loadRules(ctx), { path, method, ...(body !== undefined ? { body } : {}) });
+        const out = cbsGate(loadRules(ctx), { path, method, ...withBody });
         decision = out.decision;
         return out.gate;
       },
       fixture: () => ({
         kind: 'cbs_call',
         entity: SSFB,
-        key: semanticKey('cbs_call', { entity: SSFB, method, path, ...(body !== undefined ? { body } : {}) }),
+        key: semanticKey('cbs_call', { entity: SSFB, method, path, ...withBody }),
       }),
       real: async (signal) => {
         const out = await connectorFor(ctx).call(realConnectorContext(ctx, signal), {
           path,
           method,
           decision,
-          ...(body !== undefined ? { body } : {}),
-          keyInput: { entity: SSFB, service: CBS_SERVICE, method, path, ...(body !== undefined ? { body } : {}) },
+          ...withBody,
+          keyInput: { entity: SSFB, service: CBS_SERVICE, method, path, ...withBody },
         });
         return outcomeData(out);
       },

@@ -64,8 +64,8 @@ async function mountedTools(ctx: DoctorContext): Promise<DoctorCheck[]> {
   const listing = ctx.tools ?? DEFAULT_LISTING;
   const rows: DoctorCheck[] = [];
 
+  const tc = toolContext(ctx, registry, null);
   for (const mount of ['triage', 'code_walker'] as const) {
-    const tc = toolContext(ctx, registry, null);
     const names = listing.toolsFor(mount, tc).map((t) => t.name);
     rows.push({ id: ID, status: 'ok', key_names: [], message: `${mount}: ${list(names)}` });
     const off = offRow(listing, mount, tc);

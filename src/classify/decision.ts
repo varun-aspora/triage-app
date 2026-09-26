@@ -106,13 +106,6 @@ export function classificationFromAnswers(answers: { readonly [name: string]: De
     if (sub.choice.slice(0, slash) === category.choice) subcategory = sub.choice.slice(slash + 1);
   }
 
-  const entities_likely: string[] = [];
-  for (const [name, answer] of Object.entries(a)) {
-    if (name.startsWith(ENTITY_PREFIX) && answer?.kind === 'yes_no' && answer.yes >= YES_THRESHOLD) {
-      entities_likely.push(name.slice(ENTITY_PREFIX.length));
-    }
-  }
-
   const yes = (name: string): boolean | undefined => {
     const answer = a[name];
     return answer?.kind === 'yes_no' ? answer.yes >= YES_THRESHOLD : undefined;
@@ -122,7 +115,7 @@ export function classificationFromAnswers(answers: { readonly [name: string]: De
   const picked = {
     category: category.choice,
     subcategory,
-    entities_likely: ENTITIES.filter((e) => entities_likely.includes(e)),
+    entities_likely: ENTITIES.filter((e) => yes(`${ENTITY_PREFIX}${e}`) === true),
     money_moved: yes('money_moved'),
     misdirected_funds: yes('misdirected_funds'),
     tier_proposed: tier,
@@ -130,11 +123,13 @@ export function classificationFromAnswers(answers: { readonly [name: string]: De
     images_seen: false,
   };
   const parsed = v.safeParse(ClassificationSchema, picked);
-  if (!parsed.success) {
-    const paths = [...new Set(parsed.issues.map((i) => v.getDotPath(i) ?? '(root)'))];
-    return { ok: false, error: `decision answers invalid at ${paths.join(', ')}` };
-  }
+  if (!parsed.success) return { ok: false, error: `decision answers invalid at ${issuePaths(parsed.issues)}` };
   return { ok: true, classification: parsed.output };
+}
+
+/** The distinct paths of schema issues, comma separated. Paths only, never the values. */
+export function issuePaths(issues: readonly v.BaseIssue<unknown>[]): string {
+  return [...new Set(issues.map((i) => v.getDotPath(i) ?? '(root)'))].join(', ');
 }
 
 // The probability of the chosen category, else the choice's confidence, else 0.

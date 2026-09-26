@@ -8,7 +8,7 @@
 // Skills are repo-map and codegraph-limits, plus frontend-routing, which
 // knowledge/README.md also assigns to code_walker.
 
-import { defineSubagent, type SkillDefinition, type SubagentDefinition } from '@flue/runtime';
+import { defineSubagent, type SubagentDefinition } from '@flue/runtime';
 import { codeWalkerModel } from '../../models.ts';
 import { toolsFor } from '../../tools/index.ts';
 import type { RunId } from '../../types/core.ts';
@@ -18,6 +18,7 @@ import {
   checkRunId,
   delegateContext,
   FLUE_HOOKS,
+  freezeMounts,
   mountAll,
   type DelegateEnv,
   type DelegateHooks,
@@ -57,24 +58,14 @@ export function codeWalkerMounts(runId: RunId, options: { readonly env: Delegate
   const ctx = delegateContext(runId, null, env);
   const knowledge = env.knowledge ?? currentKnowledge();
   const tools = toolsFor('code_walker', ctx);
-  const skills = [
-    repoMapSkill(knowledge),
-    codegraphLimitsSkill(knowledge),
-    frontendRoutingSkill(knowledge),
-  ].filter((s): s is SkillDefinition => s !== undefined);
-
-  const doc = methodDoc(CODE_WALKER_DOC, knowledge);
+  const skills = [repoMapSkill(knowledge), codegraphLimitsSkill(knowledge), frontendRoutingSkill(knowledge)];
   const footer = [
     '## This delegate',
     '',
     `- Tools mounted: ${tools.map((t) => t.name).join(', ')}.`,
     '- You have no database, API or log tools. If the brief needs runtime data, say so in the reply.',
     ...deployManifestLines(env.config, env.registry, env.registry.enabledEntities()),
-  ].join('\n');
+  ];
 
-  return Object.freeze({
-    tools: Object.freeze(tools),
-    skills: Object.freeze(skills),
-    instructions: `${[...(doc ? [doc] : []), footer].join('\n\n')}\n`,
-  });
+  return freezeMounts(tools, skills, [methodDoc(CODE_WALKER_DOC, knowledge)], footer);
 }

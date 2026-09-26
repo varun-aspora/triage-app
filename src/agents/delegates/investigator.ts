@@ -135,15 +135,8 @@ export function investigatorMounts(
   const services = env.registry.services(entity);
   const notes = serviceSkills(entity, services, knowledge);
   const tools = toolsFor(mount, ctx);
-  const skills = [
-    ...notes.skills,
-    repoMapSkill(knowledge),
-    ...(deep ? [codegraphLimitsSkill(knowledge)] : []),
-  ].filter((s): s is SkillDefinition => s !== undefined);
-
-  const docs = investigatorDocs(entity)
-    .map((file) => methodDoc(file, knowledge))
-    .filter((text): text is string => text !== undefined && text !== '');
+  const skills = [...notes.skills, repoMapSkill(knowledge), ...(deep ? [codegraphLimitsSkill(knowledge)] : [])];
+  const docs = investigatorDocs(entity).map((file) => methodDoc(file, knowledge));
   const footer = [
     '## This delegate',
     '',
@@ -153,16 +146,30 @@ export function investigatorMounts(
     ...(notes.missing.length > 0 ? [`- No service notes yet for: ${notes.missing.join(', ')}.`] : []),
     `- Tools mounted: ${tools.map((t) => t.name).join(', ')}.`,
     ...(deep ? ['- You are the deep variant: use the code tools only to explain what the data and logs show.'] : []),
-  ].join('\n');
+  ];
 
-  return Object.freeze({
-    tools: Object.freeze(tools),
-    skills: Object.freeze(skills),
-    instructions: `${[...docs, footer].join('\n\n')}\n`,
-  });
+  return freezeMounts(tools, skills, docs, footer);
 }
 
 // ---------------------------------------------------------- shared helpers
+
+/**
+ * Drops missing skills and empty method docs, puts the footer lines after the
+ * docs and freezes the result.
+ */
+export function freezeMounts(
+  tools: readonly ToolDefinition[],
+  skills: readonly (SkillDefinition | undefined)[],
+  docs: readonly (string | undefined)[],
+  footer: readonly string[],
+): DelegateMounts {
+  const text = docs.filter((doc): doc is string => doc !== undefined && doc !== '');
+  return Object.freeze({
+    tools: Object.freeze(tools),
+    skills: Object.freeze(skills.filter((s): s is SkillDefinition => s !== undefined)),
+    instructions: `${[...text, footer.join('\n')].join('\n\n')}\n`,
+  });
+}
 
 /** The T01.6 ToolContext for a delegate. Entity and run id are fixed here, by closure. */
 export function delegateContext(runId: RunId, entity: Entity | null, env: DelegateEnv): ToolContext {
