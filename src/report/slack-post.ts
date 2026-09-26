@@ -15,7 +15,7 @@
 // name, never the token), transport real|mock, and approved_by in the summary.
 // The message text is never written to the audit log.
 import * as v from 'valibot';
-import { makeAuditLine } from '../gate/audit.ts';
+import { makeAuditLine, type AuditInput } from '../gate/audit.ts';
 import type { AuditSink } from '../gate/audit-sink.ts';
 import { checkEgress } from '../gate/redact.ts';
 import type { RunRecord, RunStore } from '../runstore/types.ts';
@@ -224,21 +224,12 @@ export async function postReport(post: PreparedSlackPost, approval: Approval, de
   const started = now();
   const who = `approved_by ${approval.approved_by} (${approval.method})`;
   const line = (exit: number | string, summary: string) =>
-    deps.audit.write(
-      makeAuditLine({
-        run_id: post.run_id,
-        ts: now().toISOString(),
-        interface: deps.interface ?? 'cli',
-        entity: null,
-        tool: AUDIT_TOOL,
-        decision: 'allow',
-        target: AUDIT_TARGET,
-        transport: deps.client.transport,
-        summary,
-        duration_ms: Math.max(0, now().getTime() - started.getTime()),
-        exit,
-      }),
-    );
+    writeAudit(post.run_id, deps, now, {
+      decision: 'allow',
+      summary,
+      duration_ms: Math.max(0, now().getTime() - started.getTime()),
+      exit,
+    });
 
   const { channel_id, thread_ts } = post.target;
   let reply;
@@ -276,23 +267,35 @@ function denier(runId: string, deps: SlackPostDeps): Denier {
   const now = deps.now ?? (() => new Date());
   return (code, message) => {
     if (v.is(RunIdSchema, runId)) {
-      deps.audit.write(
-        makeAuditLine({
-          run_id: runId,
-          ts: now().toISOString(),
-          interface: deps.interface ?? 'cli',
-          entity: null,
-          tool: AUDIT_TOOL,
-          decision: 'deny',
-          reason: message,
-          target: AUDIT_TARGET,
-          transport: deps.client.transport,
-          summary: `${AUDIT_TOOL}: refused (${code})`,
-          duration_ms: 0,
-          exit: code,
-        }),
-      );
+      writeAudit(runId, deps, now, {
+        decision: 'deny',
+        reason: message,
+        summary: `${AUDIT_TOOL}: refused (${code})`,
+        duration_ms: 0,
+        exit: code,
+      });
     }
     return new SlackPostRefusal(code, message);
   };
+}
+
+// One slack_post audit line; the fields every line shares are filled here.
+function writeAudit(
+  runId: string,
+  deps: SlackPostDeps,
+  now: () => Date,
+  fields: Pick<AuditInput, 'decision' | 'reason' | 'summary' | 'duration_ms' | 'exit'>,
+): void {
+  deps.audit.write(
+    makeAuditLine({
+      run_id: runId,
+      ts: now().toISOString(),
+      interface: deps.interface ?? 'cli',
+      entity: null,
+      tool: AUDIT_TOOL,
+      target: AUDIT_TARGET,
+      transport: deps.client.transport,
+      ...fields,
+    }),
+  );
 }
