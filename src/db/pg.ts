@@ -245,6 +245,15 @@ function forget(key: string, runner: PgRunner): void {
   if (shared.get(key) === runner) shared.delete(key);
 }
 
+/**
+ * Ends every shared pool. The CLI calls it once its command has finished:
+ * idle connections otherwise keep the process alive for idleTimeoutMillis
+ * after the output is printed. A later getSharedPgRunner builds a new runner.
+ */
+export async function closeSharedPgRunners(): Promise<void> {
+  await Promise.allSettled([...shared.values()].map(async (runner) => runner.close()));
+}
+
 export function getSharedPgRunner(config: Pick<Config, 'db'>, deps: PgRunnerDeps = {}): PgRunner {
   if (config.db.provider !== 'postgres') {
     throw ConfigError.of('TRIAGE_DB_PROVIDER', 'must be postgres to use the postgres runner');
