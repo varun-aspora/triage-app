@@ -171,16 +171,19 @@ function checkAnswers(provider: string, questions: DecisionQuestions, result: De
     if (a.kind !== q.kind) throw invalid(`answer for ${name} is ${a.kind}, asked ${q.kind}`);
     if (a.kind === 'choice' && q.kind === 'choice') {
       if (!Object.hasOwn(q.options, a.choice)) throw invalid(`answer for ${name} is not one of its options`);
-      if (a.confidence !== undefined && !isUnit(a.confidence)) throw invalid(`confidence for ${name} is out of range`);
     } else if (a.kind === 'yes_no') {
       if (!isUnit(a.yes)) throw invalid(`answer for ${name} is out of range`);
     } else if (a.kind === 'score' && q.kind === 'score') {
-      if (!(Number.isFinite(a.score) && a.score >= 0 && a.score <= q.levels.length - 1)) throw invalid(`score for ${name} is out of range`);
-      if (a.confidence !== undefined && !isUnit(a.confidence)) throw invalid(`confidence for ${name} is out of range`);
+      if (!inRange(a.score, q.levels.length - 1)) throw invalid(`score for ${name} is out of range`);
     }
+    if (a.kind !== 'yes_no' && a.confidence !== undefined && !isUnit(a.confidence)) throw invalid(`confidence for ${name} is out of range`);
   }
 }
 
+function inRange(n: number, max: number): boolean {
+  return Number.isFinite(n) && n >= 0 && n <= max;
+}
+
 function isUnit(n: number): boolean {
-  return Number.isFinite(n) && n >= 0 && n <= 1;
+  return inRange(n, 1);
 }
