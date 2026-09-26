@@ -576,6 +576,26 @@ export function assertPersisted<T>(value: Persisted<T>, what: string): T {
   return inner;
 }
 
+/** Validates a store record. The error names the failing paths, never the values. */
+export function parseRecord<S extends v.GenericSchema>(schema: S, value: unknown, label: string): v.InferOutput<S> {
+  const result = v.safeParse(schema, value);
+  if (result.success) return result.output;
+  const paths = [...new Set(result.issues.map((i) => v.getDotPath(i) ?? '(root)'))];
+  throw new RunStoreError(`invalid ${label}: ${paths.join(', ')}`);
+}
+
+export function positiveInt(n: number, label: string): number {
+  if (!Number.isSafeInteger(n) || n < 1) throw new RunStoreError(`invalid ${label}`);
+  return n;
+}
+
+/** The checks setPhase and setPhaseIf run before anything is written. */
+export function checkPhaseChange(phase: RunPhase, detail: PhaseDetail): void {
+  parseRecord(RunPhaseSchema, phase, 'phase');
+  if (detail.reason !== undefined) assertClean(detail.reason, 'phase reason');
+  if (detail.worker_pid !== undefined && detail.worker_pid !== null) positiveInt(detail.worker_pid, 'worker pid');
+}
+
 /** The largest value of a Postgres integer column, the type of every usage count. Both providers refuse more. */
 export const MAX_USAGE_COUNT = 2_147_483_647;
 
@@ -597,12 +617,7 @@ export function byUsageKey(a: UsageRow, b: UsageRow): number {
 export function checkUsage(seq: number, rows: readonly UsageRow[], final: boolean): { seq: number; rows: UsageRow[] } {
   if (!Number.isSafeInteger(seq) || seq < 0) throw new RunStoreError('invalid usage seq');
   if (typeof final !== 'boolean') throw new RunStoreError('invalid usage final flag');
-  const result = v.safeParse(UsageRowsSchema, rows);
-  if (!result.success) {
-    const paths = [...new Set(result.issues.map((i) => v.getDotPath(i) ?? '(root)'))];
-    throw new RunStoreError(`invalid usage rows: ${paths.join(', ')}`);
-  }
-  const checked = result.output;
+  const checked = parseRecord(UsageRowsSchema, rows, 'usage rows');
   checked.forEach((row, i) => {
     const counts = [row.calls, row.failed_calls, row.input_tokens, row.output_tokens, row.cache_read_tokens, row.cache_write_tokens];
     if (counts.some((n) => n > MAX_USAGE_COUNT)) throw new RunStoreError(`invalid usage rows: ${i} has a count above ${MAX_USAGE_COUNT}`);
