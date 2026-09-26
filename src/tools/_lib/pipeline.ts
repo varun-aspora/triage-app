@@ -24,7 +24,7 @@ import type { Config } from '../../config/env.ts';
 import { errorText, excerpt, safeErrorText, scrubSecrets, stripAddresses } from '../../connectors/error-text.ts';
 import { makeAuditLine } from '../../gate/audit.ts';
 import { checkScope, type LogsMode } from '../../gate/scope.ts';
-import { classifySqlState, isSqlState, maskSqlValues, sqlErrorMessage } from '../../gate/sql-errors.ts';
+import { classifySqlState, isSqlState, maskSqlValues, sqlErrorMessage, type SqlStateInfo } from '../../gate/sql-errors.ts';
 import { redactModelFacing, redactPersisted } from '../../gate/redact.ts';
 import { FixtureMissError } from '../../mock/errors.ts';
 import type { FixtureEntity, FixtureKind, SemanticKey } from '../../mock/types.ts';
@@ -327,9 +327,9 @@ export async function runIoTool<K extends FixtureKind, T>(
   // Denies before any I/O: the transport is what the run is configured for.
   const noIoTransport: AuditTransport = mockMode ? 'mock' : 'real';
 
-  const finish = (build: (text: string) => ToolEnvelope, text: string): ToolEnvelope => {
+  const finish = <V>(build: (safe: V) => ToolEnvelope, value: V): ToolEnvelope => {
     step('redact');
-    const safe = redactModelFacing(text);
+    const safe = redactModelFacing(value);
     step('envelope');
     return build(safe);
   };
@@ -413,12 +413,8 @@ export async function runIoTool<K extends FixtureKind, T>(
       audit({ decision: 'allow', exit: 'aborted', transport: noIoTransport, gate });
       throw err;
     }
-    if (err instanceof FixtureMissError) {
-      audit({ decision: 'allow', exit: 'fixture_miss', transport: 'mock', summary: `${spec.tool} ${where}: strict fixture miss`, gate });
-      throw err;
-    }
     const code = errorCode(err);
-    if (code === 'strict_miss') {
+    if (err instanceof FixtureMissError || code === 'strict_miss') {
       audit({ decision: 'allow', exit: 'fixture_miss', transport: 'mock', summary: `${spec.tool} ${where}: strict fixture miss`, gate });
       throw err;
     }
@@ -437,6 +433,7 @@ export async function runIoTool<K extends FixtureKind, T>(
     const sqlstate = sqlStateOf(err);
     const sql = sqlstate !== undefined ? classifySqlState(sqlstate) : undefined;
     const detail = errorDetail(err, where, sqlstate);
+    const sqlMessage = (info: SqlStateInfo): string => sqlErrorMessage(info, where, serverMessageOf(err, info.sqlstate));
     const noted = (reason: string): string => (detail === '' ? reason : `${reason}: ${excerpt(detail, AUDIT_DETAIL_CHARS)}`);
     ctx.log.warn(
       `${spec.tool} ${where} failed (${code ?? (err instanceof Error ? err.name : 'error')}${sqlstate !== undefined ? ` ${sqlstate}` : ''})`,
@@ -457,7 +454,7 @@ export async function runIoTool<K extends FixtureKind, T>(
         gate,
         sqlstate: sql.sqlstate,
       });
-      return refuse(sqlErrorMessage(sql, where, serverMessageOf(err, sql.sqlstate)));
+      return refuse(sqlMessage(sql));
     }
     if (code !== undefined && REFUSAL_CODES.has(code)) {
       audit({
@@ -470,7 +467,7 @@ export async function runIoTool<K extends FixtureKind, T>(
       });
       return refuse(
         sql !== undefined
-          ? sqlErrorMessage(sql, where, serverMessageOf(err, sql.sqlstate))
+          ? sqlMessage(sql)
           : `${sentence(`${spec.tool} on ${where} was refused (${code})${detail !== '' ? `: ${detail}` : ''}`)} ${REFUSAL_HINTS[code] ?? REFUSAL_HINTS['refused']}`,
       );
     }
@@ -498,7 +495,7 @@ export async function runIoTool<K extends FixtureKind, T>(
     return finish(
       (t) => unreachable(t, now),
       sql !== undefined
-        ? sqlErrorMessage(sql, where, serverMessageOf(err, sql.sqlstate))
+        ? sqlMessage(sql)
         : `${sentence(`${where} did not answer (${code ?? 'error'})${detail !== '' ? `: ${detail}` : ''}`)} ${code === 'timeout' ? TIMEOUT_HINT : UNREACHABLE_HINT}`,
     );
   }
@@ -532,10 +529,7 @@ export async function runIoTool<K extends FixtureKind, T>(
   // 8. Model-facing redaction, then 9. the envelope.
   const rendered = spec.render(value);
   const data = stagedPath !== undefined && isPlainObject(rendered) ? { ...rendered, staged_file: stagedPath } : rendered;
-  step('redact');
-  const safe = redactModelFacing(data);
-  step('envelope');
-  return ok(asJson(safe), now);
+  return finish((safe) => ok(asJson(safe), now), data);
 }
 
 // Flue JSON-stringifies tool output; round-tripping here makes the envelope

@@ -106,6 +106,8 @@ type StatementResult =
 
 type Found = { readonly status: HopStatus; readonly rows: Rows };
 
+type StateRead = { readonly status: 'read' | 'not_found' | 'unreachable'; readonly rows: Rows; readonly taken_at: string };
+
 const CONNECTION_CODES = new Set(['unreachable', 'timeout', 'not_configured', 'readonly_role_required']);
 
 /** Resolves the ID chain and reads the basic state. Throws only for bad input, a strict mock miss or an abort. */
@@ -267,7 +269,7 @@ class Walk {
     if (value === undefined) {
       if (this.blocked.has(from)) {
         this.record(stmt, from, 'unreachable', this.nowIso());
-        for (const k of produces) if (this.ids[k] === undefined) this.blocked.add(k);
+        this.block(produces);
       }
       return null;
     }
@@ -278,12 +280,17 @@ class Walk {
     }
     if (result.kind === 'unreachable') {
       this.record(stmt, from, 'unreachable', result.taken_at);
-      for (const k of produces) if (this.ids[k] === undefined) this.blocked.add(k);
+      this.block(produces);
       return { status: 'unreachable', rows: [] };
     }
     const status: HopStatus = result.rows.length > 0 ? 'resolved' : 'not_found';
     this.record(stmt, from, status, result.taken_at, status === 'resolved' ? to : undefined);
     return { status, rows: result.rows };
+  }
+
+  /** Marks the ids a failed hop would have produced, unless already known. */
+  private block(produces: readonly KnownIdKey[]): void {
+    for (const k of produces) if (this.ids[k] === undefined) this.blocked.add(k);
   }
 
   private record(stmt: IdentityStatement, from: KnownIdKey, status: HopStatus, taken_at: string, to?: KnownIdKey): void {
@@ -307,20 +314,21 @@ class Walk {
     const form = await this.read(S.state_account_form, 'account_form_id', ['account_form_status_v2']);
     if (form !== null) this.items(S.state_account_form, form, [['account_form_status_v2', form.rows[0]?.status_v2]]);
 
-    const names = ['rhythm_account_status', 'rhythm_debit_allowed'];
-    const rhythm = await this.read(S.state_rhythm_account, 'customer_id', names);
+    const statusItem = 'rhythm_account_status';
+    const debitItem = 'rhythm_debit_allowed';
+    const rhythm = await this.read(S.state_rhythm_account, 'customer_id', [statusItem, debitItem]);
     if (rhythm !== null) {
       if (rhythm.rows.length === 0) {
         this.items(S.state_rhythm_account, rhythm, [
-          [names[0] as string, undefined],
-          [names[1] as string, undefined],
+          [statusItem, undefined],
+          [debitItem, undefined],
         ]);
       }
       rhythm.rows.forEach((row, i) => {
         const suffix = accountSuffix(row.account_type, i, rhythm.rows.length);
         this.items(S.state_rhythm_account, rhythm, [
-          [[names[0], suffix].join(''), row.account_status],
-          [[names[1], suffix].join(''), row.debit_allowed],
+          [[statusItem, suffix].join(''), row.account_status],
+          [[debitItem, suffix].join(''), row.debit_allowed],
         ]);
       });
     }
@@ -331,7 +339,7 @@ class Walk {
     stmt: IdentityStatement,
     from: KnownIdKey,
     itemNames: readonly string[],
-  ): Promise<{ status: 'read' | 'not_found' | 'unreachable'; rows: Rows; taken_at: string } | null> {
+  ): Promise<StateRead | null> {
     const value = this.ids[from];
     if (value === undefined) {
       if (!this.blocked.has(from)) return null;
@@ -348,7 +356,7 @@ class Walk {
 
   private items(
     stmt: IdentityStatement,
-    read: { status: 'read' | 'not_found' | 'unreachable'; taken_at: string },
+    read: StateRead,
     pairs: readonly (readonly [string, unknown])[],
   ): void {
     for (const [item, raw] of pairs) {
