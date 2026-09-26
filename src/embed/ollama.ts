@@ -1,7 +1,8 @@
 // Ollama embeddings: POST {OLLAMA_BASE_URL}/api/embed with { model, input[] },
-// answered with { embeddings: number[][] }. The fetch is injected.
+// answered with { embeddings: number[][], prompt_eval_count }. The fetch is
+// injected.
 
-import { EmbeddingError, isVector, postJson, type EmbedClient, type FetchLike } from './spec.ts';
+import { EmbeddingError, isVector, postJson, reportedTokens, type EmbedClient, type FetchLike } from './spec.ts';
 
 export type OllamaClientConfig = {
   readonly baseUrl: string;
@@ -23,7 +24,7 @@ export function ollamaEmbedUrl(baseUrl: string): string {
 export function createOllamaClient(cfg: OllamaClientConfig): EmbedClient {
   const url = ollamaEmbedUrl(cfg.baseUrl);
   return async (texts, opts = {}) => {
-    if (texts.length === 0) return [];
+    if (texts.length === 0) return { vectors: [], inputTokens: 0 };
     const body = await postJson({
       provider: 'ollama',
       fetch: cfg.fetch,
@@ -33,8 +34,13 @@ export function createOllamaClient(cfg: OllamaClientConfig): EmbedClient {
       timeoutMs: cfg.timeoutMs,
       ...(opts.signal ? { signal: opts.signal } : {}),
     });
-    return parseOllamaResponse(body, texts.length);
+    return { vectors: parseOllamaResponse(body, texts.length), inputTokens: ollamaInputTokens(body) };
   };
+}
+
+/** prompt_eval_count from the response body; null when it is missing or not a count. */
+export function ollamaInputTokens(body: unknown): number | null {
+  return reportedTokens((body as { prompt_eval_count?: unknown } | null)?.prompt_eval_count);
 }
 
 export function parseOllamaResponse(body: unknown, expected: number): number[][] {

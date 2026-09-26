@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { caseCardText, requestText } from '../embed/case-text.ts';
-import { EmbeddingError, HASH_MODEL, createEmbedder, type Embedder, type EmbedConfig } from '../embed/index.ts';
+import { EmbeddingError, HASH_MODEL, createEmbedder, type Embedder, type EmbedConfig, type EmbedUsage } from '../embed/index.ts';
 import { checkEgress, redactPersisted, type Persisted } from '../gate/redact.ts';
 import {
   RUN_A,
@@ -269,6 +269,46 @@ describe('embedRun', () => {
     const rows = (await store.getRun(RUN_A))?.embeddings ?? [];
     expect(rows).toHaveLength(1);
     expect(rows[0]?.submission_id).toBeUndefined();
+  });
+});
+
+describe('embedRun usage (D59)', () => {
+  test('onUsage hears the one embed call: the MODEL_EMBEDDING spec and 0 tokens in mock mode', async () => {
+    const store = folderStore();
+    await seedRun(store, RUN_A);
+    const { embedder, calls } = hashEmbedder();
+    const seen: EmbedUsage[] = [];
+    const r = await embedRun(store, embedder, RUN_A, { onUsage: (u) => seen.push(u) });
+    expect(r.written).toHaveLength(2);
+    expect(calls).toHaveLength(1);
+    expect(seen).toEqual([{ model: 'ollama/nomic-embed-text', inputTokens: 0, failed: false }]);
+  });
+
+  test('nothing to embed: no call and no usage', async () => {
+    const store = folderStore();
+    await seedRun(store, RUN_A);
+    const { embedder } = hashEmbedder();
+    await embedRun(store, embedder, RUN_A);
+    const seen: EmbedUsage[] = [];
+    const r = await embedRun(store, embedder, RUN_A, { onUsage: (u) => seen.push(u) });
+    expect(r.written).toEqual([]);
+    expect(seen).toEqual([]);
+  });
+
+  test('an embedder error is reported as a failed call and still ends as a gap', async () => {
+    const store = folderStore();
+    await seedRun(store, RUN_A);
+    const embedder: Embedder = {
+      model: 'ollama/nomic-embed-text',
+      embed: async (_texts, opts) => {
+        opts?.onUsage?.({ model: 'ollama/nomic-embed-text', inputTokens: 0, failed: true });
+        throw new EmbeddingError('ollama', 'timeout');
+      },
+    };
+    const seen: EmbedUsage[] = [];
+    const r = await embedRun(store, embedder, RUN_A, { onUsage: (u) => seen.push(u) });
+    expect(r.gaps).toHaveLength(1);
+    expect(seen).toEqual([{ model: 'ollama/nomic-embed-text', inputTokens: 0, failed: true }]);
   });
 });
 

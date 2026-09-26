@@ -281,8 +281,45 @@ describe('variants', () => {
     };
     const body = section(renderReportMarkdown(r), 'Cost');
     expect(body).toContain('- USD total: $0.0123');
+    expect(body).not.toContain('partial');
     expect(body.indexOf('fake/mid')).toBeLessThan(body.indexOf('fake/strong'));
-    expect(body).toContain('| `fake/mid` | 6 | 12,000 | 1,800 |');
+    // A report from before D59 has no cache or USD per model: those cells show '-'.
+    expect(body).toContain('| `fake/mid` | 6 | 12,000 | - | - | 1,800 | - |');
+  });
+
+  test('cost shows cache and USD columns and a partial line for unpriced models', () => {
+    const r = sample();
+    r.cost = {
+      models: {
+        'anthropic/claude-sonnet-4-5': {
+          calls: 4,
+          input_tokens: 1350,
+          output_tokens: 520,
+          cache_read_tokens: 40000,
+          cache_write_tokens: 2000,
+          usd: 0.0135,
+        },
+        'faux/cheap': { calls: 3, input_tokens: 90, output_tokens: 30, cache_read_tokens: 0, cache_write_tokens: 0, usd: 0 },
+        'openai/gpt-6-sol': { calls: 2, input_tokens: 700, output_tokens: 70, cache_read_tokens: 100, cache_write_tokens: 0 },
+      },
+      wall_ms: 61000,
+      usd_total: 0.0135,
+      unpriced_models: ['openai/gpt-6-sol'],
+    };
+    const body = section(renderReportMarkdown(r), 'Cost');
+    expect(body).toContain('- USD total: $0.0135 (partial)');
+    expect(body).toContain('- Partial: no pricing for `openai/gpt-6-sol`');
+    expect(body).toContain('| Model | Calls | Input tokens | Cache read | Cache write | Output tokens | USD |');
+    expect(body).toContain('| `anthropic/claude-sonnet-4-5` | 4 | 1,350 | 40,000 | 2,000 | 520 | $0.0135 |');
+    expect(body).toContain('| `faux/cheap` | 3 | 90 | 0 | 0 | 30 | $0.0000 |');
+    expect(body).toContain('| `openai/gpt-6-sol` | 2 | 700 | 100 | 0 | 70 | no pricing |');
+    expect(body).toMatchSnapshot();
+  });
+
+  test('a null cost means no usage was recorded', () => {
+    const r = sample();
+    r.cost = null;
+    expect(section(renderReportMarkdown(r), 'Cost').trim()).toBe('Not costed: no token usage was recorded for this run.');
   });
 });
 

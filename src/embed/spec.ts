@@ -42,10 +42,37 @@ function isProvider(value: string): value is EmbeddingProvider {
 /** The slice of fetch the clients use. Always injected; nothing here calls the global fetch. */
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
-export type ClientOptions = { readonly signal?: AbortSignal };
+/** What one embed() call used, for the run meter (D59). */
+export type EmbedUsage = {
+  /** The MODEL_EMBEDDING spec, '<provider>/<model>'. Mock mode reports the spec too, not HASH_MODEL. */
+  readonly model: string;
+  /** Input tokens the provider reported. 0 when it reported none, and always 0 in mock mode. */
+  readonly inputTokens: number;
+  /** true when the call threw. The error is rethrown after onUsage runs. */
+  readonly failed: boolean;
+  /** Set when a successful response carried no token count, so inputTokens is 0 by default. */
+  readonly usageMissing?: true;
+};
+
+export type ClientOptions = {
+  readonly signal?: AbortSignal;
+  /**
+   * Told once per embed() call with at least one text, after the call settles.
+   * A throwing callback is ignored: metering must not fail an embedding.
+   */
+  readonly onUsage?: (u: EmbedUsage) => void;
+};
+
+/** A client's answer: the vectors, and the input tokens the provider reported (null when it reported none). */
+export type EmbedResult = { readonly vectors: number[][]; readonly inputTokens: number | null };
 
 /** A provider client over plain strings. index.ts is the only caller and unwraps Persisted first. */
-export type EmbedClient = (texts: readonly string[], opts?: ClientOptions) => Promise<number[][]>;
+export type EmbedClient = (texts: readonly string[], opts?: { readonly signal?: AbortSignal }) => Promise<EmbedResult>;
+
+/** A provider's token count when it is a non-negative integer, else null. */
+export function reportedTokens(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
 
 export type EmbeddingErrorReason = 'status' | 'timeout' | 'network' | 'malformed';
 

@@ -22,9 +22,14 @@
 //      minus the service fields (D42).
 //   5. Appends the record through RunStore.putFeedback, with that feedback.md.
 //   6. When the run has a report: writes an eval draft (feedback.md plus a
-//      copy of report.json) to <TRIAGE_HOME>/evals/_unreviewed/<run_id>/.
-//      Nothing here writes to evals/cases; promotion is `triage fixtures
-//      review` (D42). A verdict given before the report has no draft.
+//      copy of report.json without its cost key) to
+//      <TRIAGE_HOME>/evals/_unreviewed/<run_id>/. Nothing here writes to
+//      evals/cases; promotion is `triage fixtures review` (D42). A verdict
+//      given before the report has no draft.
+//
+// The draft leaves out report.cost (D59): promoted drafts are committed to
+// git, and token counts and spend are run data, not case data. Nothing that
+// grades evals reads cost from a stored case.
 //
 // The store's feedback.jsonl (or feedback rows) is the source of truth, and
 // feedback.md is only a rendering of it. Errors carry field names and fixed
@@ -184,7 +189,7 @@ export async function recordFeedback(
   const reportPath = join(dir, DRAFT_REPORT_FILE);
   // The stored report is persisted-profile already; redacting again is a no-op
   // that keeps the draft clean even if the store returned something else.
-  await writeFileAtomic(reportPath, `${JSON.stringify(redactPersisted(run.report).value, null, 2)}\n`);
+  await writeFileAtomic(reportPath, `${JSON.stringify(redactPersisted(draftReport(run.report)).value, null, 2)}\n`);
   await writeFileAtomic(feedbackPath, md.value);
 
   return {
@@ -194,6 +199,12 @@ export async function recordFeedback(
     draft_dir: dir,
     draft_files: { feedback_md: feedbackPath, report_json: reportPath },
   };
+}
+
+/** The report as the eval draft holds it: every key but cost (D59). */
+export function draftReport(report: Report): Omit<Report, 'cost'> {
+  const { cost: _cost, ...rest } = report;
+  return rest;
 }
 
 // Each id must name a finding the run has, at most once. The finding's text is copied in when known.

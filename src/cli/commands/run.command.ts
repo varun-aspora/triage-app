@@ -3,8 +3,9 @@
 //
 // Runs a triage in this process and blocks until it settles: bootRuntime,
 // prepareRequest, runSubmission, then the report from the run store. The
-// human form prints report.md; --json prints {run_id, status, report?,
-// reason?, input_request?, block?} in the same shape as `triage wait --json`.
+// human form prints report.md, then a `run total:` line when usage was
+// counted (D59); --json prints {run_id, status, report?, reason?,
+// input_request?, block?, usage?} in the same shape as `triage wait --json`.
 // Exit 0 when the run completed, 1 when it failed, 4 when it stopped on a
 // question for the requester (P6 §4.5), 5 when a person stopped it, 6 when it
 // blocked on a system that did not answer (D55; `triage resume` sends it on).
@@ -23,8 +24,8 @@ import { type LineReader, linePrompt } from '../lib/prompt.ts';
 import { configureRequestArgs, parseRequestArgs, reportInputError } from '../lib/request-args.ts';
 import type { CliCommand, CliIo } from '../types.ts';
 import { defaultPrepare, type PrepareFn } from './start.command.ts';
-import { defaultOpenStore, type OpenStore } from './status.command.ts';
-import { printWaitResult } from './wait.command.ts';
+import { defaultOpenStore, pidAlive, type OpenStore, type PidChecker } from './status.command.ts';
+import { printWaitResult, withUsage } from './wait.command.ts';
 
 export type RunCommandOptions = {
   readonly openStore?: OpenStore<'getRun'>;
@@ -39,6 +40,8 @@ export type RunCommandOptions = {
   /** Reads the answer at the terminal. */
   readonly prompt?: (io: CliIo, write: (text: string) => void) => LineReader;
   readonly defaultRequestedBy?: () => string | undefined;
+  /** Checks the run's worker pid for the usage total. Defaults to pidAlive. */
+  readonly isAlive?: PidChecker;
 };
 
 // Imported on use: @flue/runtime/node loads node:sqlite, which prints an
@@ -58,6 +61,7 @@ export function createRunCommand(options: RunCommandOptions = {}): CliCommand {
   const submit = options.submit ?? defaultSubmit;
   const answer = options.answer ?? defaultAnswer;
   const prompt = options.prompt ?? linePrompt;
+  const isAlive = options.isAlive ?? pidAlive;
   return {
     path: ['run'],
     summary: 'run a triage in this process and print the report when it settles',
@@ -129,7 +133,8 @@ export function createRunCommand(options: RunCommandOptions = {}): CliCommand {
       } else {
         out = { run_id: result.run_id, status: 'failed', reason: run?.phase_reason ?? result.error ?? 'unknown failure' };
       }
-      return printWaitResult(io, json, out, result.status === 'completed' ? (run?.report_md ?? null) : null);
+      // The run total covers every submission; report.md covers only the latest.
+      return printWaitResult(io, json, withUsage(out, run, isAlive), result.status === 'completed' ? (run?.report_md ?? null) : null);
     },
   };
 }

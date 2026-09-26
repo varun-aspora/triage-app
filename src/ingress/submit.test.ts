@@ -3,7 +3,7 @@
 // prior-case providers, the real tier policy behind a spy, and a fake Flue
 // dispatcher {init -> {dispatch, read, abort}}. No model, network or Flue
 // runtime is involved.
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,7 +13,7 @@ import type { TriageRuntime } from '../agents/triage-plan.ts';
 import { Triage } from '../agents/triage.agent.ts';
 import { unknownClassification } from '../classify/classify.ts';
 import { applyTierPolicy, type TierPolicyContext } from '../classify/policy.ts';
-import type { Embedder } from '../embed/index.ts';
+import { HASH_MODEL, type Embedder } from '../embed/index.ts';
 import { isPersisted, redactPersisted } from '../gate/redact.ts';
 import type { EmbedRunResult } from '../runstore/embed-run.ts';
 import { createFolderRunStore, folderRunStoreFromConfig } from '../runstore/folder.ts';
@@ -27,6 +27,16 @@ import { flushRunEventLog, installRunEventLog, uninstallRunEventLog } from '../r
 import { readRunEvents } from '../runlog/read.ts';
 import { sampleBlock, sampleInputRequest } from '../runstore/contract.ts';
 import type { Attachment } from '../types/request.ts';
+import type { UsageRow } from '../types/usage.ts';
+import { priceUsage } from '../usage/price.ts';
+import {
+  installUsageMeter,
+  recordUsage,
+  resetUsageMeterForTests,
+  snapshotIntake,
+  snapshotSubmission,
+  type UsageEvent,
+} from '../usage/meter.ts';
 import type { IngressIdentity } from './identity.ts';
 import { buildTriageRequest, IngressInputError, type TriageInput } from './normalise.ts';
 import { prepareDeps, prepareRequest, type PreparedSubmission } from './prepare.ts';
@@ -47,6 +57,9 @@ import {
   resumeRun,
   RunNotResumableError,
   type SettleDeps,
+  DEFAULT_USAGE_FLUSH_MS,
+  HASH_USAGE_MODEL,
+  type UsageFlushTimer,
 } from './submit.ts';
 import { makeTestHome } from '../../test/support/home.ts';
 
@@ -198,8 +211,8 @@ type Harness = {
 };
 
 type HarnessOptions = {
-  config?: Partial<{ mock: boolean; priorCases: boolean }>;
-  classify?: () => Promise<Classification>;
+  config?: Partial<{ mock: boolean; priorCases: boolean; usageFlushMs: number }>;
+  classify?: SubmissionDeps['classify'];
   identity?: () => Promise<IngressIdentity>;
   read?: ReadBehaviour;
   onDispatch?: (store: RunStore) => Promise<void>;
@@ -210,6 +223,9 @@ type HarnessOptions = {
   signal?: AbortSignal;
   readTimeoutMs?: number;
   stopPollMs?: number;
+  embedder?: Embedder | null;
+  priorCases?: SubmissionDeps['priorCases'];
+  usageFlushTimer?: UsageFlushTimer;
 };
 
 const EMBEDDER: Embedder = { model: 'test/embed', embed: async () => [] };
@@ -221,7 +237,10 @@ function harness(o: HarnessOptions = {}): Harness {
   const spies: Harness['spies'] = { preflight: 0, priorCases: 0, embedRun: [], policy: [] };
   const config: SubmissionConfig = {
     mock: { enabled: o.config?.mock ?? true },
-    runs: { priorCases: o.config?.priorCases ?? false },
+    runs: {
+      priorCases: o.config?.priorCases ?? false,
+      ...(o.config?.usageFlushMs !== undefined ? { usageFlushMs: o.config.usageFlushMs } : {}),
+    },
     budgets: { runTimeoutMs: 1_000, runMaxAttempts: 1 },
   };
   const deps: SubmissionDeps = {
@@ -229,7 +248,7 @@ function harness(o: HarnessOptions = {}): Harness {
     store,
     dispatcher: flue.dispatcher,
     agent: Triage,
-    embedder: EMBEDDER,
+    embedder: o.embedder === undefined ? EMBEDDER : o.embedder,
     embedRun:
       o.embedRun ??
       (async (...args) => {
@@ -260,14 +279,17 @@ function harness(o: HarnessOptions = {}): Harness {
       return applyTierPolicy(raw, ctx);
     },
     tierAcceptsImages: o.tierAcceptsImages ?? (() => true),
-    priorCases: async () => {
-      spies.priorCases += 1;
-      return { cases: [{ category: 'card', age_days: 12, similarity: 0.82 }], gaps: [] };
-    },
+    priorCases:
+      o.priorCases ??
+      (async () => {
+        spies.priorCases += 1;
+        return { cases: [{ category: 'card', age_days: 12, similarity: 0.82 }], gaps: [] };
+      }),
     readAttachment: async () => new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
     ...(o.signal !== undefined ? { signal: o.signal } : {}),
     ...(o.readTimeoutMs !== undefined ? { readTimeoutMs: o.readTimeoutMs } : {}),
     ...(o.stopPollMs !== undefined ? { stopPollMs: o.stopPollMs } : {}),
+    ...(o.usageFlushTimer !== undefined ? { usageFlushTimer: o.usageFlushTimer } : {}),
   };
   return { deps, events, calls, store, flue, spies };
 }
@@ -1334,5 +1356,525 @@ describe('blocked and resumeRun', () => {
       await flushRunEventLog();
       uninstallRunEventLog();
     }
+  });
+});
+
+// ------------------------------------------------------------------ usage (D59)
+
+describe('usage', () => {
+  const HAIKU = 'anthropic/claude-haiku-4-5-20251001';
+  const RUN_2 = '01JSUBMITCCCCCCCCCCCCCCCCC';
+  const cancel = () => redactPersisted({ status: 'cancelled' as const, resolved_at: NOW.toISOString(), resolved_by: 'ops' });
+  const stop = (store: RunStore) => store.markStopped(RUN_ID, 'cancelled', cancel());
+
+  let runsDir = '';
+  beforeEach(() => {
+    resetUsageMeterForTests();
+    runsDir = mkdtempSync(join(tmpdir(), 'triage-submit-usage-'));
+    dirs.push(runsDir);
+    installRunEventLog({ runsDir, observe: () => () => undefined });
+  });
+  afterEach(async () => {
+    await flushRunEventLog();
+    uninstallRunEventLog();
+    resetUsageMeterForTests();
+  });
+
+  async function pipeline(runId = RUN_ID): Promise<[string, unknown][]> {
+    await flushRunEventLog();
+    const { events } = await readRunEvents(runsDir, runId);
+    return events.filter((e) => e.source === 'pipeline').map((e) => [e.type, e.data]);
+  }
+
+  function turn(over: Partial<UsageEvent> = {}): UsageEvent {
+    return { model: 'faux/cheap', agent: 'triage', purpose: 'agent', isError: false, input: 10, output: 5, cacheRead: 0, cacheWrite: 0, ...over };
+  }
+  /** One model turn of a Flue submission, the way the meter counts it. */
+  const countTurn = (over: Partial<UsageEvent> = {}, submissionId = 'sub-1', runId = RUN_ID) =>
+    recordUsage(runId, { submissionId }, turn(over));
+
+  const triageRow = (calls: number, over: Partial<UsageRow> = {}): UsageRow => ({
+    model: 'faux/cheap',
+    agent: 'triage',
+    purpose: 'agent',
+    calls,
+    failed_calls: 0,
+    input_tokens: 10 * calls,
+    output_tokens: 5 * calls,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    usd: 0,
+    ...over,
+  });
+
+  /** A classifier stub that reports one completion call. */
+  const classifyWithUsage: SubmissionDeps['classify'] = async (_input, _signal, onUsage) => {
+    onUsage?.({ path: 'completion', model: HAIKU, failed: false, input: 1000, output: 200, cacheRead: 50, cacheWrite: 0 });
+    return goodClassification();
+  };
+
+  type UsageWrite = { readonly seq: number; readonly final: boolean; readonly rows: readonly UsageRow[] };
+
+  /** The deps with putUsage recorded, and optionally held or failed per call. */
+  function spyUsage(
+    h: Harness,
+    opts: { fail?: (n: number) => Error | undefined; hold?: (n: number) => Promise<void> | undefined } = {},
+  ): { deps: SubmissionDeps; writes: UsageWrite[]; settled: () => Promise<void> } {
+    const writes: UsageWrite[] = [];
+    const pending: Promise<unknown>[] = [];
+    const inner = h.deps.store;
+    const putUsage: RunStore['putUsage'] = (runId, seq, rows, final) => {
+      const n = writes.length;
+      writes.push({ seq, final, rows });
+      const p = (async () => {
+        await opts.hold?.(n);
+        const err = opts.fail?.(n);
+        if (err !== undefined) throw err;
+        await inner.putUsage(runId, seq, rows, final);
+      })();
+      pending.push(p.catch(() => undefined));
+      return p;
+    };
+    const store = new Proxy(inner, { get: (t, prop) => (prop === 'putUsage' ? putUsage : Reflect.get(t, prop, t)) });
+    const settled = async (): Promise<void> => {
+      let seen = -1;
+      while (seen !== pending.length) {
+        seen = pending.length;
+        await Promise.all(pending);
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    };
+    return { deps: { ...h.deps, store }, writes, settled };
+  }
+
+  /** A timer the test ticks by hand. Cancelled ticks stay callable, to show a late tick does nothing. */
+  function manualTimer(): { timer: UsageFlushTimer; tick: () => void; ms: number[]; cancelled: () => number } {
+    const ticks: (() => void)[] = [];
+    const ms: number[] = [];
+    let cancelled = 0;
+    return {
+      timer: (tick, every) => {
+        ticks.push(tick);
+        ms.push(every);
+        return () => {
+          cancelled += 1;
+        };
+      },
+      tick: () => {
+        for (const t of ticks) t();
+      },
+      ms,
+      cancelled: () => cancelled,
+    };
+  }
+
+  class StoreDown extends Error {}
+
+  // ---------------------------------------------------------------- intake
+
+  test('the classifier call is written as seq 0, final, before the dispatch, and then forgotten', async () => {
+    const h = harness({ classify: classifyWithUsage });
+    await runSubmission(prepared(), h.deps);
+    const run = await h.store.getRun(RUN_ID);
+    const tokens = { input: 1000, output: 200, cacheRead: 50, cacheWrite: 0 };
+    expect(run?.usage).toEqual([
+      {
+        seq: 0,
+        final: true,
+        updated_at: expect.any(String),
+        rows: [
+          {
+            model: HAIKU,
+            agent: 'classifier',
+            purpose: 'classify',
+            calls: 1,
+            failed_calls: 0,
+            input_tokens: 1000,
+            output_tokens: 200,
+            cache_read_tokens: 50,
+            cache_write_tokens: 0,
+            usd: priceUsage(HAIKU, tokens, 'classify'),
+          },
+        ],
+      },
+    ]);
+    expect(h.events.indexOf('putUsage')).toBeGreaterThan(-1);
+    expect(h.events.indexOf('putUsage')).toBeLessThan(h.events.indexOf('dispatch'));
+    expect(snapshotIntake(RUN_ID)).toEqual([]);
+  });
+
+  test('a decision-model classifier is charged the cost the provider reported, or left unpriced', async () => {
+    const spec = 'openrouter/typesafe/jev-1.13';
+    const decision =
+      (reportedUsd?: number): SubmissionDeps['classify'] =>
+      async (_input, _signal, onUsage) => {
+        onUsage?.({ path: 'decision', model: spec, failed: false, input: 300, output: 40, cacheRead: 0, cacheWrite: 0, ...(reportedUsd !== undefined ? { reportedUsd } : {}) });
+        return goodClassification();
+      };
+    const priced = harness({ classify: decision(0.0042) });
+    await runSubmission(prepared(), priced.deps);
+    expect((await priced.store.getRun(RUN_ID))?.usage[0]?.rows[0]).toMatchObject({ model: spec, agent: 'classifier', usd: 0.0042 });
+
+    const unpriced = harness({ classify: decision() });
+    await runSubmission(prepared({ runId: RUN_2 }), unpriced.deps);
+    expect((await unpriced.store.getRun(RUN_2))?.usage[0]?.rows[0]).toMatchObject({ model: spec, input_tokens: 300, usd: null });
+  });
+
+  test('a failure between the classifier and the dispatch still writes seq 0', async () => {
+    const h = harness({ classify: classifyWithUsage });
+    const deps: SubmissionDeps = {
+      ...h.deps,
+      policy: () => {
+        throw new Error('policy broke');
+      },
+    };
+    await expect(runSubmission(prepared(), deps)).rejects.toThrow('policy broke');
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('failed');
+    expect(run?.usage.map((u) => [u.seq, u.final, u.rows.map((r) => r.agent)])).toEqual([[0, true, ['classifier']]]);
+    expect(h.flue.dispatches).toHaveLength(0);
+  });
+
+  test('a stop during the prior-cases lookup still writes seq 0, with the mock embedding marked fake', async () => {
+    let store!: RunStore;
+    const h = harness({
+      stopPollMs: 5,
+      config: { priorCases: true },
+      classify: classifyWithUsage,
+      embedder: { model: HASH_MODEL, embed: async () => [] },
+      priorCases: (_runId, signal, onUsage) => {
+        onUsage?.({ model: 'ollama/nomic-embed-text', inputTokens: 0, failed: false });
+        setTimeout(() => void stop(store), 1);
+        return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason)));
+      },
+    });
+    store = h.store;
+    await expect(runSubmission(prepared(), h.deps)).rejects.toBeInstanceOf(RunStoppedError);
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('stopped');
+    expect(run?.usage).toHaveLength(1);
+    const rows = run?.usage[0]?.rows ?? [];
+    expect(run?.usage[0]).toMatchObject({ seq: 0, final: true });
+    expect(rows.map((r) => [r.model, r.agent, r.purpose, r.calls, r.usd])).toEqual([
+      [HAIKU, 'classifier', 'classify', 1, expect.any(Number)],
+      [HASH_USAGE_MODEL, 'embedder', 'embed', 1, 0],
+    ]);
+  });
+
+  test('a real embedder keeps its MODEL_EMBEDDING spec, and a missing token count is logged as usage_missing', async () => {
+    const spec = 'openai/text-embedding-3-small';
+    const h = harness({
+      config: { priorCases: true },
+      embedder: { model: spec, embed: async () => [] },
+      priorCases: async (_runId, _signal, onUsage) => {
+        onUsage?.({ model: spec, inputTokens: 12, failed: false });
+        onUsage?.({ model: spec, inputTokens: 0, failed: false, usageMissing: true });
+        return { cases: [], gaps: [] };
+      },
+    });
+    await runSubmission(prepared(), h.deps);
+    const rows = (await h.store.getRun(RUN_ID))?.usage[0]?.rows ?? [];
+    expect(rows).toEqual([
+      {
+        model: spec,
+        agent: 'embedder',
+        purpose: 'embed',
+        calls: 2,
+        failed_calls: 0,
+        input_tokens: 12,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        usd: priceUsage(spec, { input: 12, output: 0, cacheRead: 0, cacheWrite: 0 }, 'embed'),
+      },
+    ]);
+    expect(await pipeline()).toContainEqual(['usage_missing', { submission_seq: 0, agent: 'embedder', calls: 1 }]);
+  });
+
+  // ---------------------------------------------------------------- settle
+
+  const statuses: [string, (h: Harness) => ReadBehaviour][] = [
+    ['completed', () => async () => {
+      countTurn();
+      return { text: 'done', submissionId: 'sub-1', data: {} };
+    }],
+    ['failed', () => async () => {
+      countTurn();
+      throw new AgentRunError({ outcome: 'failed', submissionId: 'sub-1' });
+    }],
+    ['stopped', (h) => async () => {
+      countTurn();
+      await stop(h.store);
+      throw new AgentRunError({ outcome: 'aborted', submissionId: 'sub-1' });
+    }],
+    ['needs_input', (h) => async () => {
+      countTurn();
+      await h.store.putInputRequest(RUN_ID, redactPersisted(sampleInputRequest('q1')));
+      return { text: 'waiting', submissionId: 'sub-1', data: {} };
+    }],
+    ['blocked', (h) => async () => {
+      countTurn();
+      await h.store.putBlock(RUN_ID, redactPersisted(sampleBlock('b1')));
+      return { text: 'parked', submissionId: 'sub-1', data: {} };
+    }],
+  ];
+  for (const [status, read] of statuses) {
+    test(`a ${status} settle writes the submission's rows final on its seq and forgets them`, async () => {
+      let h!: Harness;
+      h = harness({ stopPollMs: 0, read: (signal) => read(h)(signal) });
+      const result = await runSubmission(prepared(), h.deps);
+      expect(result.status).toBe(status as typeof result.status);
+      const run = await h.store.getRun(RUN_ID);
+      expect(run?.usage).toEqual([{ seq: 1, final: true, updated_at: expect.any(String), rows: [triageRow(1)] }]);
+      expect(snapshotSubmission(RUN_ID, 'sub-1')).toEqual([]);
+    });
+  }
+
+  test('the embedding after the settle is counted on the same seq and the rows are written final again, once each', async () => {
+    const h = harness({
+      read: async () => {
+        countTurn();
+        return { text: 'done', submissionId: 'sub-1', data: {} };
+      },
+      embedRun: async (_store, _embedder, _runId, options) => {
+        h.events.push('embedRun');
+        options?.onUsage?.({ model: 'test/embed', inputTokens: 30, failed: false });
+        return { written: ['case'], unchanged: [], empty: [], gaps: [] };
+      },
+    });
+    const spy = spyUsage(h);
+    await runSubmission(prepared(), spy.deps);
+    const embedder = { ...triageRow(1), model: 'test/embed', agent: 'embedder', purpose: 'embed' as const, input_tokens: 30, output_tokens: 0, usd: null };
+    expect(spy.writes).toEqual([
+      { seq: 1, final: true, rows: [triageRow(1)] },
+      { seq: 1, final: true, rows: [triageRow(1), embedder] },
+    ]);
+    const settle = h.events.filter((e) => e === 'putUsage' || e === 'embedRun');
+    expect(settle).toEqual(['putUsage', 'embedRun', 'putUsage']);
+    // Final replaces final: one set, not two.
+    expect((await h.store.getRun(RUN_ID))?.usage).toEqual([{ seq: 1, final: true, updated_at: expect.any(String), rows: [triageRow(1), embedder] }]);
+  });
+
+  test('the mock hash embedder after the settle is recorded as a faux model', async () => {
+    const h = harness({
+      embedder: { model: HASH_MODEL, embed: async () => [] },
+      read: async () => {
+        countTurn();
+        return { text: 'done', submissionId: 'sub-1', data: {} };
+      },
+      embedRun: async (_store, _embedder, _runId, options) => {
+        options?.onUsage?.({ model: 'ollama/nomic-embed-text', inputTokens: 0, failed: false });
+        return { written: ['case'], unchanged: [], empty: [], gaps: [] };
+      },
+    });
+    await runSubmission(prepared(), h.deps);
+    const rows = (await h.store.getRun(RUN_ID))?.usage[0]?.rows ?? [];
+    expect(rows.map((r) => [r.model, r.agent, r.usd])).toEqual([
+      ['faux/cheap', 'triage', 0],
+      [HASH_USAGE_MODEL, 'embedder', 0],
+    ]);
+  });
+
+  test('a usage write that fails is logged by class name only and never changes the status', async () => {
+    const h = harness({
+      classify: classifyWithUsage,
+      read: async () => {
+        countTurn();
+        return { text: 'done', submissionId: 'sub-1', data: {} };
+      },
+    });
+    const spy = spyUsage(h, { fail: () => new StoreDown('connection to the secret host dropped') });
+    const result = await runSubmission(prepared(), spy.deps);
+    expect(result.status).toBe('completed');
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('completed');
+    expect(run?.usage).toEqual([]);
+    const events = await pipeline();
+    expect(events).toContainEqual(['usage_write_failed', { submission_seq: 0, final: true, error: 'StoreDown' }]);
+    expect(events).toContainEqual(['usage_write_failed', { submission_seq: 1, final: true, error: 'StoreDown' }]);
+    expect(JSON.stringify(events)).not.toContain('secret host');
+  });
+
+  test('a caller abort writes what is counted so far, not final, and keeps it in memory', async () => {
+    const ctrl = new AbortController();
+    const h = harness({
+      signal: ctrl.signal,
+      read: (signal) =>
+        new Promise((_, reject) => {
+          countTurn();
+          signal?.addEventListener('abort', () => reject(signal.reason));
+          ctrl.abort(new Error('caller went away'));
+        }),
+    });
+    const spy = spyUsage(h);
+    await expect(runSubmission(prepared(), spy.deps)).rejects.toThrow('caller went away');
+    expect(spy.writes).toEqual([{ seq: 1, final: false, rows: [triageRow(1)] }]);
+    expect((await h.store.getRun(RUN_ID))?.usage).toEqual([{ seq: 1, final: false, updated_at: expect.any(String), rows: [triageRow(1)] }]);
+    // The run goes on in this process; report.cost still reads these.
+    expect(snapshotSubmission(RUN_ID, 'sub-1')).toEqual([triageRow(1)]);
+  });
+
+  test('turns without a submission id are logged as usage_unassigned, counts only, and not stored', async () => {
+    let emit!: (o: unknown, ctx: unknown) => void;
+    installUsageMeter({
+      observe: (subscriber) => {
+        emit = subscriber as typeof emit;
+        return () => undefined;
+      },
+    });
+    const h = harness({
+      read: async () => {
+        emit(
+          {
+            type: 'turn',
+            instanceId: RUN_ID,
+            request: { providerId: 'faux', requestedModel: 'cheap' },
+            response: { usage: { input: 3, output: 2, cacheRead: 1, cacheWrite: 0 } },
+          },
+          { id: RUN_ID },
+        );
+        return { text: 'done', submissionId: 'sub-1', data: {} };
+      },
+    });
+    await runSubmission(prepared(), h.deps);
+    expect(await pipeline()).toContainEqual(['usage_unassigned', { rows: 1, calls: 1, tokens: 6 }]);
+    expect((await h.store.getRun(RUN_ID))?.usage).toEqual([]);
+  });
+
+  test('a follow-up gets its own seq and leaves the first one as it was', async () => {
+    const h = harness({
+      read: async () => {
+        countTurn({}, `sub-${h.flue.dispatches.length}`);
+        return { text: 'done', submissionId: `sub-${h.flue.dispatches.length}`, data: {} };
+      },
+    });
+    await runSubmission(prepared(), h.deps);
+    await askRun(RUN_ID, 'did the reversal land?', 'ops', h.deps);
+    const usage = (await h.store.getRun(RUN_ID))?.usage ?? [];
+    expect(usage.map((u) => [u.seq, u.final, u.rows])).toEqual([
+      [1, true, [triageRow(1)]],
+      [2, true, [triageRow(1)]],
+    ]);
+  });
+
+  // ---------------------------------------------------------------- live flush
+
+  test('the live flush writes non-final rows when they changed, skips an unchanged tick, and stops at the settle', async () => {
+    const m = manualTimer();
+    const seen: { writes: number; stored?: unknown }[] = [];
+    let spy!: ReturnType<typeof spyUsage>;
+    let h!: Harness;
+    h = harness({
+      config: { usageFlushMs: 5000 },
+      usageFlushTimer: m.timer,
+      read: async () => {
+        m.tick(); // nothing counted yet
+        await spy.settled();
+        seen.push({ writes: spy.writes.length });
+        countTurn();
+        m.tick();
+        await spy.settled();
+        seen.push({ writes: spy.writes.length, stored: (await h.store.getRun(RUN_ID))?.usage });
+        m.tick(); // unchanged
+        await spy.settled();
+        seen.push({ writes: spy.writes.length });
+        countTurn();
+        m.tick();
+        await spy.settled();
+        seen.push({ writes: spy.writes.length });
+        return { text: 'done', submissionId: 'sub-1', data: {} };
+      },
+    });
+    spy = spyUsage(h);
+    const result = await runSubmission(prepared(), spy.deps);
+    expect(result.status).toBe('completed');
+    expect(seen).toEqual([
+      { writes: 0 },
+      { writes: 1, stored: [{ seq: 1, final: false, updated_at: expect.any(String), rows: [triageRow(1)] }] },
+      { writes: 1 },
+      { writes: 2 },
+    ]);
+    expect(spy.writes.map((w) => [w.seq, w.final, w.rows[0]?.calls])).toEqual([
+      [1, false, 1],
+      [1, false, 2],
+      [1, true, 2],
+      [1, true, 2],
+    ]);
+    expect(m.ms).toEqual([5000]);
+    expect(m.cancelled()).toBe(1);
+
+    // A tick after the settle writes nothing, and the final rows stay.
+    m.tick();
+    await spy.settled();
+    expect(spy.writes).toHaveLength(4);
+    expect((await h.store.getRun(RUN_ID))?.usage[0]).toMatchObject({ final: true, rows: [triageRow(2)] });
+  });
+
+  test('ticks never overlap, and the settle waits for a write in flight before its final write', async () => {
+    const m = manualTimer();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let whileHeld = -1;
+    let spy!: ReturnType<typeof spyUsage>;
+    const h = harness({
+      usageFlushTimer: m.timer,
+      read: async () => {
+        countTurn();
+        m.tick();
+        countTurn();
+        m.tick(); // the first write is still running
+        await new Promise((resolve) => setImmediate(resolve));
+        whileHeld = spy.writes.length;
+        setTimeout(release, 20);
+        return { text: 'done', submissionId: 'sub-1', data: {} };
+      },
+    });
+    spy = spyUsage(h, { hold: (n) => (n === 0 ? held : undefined) });
+    await runSubmission(prepared(), spy.deps);
+    expect(whileHeld).toBe(1);
+    expect(spy.writes.map((w) => [w.final, w.rows[0]?.calls])).toEqual([
+      [false, 1],
+      [true, 2],
+      [true, 2],
+    ]);
+    expect((await h.store.getRun(RUN_ID))?.usage[0]).toMatchObject({ final: true, rows: [triageRow(2)] });
+  });
+
+  test('a failed flush is logged, tried again on the next tick, and never changes the status', async () => {
+    const m = manualTimer();
+    let spy!: ReturnType<typeof spyUsage>;
+    const h = harness({
+      usageFlushTimer: m.timer,
+      read: async () => {
+        countTurn();
+        m.tick();
+        await spy.settled();
+        m.tick(); // same version, but the last write failed
+        await spy.settled();
+        return { text: 'done', submissionId: 'sub-1', data: {} };
+      },
+    });
+    spy = spyUsage(h, { fail: (n) => (n === 0 ? new StoreDown('host unreachable') : undefined) });
+    const result = await runSubmission(prepared(), spy.deps);
+    expect(result.status).toBe('completed');
+    expect(spy.writes.map((w) => w.final)).toEqual([false, false, true, true]);
+    const events = await pipeline();
+    expect(events).toContainEqual(['usage_flush_failed', { submission_seq: 1, error: 'StoreDown' }]);
+    expect(events.filter(([type]) => type === 'usage_write_failed')).toEqual([]);
+  });
+
+  test('TRIAGE_USAGE_FLUSH_MS=0 turns the live flush off; left out, it uses the default interval', async () => {
+    const off = manualTimer();
+    const h = harness({ config: { usageFlushMs: 0 }, usageFlushTimer: off.timer });
+    await runSubmission(prepared(), h.deps);
+    expect(off.ms).toEqual([]);
+
+    const dflt = manualTimer();
+    const d = harness({ usageFlushTimer: dflt.timer });
+    await runSubmission(prepared({ runId: RUN_2 }), d.deps);
+    expect(dflt.ms).toEqual([DEFAULT_USAGE_FLUSH_MS]);
+    expect(dflt.cancelled()).toBe(1);
   });
 });

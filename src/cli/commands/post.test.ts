@@ -84,6 +84,7 @@ function runRecord(o: { report?: Report | null; source?: TriageRequest['source']
     feedback: [],
     feedback_latest: null,
     embeddings: [],
+    usage: [],
   };
 }
 

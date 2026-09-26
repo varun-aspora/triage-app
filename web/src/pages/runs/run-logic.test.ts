@@ -1,15 +1,18 @@
 import { describe, expect, test } from 'bun:test';
-import type { RunDetail, TierDecision } from '../../api/types.ts';
+import type { RunDetail, RunUsageView, TierDecision, UsageTotals } from '../../api/types.ts';
 import {
   blockedSteps,
   buildStartBody,
-  costTotals,
   deriveInvestigators,
   followUpPending,
+  formatCalls,
+  formatCost,
   formFieldOf,
+  formatTokenSplit,
   formatUsd,
   inferFailure,
   joinEntityLabels,
+  listCost,
   MAX_CONTEXT,
   type NewRunForm,
   newIdempotencyKey,
@@ -17,6 +20,9 @@ import {
   reportVersionLabel,
   runningSteps,
   sinceFor,
+  submissionCost,
+  usageLines,
+  usageNotes,
 } from './run-logic.ts';
 
 const baseForm: NewRunForm = {
@@ -239,11 +245,116 @@ test('followUpPending waits for the newer submission, then for the run to settle
   expect(followUpPending({ status: 'stopped', submissions: [s(1, true), s(2, false)] }, 1)).toBe(false);
 });
 
-test('cost helpers', () => {
-  expect(
-    costTotals({ a: { calls: 2, input_tokens: 100, output_tokens: 10 }, b: { calls: 1, input_tokens: 50, output_tokens: 5 } }),
-  ).toEqual({ calls: 3, input: 150, output: 15 });
+test('formatUsd', () => {
   expect(formatUsd(undefined)).toBe('—');
+  expect(formatUsd(0)).toBe('$0.00');
   expect(formatUsd(0.4231)).toBe('$0.42');
   expect(formatUsd(0.001)).toBe('<$0.01');
+});
+
+describe('usage (D59)', () => {
+  const NOW = Date.parse('2026-09-26T10:00:10.000Z');
+  const totals = (over: Partial<UsageTotals> = {}): UsageTotals => ({
+    calls: 4,
+    failed_calls: 0,
+    input_tokens: 1200,
+    output_tokens: 300,
+    cache_read_tokens: 4000,
+    cache_write_tokens: 500,
+    usd: 0.42,
+    unpriced_models: [],
+    ...over,
+  });
+  const view = (over: Partial<RunUsageView> = {}): RunUsageView => ({
+    recorded: true,
+    total: totals(),
+    by_model: { 'anthropic/claude-haiku-4-5-20251001': totals() },
+    by_agent: { triage: totals() },
+    by_submission: { '1': totals() },
+    pricing: 'full',
+    fake: false,
+    live: false,
+    incomplete: false,
+    updated_at: '2026-09-26T10:00:06.000Z',
+    ...over,
+  });
+  const texts = (u: RunUsageView | undefined, running = false) => usageNotes(u, running, NOW).map((n) => n.text);
+
+  test('not recorded, or waiting while the run is running', () => {
+    expect(texts(undefined)).toEqual(['not recorded']);
+    expect(texts(view({ recorded: false }))).toEqual(['not recorded']);
+    expect(texts(view({ recorded: false }), true)).toEqual(['waiting for the first count']);
+    expect(texts(undefined, true)).toEqual(['waiting for the first count']);
+  });
+
+  test('a fully priced, final run has no labels', () => {
+    expect(texts(view())).toEqual([]);
+  });
+
+  test('partial and no pricing name the unpriced models', () => {
+    const unpriced = totals({ unpriced_models: ['openai/text-embedding-3-small', 'typesafe/jev-1'] });
+    expect(texts(view({ pricing: 'partial', total: unpriced }))).toEqual(['partial: no pricing for openai/text-embedding-3-small, typesafe/jev-1']);
+    expect(texts(view({ pricing: 'none', total: { ...unpriced, usd: 0 } }))).toEqual(['no pricing for openai/text-embedding-3-small, typesafe/jev-1']);
+  });
+
+  test('fake, incomplete and live labels', () => {
+    expect(texts(view({ fake: true }))).toEqual(['estimates, fake model']);
+    expect(texts(view({ incomplete: true }))).toEqual(['incomplete: the worker ended before the final count']);
+    expect(texts(view({ live: true }), true)).toEqual(['live, updated 4s ago']);
+    expect(texts(view({ live: true, updated_at: null }), true)).toEqual(['live']);
+    expect(usageNotes(view({ incomplete: true }), false, NOW)[0]?.look.tone).toBe('amber');
+  });
+
+  test('formatCost reads the run pricing, or the bucket unpriced list', () => {
+    expect(formatCost(totals(), 'full')).toBe('$0.42');
+    expect(formatCost(totals(), 'partial')).toBe('$0.42 (partial)');
+    expect(formatCost(totals({ usd: 0 }), 'none')).toBe('not priced');
+    expect(formatCost(totals())).toBe('$0.42');
+    expect(formatCost(totals({ unpriced_models: ['typesafe/jev-1'] }))).toBe('$0.42 (partial)');
+    expect(formatCost(totals({ usd: 0, unpriced_models: ['typesafe/jev-1'] }))).toBe('not priced');
+    expect(formatCost(totals({ usd: 0 }))).toBe('$0.00');
+  });
+
+  test('calls and the token split', () => {
+    expect(formatCalls(totals())).toBe('4');
+    expect(formatCalls(totals({ failed_calls: 1 }))).toBe('4 (1 failed)');
+    expect(formatTokenSplit(totals({ input_tokens: 120_000, cache_read_tokens: 90_000, cache_write_tokens: 4000, output_tokens: 8000 }))).toBe(
+      '120k in / 90k cache read / 4k cache write / 8k out',
+    );
+  });
+
+  test('usageLines: most expensive first, then most tokens, then by name', () => {
+    const u = view({
+      by_agent: {
+        classifier: totals({ usd: 0.01 }),
+        embedder: totals({ usd: 0, input_tokens: 10, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 }),
+        synthesis: totals({ usd: 0.01, output_tokens: 900 }),
+        triage: totals({ usd: 0.3 }),
+      },
+    });
+    expect(usageLines(u, 'agent').map((l) => l.key)).toEqual(['triage', 'synthesis', 'classifier', 'embedder']);
+    expect(usageLines(u, 'model').map((l) => l.key)).toEqual(['anthropic/claude-haiku-4-5-20251001']);
+  });
+
+  test('submissionCost: intake and submissions, a dash when nothing was counted', () => {
+    const u = view({ by_submission: { '0': totals({ usd: 0.01 }), '1': totals({ unpriced_models: ['typesafe/jev-1'] }) } });
+    expect(submissionCost(u, 0)).toBe('$0.01');
+    expect(submissionCost(u, 1)).toBe('$0.42 (partial)');
+    expect(submissionCost(u, 2)).toBe('—');
+    expect(submissionCost(undefined, 1)).toBe('—');
+  });
+
+  test('listCost: the priced total, partial, not priced, not recorded, and live for a running run', () => {
+    expect(listCost({ phase: 'completed', usd_total: 0.42, tokens_total: 1000 })).toEqual({ text: '$0.42', live: false });
+    expect(listCost({ phase: 'completed', usd_total: 0.42, tokens_total: 1000, usd_partial: true })).toEqual({
+      text: '$0.42 (partial)',
+      live: false,
+    });
+    expect(listCost({ phase: 'investigating', usd_total: 0.004, usd_partial: true })).toEqual({ text: '<$0.01 (partial)', live: true });
+    expect(listCost({ phase: 'completed', tokens_total: 1000 })).toEqual({ text: 'not priced', live: false });
+    expect(listCost({ phase: 'failed' })).toEqual({ text: '—', live: false });
+    expect(listCost({ phase: 'investigating', usd_total: 0.1, tokens_total: 10 })).toEqual({ text: '$0.10', live: true });
+    expect(listCost({ phase: 'needs_input' }).live).toBe(true);
+    expect(listCost({ phase: 'blocked', usd_total: 0.1 }).live).toBe(false);
+  });
 });

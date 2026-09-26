@@ -252,7 +252,7 @@ Assumptions made, not verified against a real system:
 Known gaps:
 
 - No deadline for a blocked run (as for questions, D53).
-- The Ollama keyless auth in `src/models.ts` resolved to an empty credential, so a run on an `ollama/*` tier failed at the first model call (`No API key for provider: ollama`, seen on 2026-09-25). Fixed on 2026-09-26: the provider now resolves to the placeholder key `ollama`, which Ollama ignores.
+- The Ollama keyless auth in `src/models.ts` resolved to an empty credential, so a run on an `ollama/*` tier failed at the first model call (`No API key for provider: ollama`, seen on 2026-09-25). Fixed on 2026-09-26: the provider now resolves to the placeholder key `ollama`, which Ollama ignores. Later the same day: the provider sends `OLLAMA_API_KEY` when it is set, for an Ollama behind a proxy that checks the key, and falls back to the placeholder when it is blank.
 
 ### Postgres connection loss and the resume tunnel check (D56, 2026-09-26)
 
@@ -278,6 +278,68 @@ Known gaps:
 - `OPENAI_BASE_URL` is declared in `keys.ts`; nothing reads it yet.
 - Tests use the fake decision provider, and the route tests stub `fetch`, so no test calls TypeSafe or OpenRouter.
 - Not done: a classifier eval run against a real jev model (question wording, the one-call subcategory and the derived confidence are untried); an eval case that runs the decision path; a separate time limit for decision models.
+
+### Run usage and cost (D59, 2026-09-26)
+
+| Change | Decision |
+|---|---|
+| `src/types/usage.ts`: `UsageRowSchema`, `SubmissionUsageSchema`, `RunUsageViewSchema`, the model and agent patterns | D59 |
+| `src/usage/price.ts`: `priceUsage` and `EMBEDDING_PRICES`; `usageCostUsd` moved here from `src/evals/cost.ts`, which re-exports it | D59 |
+| `src/usage/meter.ts`: the meter, installed by `startOnce` in `src/ingress/runtime.ts` (`BootOptions.usageMeter: false` turns it off in tests); `src/usage/summary.ts`: `summariseUsage` | D59 |
+| `RunStore.putUsage`, `RunRecord.usage`, `RunSummary.usd_total` / `tokens_total` / `usd_partial`; migration `0004_run_usage.sql`; `usage/<seq>.json` in the folder store; `checkUsage` in `src/runstore/types.ts` | D59 |
+| `src/classify/classify.ts`: `ClassifyDeps.onUsage` on both paths; `src/embed`: `onUsage` on `embed()` with the provider's token count | D59 |
+| `src/ingress/submit.ts`: seq 0 at intake, the live flush, the settle writes, the embed rows; new key `TRIAGE_USAGE_FLUSH_MS` | D59 |
+| `finish_report` sums the meter's rows; the tripwire no longer counts usage; `report.cost` and the `report.md` Cost section gain cache, USD and partial columns | D59 |
+| `GET /triage/:run_id` carries `usage`; the web usage panel, the Submissions table's Cost column and the runs list's Cost column | D59 |
+| `triage usage`; usage in `triage status`, `wait` and `run`; `tokens` in `runs reembed` | D59 |
+| Eval drafts and promoted eval cases carry no `cost` (`draftReport` in `src/report/feedback.ts`, `dropDraftCost` in `src/mock/promote.ts`) | D59 |
+| `test/contract/usage-attribution.contract.ts`: records the Flue events of one faux run with a delegate and the strong synthesis | D59 |
+
+A Postgres run store gets `0004_run_usage.sql` on the next start; the folder store needs nothing. Runs from before the change show `not recorded`.
+
+What Flue 2.0.8 puts on its events (checked in `@flue/runtime` dist and by the contract test):
+
+- `createFlueContext`'s `createEvent` stamps `instanceId` (the run id), `submissionId`, `agentName`, `v`, `eventIndex` and `timestamp` on every event. The harness adds `harness`; `Session.emit` adds `conversationId`, `session`, `operationId` and `turnId`.
+- Every turn carries the dispatch receipt's `submissionId`. A follow-up dispatch on the same run gets a new one, and all its turns carry it. So the per-run current seq and the HTTP 409 on ask while running, planned as a fallback, were not built.
+- `task_start` carries the delegate's name (`agent`) and a `taskId`. The delegate's turns carry that `taskId`, session `task:default:<taskId>` and parent session `default`.
+- The strong synthesis turn has harness `default`, session `default` and agent name `triage`, the same as a root turn, and no `taskId`. It runs as its own `prompt` operation that starts while the root operation is still open; the root's `operation` end event comes after it. The meter uses that. Its `operation` end event carries usage equal to the sum of its turns.
+- A `finish_required` continuation stays inside the root operation and is charged to `triage`.
+- `useAgentFinish` (and `settleRun`) runs before `agent.read(receipt)` resolves, and `submission_settled` arrives before it too; no turn comes after it. So the settle write sees every turn.
+- Faux turns report `cacheWrite` equal to input on the first turn and `cacheRead` on later ones, with `cost.total` 0.
+- Flue's `PromptUsage` has no `cacheWrite1h`.
+
+Embedding prices (`EMBEDDING_PRICES`, USD per million input tokens): `openai/text-embedding-3-small` 0.02, `openai/text-embedding-3-large` 0.13, `openai/text-embedding-ada-002` 0.10, from https://developers.openai.com/api/docs/pricing (standard tier), read 2026-09-26. pi-ai 0.83.0 has no embedding models in its anthropic (15) or openai (41) catalogs. Ollama is $0. Another OpenAI embedding model is unpriced.
+
+Deviations from the plan, kept:
+
+- Synthesis is found by the nested prompt operation, not by an envelope field or a marker in `synthesis.ts`, which is unchanged. The meter reads `operation_start`, `operation` and `submission_settled` for that structure and to clear it, but never adds their usage.
+- A classifier on a decision model takes the cost the provider reports (plan 3.5a); the plan's 3.2 had said decision costs would be ignored. `priceUsage` returns null for those specs, and the intake code passes the reported cost, or null.
+- When `decide()` refuses the answers, the provider has already returned usage, so that failed call keeps its real tokens and reported cost. Other failures after the request was sent record one failed call with 0 tokens. A timeout or abort counts as a failed call on the decision path and is not counted on the completion path, where no message exists.
+- `summariseUsage` takes `{ running }` instead of a run status. The CLI passes `status === 'running'` from `runStatusOf`, which is already false for a dead worker; the HTTP route passes the same rule through a new `isAlive` dependency, wired to `pidAlive`. The server now imports `pidAlive` from `src/cli/commands/status.command.ts`.
+- The runs list gained `usd_partial`, so it can mark a partly priced total.
+- The store refuses a count above 2,147,483,647, the same (model, agent, purpose) twice in one call, and a non-finite `usd` (the schema has `v.finite()`). It reads rows with `COLLATE "C"` so Postgres and the folder store give the same order.
+- `TRIAGE_USAGE_FLUSH_MS` has a maximum of 3,600,000; a larger value would overflow `setInterval`, which Node then runs every 1 ms. `keys.ts` has min 0, and `env.ts` refuses 1 to 1999. The flush timer is injected (`SettleDeps.usageFlushTimer`) instead of a clock.
+- Mock-mode embed rows are recorded as `faux/hash-embed` (the plan said only "marked fake"), so the run shows as fake. `EmbedUsage` has an optional `usageMissing`, so a missing count can be logged apart from a real 0.
+- `finish_report` no longer prices: `defaultPricing`, `PricingLookup`, `ModelPricing` and `FinishReportOptions.pricing` are gone, and `computeCost` is synchronous. The gap reads "cost is partial: no pricing for X; the total leaves it out". The null-cost line in `report.md` now reads "Not costed: no token usage was recorded for this run."
+- `triage wait`'s live stderr line adds `(partial)` when pricing is partial and shows `unknown` when nothing is priced. `runs reembed` counts tokens by wrapping the embedder in the command; `embed-run.ts` only passes `onUsage` through.
+- The web `UsagePanel` takes `running` and `now` as well, for "waiting for the first count" and the "updated Ns ago" ticker. The completed view without a report gained a side column for it.
+- New run event types: `usage_write_failed {submission_seq, final, error}`, `usage_flush_failed {submission_seq, error}`, `usage_unassigned {rows, calls, tokens}`, `usage_missing {submission_seq, agent, calls}`. All carry counts and class names only.
+
+Assumptions made, not verified against a real system:
+
+- The OpenAI (`usage.prompt_tokens`) and Ollama (`prompt_eval_count`) token fields are present in real responses. The test fixtures follow the documented shapes; they were not recorded from live calls.
+- `report.cost` covers every submission in memory when `finish_report` runs, which can be two when an HTTP ask lands on a running run. Only the eval driver reads it; the store rows stay exact per submission.
+
+Known gaps:
+
+- A report whose Cost section names a model id with a run of six or more digits (for example `anthropic/claude-haiku-4-5-20251001`) is refused by the `report.md` egress check in `src/report/write.ts`, so the report is never written. This was already true before D59; D59 adds the id to the partial line and to `cost.unpriced_models`. Today's configured specs have no such run. Blanking `cost` in the model-text check (as `run_id` and `env_label` are) would fix it.
+- A classifier on the fake decision provider is recorded under its `typesafe/*` spec with `usd` null, so a test or eval run that uses it shows partial pricing and is not marked fake. Production mock mode does not use that provider.
+- `droppedUsageEvents()` counts turns the meter could not store (a model or agent the schema refuses, a turn with no request model); nothing logs it yet.
+
+### No foreign keys in the run store (D60, 2026-09-26)
+
+- 2026-09-26: removed every foreign key from the run store, per the owner's rule in `src/runstore/migrations/AGENTS.md`. `0004_run_usage.sql` lost its `REFERENCES`; the new `0005_drop_foreign_keys.sql` drops the rest with a `DO` block over `pg_constraint`; the per-model embedding table DDL has none. `deleteRun` in `postgres.ts` deletes from every table itself; `putFeedback`, `putEmbedding` and `putUsage` check the run under `FOR KEY SHARE`; the feedback and embedding inserts are plain `VALUES` now. `fake-pg.ts` enforces no foreign key and cascades nothing. New contract cases: `deleteRun` clears every kind of row across two embedding models and leaves other runs alone; every write on a deleted run throws `RunNotFoundError`; `putReport` on an unknown run throws `RunNotFoundError`. The folder provider is unchanged.
+- A Postgres run store gets `0005_drop_foreign_keys.sql` on the next start. It was checked against fake-pg and the Postgres grammar (libpg-query, including the PL/pgSQL body), not against a live database.
 
 ## Commit trailer note
 

@@ -330,26 +330,46 @@ function formatInt(n: number): string {
   return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
+function formatUsd(usd: number): string {
+  return `$${usd.toFixed(4)}`;
+}
+
+// A report written before D59 has no cache fields and no usd per model, so a
+// missing number shows as '-'. A model named in unpriced_models shows
+// 'no pricing' instead of a USD figure.
 function cost(r: Report): string {
   if (r.cost === null) {
-    return 'Not costed: a model in this run has no pricing data.';
+    return 'Not costed: no token usage was recorded for this run.';
   }
   const c = r.cost;
-  const lines = [
-    `- Wall time: ${(c.wall_ms / 1000).toFixed(1)} s`,
-    `- USD total: ${c.usd_total === undefined ? 'not known' : `$${c.usd_total.toFixed(4)}`}`,
-    '',
-  ];
+  const unpriced = c.unpriced_models ?? [];
+  const total =
+    c.usd_total === undefined ? 'not known' : `${formatUsd(c.usd_total)}${unpriced.length > 0 ? ' (partial)' : ''}`;
+  const lines = [`- Wall time: ${(c.wall_ms / 1000).toFixed(1)} s`, `- USD total: ${total}`];
+  if (unpriced.length > 0) lines.push(`- Partial: no pricing for ${unpriced.map(codeSpan).join(', ')}`);
+  lines.push('');
   const models = Object.keys(c.models).sort();
   if (models.length === 0) {
     lines.push('No model calls recorded.');
   } else {
-    lines.push('| Model | Calls | Input tokens | Output tokens |', '| --- | ---: | ---: | ---: |');
+    const count = (n: number | undefined): string => (n === undefined ? '-' : formatInt(n));
+    lines.push(
+      '| Model | Calls | Input tokens | Cache read | Cache write | Output tokens | USD |',
+      '| --- | ---: | ---: | ---: | ---: | ---: | ---: |',
+    );
     for (const name of models) {
       const m = c.models[name]!;
-      lines.push(
-        `| ${codeSpan(name).replace(/\|/g, '\\|')} | ${formatInt(m.calls)} | ${formatInt(m.input_tokens)} | ${formatInt(m.output_tokens)} |`,
-      );
+      const usd = m.usd !== undefined ? formatUsd(m.usd) : unpriced.includes(name) ? 'no pricing' : '-';
+      const cells = [
+        codeSpan(name).replace(/\|/g, '\\|'),
+        formatInt(m.calls),
+        formatInt(m.input_tokens),
+        count(m.cache_read_tokens),
+        count(m.cache_write_tokens),
+        formatInt(m.output_tokens),
+        usd,
+      ];
+      lines.push(`| ${cells.join(' | ')} |`);
     }
   }
   return lines.join('\n');

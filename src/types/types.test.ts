@@ -361,6 +361,22 @@ describe('Report', () => {
     expect(parses(ReportSchema, { ...report(), root_cause: null, cost: null })).toBe(true);
   });
 
+  test('cost parses with and without the D59 fields', () => {
+    const r = report();
+    // A report from before D59: no cache fields, no usd per model, no unpriced_models.
+    expect(parses(ReportSchema, r)).toBe(true);
+    const models = {
+      'anthropic/test': { calls: 2, input_tokens: 100, output_tokens: 50, cache_read_tokens: 10, cache_write_tokens: 5, usd: 0.01 },
+      'openai/test': { calls: 1, input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_write_tokens: 0 },
+    };
+    const cost = { models, wall_ms: 1200, usd_total: 0.01, unpriced_models: ['openai/test'] };
+    expect(parses(ReportSchema, { ...r, cost })).toBe(true);
+    const bad = (m: Record<string, unknown>) => ({ ...r, cost: { ...cost, models: { 'anthropic/test': { ...models['anthropic/test'], ...m } } } });
+    expect(parses(ReportSchema, bad({ usd: -1 }))).toBe(false);
+    expect(parses(ReportSchema, bad({ cache_read_tokens: 1.5 }))).toBe(false);
+    expect(parses(ReportSchema, { ...r, cost: { ...cost, unpriced_models: 'openai/test' } })).toBe(false);
+  });
+
   test('repo_commits needs a hex commit', () => {
     expect(parses(ReportSchema, { ...report(), repo_commits: [{ repo: 'r', commit: 'main' }] })).toBe(false);
   });
@@ -437,7 +453,7 @@ describe('module rules', () => {
 
   test('every schema module is present', () => {
     expect(sources.sort()).toEqual(
-      ['audit.ts', 'block.ts', 'classification.ts', 'core.ts', 'findings.ts', 'id-chain.ts', 'input-request.ts', 'report.ts', 'request.ts', 'tool-result.ts'].sort(),
+      ['audit.ts', 'block.ts', 'classification.ts', 'core.ts', 'findings.ts', 'id-chain.ts', 'input-request.ts', 'report.ts', 'request.ts', 'tool-result.ts', 'usage.ts'].sort(),
     );
   });
 

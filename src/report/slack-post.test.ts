@@ -98,6 +98,7 @@ function runRecord(o: { report?: Report | null; source?: Source; requestedBy?: s
     feedback: [],
     feedback_latest: null,
     embeddings: [],
+    usage: [],
   };
   return (o.slackTarget !== undefined ? { ...record, slack_target: o.slackTarget } : record) as RunRecord;
 }

@@ -1,9 +1,9 @@
 // OpenAI embeddings: POST https://api.openai.com/v1/embeddings with
 // { model, input[] } and a bearer key, answered with
-// { data: [{ index, embedding }] }. The fetch is injected and the key only
-// ever goes into the Authorization header.
+// { data: [{ index, embedding }], usage: { prompt_tokens } }. The fetch is
+// injected and the key only ever goes into the Authorization header.
 
-import { EmbeddingError, isVector, postJson, type EmbedClient, type FetchLike } from './spec.ts';
+import { EmbeddingError, isVector, postJson, reportedTokens, type EmbedClient, type FetchLike } from './spec.ts';
 
 export const OPENAI_EMBEDDINGS_URL = 'https://api.openai.com/v1/embeddings';
 
@@ -16,7 +16,7 @@ export type OpenAiClientConfig = {
 
 export function createOpenAiClient(cfg: OpenAiClientConfig): EmbedClient {
   return async (texts, opts = {}) => {
-    if (texts.length === 0) return [];
+    if (texts.length === 0) return { vectors: [], inputTokens: 0 };
     const body = await postJson({
       provider: 'openai',
       fetch: cfg.fetch,
@@ -26,8 +26,14 @@ export function createOpenAiClient(cfg: OpenAiClientConfig): EmbedClient {
       timeoutMs: cfg.timeoutMs,
       ...(opts.signal ? { signal: opts.signal } : {}),
     });
-    return parseOpenAiResponse(body, texts.length);
+    return { vectors: parseOpenAiResponse(body, texts.length), inputTokens: openAiInputTokens(body) };
   };
+}
+
+/** usage.prompt_tokens from the response body; null when it is missing or not a count. */
+export function openAiInputTokens(body: unknown): number | null {
+  const usage = (body as { usage?: unknown } | null)?.usage;
+  return reportedTokens((usage as { prompt_tokens?: unknown } | null | undefined)?.prompt_tokens);
 }
 
 type Item = { index: number; embedding: number[] };

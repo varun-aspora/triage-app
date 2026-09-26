@@ -123,6 +123,16 @@ function filesUnder(dir: string): string[] {
   return readdirSync(dir, { recursive: true }).map(String);
 }
 
+// Keys that would carry token counts or spend: cost, usd*, *tokens*, at any depth.
+function usageKeys(value: unknown, path = ''): string[] {
+  if (Array.isArray(value)) return value.flatMap((item, i) => usageKeys(item, `${path}[${i}]`));
+  if (value === null || typeof value !== 'object') return [];
+  return Object.entries(value).flatMap(([k, item]) => {
+    const at = path === '' ? k : `${path}.${k}`;
+    return k === 'cost' || k.startsWith('usd') || k.includes('tokens') ? [at] : usageKeys(item, at);
+  });
+}
+
 async function rejected(p: Promise<unknown>): Promise<FeedbackError> {
   try {
     await p;
@@ -466,7 +476,29 @@ describe('draft path', () => {
     expect(existsSync(join(home, 'evals', 'cases'))).toBe(false);
 
     const copy = JSON.parse(readFileSync(r.draft_files!.report_json, 'utf8'));
-    expect(copy).toEqual((await s.store.getRun(RUN))?.report);
+    const { cost: _cost, ...rest } = (await s.store.getRun(RUN))!.report!;
+    expect(copy).toEqual(rest);
+  });
+
+  test('the draft report.json has no cost key, while the stored report keeps it', async () => {
+    const s = await setup();
+    const r = await recordFeedback(RUN, valid, s.deps);
+    const text = readFileSync(r.draft_files!.report_json, 'utf8');
+    const copy = JSON.parse(text);
+    expect(Object.hasOwn(copy, 'cost')).toBe(false);
+    expect(usageKeys(copy)).toEqual([]);
+    expect(text).not.toContain('"cost"');
+    expect(usageKeys(frontMatter(readFileSync(r.draft_files!.feedback_md, 'utf8')))).toEqual([]);
+    expect((await s.store.getRun(RUN))?.report?.cost).toEqual((sampleReport as unknown as Report).cost);
+  });
+
+  test('a report with cost null also leaves the key out of the draft', async () => {
+    const s = await setup();
+    const run = '01J8ZQ7XK3PSEDRMNABCDEFGH4';
+    await seedRun(s.store, run, false);
+    await s.store.putReport(run, 1, redactPersisted({ ...report(run), cost: null }), redactPersisted('# report\n'));
+    const r = await recordFeedback(run, valid, s.deps);
+    expect(Object.hasOwn(JSON.parse(readFileSync(r.draft_files!.report_json, 'utf8')), 'cost')).toBe(false);
   });
 
   test('a second call rewrites the same draft and still writes nothing under evals/cases', async () => {

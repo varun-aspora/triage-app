@@ -13,7 +13,10 @@
 // fixtures/shared/....
 //
 // An eval case draft folder is renamed to evals/cases/<case_id>/ once every
-// file in it passes the same check.
+// file in it passes the same check. Before the check, the cost key is dropped
+// from the draft's report.json in place (D59), so no promotion path carries a
+// run's token counts or spend into evals/cases, drafts written before
+// feedback.ts stopped copying it included.
 //
 // Refusals are returned, not thrown, and name patterns, fields and file names,
 // never values. Declined items stay where they are. Nothing here runs git or
@@ -22,6 +25,7 @@ import { lstat, mkdir, readdir, readFile, realpath, rename, rm, unlink } from 'n
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import * as v from 'valibot';
 import { checkEgress, type EgressResult, type PatternName } from '../gate/redact.ts';
+import { DRAFT_REPORT_FILE } from '../report/feedback.ts';
 import { writeFileAtomic } from '../report/run-folder.ts';
 import { RunIdSchema } from '../types/core.ts';
 import { canonicalJson, hashKeyString, keyString, semanticKey, SemanticKeyError } from './key.ts';
@@ -259,6 +263,7 @@ async function promoteEvalCase(item: EvalCaseReviewItem, o: Resolved, refuse: Re
   const walked = await walkFiles(source.path);
   if (walked.symlinks.length > 0) return refuse(`draft holds symlinks: ${walked.symlinks.join(', ')}`);
   if (walked.files.length === 0) return refuse('draft folder has no files');
+  if (walked.files.includes(DRAFT_REPORT_FILE)) await dropDraftCost(join(source.path, DRAFT_REPORT_FILE));
 
   const failures: string[] = [];
   const patterns = new Set<PatternName>();
@@ -294,6 +299,30 @@ async function promoteEvalCase(item: EvalCaseReviewItem, o: Resolved, refuse: Re
   await mkdir(join(root, CASES_DIR), { recursive: true });
   await rename(source.path, target);
   return { status: 'promoted', type: 'eval_case', from: item.path, to: target };
+}
+
+/**
+ * Rewrites a draft's report.json in place without its cost key (D59).
+ * Anything unexpected (no file, a symlink, not JSON, not an object, no cost
+ * key) is left as it is for the checks that follow to accept or refuse.
+ * Returns whether the file was rewritten.
+ */
+export async function dropDraftCost(path: string): Promise<boolean> {
+  try {
+    if (!(await lstat(path)).isFile()) return false;
+  } catch {
+    return false;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(path, 'utf8'));
+  } catch {
+    return false;
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed) || !('cost' in parsed)) return false;
+  const { cost: _cost, ...rest } = parsed as Record<string, unknown>;
+  await writeFileAtomic(path, `${JSON.stringify(rest, null, 2)}\n`);
+  return true;
 }
 
 // ------------------------------------------------------------------ decline

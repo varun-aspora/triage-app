@@ -1,12 +1,14 @@
-// The --json shapes of run, start, wait, status, ask, input and resume. Each command checks
-// its document against the schema here before printing it with printJson
-// from src/cli/output.ts, so a shape cannot drift without a test failing.
+// The --json shapes of run, start, wait, status, usage, ask, input and
+// resume. Each command checks its document against the schema here before
+// printing it with printJson from src/cli/output.ts, so a shape cannot drift
+// without a test failing.
 import * as v from 'valibot';
 import { PreflightWarningSchema } from '../../types/classification.ts';
 import { ReportStatusSchema, RunIdSchema, TierSchema } from '../../types/core.ts';
 import { RunPhaseSchema } from '../../runstore/types.ts';
 import { InputRequestSchema, QuestionIdSchema } from '../../types/input-request.ts';
 import { BlockRecordSchema } from '../../types/block.ts';
+import { RunUsageViewSchema, USAGE_AGENT_PATTERN, UsageModelSchema, UsageTotalsSchema } from '../../types/usage.ts';
 import { EXIT, printJson } from '../output.ts';
 import type { CliIo } from '../types.ts';
 
@@ -40,6 +42,23 @@ export const StoredReportSchema = v.looseObject({
 export const StartOutputSchema = v.strictObject({ run_id: RunIdSchema });
 export type StartOutput = v.InferOutput<typeof StartOutputSchema>;
 
+/** One totals bucket of a run's usage (D59), strict. */
+export const UsageTotalsOutputSchema = v.strictObject(UsageTotalsSchema.entries);
+
+/**
+ * A run's usage as src/usage/summary.ts builds it, strict: numbers, model
+ * specs and agent names only. Breakdown keys are checked the same way as the
+ * rows they come from.
+ */
+export const UsageViewSchema = v.strictObject({
+  ...RunUsageViewSchema.entries,
+  total: UsageTotalsOutputSchema,
+  by_model: v.record(UsageModelSchema, UsageTotalsOutputSchema),
+  by_agent: v.record(v.pipe(v.string(), v.regex(USAGE_AGENT_PATTERN)), UsageTotalsOutputSchema),
+  by_submission: v.record(v.pipe(v.string(), v.regex(/^(0|[1-9]\d{0,8})$/)), UsageTotalsOutputSchema),
+});
+export type UsageView = v.InferOutput<typeof UsageViewSchema>;
+
 export const WAIT_STATUSES = ['completed', 'failed', 'stalled', 'timeout', 'needs_input', 'stopped', 'blocked'] as const;
 
 /** `triage wait --json`, and `triage run --json` (completed or failed only). */
@@ -56,6 +75,8 @@ export const WaitOutputSchema = v.strictObject({
   input_request: v.optional(InputRequestSchema),
   /** The open block, with status blocked. */
   block: v.optional(BlockRecordSchema),
+  /** The whole run's usage, when any is recorded. Absent for a run from before D59. */
+  usage: v.optional(UsageViewSchema),
 });
 export type WaitOutput = v.InferOutput<typeof WaitOutputSchema>;
 
@@ -77,8 +98,21 @@ export const StatusOutputSchema = v.strictObject({
   input_request: v.optional(InputRequestSchema),
   /** The open block, with status blocked. */
   block: v.optional(BlockRecordSchema),
+  /** The run's usage, when any is recorded. Absent for a run from before D59. */
+  usage: v.optional(UsageViewSchema),
 });
 export type StatusOutput = v.InferOutput<typeof StatusOutputSchema>;
+
+export const USAGE_BREAKDOWNS = ['model', 'agent', 'submission'] as const;
+export type UsageBreakdown = (typeof USAGE_BREAKDOWNS)[number];
+
+/** `triage usage --json`. usage is always there; recorded false says nothing was counted. */
+export const UsageOutputSchema = v.strictObject({
+  run_id: RunIdSchema,
+  status: RunStatusSchema,
+  usage: UsageViewSchema,
+});
+export type UsageOutput = v.InferOutput<typeof UsageOutputSchema>;
 
 /** `triage ask --json`. submission_id is the run store seq the follow-up gets. */
 export const AskOutputSchema = v.strictObject({

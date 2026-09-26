@@ -25,9 +25,12 @@
 //   5. repo_commits: one { repo, commit } per repo in the code evidence, from
 //      the CommitReader (currentCommit, T11.4). A repo without a commit gets
 //      a gap.
-//   6. cost: token usage per model from the UsageReader (T06.7 runUsage),
-//      priced with the pi-ai model metadata cost fields. A model without
-//      pricing, or no reader, gives cost null and a gap.
+//   6. cost: the run's usage rows from the UsageReader (the usage meter's
+//      runUsageInMemory, D59), summed per model. Each row was priced when it
+//      was counted, so nothing is priced here. usd_total is the sum of the
+//      priced rows; a model with an unpriced row has no usd, is listed in
+//      unpriced_models and gets a gap, and the total is partial. No reader or
+//      no rows gives cost null and a gap.
 //   7. initialData.preflight_warnings (or the stored ones) become gaps.
 //   8. writeReport() with the ingress names (initialData.redaction_names plus
 //      deps.run.redactionNames). A refusal is returned as a refused envelope
@@ -39,7 +42,7 @@
 // The tool is exempt from the tool-call budget (BUDGET_EXEMPT_TOOLS): it
 // never asks the budget, so it still works after the run budget ran out.
 //
-// synthesis.ts and models.ts are imported lazily inside run(). models.ts
+// synthesis.ts is imported lazily inside run(). It imports models.ts, which
 // loads config at import, and the generated tool list is imported by many
 // modules and tests that should not do that.
 
@@ -58,6 +61,7 @@ import { ENTITIES, type Entity, type RunId, type Tier } from '../types/core.ts';
 import type { CodeFindings, EntityFindings } from '../types/findings.ts';
 import { type RepoCommit, type ReportCost, type ReportDraft, ReportDraftSchema, RepoCommitSchema } from '../types/report.ts';
 import { ok, refused, type ToolEnvelope } from '../types/tool-result.ts';
+import type { UsageRow } from '../types/usage.ts';
 import type { ToolContext, ToolModule } from './types.ts';
 import type {} from './_lib/context.ts';
 
@@ -86,18 +90,10 @@ const MAX_LISTED_PATHS = 12;
 
 // ------------------------------------------------------------------ deps
 
-/** Token usage for one model in the run. */
-export type UsageEntry = {
-  readonly input_tokens: number;
-  readonly output_tokens: number;
-  /** Model calls; 0 when the reader does not count them. */
-  readonly calls?: number;
-};
+/** The run's usage rows, one per model x agent x purpose. */
+export type RunUsage = readonly UsageRow[];
 
-/** Usage per model spec ('provider/model') for one run. */
-export type RunUsage = Readonly<Record<string, UsageEntry>>;
-
-/** Reads a run's token usage. T06.8 backs it with T06.7's runUsage(runId). */
+/** Reads a run's usage rows. triage-plan.ts backs it with the meter's runUsageInMemory. */
 export type UsageReader = (runId: RunId) => RunUsage | Promise<RunUsage>;
 
 /** The commit a repo checkout is on. Backed by currentCommit (T11.4). */
@@ -123,33 +119,11 @@ export function commitReaderFor(deps: Omit<ReposDeps, 'signal'>): CommitReader {
   return (repo, signal) => currentCommit(repo, { ...deps, ...(signal !== undefined ? { signal } : {}) });
 }
 
-// ------------------------------------------------------------------ pricing
-
-/** USD per million tokens, as pi-ai model metadata gives it. */
-export type ModelPricing = { readonly input: number; readonly output: number };
-
-/** Pricing for a model spec, or undefined when no metadata has it. */
-export type PricingLookup = (spec: string) => ModelPricing | undefined | Promise<ModelPricing | undefined>;
-
-function isRate(x: unknown): x is number {
-  return typeof x === 'number' && Number.isFinite(x) && x >= 0;
-}
-
-/** Reads the cost fields of the pi-ai model metadata that models.ts resolves. */
-export const defaultPricing: PricingLookup = async (spec) => {
-  const { lookupModel } = await import('../models.ts');
-  const cost = (lookupModel(spec) as { cost?: { input?: unknown; output?: unknown } } | undefined)?.cost;
-  if (cost === undefined || !isRate(cost.input) || !isRate(cost.output)) return undefined;
-  return { input: cost.input, output: cost.output };
-};
-
 // ------------------------------------------------------------------ options
 
 export type FinishReportOptions = {
   /** The report writer. Defaults to writeReport (T08.4). */
   readonly writeReport?: (args: WriteReportArgs) => Promise<WriteReportResult>;
-  /** Model pricing. Defaults to the pi-ai metadata through models.ts. */
-  readonly pricing?: PricingLookup;
 };
 
 // ------------------------------------------------------------------ text
@@ -172,6 +146,11 @@ export const SYNTHESIS_SKIPPED_GAP =
   'strong-model synthesis was not run again after its reports were refused; this report is the orchestrator draft';
 
 export const NO_USAGE_GAP = 'cost not recorded: no token usage was available for this run';
+
+/** The gap for a partial total: which models have no price. */
+export function unpricedGap(models: readonly string[]): string {
+  return `cost is partial: no pricing for ${models.join(', ')}; the total leaves ${models.length === 1 ? 'it' : 'them'} out`;
+}
 
 // ------------------------------------------------------------------ helpers
 
@@ -239,31 +218,68 @@ function runFacts(init: TriageInit | undefined, run: RunRecord, draft: ReportDra
 
 type CostResult = { readonly cost: ReportCost | null; readonly gaps: string[] };
 
-/** Prices the run's usage. Any model without pricing makes the cost null with a gap. */
-export async function computeCost(
-  usage: RunUsage | undefined,
-  pricing: PricingLookup,
-  wallMs: number,
-): Promise<CostResult> {
-  if (usage === undefined) return { cost: null, gaps: [NO_USAGE_GAP] };
+type ModelSum = {
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  usd: number;
+  priced: boolean;
+};
+
+function count(n: unknown): number {
+  return typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0;
+}
+
+function roundUsd(usd: number): number {
+  return Math.round(usd * 1_000_000) / 1_000_000;
+}
+
+/**
+ * Sums the run's usage rows per model. usd_total is the sum of the priced
+ * rows, so it is partial when a model is unpriced: that model has no usd, is
+ * named in unpriced_models and gets a gap. No reader or no rows gives cost
+ * null and a gap.
+ */
+export function computeCost(usage: RunUsage | undefined, wallMs: number): CostResult {
+  if (usage === undefined || usage.length === 0) return { cost: null, gaps: [NO_USAGE_GAP] };
+  const sums = new Map<string, ModelSum>();
+  let usd = 0;
+  for (const row of usage) {
+    let m = sums.get(row.model);
+    if (m === undefined) {
+      m = { calls: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, usd: 0, priced: true };
+      sums.set(row.model, m);
+    }
+    m.calls += count(row.calls);
+    m.input_tokens += count(row.input_tokens);
+    m.output_tokens += count(row.output_tokens);
+    m.cache_read_tokens += count(row.cache_read_tokens);
+    m.cache_write_tokens += count(row.cache_write_tokens);
+    const rowUsd = row.usd;
+    if (typeof rowUsd === 'number' && Number.isFinite(rowUsd) && rowUsd >= 0) {
+      m.usd += rowUsd;
+      usd += rowUsd;
+    } else {
+      m.priced = false;
+    }
+  }
   const models: ReportCost['models'] = {};
   const unpriced: string[] = [];
-  let usd = 0;
-  for (const spec of Object.keys(usage).sort()) {
-    const u = usage[spec] as UsageEntry;
-    const input = Math.max(0, Math.trunc(u.input_tokens));
-    const output = Math.max(0, Math.trunc(u.output_tokens));
-    models[spec] = { calls: Math.max(0, Math.trunc(u.calls ?? 0)), input_tokens: input, output_tokens: output };
-    const price = await pricing(spec);
-    if (price === undefined) unpriced.push(spec);
-    else usd += (input * price.input + output * price.output) / 1_000_000;
-  }
-  if (unpriced.length > 0) {
-    return { cost: null, gaps: [`cost not computed: no pricing metadata for ${unpriced.join(', ')}`] };
+  for (const spec of [...sums.keys()].sort()) {
+    const { priced, usd: modelUsd, ...counts } = sums.get(spec) as ModelSum;
+    models[spec] = priced ? { ...counts, usd: roundUsd(modelUsd) } : counts;
+    if (!priced) unpriced.push(spec);
   }
   return {
-    cost: { models, wall_ms: Math.max(0, Math.round(wallMs)), usd_total: Math.round(usd * 1_000_000) / 1_000_000 },
-    gaps: [],
+    cost: {
+      models,
+      wall_ms: Math.max(0, Math.round(wallMs)),
+      usd_total: roundUsd(usd),
+      ...(unpriced.length > 0 ? { unpriced_models: unpriced } : {}),
+    },
+    gaps: unpriced.length > 0 ? [unpricedGap(unpriced)] : [],
   };
 }
 
@@ -313,7 +329,6 @@ type FinishRunContext = {
 /** Builds the tool. toolModule.create() calls it with the defaults; tests pass fakes. */
 export function createFinishReportTool(ctx: ToolContext, options: FinishReportOptions = {}): ToolDefinition {
   const write = options.writeReport ?? writeReport;
-  const pricing = options.pricing ?? defaultPricing;
 
   const run = async ({ data, signal, harness }: FinishRunContext): Promise<ToolEnvelope> => {
     signal?.throwIfAborted();
@@ -419,7 +434,7 @@ export function createFinishReportTool(ctx: ToolContext, options: FinishReportOp
 
     // 6. Cost, read after synthesis so its turns are counted.
     const usage = deps.usage === undefined ? undefined : await deps.usage(ctx.runId);
-    const cost = await computeCost(usage, pricing, wallMsSince(record.created_at, now()));
+    const cost = computeCost(usage, wallMsSince(record.created_at, now()));
 
     // 7. Pre-flight warnings.
     const warnings = init?.preflight_warnings ?? record.classification?.preflight_warnings ?? [];

@@ -171,6 +171,7 @@ function record(phase: RunPhase, extra: Partial<RunRecord> = {}): RunRecord {
     feedback: [],
     feedback_latest: null,
     embeddings: [],
+    usage: [],
     ...extra,
   };
 }

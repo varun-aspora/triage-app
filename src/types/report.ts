@@ -99,18 +99,30 @@ export const RepoCommitSchema = v.object({
 });
 export type RepoCommit = v.InferOutput<typeof RepoCommitSchema>;
 
+const TokenCount = v.pipe(v.number(), v.integer(), v.minValue(0));
+
+// Usage per model in the report (D59). The cache fields and usd are optional
+// so reports written before D59 still parse.
 export const ModelUsageSchema = v.object({
-  calls: v.pipe(v.number(), v.integer(), v.minValue(0)),
-  input_tokens: v.pipe(v.number(), v.integer(), v.minValue(0)),
-  output_tokens: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  calls: TokenCount,
+  input_tokens: TokenCount,
+  output_tokens: TokenCount,
+  cache_read_tokens: v.optional(TokenCount),
+  cache_write_tokens: v.optional(TokenCount),
+  // Absent when the model has no price; it is then listed in unpriced_models.
+  usd: v.optional(v.pipe(v.number(), v.minValue(0))),
 });
 export type ModelUsage = v.InferOutput<typeof ModelUsageSchema>;
 
 export const ReportCostSchema = v.object({
   models: v.record(v.string(), ModelUsageSchema),
   wall_ms: v.pipe(v.number(), v.minValue(0)),
-  // Absent when a model has no pricing metadata; the report then has a gap.
+  // The sum of the priced models. Since D59 it is set whenever usage exists,
+  // and leaves out the models in unpriced_models. Reports written before D59
+  // may lack it.
   usd_total: v.optional(v.pipe(v.number(), v.minValue(0))),
+  // Models with no price, sorted. Absent or empty: the total is complete.
+  unpriced_models: v.optional(v.array(v.string())),
 });
 export type ReportCost = v.InferOutput<typeof ReportCostSchema>;
 
@@ -138,7 +150,8 @@ export const ReportSchema = v.object({
   escalation_reasons: v.array(v.string()),
   images_seen: v.boolean(),
   repo_commits: v.array(RepoCommitSchema),
-  // Null when a model in the run has no pricing and usage cannot be costed.
+  // Null when no token usage was recorded for the run (D59). Before D59 it was
+  // also null when a model had no pricing.
   cost: v.nullable(ReportCostSchema),
 });
 export type Report = v.InferOutput<typeof ReportSchema>;

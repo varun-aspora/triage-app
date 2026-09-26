@@ -7,7 +7,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import type { Embedder } from '../embed/index.ts';
+import type { EmbedUsage, Embedder } from '../embed/index.ts';
 import { redactPersisted, type Persisted } from '../gate/redact.ts';
 import {
   CONTRACT_EPOCH,
@@ -333,6 +333,48 @@ describe('priorCasesFor', () => {
     await seedCurrent(store);
     const embedder: Embedder = { model: MODEL, embed: async () => [] };
     expect(await priorCasesFor(ON, store, embedder, RUN_A)).toEqual({ cases: [], gaps: [PRIOR_CASES_UNAVAILABLE] });
+  });
+});
+
+describe('priorCasesFor usage (D59)', () => {
+  // A fake that reports usage the way createEmbedder does: once per call, after it settles.
+  function meteredEmbedder(fail?: Error): Embedder {
+    return {
+      model: MODEL,
+      embed: async (texts, opts) => {
+        if (fail !== undefined) {
+          opts?.onUsage?.({ model: MODEL, inputTokens: 0, failed: true });
+          throw fail;
+        }
+        opts?.onUsage?.({ model: MODEL, inputTokens: 7 * texts.length, failed: false });
+        return texts.map(() => [1, 0, 0]);
+      },
+    };
+  }
+
+  test('onUsage reaches the one embed call', async () => {
+    const store = folderStore();
+    await seedCurrent(store);
+    await seedRun(store, RUN_B, { sim: 0.9 });
+    const seen: EmbedUsage[] = [];
+    const r = await priorCasesFor(ON, store, meteredEmbedder(), RUN_A, { now: () => NOW, onUsage: (u) => seen.push(u) });
+    expect(r.cases).toHaveLength(1);
+    expect(seen).toEqual([{ model: MODEL, inputTokens: 7, failed: false }]);
+  });
+
+  test('a failed embed call is still reported, and the result is the usual gap', async () => {
+    const store = folderStore();
+    await seedCurrent(store);
+    const seen: EmbedUsage[] = [];
+    const r = await priorCasesFor(ON, store, meteredEmbedder(new Error('down')), RUN_A, { onUsage: (u) => seen.push(u) });
+    expect(r).toEqual({ cases: [], gaps: [PRIOR_CASES_UNAVAILABLE] });
+    expect(seen).toEqual([{ model: MODEL, inputTokens: 0, failed: true }]);
+  });
+
+  test('flag off: no embed call, so no usage', async () => {
+    const seen: EmbedUsage[] = [];
+    await priorCasesFor(OFF, folderStore(), meteredEmbedder(), RUN_A, { onUsage: (u) => seen.push(u) });
+    expect(seen).toEqual([]);
   });
 });
 

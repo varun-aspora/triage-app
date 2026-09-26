@@ -127,9 +127,10 @@ export function registerProviders(config: Config): boolean {
   const baseUrl = config.providers.ollamaBaseUrl;
   if (baseUrl === undefined) return false;
   const ids = ollamaModelIds(config);
-  const signature = JSON.stringify([baseUrl, ids]);
+  const apiKey = config.providers.ollamaApiKey;
+  const signature = JSON.stringify([baseUrl, ids, apiKey ?? null]);
   if (registeredOllama === signature) return false;
-  setProvider(ollamaProvider(baseUrl, ids));
+  setProvider(ollamaProvider(baseUrl, ids, apiKey));
   registeredOllama = signature;
   return true;
 }
@@ -144,17 +145,18 @@ function ollamaModelIds(config: Config): string[] {
   return [...ids].sort();
 }
 
-// Ollama's OpenAI-compatible endpoint. Ollama ignores the API key, but pi-ai's
-// openai-completions API refuses to send a request without one, so the provider
-// resolves to a fixed placeholder. Models are declared text-only:
+// Ollama's OpenAI-compatible endpoint. The provider sends OLLAMA_API_KEY, for an
+// Ollama behind a proxy that checks it. When the key is blank it sends the
+// placeholder 'ollama': a plain Ollama ignores the key, but pi-ai's
+// openai-completions API refuses to send a request without one. Models are declared text-only:
 // Ollama does not report vision support up front, so the tier policy treats them
 // as unable to take images. Context and output sizes follow the Flue guide example.
-export function ollamaProvider(baseUrl: string, ids: readonly string[]) {
+export function ollamaProvider(baseUrl: string, ids: readonly string[], apiKey: string = OLLAMA) {
   return createProvider({
     id: OLLAMA,
     name: 'Ollama (local)',
     baseUrl,
-    auth: { apiKey: { name: 'Ollama (keyless)', resolve: async () => ({ auth: { apiKey: 'ollama' } }) } },
+    auth: { apiKey: { name: 'OLLAMA_API_KEY', resolve: async () => ({ auth: { apiKey } }) } },
     models: ids.map((id) => ({
       id,
       name: `${id} (ollama)`,

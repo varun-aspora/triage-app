@@ -17,6 +17,18 @@
 //
 // Timestamps come from the injected clock and are passed as parameters, never
 // taken from now() in SQL, so a fake clock drives expiry in tests.
+//
+// Token usage (D59) lives in triage.run_usage, one row per submission, model,
+// agent and purpose. putUsage replaces one seq's rows in a transaction and
+// never moves updated_at. It takes only a key-share lock on the run row, so
+// it never waits on a plain update of the run.
+//
+// There are no foreign keys (D60, migrations/AGENTS.md). Every insert first
+// checks its run in the same transaction, locking the run row FOR UPDATE when
+// it allocates a number and FOR KEY SHARE otherwise; putReport also checks its
+// submission. Updates of triage.runs check the run through RETURNING.
+// deleteRun deletes the run row first and then the run's rows in every other
+// table, so a write that is waiting on the run row finds it gone.
 
 import { createHash } from 'node:crypto';
 import * as v from 'valibot';
@@ -25,6 +37,7 @@ import type { Persisted } from '../gate/redact.ts';
 import type { RunId } from '../types/core.ts';
 import type { Report } from '../types/report.ts';
 import type { TriageRequest } from '../types/request.ts';
+import { UsageRowSchema, type SubmissionUsage, type UsageRow } from '../types/usage.ts';
 import {
   EMBEDDING_KINDS,
   EmbeddingInputSchema,
@@ -42,6 +55,7 @@ import {
   assertEvidenceKey,
   assertPersisted,
   assertRunId,
+  checkUsage,
   type ClassificationRecord,
   type EmbeddingInput,
   type EmbeddingKind,
@@ -182,6 +196,9 @@ ON CONFLICT (run_id) DO NOTHING`,
 
   lockRun: 'SELECT run_id FROM triage.runs WHERE run_id = $1 FOR UPDATE',
   runExists: 'SELECT run_id FROM triage.runs WHERE run_id = $1',
+  // The lock a foreign key check used to take (D60): it waits on FOR UPDATE
+  // and on a delete of the run row, never on a plain UPDATE.
+  shareRun: 'SELECT run_id FROM triage.runs WHERE run_id = $1 FOR KEY SHARE',
 
   // A run in phase $7 (stopped) stays there unless $6 (resume) is set.
   setPhase: `UPDATE triage.runs
@@ -242,8 +259,7 @@ RETURNING seq`,
   setRunReport: 'UPDATE triage.runs SET report_status = $2::text, escalated = $3::boolean WHERE run_id = $1',
 
   insertFeedback: `INSERT INTO triage.feedback (run_id, verdict, given_by, given_at, body, body_md)
-SELECT run_id, $2::text, $3::text, $4::timestamptz, $5::jsonb, $6::text FROM triage.runs WHERE run_id = $1
-RETURNING id`,
+VALUES ($1, $2::text, $3::text, $4::timestamptz, $5::jsonb, $6::text)`,
 
   claimKey: `INSERT INTO triage.idempotency AS i (key_sha256, run_id, expires_at)
 VALUES ($1, $2, $3::timestamptz)
@@ -264,9 +280,15 @@ FROM triage.submissions s LEFT JOIN triage.reports r ON r.run_id = s.run_id AND 
 WHERE s.run_id = $1 ORDER BY s.seq`,
   feedback: 'SELECT body FROM triage.feedback WHERE run_id = $1 ORDER BY id',
 
+  // SUM(usd) is null when no row has a price; the token sum is null when the run has no rows.
+  // usd_unpriced with a non-null usd_total makes the total partial.
   listRuns: `SELECT r.run_id, r.created_at, r.updated_at, r.phase, r.category, r.tier_final, r.report_status,
   (SELECT COUNT(*) FROM triage.submissions s WHERE s.run_id = r.run_id) AS submissions,
-  (SELECT f.verdict FROM triage.feedback f WHERE f.run_id = r.run_id ORDER BY f.id DESC LIMIT 1) AS feedback_verdict
+  (SELECT f.verdict FROM triage.feedback f WHERE f.run_id = r.run_id ORDER BY f.id DESC LIMIT 1) AS feedback_verdict,
+  (SELECT SUM(u.usd) FROM triage.run_usage u WHERE u.run_id = r.run_id) AS usd_total,
+  (SELECT SUM(u.input_tokens::bigint + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens)::bigint
+    FROM triage.run_usage u WHERE u.run_id = r.run_id) AS tokens_total,
+  EXISTS (SELECT 1 FROM triage.run_usage u WHERE u.run_id = r.run_id AND u.usd IS NULL) AS usd_unpriced
 FROM triage.runs r
 WHERE ($1::timestamptz IS NULL OR r.created_at >= $1::timestamptz)
   AND ($2::text IS NULL OR r.phase = $2::text)
@@ -275,7 +297,26 @@ ORDER BY r.created_at DESC, r.run_id DESC
 LIMIT $4::bigint`,
   listExpired: 'SELECT run_id FROM triage.runs WHERE created_at < $1::timestamptz ORDER BY created_at, run_id',
 
+  // deleteRun (D60) runs these in order, in one transaction, then the
+  // run's rows in every embedding table and dropKeysForRun.
   deleteRun: 'DELETE FROM triage.runs WHERE run_id = $1 RETURNING run_id',
+  deleteSubmissions: 'DELETE FROM triage.submissions WHERE run_id = $1',
+  deleteEvidence: 'DELETE FROM triage.evidence WHERE run_id = $1',
+  deleteReports: 'DELETE FROM triage.reports WHERE run_id = $1',
+  deleteFeedback: 'DELETE FROM triage.feedback WHERE run_id = $1',
+  deleteRunUsage: 'DELETE FROM triage.run_usage WHERE run_id = $1',
+
+  // Usage (D59). A non-final write stops when the seq already holds final rows.
+  usageFinal: 'SELECT 1 FROM triage.run_usage WHERE run_id = $1 AND seq = $2 AND final LIMIT 1',
+  deleteUsage: 'DELETE FROM triage.run_usage WHERE run_id = $1 AND seq = $2',
+  insertUsage: `INSERT INTO triage.run_usage (run_id, seq, model, agent, purpose, calls, failed_calls, input_tokens, output_tokens,
+  cache_read_tokens, cache_write_tokens, usd, final, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::double precision, $13, $14::timestamptz)`,
+  // COLLATE "C" gives the byte order the folder provider sorts by.
+  usage: `SELECT seq, model, agent, purpose, calls, failed_calls, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+  usd, final, updated_at
+FROM triage.run_usage WHERE run_id = $1
+ORDER BY seq, model COLLATE "C", agent COLLATE "C", purpose COLLATE "C"`,
 
   // Serialises model registration across processes. Any fixed number works;
   // it differs from the migrator's lock.
@@ -287,12 +328,12 @@ LIMIT $4::bigint`,
 VALUES ($1, $2, $3, $4::timestamptz)`,
 } as const;
 
-/** DDL for one model's embedding table. dims is fixed by the first vector. */
+/** DDL for one model's embedding table. dims is fixed by the first vector. No foreign key (D60). */
 export function embeddingTableDdl(table: ModelTable, dimensions: number): string {
   const t = tableIdent(table);
   const dims = checkDims(dimensions);
   return `CREATE TABLE IF NOT EXISTS triage.${t} (
-  run_id text NOT NULL REFERENCES triage.runs (run_id) ON DELETE CASCADE,
+  run_id text NOT NULL,
   submission_seq integer NOT NULL DEFAULT 0,
   kind text NOT NULL,
   text_sha256 text NOT NULL,
@@ -308,12 +349,12 @@ export function embeddingSql(table: ModelTable) {
   const t = tableIdent(table);
   return {
     upsert: `INSERT INTO triage.${t} (run_id, submission_seq, kind, text_sha256, source_text, embedding, created_at)
-SELECT run_id, $2::integer, $3::text, $4::text, $5::text, $6::vector, $7::timestamptz FROM triage.runs WHERE run_id = $1
+VALUES ($1, $2::integer, $3::text, $4::text, $5::text, $6::vector, $7::timestamptz)
 ON CONFLICT (run_id, kind, submission_seq) DO UPDATE SET text_sha256 = EXCLUDED.text_sha256,
-  source_text = EXCLUDED.source_text, embedding = EXCLUDED.embedding, created_at = EXCLUDED.created_at
-RETURNING run_id`,
+  source_text = EXCLUDED.source_text, embedding = EXCLUDED.embedding, created_at = EXCLUDED.created_at`,
     listForRun: `SELECT submission_seq, kind, text_sha256 FROM triage.${t}
 WHERE run_id = $1 ORDER BY kind, submission_seq`,
+    deleteForRun: `DELETE FROM triage.${t} WHERE run_id = $1`,
     similar: `SELECT run_id, submission_seq, kind, 1 - (embedding <=> $1::vector) AS similarity FROM triage.${t}
 WHERE kind IN ($2::text, $3::text) AND ($4::text IS NULL OR run_id <> $4::text)
 ORDER BY embedding <=> $1::vector, run_id, kind, submission_seq
@@ -370,6 +411,49 @@ function parseRecord<S extends v.GenericSchema>(schema: S, value: unknown, label
   if (result.success) return result.output;
   const paths = [...new Set(result.issues.map((i) => v.getDotPath(i) ?? '(root)'))];
   throw new RunStoreError(`invalid ${label}: ${paths.join(', ')}`);
+}
+
+/** pg returns double precision as a number; a text value is accepted too. */
+function toFloat(value: unknown, label: string): number {
+  const n = typeof value === 'string' ? Number(value) : value;
+  if (typeof n !== 'number' || !Number.isFinite(n)) throw new RunStoreError(`corrupt ${label} in the run store`);
+  return n;
+}
+
+/** Groups usage rows, read in seq order, into one entry per seq. */
+function groupUsage(rows: readonly Row[]): SubmissionUsage[] {
+  const out: { seq: number; rows: UsageRow[]; updated_at: string; final: boolean }[] = [];
+  for (const row of rows) {
+    const seq = toInt(row.seq, 'usage seq');
+    const at = toIso(row.updated_at, 'usage time');
+    const final = row.final === true;
+    const usage = parseRecord(
+      UsageRowSchema,
+      {
+        model: row.model,
+        agent: row.agent,
+        purpose: row.purpose,
+        calls: toInt(row.calls, 'usage calls'),
+        failed_calls: toInt(row.failed_calls, 'usage failed calls'),
+        input_tokens: toInt(row.input_tokens, 'usage input tokens'),
+        output_tokens: toInt(row.output_tokens, 'usage output tokens'),
+        cache_read_tokens: toInt(row.cache_read_tokens, 'usage cache read tokens'),
+        cache_write_tokens: toInt(row.cache_write_tokens, 'usage cache write tokens'),
+        usd: row.usd === null || row.usd === undefined ? null : toFloat(row.usd, 'usage usd'),
+      },
+      'usage row',
+    );
+    const last = out.at(-1);
+    if (last?.seq === seq) {
+      last.rows.push(usage);
+      // One write sets every row of a seq; take the newest and the strictest in case they differ.
+      if (at > last.updated_at) last.updated_at = at;
+      last.final = last.final && final;
+    } else {
+      out.push({ seq, rows: [usage], updated_at: at, final });
+    }
+  }
+  return out;
 }
 
 type ModelInfo = { readonly model: string; readonly table: ModelTable; readonly dims: number };
@@ -592,15 +676,17 @@ class PostgresRunStore implements RunStore {
     const entry = parseRecord(FeedbackSchema, assertPersisted(feedback, 'feedback'), 'feedback');
     const mdValue = md === undefined ? undefined : assertPersisted(md, 'feedback markdown');
     if (mdValue !== undefined && typeof mdValue !== 'string') throw new RunStoreError('feedback markdown must be a string');
-    const rows = await this.#runner.query(SQL.insertFeedback, [
-      id,
-      entry.verdict,
-      entry.given_by,
-      entry.given_at,
-      JSON.stringify(entry),
-      mdValue ?? null,
-    ]);
-    if (rows.length === 0) throw new RunNotFoundError(id);
+    await this.#runner.transaction(async (tx) => {
+      await this.#requireRun(tx.query, SQL.shareRun, id);
+      await tx.query(SQL.insertFeedback, [
+        id,
+        entry.verdict,
+        entry.given_by,
+        entry.given_at,
+        JSON.stringify(entry),
+        mdValue ?? null,
+      ]);
+    });
   }
 
   // ---------------------------------------------------------------- embeddings
@@ -648,16 +734,19 @@ class PostgresRunStore implements RunStore {
     // Check the run first, so an unknown run registers no model.
     await this.#requireRun(this.#runner.query, SQL.runExists, id);
     const info = await this.#ensureModel(input.model, input.vector.length);
-    const rows = await this.#runner.query(embeddingSql(info.table).upsert, [
-      id,
-      input.submission_id ?? NO_SUBMISSION,
-      input.kind,
-      input.text_sha256,
-      input.source_text,
-      vectorLiteral(input.vector),
-      this.#iso(),
-    ]);
-    if (rows.length === 0) throw new RunNotFoundError(id);
+    await this.#runner.transaction(async (tx) => {
+      // Again under the lock: the run may have been deleted since.
+      await this.#requireRun(tx.query, SQL.shareRun, id);
+      await tx.query(embeddingSql(info.table).upsert, [
+        id,
+        input.submission_id ?? NO_SUBMISSION,
+        input.kind,
+        input.text_sha256,
+        input.source_text,
+        vectorLiteral(input.vector),
+        this.#iso(),
+      ]);
+    });
   }
 
   async findSimilar(query: SimilarQuery): Promise<SimilarHit[]> {
@@ -692,6 +781,38 @@ class PostgresRunStore implements RunStore {
       });
     }
     return hits;
+  }
+
+  // ---------------------------------------------------------------- usage
+
+  async putUsage(runId: RunId, seq: number, rows: readonly UsageRow[], final: boolean): Promise<void> {
+    const id = assertRunId(runId);
+    const usage = checkUsage(seq, rows, final);
+    const now = this.#iso();
+    await this.#runner.transaction(async (tx) => {
+      // No FOR UPDATE: only the process running the submission writes its seq.
+      await this.#requireRun(tx.query, SQL.shareRun, id);
+      if (!final && (await tx.query(SQL.usageFinal, [id, usage.seq])).length > 0) return;
+      await tx.query(SQL.deleteUsage, [id, usage.seq]);
+      for (const row of usage.rows) {
+        await tx.query(SQL.insertUsage, [
+          id,
+          usage.seq,
+          row.model,
+          row.agent,
+          row.purpose,
+          row.calls,
+          row.failed_calls,
+          row.input_tokens,
+          row.output_tokens,
+          row.cache_read_tokens,
+          row.cache_write_tokens,
+          row.usd,
+          final,
+          now,
+        ]);
+      }
+    });
   }
 
   // ---------------------------------------------------------------- idempotency
@@ -778,6 +899,8 @@ class PostgresRunStore implements RunStore {
       }
     }
 
+    const usage = groupUsage(await query(SQL.usage, [id]));
+
     const reason = optText(run.phase_reason);
     const pid = run.worker_pid === null || run.worker_pid === undefined ? undefined : toInt(run.worker_pid, 'worker pid');
     const classification = run.classification === null || run.classification === undefined
@@ -816,6 +939,7 @@ class PostgresRunStore implements RunStore {
       feedback,
       feedback_latest: feedback.at(-1) ?? null,
       embeddings,
+      usage,
     };
   }
 
@@ -830,6 +954,7 @@ class PostgresRunStore implements RunStore {
       const tier = optText(row.tier_final);
       const status = optText(row.report_status);
       const verdict = optText(row.feedback_verdict);
+      const priced = row.usd_total !== null && row.usd_total !== undefined;
       const summary = {
         run_id: String(row.run_id),
         created_at: toIso(row.created_at, 'created_at'),
@@ -840,6 +965,11 @@ class PostgresRunStore implements RunStore {
         ...(status !== undefined ? { report_status: status } : {}),
         submissions: toInt(row.submissions, 'submission count'),
         ...(verdict !== undefined ? { feedback_verdict: verdict } : {}),
+        ...(priced ? { usd_total: toFloat(row.usd_total, 'usage usd') } : {}),
+        ...(row.tokens_total !== null && row.tokens_total !== undefined
+          ? { tokens_total: toInt(row.tokens_total, 'usage token total') }
+          : {}),
+        ...(priced && row.usd_unpriced === true ? { usd_partial: true } : {}),
       };
       return parseRecord(RunSummarySchema, summary, 'run summary');
     });
@@ -860,11 +990,17 @@ class PostgresRunStore implements RunStore {
 
   async deleteRun(runId: RunId): Promise<boolean> {
     const id = assertRunId(runId);
-    // One transaction: the run row goes, the foreign keys cascade to
-    // submissions, evidence, reports, feedback and every embedding table,
-    // and the run's idempotency claims (no foreign key) go with it.
+    // No foreign keys (D60), so every table is cleared here, in one
+    // transaction. The run row goes first: a write waiting on its lock then
+    // finds no run. The other tables are cleared whether or not it was there.
     return this.#runner.transaction(async (tx) => {
       const deleted = await tx.query(SQL.deleteRun, [id]);
+      for (const sql of [SQL.deleteSubmissions, SQL.deleteEvidence, SQL.deleteReports, SQL.deleteFeedback, SQL.deleteRunUsage]) {
+        await tx.query(sql, [id]);
+      }
+      for (const info of (await tx.query(SQL.embeddingModels)).map(modelInfo)) {
+        await tx.query(embeddingSql(info.table).deleteForRun, [id]);
+      }
       await tx.query(SQL.dropKeysForRun, [id]);
       return deleted.length > 0;
     });

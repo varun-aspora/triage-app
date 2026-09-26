@@ -1395,7 +1395,7 @@ src/agents/\*: classifier (code-driven model call on MODEL\_CLASSIFIER, structur
 - each task operation consumes one task from the run's budget
 - the 13th task operation with TRIAGE\_MAX\_TASKS\_PER\_RUN=12 is denied by the interceptor with the budget message and one audit deny line
 - code tool names (code\_explore, code\_node, code\_callers, code\_impact, repo\_read, repo\_grep) are on the allowlist when their modules are enabled and denied when they are disabled (blank CODEGRAPH\_BIN)
-- runUsage(runId) returns the summed input and output tokens per model for that run only
+- runUsage(runId) returns the summed input and output tokens per model for that run only (removed by D59: the usage meter in `src/usage/meter.ts` counts tokens now, and the tripwire no longer does)
 
 **Doc refs:** docs/02-hld-detailed.md §2 Sandbox paragraph and 'Not mounted anywhere'; docs/05-decisions.md D2, D45; .claude/skills/flue-framework/references/guides\_sandboxes.md; .claude/skills/flue-framework/references/advanced\_observability.md
 
@@ -1428,10 +1428,12 @@ src/agents/\*: classifier (code-driven model call on MODEL\_CLASSIFIER, structur
 - Escalation triggered on a cheap run calls synthesizeOnStrong once; on a strong run it does not
 - A synthesis ResultUnavailableError keeps the draft, adds a gap and still writes the report
 - repo\_commits holds one {repo, commit} per repo in the code evidence, taken from currentCommit
-- cost holds tokens per model and a USD total when pricing is known, and null with a gap when not
+- cost holds tokens per model and a USD total when pricing is known, and null with a gap when not (changed by D59: see below)
 - preflight\_warnings from initialData appear in the report gaps; redaction\_names are passed to writeReport
 - finish\_report passes after the run budget is exhausted
 - commit subject: 'feat(T06.9): finish\_report tool'
+
+**Changed by D59 (2026-09-26):** cost is no longer priced here or read from the tripwire. finish\_report sums the rows of the usage meter (`src/usage/meter.ts`), which prices each call when it is counted. An unpriced model no longer makes cost null: the total is the sum of the priced models, the unpriced ones are listed in `unpriced_models`, and a gap names them. cost is null only when no usage was recorded. See docs/05-decisions.md D59.
 
 **Doc refs:** docs/02-hld-detailed.md §1.1 Tools, §2 finish\_report row, §4.3, §6; docs/04-lld-multi-entity-request.md §2.8, §2.9, §3; docs/05-decisions.md D23, D24, D35, D37; .claude/skills/flue-framework/references/guides\_tools.md
 
@@ -1820,7 +1822,7 @@ src/db.ts Flue adapter selectable by TRIAGE\_DB\_PROVIDER=sqlite|postgres on TRI
 
 #### T09.3 Postgres migrations as plain SQL and a startup migrator
 
-**Scope.** src/runstore/migrations/0001\_init.sql creates schema triage and runs CREATE EXTENSION IF NOT EXISTS vector. Tables: triage.schema\_migrations, runs (run\_id pk, created\_at, phase, category, subcategory, tier\_proposed, tier\_final, rule\_fired, matched\_pattern\_id, report\_status, escalated, request jsonb, classification jsonb, id\_chain jsonb), submissions (run\_id, seq, created\_at, pk(run\_id, seq)), evidence (run\_id, key, version, findings jsonb, pk(run\_id, key, version)), reports (run\_id, seq, report jsonb, report\_md text), feedback (id bigserial, run\_id, verdict, given\_by, given\_at, body jsonb), idempotency (key\_sha256 pk, run\_id, expires\_at) and embedding\_models (model pk, table\_name unique, dims). Child tables use ON DELETE CASCADE from runs. There are no audit table, no HNSW index and no fixed vector(n) column. src/runstore/migrate.ts exports migrateRunStore(runner): it reads the .sql files in order, applies each one not yet recorded inside a transaction, and records it in schema\_migrations. It is idempotent on re-run. It does not reference flue\_\* tables.
+**Scope.** src/runstore/migrations/0001\_init.sql creates schema triage and runs CREATE EXTENSION IF NOT EXISTS vector. Tables: triage.schema\_migrations, runs (run\_id pk, created\_at, phase, category, subcategory, tier\_proposed, tier\_final, rule\_fired, matched\_pattern\_id, report\_status, escalated, request jsonb, classification jsonb, id\_chain jsonb), submissions (run\_id, seq, created\_at, pk(run\_id, seq)), evidence (run\_id, key, version, findings jsonb, pk(run\_id, key, version)), reports (run\_id, seq, report jsonb, report\_md text), feedback (id bigserial, run\_id, verdict, given\_by, given\_at, body jsonb), idempotency (key\_sha256 pk, run\_id, expires\_at) and embedding\_models (model pk, table\_name unique, dims). Child tables use ON DELETE CASCADE from runs (changed by D60: no foreign keys; migration 0005 drops them and deleteRun clears each table itself). There are no audit table, no HNSW index and no fixed vector(n) column. src/runstore/migrate.ts exports migrateRunStore(runner): it reads the .sql files in order, applies each one not yet recorded inside a transaction, and records it in schema\_migrations. It is idempotent on re-run. It does not reference flue\_\* tables.
 
 **Acceptance criteria:**
 
@@ -1834,7 +1836,7 @@ src/db.ts Flue adapter selectable by TRIAGE\_DB\_PROVIDER=sqlite|postgres on TRI
 
 #### T09.4 Postgres run store provider and createRunStore factory
 
-**Scope.** src/runstore/postgres.ts implements RunStore over the shared PgRunner from src/db/pg.ts, using $n parameters only. putEmbedding looks up or registers the model in triage.embedding\_models. On first use it creates a per-model table triage.emb\_&lt;slug&gt; (run\_id references runs on delete cascade, submission\_seq, kind, text\_sha256, source\_text, embedding vector(&lt;dims of first vector&gt;)). The table name comes from sanitiseModelTable(model), which allows only [a-z0-9\_] and a length cap, and anything else throws. A dimension mismatch against the registered dims is refused. findSimilar is an exact scan ORDER BY embedding &lt;=&gt; $1 LIMIT $k with no index. deleteRun deletes from runs in one transaction; cascades clear child and embedding rows. src/runstore/index.ts exports createRunStore(config, deps) and getRunStore(). The provider follows TRIAGE\_DB\_PROVIDER: postgres runs migrateRunStore first, and sqlite uses the folder provider. Tools and ingress receive the store by closure.
+**Scope.** src/runstore/postgres.ts implements RunStore over the shared PgRunner from src/db/pg.ts, using $n parameters only. putEmbedding looks up or registers the model in triage.embedding\_models. On first use it creates a per-model table triage.emb\_&lt;slug&gt; (run\_id, with no foreign key since D60, submission\_seq, kind, text\_sha256, source\_text, embedding vector(&lt;dims of first vector&gt;)). The table name comes from sanitiseModelTable(model), which allows only [a-z0-9\_] and a length cap, and anything else throws. A dimension mismatch against the registered dims is refused. findSimilar is an exact scan ORDER BY embedding &lt;=&gt; $1 LIMIT $k with no index. deleteRun deletes from runs in one transaction; cascades clear child and embedding rows (changed by D60: deleteRun deletes from every child and embedding table itself). src/runstore/index.ts exports createRunStore(config, deps) and getRunStore(). The provider follows TRIAGE\_DB\_PROVIDER: postgres runs migrateRunStore first, and sqlite uses the folder provider. Tools and ingress receive the store by closure.
 
 **Acceptance criteria:**
 

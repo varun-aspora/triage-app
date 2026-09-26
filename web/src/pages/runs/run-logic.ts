@@ -8,12 +8,16 @@ import type {
   ReportStatus,
   RunDetail,
   RunPhase,
+  RunSummary,
+  RunUsageView,
   StartRunBody,
   SubmissionView,
   Tier,
+  UsageTotals,
 } from '../../api/types.ts';
 import { ENTITY_LABELS } from '../../lib/constants.ts';
-import type { StatusLook } from '../../lib/status.ts';
+import { formatRelative, formatTokens } from '../../lib/format.ts';
+import { runStatusOf, type StatusLook } from '../../lib/status.ts';
 
 // ------------------------------------------------------------------ list
 
@@ -327,18 +331,90 @@ export function reportVersionLabel(submissions: readonly SubmissionView[]): stri
   return `Report v${withReport} of ${submissions.length}`;
 }
 
-export type CostTotals = { calls: number; input: number; output: number };
+// ------------------------------------------------------------------ usage (D59)
 
-export function costTotals(models: Readonly<Record<string, { calls: number; input_tokens: number; output_tokens: number }>>): CostTotals {
-  let calls = 0;
-  let input = 0;
-  let output = 0;
-  for (const m of Object.values(models)) {
-    calls += m.calls;
-    input += m.input_tokens;
-    output += m.output_tokens;
+export type UsageNote = { readonly text: string; readonly look: StatusLook };
+
+/**
+ * The labels above the usage totals. Nothing counted yet reads "waiting" while
+ * the run is running and "not recorded" otherwise; "no pricing" and "no usage"
+ * are kept apart.
+ */
+export function usageNotes(usage: RunUsageView | undefined, running: boolean, now: number): UsageNote[] {
+  if (usage === undefined || !usage.recorded) {
+    return [
+      running
+        ? { text: 'waiting for the first count', look: { tone: 'info', icon: 'clock' } }
+        : { text: 'not recorded', look: { tone: 'muted', icon: 'dash' } },
+    ];
   }
-  return { calls, input, output };
+  const notes: UsageNote[] = [];
+  if (usage.live) {
+    const updated = usage.updated_at !== null ? `, updated ${formatRelative(usage.updated_at, now)}` : '';
+    notes.push({ text: `live${updated}`, look: { tone: 'info', icon: 'spinner' } });
+  }
+  if (usage.incomplete) notes.push({ text: 'incomplete: the worker ended before the final count', look: { tone: 'amber', icon: 'alert' } });
+  if (usage.pricing !== 'full') {
+    const names = usage.total.unpriced_models.join(', ');
+    notes.push({ text: usage.pricing === 'partial' ? `partial: no pricing for ${names}` : `no pricing for ${names}`, look: { tone: 'amber', icon: 'alert' } });
+  }
+  if (usage.fake) notes.push({ text: 'estimates, fake model', look: { tone: 'muted', icon: 'dash' } });
+  return notes;
+}
+
+/** The cost of one totals bucket: '$0.42', '$0.42 (partial)' when some rows have no price, 'not priced' when none has. */
+export function formatCost(t: Pick<UsageTotals, 'usd' | 'unpriced_models'>, pricing?: RunUsageView['pricing']): string {
+  const unpriced = pricing !== undefined ? pricing !== 'full' : t.unpriced_models.length > 0;
+  if (!unpriced) return formatUsd(t.usd);
+  // A bucket's totals cannot tell $0 of priced rows from no priced rows, so $0 plus an unpriced model reads 'not priced'.
+  const none = pricing !== undefined ? pricing === 'none' : t.usd === 0;
+  return none ? 'not priced' : `${formatUsd(t.usd)} (partial)`;
+}
+
+/** '37' or '37 (1 failed)'. */
+export function formatCalls(t: Pick<UsageTotals, 'calls' | 'failed_calls'>): string {
+  return t.failed_calls > 0 ? `${t.calls} (${t.failed_calls} failed)` : String(t.calls);
+}
+
+export function totalTokens(t: Pick<UsageTotals, 'input_tokens' | 'output_tokens' | 'cache_read_tokens' | 'cache_write_tokens'>): number {
+  return t.input_tokens + t.cache_read_tokens + t.cache_write_tokens + t.output_tokens;
+}
+
+/** '120k in / 90k cache read / 4k cache write / 8k out'. */
+export function formatTokenSplit(t: Pick<UsageTotals, 'input_tokens' | 'output_tokens' | 'cache_read_tokens' | 'cache_write_tokens'>): string {
+  return `${formatTokens(t.input_tokens)} in / ${formatTokens(t.cache_read_tokens)} cache read / ${formatTokens(t.cache_write_tokens)} cache write / ${formatTokens(t.output_tokens)} out`;
+}
+
+export type UsageBreakdown = 'model' | 'agent';
+export type UsageLine = { readonly key: string; readonly totals: UsageTotals };
+
+/** One line per model or agent, the most expensive first, then the most tokens, then by name. */
+export function usageLines(usage: RunUsageView, by: UsageBreakdown): UsageLine[] {
+  const source = by === 'model' ? usage.by_model : usage.by_agent;
+  return Object.entries(source)
+    .map(([key, totals]) => ({ key, totals }))
+    .sort((a, b) => b.totals.usd - a.totals.usd || totalTokens(b.totals) - totalTokens(a.totals) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+}
+
+/** The Cost cell of one submission (seq 0 is the intake); a dash when nothing was counted for it. */
+export function submissionCost(usage: RunUsageView | undefined, seq: number): string {
+  const t = usage?.by_submission[String(seq)];
+  return t === undefined ? '—' : formatCost(t);
+}
+
+/**
+ * The Cost cell of a runs-list row: the priced sum, marked '(partial)' when
+ * some rows have no price, or 'not priced' when the run has tokens and no
+ * priced row. live marks a running run, whose total is still growing.
+ */
+export function listCost(row: Pick<RunSummary, 'phase' | 'usd_total' | 'tokens_total' | 'usd_partial'>): { text: string; live: boolean } {
+  const text =
+    row.usd_total !== undefined
+      ? `${formatUsd(row.usd_total)}${row.usd_partial === true ? ' (partial)' : ''}`
+      : row.tokens_total !== undefined
+        ? 'not priced'
+        : '—';
+  return { text, live: runStatusOf(row.phase) === 'running' };
 }
 
 export function formatUsd(usd: number | undefined): string {

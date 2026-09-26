@@ -7,6 +7,7 @@ import type { EgressResult } from '../gate/redact.ts';
 import { keyHash, keyString, semanticKey } from './key.ts';
 import {
   decline,
+  dropDraftCost,
   listUnreviewed,
   promote,
   reviewDirsFrom,
@@ -375,6 +376,84 @@ describe('promote an eval case draft', () => {
     expect(clash.status === 'refused' && clash.reason).toBe('target case folder exists with different content');
     expect(existsSync(different)).toBe(true);
     expect(readFileSync(join(dirs.evalsDir, 'cases', 'c1', 'feedback.md'), 'utf8')).toBe(FILES['feedback.md']);
+  });
+});
+
+describe('eval case draft cost (D59)', () => {
+  const REPORT = { run_id: RUN_ID, status: 'done', summary: 'stale cache' };
+  const COST = { models: [{ model: 'anthropic/claude-haiku-4-5', input_tokens: 10 }], wall_ms: 5, usd_total: 0.01 };
+  const withCost = (): Record<string, string> => ({
+    'feedback.md': '---\nverdict: correct\n---\n',
+    'report.json': `${JSON.stringify({ ...REPORT, cost: COST }, null, 2)}\n`,
+  });
+
+  test('a direct promote drops cost from report.json and keeps every other key', async () => {
+    writeDraft(withCost());
+    const result = await promote(await onlyItem('eval_case'), { reviewer: 'r', caseId: 'c1' });
+    expect(result.status).toBe('promoted');
+    const promoted = readJson(join(dirs.evalsDir, 'cases', 'c1', 'report.json'));
+    expect(promoted).toEqual(REPORT);
+    expect(readFileSync(join(dirs.evalsDir, 'cases', 'c1', 'feedback.md'), 'utf8')).toBe(withCost()['feedback.md'] as string);
+  });
+
+  test('cost is dropped before the redaction check, so the check never sees it', async () => {
+    writeDraft(withCost());
+    const seen: unknown[] = [];
+    const check = (value: unknown): EgressResult => {
+      seen.push(value);
+      return { ok: true };
+    };
+    await promote(await onlyItem('eval_case'), { reviewer: 'r', caseId: 'c1', check });
+    expect(seen).toContainEqual(REPORT);
+  });
+
+  test('an old draft with cost matches a case already promoted without it', async () => {
+    writeDraft(withCost());
+    expect((await promote(await onlyItem('eval_case'), { reviewer: 'r', caseId: 'c1' })).status).toBe('promoted');
+    const again = writeDraft(withCost());
+    const second = await promote(await onlyItem('eval_case'), { reviewer: 'r', caseId: 'c1' });
+    expect(second.status).toBe('unchanged');
+    expect(existsSync(again)).toBe(false);
+  });
+
+  test('a refusal before the check (bad case id, a symlink) leaves report.json as it was', async () => {
+    const draft = writeDraft(withCost());
+    const before = readFileSync(join(draft, 'report.json'), 'utf8');
+    const badId = await promote(await onlyItem('eval_case'), { reviewer: 'r', caseId: '../x' });
+    expect(badId.status).toBe('refused');
+    symlinkSync(join(dirs.evalsDir, 'x'), join(draft, 'link.md'));
+    const linked = await promote(await onlyItem('eval_case'), { reviewer: 'r', caseId: 'c1' });
+    expect(linked.status).toBe('refused');
+    expect(readFileSync(join(draft, 'report.json'), 'utf8')).toBe(before);
+  });
+
+  test('dropDraftCost leaves anything that is not a JSON object with cost untouched', async () => {
+    const cases: [string, string][] = [
+      ['not-json', '{ not json'],
+      ['array', '[{"cost":1}]'],
+      ['no-cost', '{"run_id":"x"}'],
+      ['null', 'null'],
+    ];
+    for (const [runId, text] of cases) {
+      const dir = writeDraft({ 'report.json': text }, runId);
+      expect(await dropDraftCost(join(dir, 'report.json'))).toBe(false);
+      expect(readFileSync(join(dir, 'report.json'), 'utf8')).toBe(text);
+    }
+    // Missing, a folder, or a symlink to a file that has cost.
+    const dir = writeDraft({ 'feedback.md': 'x\n', 'real.json': '{"cost":1}' }, 'odd');
+    expect(await dropDraftCost(join(dir, 'report.json'))).toBe(false);
+    mkdirSync(join(dir, 'sub.json'));
+    expect(await dropDraftCost(join(dir, 'sub.json'))).toBe(false);
+    symlinkSync(join(dir, 'real.json'), join(dir, 'report.json'));
+    expect(await dropDraftCost(join(dir, 'report.json'))).toBe(false);
+    expect(readFileSync(join(dir, 'real.json'), 'utf8')).toBe('{"cost":1}');
+  });
+
+  test('dropDraftCost rewrites an object with cost and says so', async () => {
+    const dir = writeDraft(withCost());
+    expect(await dropDraftCost(join(dir, 'report.json'))).toBe(true);
+    expect(readJson(join(dir, 'report.json'))).toEqual(REPORT);
+    expect(await dropDraftCost(join(dir, 'report.json'))).toBe(false);
   });
 });
 

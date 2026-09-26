@@ -2,7 +2,8 @@
 //
 // Polls the run store until the run's phase is terminal, the worker is gone,
 // the run is waiting on a question or blocked on a system, or the timeout
-// passes, then prints {run_id, status, report?, reason?, input_request?, block?}.
+// passes, then prints {run_id, status, report?, reason?, input_request?,
+// block?, usage?}.
 //
 //   completed   -> the stored report (persisted profile), exit 0
 //   failed      -> the failure reason, exit 1
@@ -16,6 +17,12 @@
 // (or a skip) goes to a detached worker the way `triage input` does, and the
 // wait goes on with a fresh timeout. Otherwise the question is printed with
 // how to answer it, and the run stays parked.
+//
+// usage (D59) is the whole run's token and cost totals, present once
+// anything was counted. report_md covers only the latest submission, so the
+// human form adds a 'run total:' line after it. While the run goes on, the
+// human form also writes 'cost so far: ...' to stderr each time the live
+// total changes; --json prints nothing until the one final document.
 //
 // A timeout only stops the waiting. Apart from starting the worker that
 // carries an answer, this command reads the run store and nothing else, so
@@ -36,6 +43,10 @@ import {
   printNotFound,
   runStatusOf,
   STALLED_REASON,
+  usageField,
+  usageShortText,
+  usageTotalText,
+  usageViewOf,
   type OpenStore,
   type PidChecker,
 } from './status.command.ts';
@@ -63,35 +74,48 @@ const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTim
 /** The wait result for a run in a final state, or undefined while it is still going. */
 export function settledOutput(run: RunRecord, isAlive: PidChecker): WaitOutput | undefined {
   const status = runStatusOf(run, isAlive);
+  const usage = usageField(usageViewOf(run, status));
   if (status === 'completed') {
-    return { run_id: run.run_id, status, ...(run.report !== null ? { report: { ...run.report } } : {}) };
+    return { run_id: run.run_id, status, ...(run.report !== null ? { report: { ...run.report } } : {}), ...usage };
   }
-  if (status === 'failed') return { run_id: run.run_id, status, reason: run.phase_reason ?? 'unknown failure' };
-  if (status === 'stopped') return { run_id: run.run_id, status, reason: run.phase_reason ?? 'stopped' };
-  if (status === 'stalled') return { run_id: run.run_id, status, reason: STALLED_REASON, phase: run.phase };
+  if (status === 'failed') return { run_id: run.run_id, status, reason: run.phase_reason ?? 'unknown failure', ...usage };
+  if (status === 'stopped') return { run_id: run.run_id, status, reason: run.phase_reason ?? 'stopped', ...usage };
+  if (status === 'stalled') return { run_id: run.run_id, status, reason: STALLED_REASON, phase: run.phase, ...usage };
   if (status === 'needs_input') {
     return {
       run_id: run.run_id,
       status,
       phase: run.phase,
       ...(run.input_request !== null ? { input_request: { ...run.input_request, options: [...run.input_request.options] } } : {}),
+      ...usage,
     };
   }
   if (status === 'blocked') {
-    return { run_id: run.run_id, status, phase: run.phase, ...(run.block !== null ? { block: copyBlock(run.block) } : {}) };
+    return { run_id: run.run_id, status, phase: run.phase, ...(run.block !== null ? { block: copyBlock(run.block) } : {}), ...usage };
   }
   return undefined;
 }
 
 /**
+ * Adds the run's usage to a result built elsewhere (`triage run`), so its
+ * JSON and its 'run total:' line match `triage wait`.
+ */
+export function withUsage(out: WaitOutput, run: RunRecord | null, isAlive: PidChecker = pidAlive): WaitOutput {
+  if (run === null) return out;
+  return { ...out, ...usageField(usageViewOf(run, runStatusOf(run, isAlive))) };
+}
+
+/**
  * Prints a settled or timed-out result and returns the exit code. Shared with
- * `triage run`. The human form prints the report Markdown when there is one.
+ * `triage run`. The human form prints the report Markdown when there is one,
+ * then the run total when out carries usage.
  */
 export function printWaitResult(
   io: Pick<CliIo, 'stdout' | 'stderr'>,
   json: boolean,
   out: WaitOutput,
   reportMd: string | null,
+  now: number = Date.now(),
 ): number {
   const code =
     out.status === 'completed'
@@ -142,6 +166,7 @@ export function printWaitResult(
       );
       break;
   }
+  if (out.usage !== undefined) printHuman(io, `run total: ${usageTotalText(out.usage, now)}`);
   return code;
 }
 
@@ -177,6 +202,7 @@ export function createWaitCommand(options: WaitCommandOptions = {}): CliCommand 
       const store = await openStore(ctx.config());
       const write = (text: string): void => void io.stdout.write(text);
       let deadline = now() + seconds * 1000;
+      let lastCost: string | undefined;
       for (;;) {
         const run = await store.getRun(runId);
         if (run === null) return printNotFound(io, json, runId);
@@ -197,9 +223,20 @@ export function createWaitCommand(options: WaitCommandOptions = {}): CliCommand 
             continue;
           }
         }
-        if (settled !== undefined) return printWaitResult(io, json, settled, settled.status === 'completed' ? run.report_md : null);
+        if (settled !== undefined) {
+          return printWaitResult(io, json, settled, settled.status === 'completed' ? run.report_md : null, now());
+        }
+        // Not settled, so the run is running with its worker alive.
+        const view = usageViewOf(run, 'running');
+        if (!json && view.recorded) {
+          const cost = usageShortText(view);
+          if (cost !== lastCost) io.stderr.write(`cost so far: ${cost}\n`);
+          lastCost = cost;
+        }
         const left = deadline - now();
-        if (left <= 0) return printWaitResult(io, json, { run_id: run.run_id, status: 'timeout', phase: run.phase }, null);
+        if (left <= 0) {
+          return printWaitResult(io, json, { run_id: run.run_id, status: 'timeout', phase: run.phase, ...usageField(view) }, null, now());
+        }
         await sleep(Math.min(pollMs, left));
       }
     },

@@ -4,13 +4,15 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Agent, AgentReply, InitOptions } from '@flue/runtime';
+import * as v from 'valibot';
 import { FeedbackError, type FeedbackDeps, type FeedbackInput, type FeedbackResult } from '../../report/feedback.ts';
 import { redactPersisted } from '../../gate/redact.ts';
-import { sampleBlock, sampleClassification, sampleFeedback, sampleRequest } from '../../runstore/contract.ts';
+import { sampleBlock, sampleClassification, sampleFeedback, sampleRequest, sampleUsageRow, USAGE_MODEL } from '../../runstore/contract.ts';
 import { createFolderRunStore } from '../../runstore/folder.ts';
 import { RunNotFoundError, type RunPhase, type RunQuery, type RunRecord, type RunStore, type RunSummary } from '../../runstore/types.ts';
 import { BLOCK_RESUME_SIGNAL, MAX_RESUME_NOTE_CHARS } from '../../types/block.ts';
 import type { RunId } from '../../types/core.ts';
+import { RunUsageViewSchema, type RunUsageView, type SubmissionUsage } from '../../types/usage.ts';
 import { IngressInputError } from '../normalise.ts';
 import { prepareRequest, type PrepareDeps, type PrepareInput, type PreparedSubmission } from '../prepare.ts';
 import { SlackFetchError, type SlackThread, type SlackThreadRef } from '../slack.ts';
@@ -63,6 +65,7 @@ function record(runId: string, phase: RunPhase, report: unknown = null): RunReco
     feedback: [],
     feedback_latest: null,
     embeddings: [],
+    usage: [],
   };
 }
 
@@ -570,6 +573,125 @@ describe('GET /triage/:run_id detail fields', () => {
   });
 });
 
+describe('GET /triage/:run_id usage (D59)', () => {
+  const AT = '2026-09-24T00:05:00.000Z';
+  const LATER = '2026-09-24T00:06:00.000Z';
+  const OTHER_MODEL = 'openai/text-embedding-3-small';
+  const submission = (seq: number, rows: SubmissionUsage['rows'], final = true, updated_at = AT): SubmissionUsage => ({
+    seq,
+    rows,
+    updated_at,
+    final,
+  });
+
+  async function usageOf(run: RunRecord, isAlive?: (pid: number) => boolean): Promise<{ text: string; usage: RunUsageView }> {
+    const extra = isAlive === undefined ? {} : { isAlive };
+    const res = await harness({ runs: { [run.run_id]: run }, ...extra }).app.request(`/triage/${run.run_id}`);
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const usage = (JSON.parse(text) as { usage: RunUsageView }).usage;
+    expect(() => v.parse(RunUsageViewSchema, usage)).not.toThrow();
+    return { text, usage };
+  }
+
+  test('the view carries totals and breakdowns by model, agent and submission', async () => {
+    const run = {
+      ...record(RUN_A, 'completed'),
+      usage: [
+        submission(0, [sampleUsageRow({ agent: 'classifier', purpose: 'classify', calls: 1, failed_calls: 0, usd: 0.01 })]),
+        submission(1, [sampleUsageRow(), sampleUsageRow({ model: OTHER_MODEL, agent: 'embedder', purpose: 'embed', calls: 1, failed_calls: 0, usd: 0 })], true, LATER),
+      ],
+    };
+    const { usage } = await usageOf(run);
+    expect(usage.recorded).toBe(true);
+    expect(usage.total.calls).toBe(5);
+    expect(usage.total.failed_calls).toBe(1);
+    expect(usage.total.usd).toBeCloseTo(0.26);
+    expect(Object.keys(usage.by_model)).toEqual([USAGE_MODEL, OTHER_MODEL]);
+    expect(Object.keys(usage.by_agent)).toEqual(['classifier', 'embedder', 'triage']);
+    expect(Object.keys(usage.by_submission)).toEqual(['0', '1']);
+    expect(usage.pricing).toBe('full');
+    expect(usage.live).toBe(false);
+    expect(usage.incomplete).toBe(false);
+    expect(usage.updated_at).toBe(LATER);
+  });
+
+  test('usage is added after the redaction: model ids keep their digits, other text is still masked', async () => {
+    // The profile masks digit runs in string values; an unpriced model id is one.
+    expect(JSON.stringify(redactPersisted({ m: USAGE_MODEL }).value)).not.toContain(USAGE_MODEL);
+    const report = { summary: `customer called from ${SYNTHETIC_PHONE}`, status: 'resolved' };
+    const run = { ...record(RUN_A, 'completed', report), usage: [submission(1, [sampleUsageRow({ usd: null })])] };
+    const { text, usage } = await usageOf(run);
+    expect(text).not.toContain(SYNTHETIC_PHONE);
+    expect(usage.total.unpriced_models).toEqual([USAGE_MODEL]);
+    expect(usage.by_model[USAGE_MODEL]?.unpriced_models).toEqual([USAGE_MODEL]);
+    expect(usage.pricing).toBe('none');
+    expect(text).not.toContain('****1001');
+  });
+
+  test('a run with no usage rows, or a record from before D59, says not recorded', async () => {
+    for (const run of [record(RUN_A, 'completed'), { ...record(RUN_A, 'completed'), usage: [submission(1, [])] }]) {
+      const { usage } = await usageOf(run);
+      expect(usage.recorded).toBe(false);
+      expect(usage.total.calls).toBe(0);
+      expect(usage.total.usd).toBe(0);
+      expect(usage.by_model).toEqual({});
+    }
+    const { usage: _dropped, ...older } = record(RUN_A, 'failed');
+    const view = runView(older as unknown as RunRecord);
+    expect((view.usage as RunUsageView).recorded).toBe(false);
+    expect((view.usage as RunUsageView).updated_at).toBeNull();
+  });
+
+  test('a non-final count is live while the run is running and incomplete once it is not', async () => {
+    const open = [submission(1, [sampleUsageRow()], false)];
+    for (const [phase, live, incomplete] of [
+      ['investigating', true, false],
+      ['needs_input', true, false],
+      ['blocked', false, true],
+      ['failed', false, true],
+      ['stopped', false, true],
+    ] as const) {
+      const { usage } = await usageOf({ ...record(RUN_A, phase), usage: open });
+      expect([phase, usage.live, usage.incomplete]).toEqual([phase, live, incomplete]);
+    }
+  });
+
+  test('a running run whose worker pid is dead shows its open count as incomplete, not live', async () => {
+    const open = [submission(1, [sampleUsageRow()], false)];
+    const checked: number[] = [];
+    const dead = (pid: number): boolean => {
+      checked.push(pid);
+      return false;
+    };
+    const stalled = await usageOf({ ...record(RUN_A, 'investigating'), worker_pid: 4242, usage: open }, dead);
+    expect([stalled.usage.live, stalled.usage.incomplete]).toEqual([false, true]);
+    expect(checked).toEqual([4242]);
+    // A live pid, no recorded pid, or no checker at all: still live.
+    const alive = await usageOf({ ...record(RUN_A, 'investigating'), worker_pid: 4242, usage: open }, () => true);
+    expect([alive.usage.live, alive.usage.incomplete]).toEqual([true, false]);
+    const noPid = await usageOf({ ...record(RUN_A, 'investigating'), usage: open }, dead);
+    expect([noPid.usage.live, noPid.usage.incomplete]).toEqual([true, false]);
+    const noChecker = await usageOf({ ...record(RUN_A, 'investigating'), worker_pid: 4242, usage: open });
+    expect(noChecker.usage.live).toBe(true);
+    // A finished run never asks about its pid.
+    checked.length = 0;
+    await usageOf({ ...record(RUN_A, 'completed'), worker_pid: 4242, usage: [submission(1, [sampleUsageRow()])] }, dead);
+    expect(checked).toEqual([]);
+  });
+
+  test('some rows unpriced -> partial, with the unpriced model named', async () => {
+    const run = {
+      ...record(RUN_A, 'completed'),
+      usage: [submission(1, [sampleUsageRow(), sampleUsageRow({ model: OTHER_MODEL, agent: 'embedder', purpose: 'embed', usd: null })])],
+    };
+    const { usage } = await usageOf(run);
+    expect(usage.pricing).toBe('partial');
+    expect(usage.total.usd).toBe(0.25);
+    expect(usage.total.unpriced_models).toEqual([OTHER_MODEL]);
+  });
+});
+
 // ------------------------------------------------------------------ GET /triage
 
 describe('GET /triage', () => {
@@ -624,6 +746,16 @@ describe('GET /triage', () => {
     expect(running.runs.map((r) => r.run_id)).toEqual([RUN_B]);
     const none = (await (await h.app.request('/triage?feedback=none')).json()) as { runs: RunSummary[] };
     expect(none.runs.map((r) => r.run_id)).toEqual([RUN_B, UNKNOWN_RUN]);
+  });
+
+  test('usd_total and tokens_total pass through to the list items', async () => {
+    const priced = [summary(RUN_A, T1, { usd_total: 0.42, tokens_total: 12_345 }), summary(RUN_B, T2)];
+    const h = harness({ summaries: priced });
+    const body = (await (await h.app.request('/triage')).json()) as { runs: RunSummary[] };
+    expect(body.runs.map((r) => [r.run_id, r.usd_total, r.tokens_total])).toEqual([
+      [RUN_A, 0.42, 12_345],
+      [RUN_B, undefined, undefined],
+    ]);
   });
 
   test('a blocked run lists under status blocked, not running', async () => {
@@ -703,6 +835,19 @@ describe('GET /triage', () => {
       expect(detail.current_ask).toBeNull();
       expect((detail.submissions as { seq: number; kind: string }[]).map((s) => [s.seq, s.kind])).toEqual([[1, 'initial']]);
       expect((detail.feedback as { verdict: string }[]).map((f) => f.verdict)).toEqual(['wrong']);
+      expect((detail.usage as RunUsageView).recorded).toBe(false);
+
+      // Usage written through the store shows in the list totals and the detail view.
+      await store.putUsage(RUN_A, 0, [sampleUsageRow({ agent: 'classifier', purpose: 'classify', usd: 0.05 })], true);
+      await store.putUsage(RUN_A, 1, [sampleUsageRow(), sampleUsageRow({ agent: 'synthesis', usd: null })], true);
+      const listed = (await (await h.app.request('/triage?feedback=wrong')).json()) as { runs: RunSummary[] };
+      expect(listed.runs[0]?.usd_total).toBeCloseTo(0.3);
+      expect(listed.runs[0]?.tokens_total).toBe(3 * (1200 + 300 + 4000 + 500));
+      const withUsage = (await (await h.app.request(`/triage/${RUN_A}`)).json()) as { usage: RunUsageView };
+      expect(withUsage.usage.recorded).toBe(true);
+      expect(withUsage.usage.pricing).toBe('partial');
+      expect(Object.keys(withUsage.usage.by_submission)).toEqual(['0', '1']);
+      expect(withUsage.usage.total.unpriced_models).toEqual([USAGE_MODEL]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

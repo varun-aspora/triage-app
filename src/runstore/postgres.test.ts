@@ -22,6 +22,8 @@ import {
   sampleFindings,
   sampleReport,
   sampleRequest,
+  sampleUsageRow,
+  USAGE_MODEL,
   type ContractFactory,
 } from './contract.ts';
 import { createFakePg, type FakePg, type FakePgCall } from './fake-pg.ts';
@@ -35,7 +37,7 @@ import {
   embeddingTableDdl,
   sanitiseModelTable,
 } from './postgres.ts';
-import { BlockOpenError, RunNotFoundError, RunStoreError, RunStoreRedactionError, type RunStore } from './types.ts';
+import { BlockOpenError, MAX_USAGE_COUNT, RunNotFoundError, RunStoreError, RunStoreRedactionError, type RunStore } from './types.ts';
 
 const p = <T>(value: T): Persisted<T> => redactPersisted(value);
 
@@ -167,32 +169,69 @@ describe('postgres provider: statements', () => {
     );
   });
 
-  test('deleteRun runs in one transaction', async () => {
+  test('deleteRun deletes from every table itself, in one transaction, the run row first', async () => {
     const { fake, store } = setup();
-    await store.createRun(RUN_A, p(sampleRequest(RUN_A)));
-    const seq = await store.addSubmission(RUN_A, p({ kind: 'initial' as const }));
-    await store.putReport(RUN_A, seq, p(sampleReport(RUN_A, 'answer')), p('# answer'));
-    await store.putEvidence(RUN_A, 'ssfb', p(sampleFindings('look')));
-    await store.putFeedback(RUN_A, p(sampleFeedback('correct', '2026-09-01T10:00:00.000Z')));
-    await store.putEmbedding(RUN_A, p(sampleEmbedding('case', 'ollama/x', [1, 0])));
-    await store.claimIdempotencyKey('key-a', RUN_A, 60_000);
+    const fill = async (id: string): Promise<void> => {
+      await store.createRun(id, p(sampleRequest(id)));
+      const seq = await store.addSubmission(id, p({ kind: 'initial' as const }));
+      await store.putReport(id, seq, p(sampleReport(id, 'answer')), p('# answer'));
+      await store.putEvidence(id, 'ssfb', p(sampleFindings('look')));
+      await store.putFeedback(id, p(sampleFeedback('correct', '2026-09-01T10:00:00.000Z')));
+      await store.putEmbedding(id, p(sampleEmbedding('case', 'ollama/x', [1, 0])));
+      await store.putEmbedding(id, p(sampleEmbedding('case', 'openai/y', [1, 0, 0])));
+      await store.putUsage(id, 0, [sampleUsageRow({ agent: 'classifier', purpose: 'classify' })], true);
+      await store.claimIdempotencyKey(`key-${id}`, id, 60_000);
+    };
+    await fill(RUN_A);
+    await fill(RUN_B);
+    const one = { runs: 1, submissions: 1, evidence: 1, reports: 1, feedback: 1, idempotency: 1, embedding_models: 2, embeddings: 2, run_usage: 1 };
+    expect(fake.counts()).toEqual({ ...one, runs: 2, submissions: 2, evidence: 2, reports: 2, feedback: 2, idempotency: 2, embeddings: 4, run_usage: 2 });
     const before = fake.calls.length;
 
     expect(await store.deleteRun(RUN_A)).toBe(true);
     const own = fake.calls.slice(before);
-    expect(own.map((c) => c.text)).toEqual(['BEGIN', SQL.deleteRun, SQL.dropKeysForRun, 'COMMIT']);
+    expect(own.map((c) => c.text)).toEqual([
+      'BEGIN',
+      SQL.deleteRun,
+      SQL.deleteSubmissions,
+      SQL.deleteEvidence,
+      SQL.deleteReports,
+      SQL.deleteFeedback,
+      SQL.deleteRunUsage,
+      SQL.embeddingModels,
+      embeddingSql(sanitiseModelTable('ollama/x')).deleteForRun,
+      embeddingSql(sanitiseModelTable('openai/y')).deleteForRun,
+      SQL.dropKeysForRun,
+      'COMMIT',
+    ]);
     expect(new Set(own.map((c) => c.on)).size).toBe(1);
     expect(own.every((c) => c.on !== 'pool')).toBe(true);
-    // The cascade cleared every child row, the embedding rows included.
-    expect(fake.counts()).toEqual({
-      runs: 0,
-      submissions: 0,
-      evidence: 0,
-      reports: 0,
-      feedback: 0,
-      idempotency: 0,
-      embedding_models: 1,
-      embeddings: 0,
+    for (const c of own.filter((x) => x.params.length > 0)) expect(c.params).toEqual([RUN_A]);
+    // The fake cascades nothing, so these are the provider's own deletes. RUN_B keeps its rows.
+    expect(fake.counts()).toEqual(one);
+    // Nothing in the provider's SQL declares a foreign key.
+    const t = sanitiseModelTable('ollama/x');
+    for (const text of [...Object.values(SQL), embeddingTableDdl(t, 2), ...Object.values(embeddingSql(t))]) {
+      expect(text).not.toMatch(/REFERENCES|FOREIGN KEY|CASCADE/i);
+    }
+  });
+
+  test('deleteRun on a run that is not there still clears its other tables and returns false', async () => {
+    const { fake, store } = setup();
+    expect(await store.deleteRun(RUN_B)).toBe(false);
+    expect(transactions(fake).at(-1)).toEqual({
+      on: expect.any(String),
+      statements: [
+        SQL.deleteRun,
+        SQL.deleteSubmissions,
+        SQL.deleteEvidence,
+        SQL.deleteReports,
+        SQL.deleteFeedback,
+        SQL.deleteRunUsage,
+        SQL.embeddingModels,
+        SQL.dropKeysForRun,
+      ],
+      end: 'COMMIT',
     });
   });
 
@@ -233,13 +272,71 @@ describe('postgres provider: statements', () => {
   });
 
   test('putReport on an unknown run is RunNotFoundError; on an unknown submission a RunStoreError', async () => {
-    const { store } = setup();
+    const { fake, store } = setup();
     await expect(store.putReport(RUN_B, 1, p(sampleReport(RUN_B, 'x')), p('# x'))).rejects.toThrow(RunNotFoundError);
     await store.createRun(RUN_A, p(sampleRequest(RUN_A)));
     const err = await store.putReport(RUN_A, 3, p(sampleReport(RUN_A, 'x')), p('# x')).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(RunStoreError);
     expect(err).not.toBeInstanceOf(RunNotFoundError);
     expect(String(err)).toContain('submission 3 not found');
+    // Refused by the provider's own checks; the fake enforces no foreign key.
+    expect(fake.counts().reports).toBe(0);
+  });
+
+  test('writes that a foreign key used to guard check the run under a key-share lock first', async () => {
+    const { fake, store } = setup();
+    await store.createRun(RUN_A, p(sampleRequest(RUN_A)));
+    await store.putFeedback(RUN_A, p(sampleFeedback('correct', '2026-09-01T10:00:00.000Z')));
+    await store.putEmbedding(RUN_A, p(sampleEmbedding('case', 'ollama/x', [1, 0])));
+    const upsert = embeddingSql(sanitiseModelTable('ollama/x')).upsert;
+    const txs = transactions(fake);
+    expect(txs.find((t) => t.statements.includes(SQL.insertFeedback))?.statements).toEqual([SQL.shareRun, SQL.insertFeedback]);
+    expect(txs.find((t) => t.statements.includes(upsert))?.statements).toEqual([SQL.shareRun, upsert]);
+    expect(SQL.shareRun).toEndWith('FOR KEY SHARE');
+    expect(SQL.insertFeedback).not.toContain('FROM triage.runs');
+    expect(upsert).not.toContain('FROM triage.runs');
+
+    // On an unknown run each rolls back after the check, and the fake, which enforces no foreign key, holds nothing.
+    await expect(store.putFeedback(RUN_B, p(sampleFeedback('wrong', '2026-09-01T10:00:00.000Z')))).rejects.toThrow(RunNotFoundError);
+    expect(transactions(fake).at(-1)).toEqual({ on: expect.any(String), statements: [SQL.shareRun], end: 'ROLLBACK' });
+    await expect(store.putEvidence(RUN_B, 'ssfb', p(sampleFindings('x')))).rejects.toThrow(RunNotFoundError);
+    await expect(store.addSubmission(RUN_B, p({ kind: 'initial' as const }))).rejects.toThrow(RunNotFoundError);
+    await expect(store.putUsage(RUN_B, 0, [sampleUsageRow()], true)).rejects.toThrow(RunNotFoundError);
+    expect(fake.counts()).toEqual({
+      runs: 1,
+      submissions: 0,
+      evidence: 0,
+      reports: 0,
+      feedback: 1,
+      idempotency: 0,
+      embedding_models: 1,
+      embeddings: 1,
+      run_usage: 0,
+    });
+  });
+
+  test('a run deleted while putEmbedding registers its model gets no embedding row', async () => {
+    const fake = createFakePg();
+    const other = createPostgresRunStore({ runner: fake.runner() });
+    const runner = fake.runner();
+    let deleted = false;
+    // The delete lands after putEmbedding's first run check and before its insert.
+    const racing = {
+      transaction: runner.transaction,
+      query: (async (text: string, params?: readonly unknown[]) => {
+        if (text === SQL.embeddingModel && !deleted) {
+          deleted = true;
+          expect(await other.deleteRun(RUN_A)).toBe(true);
+        }
+        return runner.query(text, params as never);
+      }) as typeof runner.query,
+    };
+    const store = createPostgresRunStore({ runner: racing });
+    await store.createRun(RUN_A, p(sampleRequest(RUN_A)));
+    await expect(store.putEmbedding(RUN_A, p(sampleEmbedding('case', 'ollama/x', [1, 0])))).rejects.toThrow(RunNotFoundError);
+    expect(deleted).toBe(true);
+    expect(transactions(fake).at(-1)).toEqual({ on: expect.any(String), statements: [SQL.shareRun], end: 'ROLLBACK' });
+    expect(fake.counts().embeddings).toBe(0);
   });
 
   test('putBlock and resolveBlock are single guarded updates; markStopped closes the block in the same statement', async () => {
@@ -307,6 +404,110 @@ describe('postgres provider: statements', () => {
   });
 });
 
+// ------------------------------------------------------------------ usage
+
+describe('postgres provider: usage (D59)', () => {
+  test('putUsage runs one transaction: run check under a key-share lock, delete for the seq, one fixed insert per row', async () => {
+    const { fake, store } = setup(() => Date.parse('2026-09-01T00:00:00.000Z'));
+    await store.createRun(RUN_A, p(sampleRequest(RUN_A)));
+    const before = fake.calls.length;
+    await store.putUsage(RUN_A, 1, [sampleUsageRow(), sampleUsageRow({ agent: 'synthesis', usd: null })], true);
+
+    const own = fake.calls.slice(before);
+    expect(own.map((c) => c.text)).toEqual(['BEGIN', SQL.shareRun, SQL.deleteUsage, SQL.insertUsage, SQL.insertUsage, 'COMMIT']);
+    expect(new Set(own.map((c) => c.on)).size).toBe(1);
+    expect(own.map((c) => c.text)).not.toContain(SQL.lockRun);
+    expect(own.map((c) => c.text)).not.toContain(SQL.usageFinal);
+    const inserts = own.filter((c) => c.text === SQL.insertUsage);
+    // Sorted by model, agent and purpose before they are sent.
+    expect(inserts[0]?.params).toEqual([RUN_A, 1, USAGE_MODEL, 'synthesis', 'agent', 3, 1, 1200, 300, 4000, 500, null, true, '2026-09-01T00:00:00.000Z']);
+    expect(inserts[1]?.params[3]).toBe('triage');
+    expect(inserts[1]?.params[11]).toBe(0.25);
+    // The run row is untouched.
+    expect(own.some((c) => c.text.startsWith('UPDATE triage.runs'))).toBe(false);
+  });
+
+  test('a non-final putUsage checks for final rows first and stops when it finds them', async () => {
+    const { fake, store } = setup();
+    await store.createRun(RUN_A, p(sampleRequest(RUN_A)));
+    let before = fake.calls.length;
+    await store.putUsage(RUN_A, 1, [sampleUsageRow()], false);
+    expect(fake.calls.slice(before).map((c) => c.text)).toEqual([
+      'BEGIN',
+      SQL.shareRun,
+      SQL.usageFinal,
+      SQL.deleteUsage,
+      SQL.insertUsage,
+      'COMMIT',
+    ]);
+    await store.putUsage(RUN_A, 1, [sampleUsageRow({ calls: 9 })], true);
+    before = fake.calls.length;
+    await store.putUsage(RUN_A, 1, [sampleUsageRow({ calls: 10 })], false);
+    expect(fake.calls.slice(before).map((c) => c.text)).toEqual(['BEGIN', SQL.shareRun, SQL.usageFinal, 'COMMIT']);
+    expect((await store.getRun(RUN_A))?.usage[0]?.rows[0]?.calls).toBe(9);
+  });
+
+  test('a refused putUsage sends no statement', async () => {
+    const { fake, store } = setup();
+    await store.createRun(RUN_A, p(sampleRequest(RUN_A)));
+    const before = fake.calls.length;
+    await expect(store.putUsage(RUN_A, 1, [sampleUsageRow({ model: 'anthropic/claude-haiku-4-5-****1001' })], true)).rejects.toThrow(
+      'invalid usage rows: 0.model',
+    );
+    await expect(store.putUsage(RUN_A, -1, [sampleUsageRow()], true)).rejects.toThrow('invalid usage seq');
+    await expect(store.putUsage('../x', 1, [sampleUsageRow()], true)).rejects.toThrow(RunStoreError);
+    expect(fake.calls.slice(before)).toEqual([]);
+  });
+
+  test('putUsage on an unknown run rolls back with RunNotFoundError', async () => {
+    const { fake, store } = setup();
+    await expect(store.putUsage(RUN_B, 1, [sampleUsageRow()], true)).rejects.toThrow(RunNotFoundError);
+    expect(transactions(fake).at(-1)).toEqual({ on: expect.any(String), statements: [SQL.shareRun], end: 'ROLLBACK' });
+  });
+
+  test('a failed insert rolls back the delete, so the earlier rows stay', async () => {
+    let fail = false;
+    const fake = createFakePg({ failOn: (text) => fail && text === SQL.insertUsage });
+    const store = createPostgresRunStore({ runner: fake.runner() });
+    await store.createRun(RUN_A, p(sampleRequest(RUN_A)));
+    await store.putUsage(RUN_A, 1, [sampleUsageRow({ calls: 1 })], true);
+    fail = true;
+    await expect(store.putUsage(RUN_A, 1, [sampleUsageRow({ calls: 2 })], true)).rejects.toThrow('injected failure');
+    expect(transactions(fake).at(-1)?.end).toBe('ROLLBACK');
+    expect((await store.getRun(RUN_A))?.usage[0]?.rows[0]?.calls).toBe(1);
+  });
+
+  test('getRun groups the rows by seq; listRuns reads the bigint token sum from text', async () => {
+    const { fake, store } = setup();
+    await store.createRun(RUN_A, p(sampleRequest(RUN_A)));
+    await store.putUsage(RUN_A, 0, [sampleUsageRow({ agent: 'classifier', purpose: 'classify' })], true);
+    await store.putUsage(RUN_A, 1, [sampleUsageRow(), sampleUsageRow({ agent: 'investigate_ssfb' })], false);
+    const run = await store.getRun(RUN_A);
+    expect(run?.usage.map((u) => [u.seq, u.final, u.rows.map((r) => r.agent)])).toEqual([
+      [0, true, ['classifier']],
+      [1, false, ['investigate_ssfb', 'triage']],
+    ]);
+    expect(callsOf(fake, SQL.usage)).toHaveLength(1);
+    expect(SQL.usage).toContain('ORDER BY seq, model COLLATE "C", agent COLLATE "C", purpose COLLATE "C"');
+    const [summary] = await store.listRuns();
+    expect(summary?.tokens_total).toBe(3 * (1200 + 300 + 4000 + 500));
+    expect(summary?.usd_total).toBe(0.75);
+    // Each row's sum is widened to bigint before it is added up, so it cannot overflow integer.
+    expect(SQL.listRuns).toContain('SUM(u.input_tokens::bigint + u.output_tokens');
+  });
+
+  test('a count above the integer column limit is refused before any statement', async () => {
+    const { fake, store } = setup();
+    await store.createRun(RUN_A, p(sampleRequest(RUN_A)));
+    const before = fake.calls.length;
+    await expect(store.putUsage(RUN_A, 1, [sampleUsageRow({ cache_read_tokens: MAX_USAGE_COUNT + 1 })], true)).rejects.toThrow(
+      RunStoreError,
+    );
+    await store.putUsage(RUN_A, 1, [sampleUsageRow({ cache_read_tokens: MAX_USAGE_COUNT })], true);
+    expect(fake.calls.slice(before).filter((c) => c.text === SQL.insertUsage)).toHaveLength(1);
+  });
+});
+
 // ------------------------------------------------------------------ embedding tables
 
 describe('postgres provider: per-model embedding tables', () => {
@@ -366,7 +567,9 @@ describe('postgres provider: per-model embedding tables', () => {
     expect(fake.embeddingTables()).toEqual({ emb_ollama_nomic_embed_text: 3 });
     const ddl = embeddingTableDdl(sanitiseModelTable('ollama/nomic-embed-text'), 3);
     expect(callsOf(fake, ddl)).toHaveLength(1);
-    expect(ddl).toContain('run_id text NOT NULL REFERENCES triage.runs (run_id) ON DELETE CASCADE');
+    // No foreign key to triage.runs (D60).
+    expect(ddl).toContain('run_id text NOT NULL,');
+    expect(ddl).not.toMatch(/REFERENCES|FOREIGN KEY|CASCADE/i);
     expect(ddl).toContain('embedding vector(3) NOT NULL');
     expect(ddl).not.toMatch(/USING (hnsw|ivfflat)/i);
     const [register] = callsOf(fake, SQL.registerModel);
@@ -487,6 +690,9 @@ describe('postgres provider: every statement is parameterised', () => {
     await store.setPhase(RUN_A, 'failed', { reason: 'AgentRunError', worker_pid: 4242 });
     await store.markStopped(RUN_B, 'cancelled', p(sampleResolution('cancelled')));
     await store.putEmbedding(RUN_A, p(sampleEmbedding('request', model, [1, 0], seq)));
+    await store.putUsage(RUN_A, seq, [sampleUsageRow()], false);
+    await store.putUsage(RUN_A, seq, [sampleUsageRow()], true);
+    await store.putUsage(RUN_A, seq, [sampleUsageRow()], false);
     await store.claimIdempotencyKey('key-a', RUN_A, 60_000);
     await store.findSimilar({ vector: [1, 0], model, excludeRunId: RUN_B });
     await store.getRun(RUN_A);
@@ -494,7 +700,7 @@ describe('postgres provider: every statement is parameterised', () => {
     await store.listExpired(new Date());
     await store.deleteRun(RUN_B);
 
-    const values = [RUN_A, RUN_B, 'was the refund sent?', 'AgentRunError', 'the refund landed', 'look', 'key-a', 'partial', model];
+    const values = [RUN_A, RUN_B, 'was the refund sent?', 'AgentRunError', 'the refund landed', 'look', 'key-a', 'partial', model, USAGE_MODEL];
     const statements = fake.calls.filter((c) => !['BEGIN', 'COMMIT', 'ROLLBACK'].includes(c.text));
     expect(statements.length).toBeGreaterThan(20);
     for (const c of statements) {

@@ -160,8 +160,22 @@ No gaps recorded.
 - Wall time: 45.0 s
 - USD total: not known
 
-| Model | Calls | Input tokens | Output tokens |
-| --- | ---: | ---: | ---: |
-| \`fake/mid\` | 6 | 12,000 | 1,800 |
+| Model | Calls | Input tokens | Cache read | Cache write | Output tokens | USD |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| \`fake/mid\` | 6 | 12,000 | - | - | 1,800 | - |
+"
+`;
+
+exports[`variants cost shows cache and USD columns and a partial line for unpriced models 1`] = `
+"
+- Wall time: 61.0 s
+- USD total: $0.0135 (partial)
+- Partial: no pricing for \`openai/gpt-6-sol\`
+
+| Model | Calls | Input tokens | Cache read | Cache write | Output tokens | USD |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| \`anthropic/claude-sonnet-4-5\` | 4 | 1,350 | 40,000 | 2,000 | 520 | $0.0135 |
+| \`faux/cheap\` | 3 | 90 | 0 | 0 | 30 | $0.0000 |
+| \`openai/gpt-6-sol\` | 2 | 700 | 100 | 0 | 70 | no pricing |
 "
 `;

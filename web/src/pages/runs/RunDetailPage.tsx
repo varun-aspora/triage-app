@@ -28,8 +28,8 @@ import { AskForm, SlackPostPanel } from './RunForms.tsx';
 import { StepsPanel } from './RunSteps.tsx';
 import { VerdictPanel } from './RunVerdict.tsx';
 import { verdictLabel } from './verdict-logic.ts';
-import { ClassificationPanel, CostPanel, Dash, EvidencePanel, IdChainPanel, KV, PhaseStepper, RunHeader } from './RunParts.tsx';
-import { blockedSteps, deriveInvestigators, followUpPending, inferFailure, investigatorLook, permalinkHref, runningSteps } from './run-logic.ts';
+import { ClassificationPanel, Dash, EvidencePanel, IdChainPanel, KV, PhaseStepper, RunHeader, UsagePanel } from './RunParts.tsx';
+import { blockedSteps, deriveInvestigators, followUpPending, inferFailure, investigatorLook, permalinkHref, runningSteps, submissionCost } from './run-logic.ts';
 import './runs.css';
 
 const POLL_MS = 3000;
@@ -112,7 +112,7 @@ export default function RunDetailPage() {
 
 // ------------------------------------------------------------------ running
 
-/** Re-renders every second so 'Updated Ns ago' keeps moving between polls. */
+/** Re-renders on a timer so 'Updated Ns ago' and the live usage label keep moving between polls. */
 function useNow(ms: number): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -161,12 +161,11 @@ function RunningView({ run, refreshError, onChanged }: { run: RunDetail; refresh
           <PreflightWarnings run={run} />
           <StepsPanel runId={run.run_id} live />
         </div>
-        {(run.id_chain !== null || run.classification !== null) && (
-          <aside className="runs-side">
-            {run.id_chain !== null && <IdChainPanel chain={run.id_chain} />}
-            {run.classification !== null && <ClassificationPanel decision={run.classification} full={false} />}
-          </aside>
-        )}
+        <aside className="runs-side">
+          {run.id_chain !== null && <IdChainPanel chain={run.id_chain} />}
+          {run.classification !== null && <ClassificationPanel decision={run.classification} full={false} />}
+          <UsagePanel usage={run.usage} running now={now} />
+        </aside>
       </div>
     </>
   );
@@ -188,7 +187,6 @@ function BlockedView({
 }) {
   const now = useNow(30_000);
   const block = shownBlock(run);
-  const hasSide = run.id_chain !== null || run.classification !== null;
   const form = <ResumeForm runId={run.run_id} from="blocked" onResumed={onFollowUp} onRefused={onChanged} />;
   return (
     <>
@@ -211,12 +209,11 @@ function BlockedView({
           <PreflightWarnings run={run} />
           <StepsPanel runId={run.run_id} live={false} />
         </div>
-        {hasSide && (
-          <aside className="runs-side">
-            {run.id_chain !== null && <IdChainPanel chain={run.id_chain} />}
-            {run.classification !== null && <ClassificationPanel decision={run.classification} full={false} />}
-          </aside>
-        )}
+        <aside className="runs-side">
+          {run.id_chain !== null && <IdChainPanel chain={run.id_chain} />}
+          {run.classification !== null && <ClassificationPanel decision={run.classification} full={false} />}
+          <UsagePanel usage={run.usage} running={false} now={now} />
+        </aside>
       </div>
     </>
   );
@@ -252,7 +249,6 @@ function FailedView({
     : failure;
   // A run that failed right after it blocked still holds the block: show what it was waiting on.
   const block = openBlock(run);
-  const hasSide = run.id_chain !== null || run.classification !== null;
   return (
     <>
       <RunHeader run={run} />
@@ -301,12 +297,11 @@ function FailedView({
           <PreflightWarnings run={run} />
           <StepsPanel runId={run.run_id} live={false} />
         </div>
-        {hasSide && (
-          <aside className="runs-side">
-            {run.id_chain !== null && <IdChainPanel chain={run.id_chain} />}
-            {run.classification !== null && <ClassificationPanel decision={run.classification} full={false} />}
-          </aside>
-        )}
+        <aside className="runs-side">
+          {run.id_chain !== null && <IdChainPanel chain={run.id_chain} />}
+          {run.classification !== null && <ClassificationPanel decision={run.classification} full={false} />}
+          <UsagePanel usage={run.usage} running={false} now={now} />
+        </aside>
       </div>
     </>
   );
@@ -348,7 +343,16 @@ function CompletedView({
   onFeedback: () => void;
 }) {
   const [tab, setTab] = useState<TabId>('report');
-  const now = useNow(30_000);
+  // Every second while a follow-up runs, so the live usage label keeps moving.
+  const now = useNow(run.status === 'running' ? 1000 : 30_000);
+  const usagePanel = (
+    <UsagePanel
+      usage={run.usage}
+      running={run.status === 'running'}
+      now={now}
+      {...(run.report !== undefined && run.report.cost !== null ? { wallMs: run.report.cost.wall_ms } : {})}
+    />
+  );
   const asks = run.submissions.filter((s) => s.kind === 'ask');
   const reports = run.submissions.filter((s) => s.has_report).length;
   const report = run.report;
@@ -421,11 +425,14 @@ function CompletedView({
 
       {tab === 'report' &&
         (report === undefined ? (
-          <>
-            <Notice variant="warn" title="No report stored">
-              The run finished without a stored report. The Request tab shows what was asked.
-            </Notice>
-          </>
+          <div className="runs-cols">
+            <div className="runs-main">
+              <Notice variant="warn" title="No report stored">
+                The run finished without a stored report. The Request tab shows what was asked.
+              </Notice>
+            </div>
+            <aside className="runs-side">{usagePanel}</aside>
+          </div>
         ) : (
           <div className="runs-cols">
             <div className="runs-main">
@@ -445,7 +452,7 @@ function CompletedView({
               <ClassificationPanel decision={report.classification} full />
               <IdChainPanel chain={report.id_chain} />
               <EvidencePanel report={report} />
-              <CostPanel cost={report.cost} />
+              {usagePanel}
             </aside>
           </div>
         ))}
@@ -550,6 +557,7 @@ function CompletedView({
 
 function RequestTab({ run }: { run: RunDetail }) {
   const href = permalinkHref(run.permalink);
+  const intake = run.usage?.by_submission['0'] !== undefined;
   return (
     <div className="runs-cols">
       <div className="runs-main">
@@ -591,9 +599,30 @@ function RequestTab({ run }: { run: RunDetail }) {
                   <th scope="col">Question</th>
                   <th scope="col">Sent</th>
                   <th scope="col">Report</th>
+                  <th scope="col" className="num">
+                    Cost
+                  </th>
                 </tr>
               </thead>
               <tbody>
+                {intake && (
+                  <tr>
+                    <td className="mono">0</td>
+                    <td>Intake</td>
+                    <td style={{ fontSize: 13 }} className="muted">
+                      Classifier and prior-cases lookup, before the first submission
+                    </td>
+                    <td>
+                      <Dash />
+                    </td>
+                    <td>
+                      <Dash />
+                    </td>
+                    <td className="num" style={{ whiteSpace: 'nowrap' }}>
+                      {submissionCost(run.usage, 0)}
+                    </td>
+                  </tr>
+                )}
                 {run.submissions.map((s) => (
                   <tr key={s.seq}>
                     <td className="mono">{s.seq}</td>
@@ -601,6 +630,9 @@ function RequestTab({ run }: { run: RunDetail }) {
                     <td style={{ fontSize: 13 }}>{s.question ?? <Dash />}</td>
                     <td style={{ whiteSpace: 'nowrap' }}>{formatDateTime(s.created_at)}</td>
                     <td>{s.has_report ? 'Yes' : 'No'}</td>
+                    <td className="num" style={{ whiteSpace: 'nowrap' }}>
+                      {submissionCost(run.usage, s.seq)}
+                    </td>
                   </tr>
                 ))}
               </tbody>
