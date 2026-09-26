@@ -145,3 +145,8 @@ export async function postJson(req: PostJsonRequest): Promise<unknown> {
 export function isVector(value: unknown): value is number[] {
   return Array.isArray(value) && value.length > 0 && value.every((n) => typeof n === 'number' && Number.isFinite(n));
 }
+
+/** True when every vector has the same length as the first. */
+export function sameDims(vectors: readonly (readonly number[])[]): boolean {
+  return vectors.every((v) => v.length === vectors[0]!.length);
+}
