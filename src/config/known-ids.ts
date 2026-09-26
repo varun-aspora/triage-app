@@ -144,30 +144,15 @@ export function parseKnownIdFields(doc: unknown): readonly KnownIdField[] {
   }
   return Object.freeze(
     parsed.output.fields.map((f): KnownIdField => {
+      const common = { key: f.key, description: f.description, question: f.question };
       const labels = Object.freeze([...f.labels]);
       if ('options' in f) {
-        const options: { [option: string]: KnownIdChoiceOption } = {};
-        for (const [key, o] of Object.entries(f.options)) {
-          options[key] = Object.freeze({ description: o.description, aliases: Object.freeze([...o.aliases]) });
-        }
-        return Object.freeze({
-          kind: 'choice',
-          key: f.key,
-          description: f.description,
-          question: f.question,
-          options: Object.freeze(options),
-          labels,
-        });
+        const options = Object.fromEntries(
+          Object.entries(f.options).map(([key, o]) => [key, Object.freeze({ description: o.description, aliases: Object.freeze([...o.aliases]) })]),
+        );
+        return Object.freeze({ kind: 'choice', ...common, options: Object.freeze(options), labels });
       }
-      return Object.freeze({
-        kind: 'value',
-        key: f.key,
-        description: f.description,
-        question: f.question,
-        pattern: f.pattern,
-        normalise: f.normalise,
-        labels,
-      });
+      return Object.freeze({ kind: 'value', ...common, pattern: f.pattern, normalise: f.normalise, labels });
     }),
   );
 }
