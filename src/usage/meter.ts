@@ -155,7 +155,7 @@ export function snapshotIntake(runId: RunId): UsageRow[] {
 export function runUsageInMemory(runId: RunId): UsageRow[] {
   const run = state().runs.get(runId);
   if (run === undefined) return [];
-  const merged: Bucket = { rows: new Map(), version: 0 };
+  const merged = newBucket();
   for (const bucket of [run.intake, ...run.submissions.values(), run.unassigned]) {
     for (const [key, row] of bucket?.rows ?? []) addInto(merged, key, row);
   }
@@ -387,7 +387,7 @@ function keyOf(model: string, agent: string, purpose: UsagePurpose): string {
 function rowsOf(bucket: Bucket | undefined): UsageRow[] {
   if (bucket === undefined) return [];
   // Byte order, the order the run store keeps rows in.
-  const keys = [...bucket.rows.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const keys = [...bucket.rows.keys()].sort();
   return keys.map((key) => {
     const [model, agent, purpose] = key.split('\u0000') as [string, string, UsagePurpose];
     const row = bucket.rows.get(key) as MutableRow;
