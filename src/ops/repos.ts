@@ -26,7 +26,7 @@ import { join } from 'node:path';
 import type { Config } from '../config/env.ts';
 import { loadRegistry } from '../config/registry.ts';
 import { loadRepos, type RepoPin } from '../config/repos.ts';
-import type { ExecResult } from '../connectors/exec.ts';
+import { succeeded, type ExecResult } from '../connectors/exec.ts';
 import {
   codegraphIndex,
   hasIndex,
@@ -97,10 +97,6 @@ function reposDirNotConfigured(deps: ReposDeps): ReposNotConfigured | undefined 
   return Object.freeze({ status: 'not_configured', key: REPOS_DIR_KEY, message: `repos not configured: ${REPOS_DIR_KEY} is blank` });
 }
 
-function codegraphDeps(deps: ReposDeps, pins: readonly RepoPin[]): CodegraphDeps {
-  return { ...deps, repos: pins };
-}
-
 // ------------------------------------------------------------ remotes and auth
 
 type GitConfig = Pick<Config, 'git'>;
@@ -152,9 +148,6 @@ async function runGit(deps: ReposDeps, argv: readonly string[], timeoutMs: numbe
   });
   return { ...r, stdout: scrubToken(deps.config, r.stdout), stderr: scrubToken(deps.config, r.stderr) };
 }
-
-const succeeded = (r: ExecResult): boolean =>
-  r.exitCode === 0 && !r.timedOut && !r.aborted && r.spawnError === undefined;
 
 // Fixed reasons for the common git failures. The stderr text itself is never returned.
 const GIT_REASONS: readonly (readonly [RegExp, string])[] = [
@@ -261,8 +254,7 @@ async function statusOne(pin: RepoPin, deps: ReposDeps, pins: readonly RepoPin[]
     expectedBranch = succeeded(def) ? (git.parseLocalDefaultBranch(def.stdout) ?? null) : null;
   }
 
-  let drift: boolean | null = null;
-  if (expectedBranch !== null) drift = actualBranch !== expectedBranch;
+  const drift = expectedBranch === null ? null : actualBranch !== expectedBranch;
 
   const problems: string[] = [];
   if (!succeeded(status)) problems.push(failure('status', status));
@@ -437,12 +429,7 @@ async function updateAndIndex(
     }
   }
 
-  let branch = pin.branch;
-  if (branch === undefined) {
-    const out = await mustRun(deps, 'ls-remote', git.remoteDefaultBranch(dir), FETCH_TIMEOUT_MS);
-    branch = git.parseDefaultBranch(out);
-    if (branch === undefined) throw new StepError('could not read the default branch of origin');
-  }
+  const branch = pin.branch ?? (await readDefaultBranch(deps, git.remoteDefaultBranch(dir), 'origin'));
 
   await mustRun(deps, 'fetch', git.fetchBranch(dir, branch), FETCH_TIMEOUT_MS);
   await mustRun(deps, 'checkout', git.checkoutFetched(dir, branch), LOCAL_TIMEOUT_MS);
@@ -454,12 +441,7 @@ async function cloneAndIndex(pin: RepoPin, remote: string, deps: ReposDeps, pins
   const reposDir = deps.config.paths.reposDir as string;
   mkdirSync(reposDir, { recursive: true });
 
-  let branch = pin.branch;
-  if (branch === undefined) {
-    const out = await mustRun(deps, 'ls-remote', git.remoteDefaultBranchOf(reposDir, remote), FETCH_TIMEOUT_MS);
-    branch = git.parseDefaultBranch(out);
-    if (branch === undefined) throw new StepError('could not read the default branch of the remote');
-  }
+  const branch = pin.branch ?? (await readDefaultBranch(deps, git.remoteDefaultBranchOf(reposDir, remote), 'the remote'));
 
   await mustRun(deps, 'clone', git.cloneBranch(reposDir, remote, branch, pin.repo), CLONE_TIMEOUT_MS);
 
@@ -470,6 +452,13 @@ async function cloneAndIndex(pin: RepoPin, remote: string, deps: ReposDeps, pins
   const warnings: string[] = [];
   if (pin.branch === undefined) await recordDefault(deps, r.dir, branch, warnings);
   return indexAndFinish(pin, r.dir, branch, 'cloned', deps, pins, index, warnings);
+}
+
+/** The branch `ls-remote --symref` says HEAD points at. `whose` names the remote in the error. */
+async function readDefaultBranch(deps: ReposDeps, argv: readonly string[], whose: string): Promise<string> {
+  const branch = git.parseDefaultBranch(await mustRun(deps, 'ls-remote', argv, FETCH_TIMEOUT_MS));
+  if (branch === undefined) throw new StepError(`could not read the default branch of ${whose}`);
+  return branch;
 }
 
 /**
@@ -489,9 +478,8 @@ async function indexAndFinish(
   deps: ReposDeps,
   pins: readonly RepoPin[],
   index: boolean,
-  earlier: readonly string[] = [],
+  warnings: string[],
 ): Promise<RepoSyncResult> {
-  const warnings: string[] = [...earlier];
   const head = await mustRun(deps, 'rev-parse', git.revParseHead(dir), LOCAL_TIMEOUT_MS);
   const commit = git.parseCommit(head);
   const done = { action, branch, ...(commit !== undefined ? { commit } : {}) };
@@ -500,7 +488,7 @@ async function indexAndFinish(
   const excludeWarning = addIndexExclude(dir);
   if (excludeWarning !== undefined) warnings.push(excludeWarning);
 
-  const idx: CodegraphResult = await codegraphIndex(pin.repo, codegraphDeps(deps, pins));
+  const idx: CodegraphResult = await codegraphIndex(pin.repo, { ...deps, repos: pins });
   switch (idx.status) {
     case 'ok':
       return finish(pin.repo, { status: 'ok', ...done, index: idx.command === 'init' ? 'init' : 'sync', warnings });
