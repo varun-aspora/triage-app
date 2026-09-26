@@ -53,11 +53,8 @@ export function noteShutdown(signal: string, deps: NoteShutdownDeps = {}): numbe
       // One run's line failing does not stop the others.
     }
   }
-  try {
-    (deps.flush ?? flushRunEventLogSync)();
-  } catch {
-    // The lines stay queued; the drain may still write them.
-  }
+  // A failed flush leaves the lines queued; the drain may still write them.
+  flushBeforeExit(deps.flush);
   return runs.length;
 }
 
