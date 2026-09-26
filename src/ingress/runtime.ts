@@ -21,6 +21,10 @@
 // start(), so every Flue event of a run this process drives lands in the
 // run's events.jsonl. A config that does not load leaves the log off.
 //
+// Next to it, it installs the usage meter (src/usage/meter.ts, D59), which
+// counts every model turn of the runs this process drives. It needs no
+// config; usageMeter: false leaves it off (tests).
+//
 // src/db.ts is imported lazily: its default export loads the config and
 // builds the adapter on import, which should happen only when a runtime is
 // actually started.
@@ -32,6 +36,7 @@ import { loadConfig, type Config } from '../config/env.ts';
 import { ConfigError } from '../config/errors.ts';
 import { describeEnsure, ensureConfiguredModels } from '../model-refresh.ts';
 import { installRunEventLog } from '../runlog/event-log.ts';
+import { installUsageMeter } from '../usage/meter.ts';
 
 export type BootOptions = {
   /** Defaults to Flue's start() from @flue/runtime/node. */
@@ -44,6 +49,8 @@ export type BootOptions = {
   readonly ensureModels?: () => Promise<void>;
   /** Where the run event log writes. Default: config.paths.runsDir; false leaves it off. */
   readonly eventLog?: false | { readonly runsDir: string };
+  /** Installs the usage meter. Default true; false leaves it off. */
+  readonly usageMeter?: boolean;
 };
 
 let booted: Promise<Flue> | undefined;
@@ -65,6 +72,7 @@ async function startOnce(options: BootOptions): Promise<Flue> {
     const runsDir = options.eventLog?.runsDir ?? runsDirOf();
     if (runsDir !== undefined) installRunEventLog({ runsDir });
   }
+  if (options.usageMeter !== false) installUsageMeter();
   const db = options.db !== undefined ? await options.db() : (await import('../db.ts')).default;
   const start = options.start ?? flueStart;
   return start({ agents: options.agents ?? [Triage], db });

@@ -26,11 +26,11 @@ import type { Tier } from '../types/core.ts';
 import type { CodeFindings, EntityFindings } from '../types/findings.ts';
 import type { Report, ReportDraft } from '../types/report.ts';
 import { ToolEnvelopeSchema, type ToolEnvelope } from '../types/tool-result.ts';
+import type { UsageRow } from '../types/usage.ts';
 import { makeTestConfig, makeToolContext } from '../../test/support/fake-tool-context.ts';
 import {
   computeCost,
   createFinishReportTool,
-  defaultPricing,
   FINISH_REPORT,
   MAX_SYNTHESIS_PASSES,
   NO_USAGE_GAP,
@@ -38,9 +38,9 @@ import {
   toolModule,
   type CommitReader,
   type FinishReportOptions,
-  type PricingLookup,
   releaseFinishReport,
   synthesisPassesFor,
+  unpricedGap,
   type UsageReader,
 } from './finish-report.tool.ts';
 import { conformanceProblems, toolsFor } from './index.ts';
@@ -182,6 +182,7 @@ function memoryStore(runId: string): MemoryStore {
     listRuns: unused,
     putEmbedding: unused,
     findSimilar: unused,
+    putUsage: unused,
     deleteRun: unused,
     listExpired: unused,
   };
@@ -258,6 +259,23 @@ type SetupOptions = {
   maxToolCalls?: number;
 };
 
+/** One usage row as the meter gives it: a faux model priced at $0 unless overridden. */
+function usageRow(over: Partial<UsageRow> = {}): UsageRow {
+  return {
+    model: 'faux/mid',
+    agent: 'triage',
+    purpose: 'agent',
+    calls: 1,
+    failed_calls: 0,
+    input_tokens: 10,
+    output_tokens: 5,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    usd: 0,
+    ...over,
+  };
+}
+
 let runSeq = 0;
 const cleanups: (() => void)[] = [];
 afterEach(() => {
@@ -311,12 +329,11 @@ function setup(opts: SetupOptions = {}): Setup {
     now: () => NOW,
     idChain: () => ({ ids: {}, hops: [], basic_state: [] }),
     ...(initialData !== undefined ? { initialData } : {}),
-    usage: opts.usage ?? (() => ({})),
+    usage: opts.usage ?? (() => [usageRow()]),
     ...(opts.repoCommit !== undefined ? { repoCommit: opts.repoCommit } : {}),
   } as unknown as ToolDeps;
   const ctx = makeToolContext({ runId, config, deps });
-  const pricing: PricingLookup = () => ({ input: 3, output: 15 });
-  const tool = createFinishReportTool(ctx, { pricing, ...opts.options });
+  const tool = createFinishReportTool(ctx, { ...opts.options });
   return { runId, store, audit, budget, escalation, tool, harness: stubHarness(opts.respond), deps };
 }
 
@@ -559,11 +576,9 @@ describe('finish_report: escalation and strong synthesis', () => {
     const s = setup({ tier: 'cheap', options: { writeReport: writer.writeReport } });
     putEvidence(s.store, 'atspl', entityFindings('low'));
     const ctx = makeToolContext({ runId: s.runId, config, deps: s.deps });
-    const pricing: PricingLookup = () => ({ input: 3, output: 15 });
-
     // Flue re-renders the agent before every model turn, so each call gets a new tool.
     for (let i = 0; i < MAX_SYNTHESIS_PASSES + 2; i++) {
-      const tool = createFinishReportTool(ctx, { pricing, writeReport: writer.writeReport });
+      const tool = createFinishReportTool(ctx, { writeReport: writer.writeReport });
       await call({ ...s, tool }, baseDraft('cheap'));
     }
 
@@ -672,58 +687,120 @@ describe('finish_report: repo_commits', () => {
 // ------------------------------------------------------------------ cost
 
 describe('finish_report: cost', () => {
-  test('tokens per model and a USD total when pricing is known', async () => {
+  test('rows are summed per model with cache tokens, a USD per model and a total', async () => {
     const writer = fakeWriter();
     const usage: UsageReader = (runId) => {
       expect(runId).toStartWith('run_finish_report_');
-      return {
-        'faux/mid': { input_tokens: 1000, output_tokens: 500, calls: 2 },
-        'faux/strong': { input_tokens: 2000, output_tokens: 0 },
-      };
+      return [
+        usageRow({ model: 'anthropic/claude-sonnet-4-5', agent: 'triage', calls: 2, input_tokens: 1000, output_tokens: 500, cache_read_tokens: 4000, cache_write_tokens: 200, usd: 0.0123 }),
+        usageRow({ model: 'anthropic/claude-sonnet-4-5', agent: 'synthesis', calls: 1, failed_calls: 1, input_tokens: 300, output_tokens: 0, usd: 0.0009 }),
+        usageRow({ model: 'anthropic/claude-sonnet-4-5', agent: 'triage', purpose: 'compaction', calls: 1, input_tokens: 50, output_tokens: 20, usd: 0.0003 }),
+        usageRow({ model: 'faux/cheap', agent: 'investigate_atspl', calls: 3, input_tokens: 90, output_tokens: 30, usd: 0 }),
+      ];
     };
     const s = setup({ tier: 'strong', usage, options: { writeReport: writer.writeReport } });
 
     await call(s, baseDraft('strong'));
 
-    const cost = writer.spy.calls[0]!.draft.cost;
-    expect(cost).toEqual({
+    const written = writer.spy.calls[0]!.draft;
+    expect(written.cost).toEqual({
       models: {
-        'faux/mid': { calls: 2, input_tokens: 1000, output_tokens: 500 },
-        'faux/strong': { calls: 0, input_tokens: 2000, output_tokens: 0 },
+        'anthropic/claude-sonnet-4-5': {
+          calls: 4,
+          input_tokens: 1350,
+          output_tokens: 520,
+          cache_read_tokens: 4000,
+          cache_write_tokens: 200,
+          usd: 0.0135,
+        },
+        'faux/cheap': { calls: 3, input_tokens: 90, output_tokens: 30, cache_read_tokens: 0, cache_write_tokens: 0, usd: 0 },
       },
       wall_ms: 30 * 60 * 1000,
-      // (1000*3 + 500*15 + 2000*3) / 1e6
-      usd_total: 0.0165,
+      usd_total: 0.0135,
     });
+    expect(written.cost).not.toHaveProperty('unpriced_models');
+    expect(written.gaps.some((g) => g.startsWith('cost'))).toBe(false);
+    expect(v.is(FullReportSchema, { ...written, run_id: s.runId, env_label: '', generated_at: AT })).toBe(true);
   });
 
-  test('a model without pricing gives cost null and a gap', async () => {
+  test('an unpriced model gives a partial total, no usd for it, unpriced_models and a gap', async () => {
     const writer = fakeWriter();
-    const usage: UsageReader = () => ({
-      'faux/mid': { input_tokens: 10, output_tokens: 5 },
-      'ollama/unknown-20250929': { input_tokens: 10, output_tokens: 5 },
-    });
-    const pricing: PricingLookup = (spec) => (spec === 'faux/mid' ? { input: 1, output: 1 } : undefined);
-    const s = setup({ tier: 'strong', usage, options: { writeReport: writer.writeReport, pricing } });
+    const usage: UsageReader = () => [
+      usageRow({ model: 'anthropic/claude-sonnet-4-5', input_tokens: 100, output_tokens: 10, usd: 0.25 }),
+      usageRow({ model: 'openai/unknown-20250929', agent: 'investigate_ssfb', input_tokens: 70, output_tokens: 7, usd: null }),
+    ];
+    const s = setup({ tier: 'strong', usage, options: { writeReport: writer.writeReport } });
 
     await call(s, baseDraft('strong'));
 
     const written = writer.spy.calls[0]!.draft;
-    expect(written.cost).toBeNull();
-    const gap = written.gaps.find((g) => g.startsWith('cost not computed'));
-    expect(gap).toBeDefined();
+    const cost = written.cost!;
+    expect(cost.usd_total).toBe(0.25);
+    expect(cost.unpriced_models).toEqual(['openai/unknown-20250929']);
+    expect(cost.models['anthropic/claude-sonnet-4-5']?.usd).toBe(0.25);
+    expect(cost.models['openai/unknown-20250929']).toEqual({
+      calls: 1,
+      input_tokens: 70,
+      output_tokens: 7,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+    });
+    const gap = written.gaps.find((g) => g.startsWith('cost is partial'));
+    expect(gap).toBe('cost is partial: no pricing for openai/unknown-****0929; the total leaves it out');
     // The model id's date run is masked so the gap cannot trip the egress check.
     expect(gap).not.toContain('20250929');
   });
 
-  test('without a usage reader the cost is null with a gap', async () => {
-    const r = await computeCost(undefined, () => ({ input: 1, output: 1 }), 0);
-    expect(r).toEqual({ cost: null, gaps: [NO_USAGE_GAP] });
+  test('a model with any unpriced row has no usd; the total keeps its priced rows', () => {
+    const r = computeCost(
+      [
+        usageRow({ model: 'typesafe/jev-1.13', agent: 'classifier', purpose: 'classify', usd: 0.002 }),
+        usageRow({ model: 'typesafe/jev-1.13', agent: 'classifier', purpose: 'agent', usd: null }),
+        usageRow({ model: 'openai/gpt-6-sol', usd: null }),
+      ],
+      1234.4,
+    );
+    expect(r.cost?.usd_total).toBe(0.002);
+    expect(r.cost?.models['typesafe/jev-1.13']).not.toHaveProperty('usd');
+    expect(r.cost?.unpriced_models).toEqual(['openai/gpt-6-sol', 'typesafe/jev-1.13']);
+    expect(r.cost?.wall_ms).toBe(1234);
+    expect(r.gaps).toEqual([unpricedGap(['openai/gpt-6-sol', 'typesafe/jev-1.13'])]);
+    expect(r.gaps[0]).toEndWith('the total leaves them out');
   });
 
-  test('the default pricing has nothing for an unknown model', async () => {
-    expect(await defaultPricing('faux/not-a-model')).toBeUndefined();
-    expect(await defaultPricing('not-a-spec')).toBeUndefined();
+  test('every model unpriced still gives a cost, with a $0 total', () => {
+    const r = computeCost([usageRow({ model: 'openai/gpt-6-sol', usd: null })], 0);
+    expect(r.cost).toEqual({
+      models: { 'openai/gpt-6-sol': { calls: 1, input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0 } },
+      wall_ms: 0,
+      usd_total: 0,
+      unpriced_models: ['openai/gpt-6-sol'],
+    });
+  });
+
+  test('no usage at all gives cost null with a gap', async () => {
+    expect(computeCost(undefined, 0)).toEqual({ cost: null, gaps: [NO_USAGE_GAP] });
+    expect(computeCost([], 0)).toEqual({ cost: null, gaps: [NO_USAGE_GAP] });
+
+    const writer = fakeWriter();
+    const s = setup({ tier: 'strong', usage: () => [], options: { writeReport: writer.writeReport } });
+    await call(s, baseDraft('strong'));
+    const written = writer.spy.calls[0]!.draft;
+    expect(written.cost).toBeNull();
+    expect(written.gaps).toContain(NO_USAGE_GAP);
+  });
+
+  test('bad counts and a non-finite usd do not break the sum', () => {
+    const bad = usageRow({ calls: -1, input_tokens: Number.NaN, output_tokens: 2.7, usd: Number.POSITIVE_INFINITY });
+    const r = computeCost([bad], 0);
+    expect(r.cost?.models['faux/mid']).toEqual({
+      calls: 0,
+      input_tokens: 0,
+      output_tokens: 2,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+    });
+    expect(r.cost?.unpriced_models).toEqual(['faux/mid']);
   });
 });
 

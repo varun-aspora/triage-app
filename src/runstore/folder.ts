@@ -12,6 +12,7 @@
 //   feedback.jsonl                 one entry per line, append-only
 //   feedback.md                    the caller's rendering, or a short default
 //   embeddings.json                EmbeddingRow[]
+//   usage/<seq>.json               SubmissionUsage, one file per seq (0 = intake), D59
 // Idempotency claims live in TRIAGE_DATA_DIR/idempotency/<sha256(key)>.json
 // and hold {run_id, expires_at}, never the key itself.
 //
@@ -21,6 +22,9 @@
 // creates, so a second process on the same run cannot take the same number.
 // A deleted run is renamed out of the way before it is removed, so a reader
 // never sees half a run.
+//
+// Usage files are checked by UsageRowSchema instead of the persisted profile
+// (D59) and never touch meta.json, so a usage write does not move updated_at.
 
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, readdir, readFile, rename, rm, stat, unlink } from 'node:fs/promises';
@@ -31,6 +35,7 @@ import type { Persisted } from '../gate/redact.ts';
 import type { RunId } from '../types/core.ts';
 import type { Report } from '../types/report.ts';
 import type { TriageRequest } from '../types/request.ts';
+import { SubmissionUsageSchema, type SubmissionUsage, type UsageRow } from '../types/usage.ts';
 import { createExclusive, hasCode, isTempFile, writeFileAtomic } from './atomic.ts';
 import {
   EMBEDDING_KINDS,
@@ -50,6 +55,8 @@ import {
   assertEvidenceKey,
   assertPersisted,
   assertRunId,
+  byUsageKey,
+  checkUsage,
   cosine,
   isTerminalPhase,
   type ClassificationRecord,
@@ -192,6 +199,7 @@ const IdempotencyClaimSchema = v.object({
 type IdempotencyClaim = v.InferOutput<typeof IdempotencyClaimSchema>;
 
 const VERSION_FILE = /^(.+)\.v(\d+)\.json$/;
+const USAGE_FILE = /^(0|[1-9][0-9]*)\.json$/;
 
 // ------------------------------------------------------------------ provider
 
@@ -578,6 +586,53 @@ class FolderRunStore implements RunStore {
     return hits.slice(0, limit);
   }
 
+  // ---------------------------------------------------------------- usage
+
+  async putUsage(runId: RunId, seq: number, rows: readonly UsageRow[], final: boolean): Promise<void> {
+    const usage = checkUsage(seq, rows, final);
+    // The run lock keeps a usage write from recreating the folder of a run being deleted.
+    await serial(this.#lock(runId), async () => {
+      await this.#requireRun(runId);
+      const path = join(this.#dir(runId), 'usage', `${usage.seq}.json`);
+      // A non-final write never replaces final rows. Only the process running
+      // the submission writes its seq, so nothing races this read.
+      if (!final && (await this.#usageFile(path, usage.seq))?.final === true) return;
+      if (usage.rows.length === 0) {
+        // Like the postgres DELETE with nothing inserted after it.
+        await unlink(path).catch((err: unknown) => {
+          if (!hasCode(err, 'ENOENT')) throw err;
+        });
+        return;
+      }
+      const entry: SubmissionUsage = { seq: usage.seq, rows: usage.rows, updated_at: this.#iso(), final };
+      await writeFileAtomic(path, json(entry));
+    });
+  }
+
+  async #usageFile(path: string, seq: number): Promise<SubmissionUsage | undefined> {
+    const raw = await readJson(path, 'usage file');
+    if (raw === undefined) return undefined;
+    const entry = parseRecord(SubmissionUsageSchema, raw, 'usage file');
+    if (entry.seq !== seq) throw new RunStoreError('corrupt usage file in the run store');
+    return entry;
+  }
+
+  /** Every usage file of the run, by seq. A run from before D59 has none. */
+  async #usage(runId: string): Promise<SubmissionUsage[]> {
+    const dir = join(this.#dir(runId), 'usage');
+    const seqs = (await listDir(dir))
+      .map((name) => USAGE_FILE.exec(name)?.[1])
+      .filter((n): n is string => n !== undefined)
+      .map(Number)
+      .sort((a, b) => a - b);
+    const out: SubmissionUsage[] = [];
+    for (const seq of seqs) {
+      const entry = await this.#usageFile(join(dir, `${seq}.json`), seq);
+      if (entry !== undefined) out.push({ ...entry, rows: [...entry.rows].sort(byUsageKey) });
+    }
+    return out;
+  }
+
   // ---------------------------------------------------------------- idempotency
 
   #claimPath(key: string): string {
@@ -715,6 +770,7 @@ class FolderRunStore implements RunStore {
       feedback,
       feedback_latest: feedback.at(-1) ?? null,
       embeddings,
+      usage: await this.#usage(runId),
     };
   }
 
@@ -751,6 +807,8 @@ class FolderRunStore implements RunStore {
       if (query.category !== undefined && category !== query.category) continue;
       const report = (await readJson(join(dir, 'report.json'), 'report.json')) as Report | undefined;
       const verdict = (await this.#feedback(runId)).at(-1)?.verdict;
+      const rows = (await this.#usage(runId)).flatMap((u) => u.rows);
+      const priced = rows.filter((r) => r.usd !== null);
       out.push({
         run_id: runId,
         created_at: meta.created_at,
@@ -761,6 +819,17 @@ class FolderRunStore implements RunStore {
         ...(report?.status !== undefined ? { report_status: report.status } : {}),
         submissions: (await this.#submissions(runId)).length,
         ...(verdict !== undefined ? { feedback_verdict: verdict } : {}),
+        // The same sums as the postgres subqueries: usd over priced rows, tokens over every row.
+        ...(priced.length > 0 ? { usd_total: priced.reduce((sum, r) => sum + (r.usd ?? 0), 0) } : {}),
+        ...(rows.length > 0
+          ? {
+              tokens_total: rows.reduce(
+                (sum, r) => sum + r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_write_tokens,
+                0,
+              ),
+            }
+          : {}),
+        ...(priced.length > 0 && priced.length < rows.length ? { usd_partial: true as const } : {}),
       });
     }
     out.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.run_id.localeCompare(a.run_id));

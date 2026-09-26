@@ -252,6 +252,47 @@ describe('pickReviewer', () => {
   });
 });
 
+describe('cost stays out of Slack (D59)', () => {
+  // Cost is shown in the web UI, the CLI and report.md only.
+  const withCost = (): Report => ({
+    ...sample(),
+    cost: {
+      models: {
+        'anthropic/claude-sonnet-4-5': {
+          calls: 4,
+          input_tokens: 1350,
+          output_tokens: 520,
+          cache_read_tokens: 40000,
+          cache_write_tokens: 2000,
+          usd: 0.4213,
+        },
+        'openai/gpt-6-sol': { calls: 2, input_tokens: 700, output_tokens: 70 },
+      },
+      wall_ms: 61000,
+      usd_total: 0.4213,
+      unpriced_models: ['openai/gpt-6-sol'],
+    },
+  });
+
+  test('a report with cost gives no Cost, no $ and no token wording', () => {
+    const report = withCost();
+    expect(v.is(ReportSchema, report)).toBe(true);
+    for (const tag of [REVIEWER, { kind: 'group', handle: 'banking-triage' } as const]) {
+      const text = formatSlackReport(report, tag);
+      expect(text).not.toMatch(/\bcost\b/i);
+      expect(text).not.toContain('$');
+      expect(text).not.toMatch(/token/i);
+      expect(text).not.toMatch(/\busd\b/i);
+      expect(text).not.toMatch(/pricing|claude-sonnet|gpt-6|cache/i);
+    }
+  });
+
+  test('the Slack text is the same with and without cost', () => {
+    const report = withCost();
+    expect(formatSlackReport(report, REVIEWER)).toBe(formatSlackReport({ ...report, cost: null }, REVIEWER));
+  });
+});
+
 describe('slack-format.ts source', () => {
   const source = readFileSync(join(import.meta.dir, 'slack-format.ts'), 'utf8');
 

@@ -14,7 +14,7 @@ import { CATEGORIES, FEEDBACK_VERDICTS, RUN_STATUSES } from '../../lib/constants
 import { formatDateTime, shortRunId } from '../../lib/format.ts';
 import { runPhaseTone } from '../../lib/status.ts';
 import { useApi } from '../../lib/useApi.ts';
-import { CREATED_RANGES, DEFAULT_CREATED, isCreatedRange, sinceFor } from './run-logic.ts';
+import { CREATED_RANGES, DEFAULT_CREATED, isCreatedRange, listCost, sinceFor } from './run-logic.ts';
 import './runs.css';
 
 const PAGE_SIZE = 50;
@@ -201,34 +201,49 @@ export default function RunsListPage() {
                     Asks
                   </th>
                   <th scope="col">Feedback</th>
+                  <th scope="col" className="num">
+                    Cost
+                  </th>
                 </tr>
               </thead>
               <tbody>
-                {data.runs.map((r) => (
-                  <tr key={r.run_id}>
-                    <td>
-                      <Link to={`/runs/${encodeURIComponent(r.run_id)}`} className="link mono" style={{ fontSize: 13 }} title={r.run_id}>
-                        {shortRunId(r.run_id)}
-                      </Link>
-                    </td>
-                    <td style={{ whiteSpace: 'nowrap', color: 'var(--text-2)' }}>{formatDateTime(r.created_at)}</td>
-                    <td>
-                      <StatusTag look={runPhaseTone(r.phase)}>{r.phase}</StatusTag>
-                    </td>
-                    <td className="mono" style={{ fontSize: 13 }}>
-                      {r.category ?? <Dash />}
-                    </td>
-                    <td>{r.tier_final ?? <Dash />}</td>
-                    <td className="mono" style={{ fontSize: 13 }}>
-                      {r.report_status ?? <Dash />}
-                    </td>
-                    <td className="num">{r.submissions}</td>
-                    <td>{r.feedback_verdict ?? <Dash />}</td>
-                  </tr>
-                ))}
+                {data.runs.map((r) => {
+                  const cost = listCost(r);
+                  return (
+                    <tr key={r.run_id}>
+                      <td>
+                        <Link to={`/runs/${encodeURIComponent(r.run_id)}`} className="link mono" style={{ fontSize: 13 }} title={r.run_id}>
+                          {shortRunId(r.run_id)}
+                        </Link>
+                      </td>
+                      <td style={{ whiteSpace: 'nowrap', color: 'var(--text-2)' }}>{formatDateTime(r.created_at)}</td>
+                      <td>
+                        <StatusTag look={runPhaseTone(r.phase)}>{r.phase}</StatusTag>
+                      </td>
+                      <td className="mono" style={{ fontSize: 13 }}>
+                        {r.category ?? <Dash />}
+                      </td>
+                      <td>{r.tier_final ?? <Dash />}</td>
+                      <td className="mono" style={{ fontSize: 13 }}>
+                        {r.report_status ?? <Dash />}
+                      </td>
+                      <td className="num">{r.submissions}</td>
+                      <td>{r.feedback_verdict ?? <Dash />}</td>
+                      <td className="num" style={{ whiteSpace: 'nowrap' }}>
+                        {cost.text === '—' ? <Dash /> : cost.text}
+                        {cost.live && (
+                          <span className="muted" style={{ fontSize: 12 }} title="Still running: the total grows until it finishes">
+                            {' '}
+                            live
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
                 {data.runs.length === 0 && (
                   <tr>
-                    <td colSpan={8} className="muted">
+                    <td colSpan={9} className="muted">
                       No older runs.
                     </td>
                   </tr>

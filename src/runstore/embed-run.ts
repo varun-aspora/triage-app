@@ -13,7 +13,7 @@
 
 import { createHash } from 'node:crypto';
 import { caseCardText, requestText } from '../embed/case-text.ts';
-import { EmbeddingError, type Embedder } from '../embed/index.ts';
+import { EmbeddingError, type EmbedUsage, type Embedder } from '../embed/index.ts';
 import { redactPersisted, type Persisted } from '../gate/redact.ts';
 import type { RunId } from '../types/core.ts';
 import type { EmbeddingKind, EmbeddingMeta, RunRecord, RunStore } from './types.ts';
@@ -24,6 +24,8 @@ export type EmbedRunOptions = {
   readonly signal?: AbortSignal;
   /** Embed even when the stored text hash matches. reembed without --missing sets it. */
   readonly force?: boolean;
+  /** Passed to embed(): what the embedding call used (D59). Not called when nothing needed embedding. */
+  readonly onUsage?: (u: EmbedUsage) => void;
 };
 
 export type EmbedRunResult = {
@@ -83,10 +85,10 @@ export async function embedRun(
 
   let vectors: number[][];
   try {
-    vectors = await embedder.embed(
-      pending.map((p) => p.text),
-      options.signal !== undefined ? { signal: options.signal } : {},
-    );
+    vectors = await embedder.embed(pending.map((p) => p.text), {
+      ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      ...(options.onUsage !== undefined ? { onUsage: options.onUsage } : {}),
+    });
   } catch (err) {
     return result({ unchanged, empty, gaps: [`embeddings failed: ${label(err)}`] });
   }

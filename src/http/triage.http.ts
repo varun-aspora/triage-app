@@ -6,6 +6,7 @@
 // server's own runtime; nothing here starts one.
 
 import { triageRuntime } from '../agents/triage-plan.ts';
+import { pidAlive } from '../cli/commands/status.command.ts';
 import { createTriageRoutes, startAsk, startResume, type TriageRouteDeps } from '../ingress/http/routes.ts';
 import { prepareDeps, prepareRequest } from '../ingress/prepare.ts';
 import { runSubmission, submissionDeps } from '../ingress/submit.ts';
@@ -34,5 +35,7 @@ export function productionDeps(): TriageRouteDeps {
     resume: (runId, input) => startResume(runId, input, submission),
     abortRun: (runId) => submission.dispatcher.init(submission.agent, { id: runId }).abort(),
     runsDir: rt.config.paths.runsDir,
+    // The same check `triage status` uses, so a dead detached worker shows as incomplete, not live.
+    isAlive: pidAlive,
   };
 }

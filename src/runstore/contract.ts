@@ -14,6 +14,7 @@ import type { InputRequest, InputResolution, InputResolutionStatus } from '../ty
 import type { BlockRecord, BlockResolution, BlockResolutionStatus, ConnectorFailure } from '../types/block.ts';
 import type { Report } from '../types/report.ts';
 import type { TriageRequest } from '../types/request.ts';
+import type { UsageRow } from '../types/usage.ts';
 import {
   BlockNotOpenError,
   BlockOpenError,
@@ -217,6 +218,25 @@ export function sampleEmbedding(kind: EmbeddingKind, model: string, vector: numb
   };
 }
 
+/** A model id with a dated suffix: the persisted profile would mask its digits, putUsage must not. */
+export const USAGE_MODEL = 'anthropic/claude-haiku-4-5-20251001';
+
+export function sampleUsageRow(over: Partial<UsageRow> = {}): UsageRow {
+  return {
+    model: USAGE_MODEL,
+    agent: 'triage',
+    purpose: 'agent',
+    calls: 3,
+    failed_calls: 1,
+    input_tokens: 1200,
+    output_tokens: 300,
+    cache_read_tokens: 4000,
+    cache_write_tokens: 500,
+    usd: 0.25,
+    ...over,
+  };
+}
+
 const p = <T>(value: T): Persisted<T> => redactPersisted(value);
 
 async function newRun(store: RunStore, runId: string): Promise<void> {
@@ -281,9 +301,12 @@ export const runStoreContract: readonly ContractCase[] = [
       await assert.rejects(() => store.setPhase(RUN_B, 'failed'), notFound);
       await assert.rejects(() => store.putEvidence(RUN_B, 'ssfb', p(sampleFindings('x'))), notFound);
       await assert.rejects(() => store.addSubmission(RUN_B, p({ kind: 'initial' as const })), notFound);
+      await assert.rejects(() => store.putReport(RUN_B, 1, p(sampleReport(RUN_B, 'x')), p('# x')), notFound);
       await assert.rejects(() => store.putClassification(RUN_B, p(sampleClassification())), notFound);
       await assert.rejects(() => store.putFeedback(RUN_B, p(sampleFeedback('correct', AT))), notFound);
       await assert.rejects(() => store.putEmbedding(RUN_B, p(sampleEmbedding('case', 'm/x', [1, 0]))), notFound);
+      await assert.rejects(() => store.putUsage(RUN_B, 1, [sampleUsageRow()], true), notFound);
+      await assert.rejects(() => store.putUsage(RUN_B, 1, [sampleUsageRow()], false), notFound);
       assert.equal(await store.getRun(RUN_B), null);
     },
   },
@@ -819,6 +842,8 @@ export const runStoreContract: readonly ContractCase[] = [
       await store.putReport(RUN_A, seq, p(sampleReport(RUN_A, 'answer')), p('# answer'));
       await store.putFeedback(RUN_A, p(sampleFeedback('correct', AT)));
       await store.putEmbedding(RUN_A, p(sampleEmbedding('case', 'ollama/x', [1, 0])));
+      await store.putUsage(RUN_A, 0, [sampleUsageRow({ agent: 'classifier', purpose: 'classify' })], true);
+      await store.putUsage(RUN_A, seq, [sampleUsageRow()], true);
       await store.claimIdempotencyKey('key-a', RUN_A, DAY);
 
       assert.equal(await store.deleteRun(RUN_A), true);
@@ -829,6 +854,96 @@ export const runStoreContract: readonly ContractCase[] = [
       assert.equal(await store.claimIdempotencyKey('key-a', RUN_C, DAY), RUN_C);
       assert.equal(await store.deleteRun(RUN_A), false);
       assert.ok(await store.getRun(RUN_B));
+      // The usage went too: a new run under the same id starts with none.
+      await newRun(store, RUN_A);
+      assert.deepEqual((await store.getRun(RUN_A))?.usage, []);
+      assert.equal((await store.listRuns()).find((r) => r.run_id === RUN_A)?.tokens_total, undefined);
+    },
+  },
+  {
+    // No foreign keys cascade (D60): deleteRun clears each kind of row itself.
+    name: 'deleteRun clears every kind of row, in every embedding model, and leaves other runs alone',
+    async run(store) {
+      const fill = async (id: string): Promise<number> => {
+        await newRun(store, id);
+        const seq = await store.addSubmission(id, p({ kind: 'initial' as const }));
+        await store.putEvidence(id, 'ssfb', p(sampleFindings('look')));
+        await store.putEvidence(id, 'code', p(sampleCodeFindings()));
+        await store.putReport(id, seq, p(sampleReport(id, 'answer')), p('# answer'));
+        await store.putFeedback(id, p(sampleFeedback('correct', AT)));
+        await store.putEmbedding(id, p(sampleEmbedding('case', 'ollama/x', [1, 0])));
+        await store.putEmbedding(id, p(sampleEmbedding('request', 'ollama/x', [1, 0], seq)));
+        await store.putEmbedding(id, p(sampleEmbedding('case', 'openai/y', [0, 1, 0])));
+        await store.putUsage(id, 0, [sampleUsageRow({ agent: 'classifier', purpose: 'classify' })], true);
+        await store.putUsage(id, seq, [sampleUsageRow()], false);
+        return seq;
+      };
+      await fill(RUN_A);
+      await fill(RUN_B);
+      const kept = await store.getRun(RUN_B);
+
+      assert.equal(await store.deleteRun(RUN_A), true);
+
+      // A new run under the same id sees none of the old rows.
+      await newRun(store, RUN_A);
+      const run = await store.getRun(RUN_A);
+      assert.ok(run);
+      assert.deepEqual(run.submissions, []);
+      assert.deepEqual(run.evidence, {});
+      assert.equal(run.report, null);
+      assert.equal(run.report_md, null);
+      assert.deepEqual(run.feedback, []);
+      assert.equal(run.feedback_latest, null);
+      assert.deepEqual(run.embeddings, []);
+      assert.deepEqual(run.usage, []);
+      const summary = (await store.listRuns()).find((r) => r.run_id === RUN_A);
+      assert.equal(summary?.submissions, 0);
+      assert.equal(summary?.feedback_verdict, undefined);
+      assert.equal(summary?.usd_total, undefined);
+      // Both models' rows went, not only the first model's.
+      const similar = async (model: string, vector: number[]) =>
+        (await store.findSimilar({ vector, model })).map((h) => h.run_id);
+      assert.deepEqual(await similar('ollama/x', [1, 0]), [RUN_B, RUN_B]);
+      assert.deepEqual(await similar('openai/y', [0, 1, 0]), [RUN_B]);
+      // The old submission is gone, so its report cannot be written again.
+      await assert.rejects(
+        () => store.putReport(RUN_A, 1, p(sampleReport(RUN_A, 'late')), p('# late')),
+        (err: unknown) => err instanceof RunStoreError && !(err instanceof RunNotFoundError),
+      );
+      // The evidence versions start again from 1.
+      assert.equal(await store.putEvidence(RUN_A, 'ssfb', p(sampleFindings('again'))), 1);
+
+      assert.deepEqual(await store.getRun(RUN_B), kept);
+    },
+  },
+  {
+    name: 'every write on a deleted run throws RunNotFoundError and stores nothing',
+    async run(store) {
+      await newRun(store, RUN_A);
+      const seq = await store.addSubmission(RUN_A, p({ kind: 'initial' as const }));
+      await store.putEmbedding(RUN_A, p(sampleEmbedding('case', 'ollama/x', [1, 0])));
+      assert.equal(await store.deleteRun(RUN_A), true);
+
+      const notFound = (err: unknown) => err instanceof RunNotFoundError;
+      await assert.rejects(() => store.addSubmission(RUN_A, p({ kind: 'initial' as const })), notFound);
+      await assert.rejects(() => store.putReport(RUN_A, seq, p(sampleReport(RUN_A, 'x')), p('# x')), notFound);
+      await assert.rejects(() => store.putEvidence(RUN_A, 'ssfb', p(sampleFindings('x'))), notFound);
+      await assert.rejects(() => store.putFeedback(RUN_A, p(sampleFeedback('correct', AT))), notFound);
+      await assert.rejects(() => store.putEmbedding(RUN_A, p(sampleEmbedding('case', 'ollama/x', [1, 0]))), notFound);
+      await assert.rejects(() => store.putUsage(RUN_A, seq, [sampleUsageRow()], true), notFound);
+      await assert.rejects(() => store.putClassification(RUN_A, p(sampleClassification())), notFound);
+      await assert.rejects(() => store.setPhase(RUN_A, 'failed'), notFound);
+
+      assert.equal(await store.getRun(RUN_A), null);
+      assert.deepEqual(await store.findSimilar({ vector: [1, 0], model: 'ollama/x' }), []);
+      // Nothing written by the refused calls turns up under a new run with the same id.
+      await newRun(store, RUN_A);
+      const run = await store.getRun(RUN_A);
+      assert.deepEqual(run?.submissions, []);
+      assert.deepEqual(run?.evidence, {});
+      assert.deepEqual(run?.feedback, []);
+      assert.deepEqual(run?.embeddings, []);
+      assert.deepEqual(run?.usage, []);
     },
   },
   {
@@ -882,7 +997,7 @@ export const runStoreContract: readonly ContractCase[] = [
     },
   },
   {
-    name: 'every write re-runs the persisted-profile check and names patterns only',
+    name: 'every write re-runs the persisted-profile check and names patterns only; putUsage is checked by its schema',
     async run(store) {
       await newRun(store, RUN_A);
       const seq = await store.addSubmission(RUN_A, p({ kind: 'initial' as const }));
@@ -1036,6 +1151,19 @@ export const runStoreContract: readonly ContractCase[] = [
         SYNTHETIC_PHONE,
       );
       await rejectsRedaction(() => store.setPhase(RUN_A, 'failed', { reason: `failed for ${SYNTHETIC_EMAIL}` }), 'email', SYNTHETIC_EMAIL);
+      // putUsage takes no Persisted box (D59): UsageRowSchema allows only a
+      // model spec, an agent name, a fixed purpose and numbers, so neither a
+      // masked id nor free text gets through.
+      for (const bad of [{ model: 'anthropic/claude-haiku-4-5-****1001' }, { agent: SYNTHETIC_EMAIL }]) {
+        await assert.rejects(
+          () => store.putUsage(RUN_A, seq, [sampleUsageRow(bad)], true),
+          (err: unknown) => {
+            assert.ok(err instanceof RunStoreError && !(err instanceof RunStoreRedactionError));
+            assert.ok(!err.message.includes(SYNTHETIC_EMAIL) && !err.message.includes('****'));
+            return true;
+          },
+        );
+      }
 
       const run = await store.getRun(RUN_A);
       assert.ok(run);
@@ -1045,10 +1173,224 @@ export const runStoreContract: readonly ContractCase[] = [
       assert.deepEqual(run.feedback, []);
       assert.equal(run.classification, null);
       assert.deepEqual(run.embeddings, []);
+      assert.deepEqual(run.usage, []);
       assert.equal(run.phase, 'created');
       for (const secret of [SYNTHETIC_PHONE, SYNTHETIC_EMAIL, SYNTHETIC_DIGITS]) {
         assert.ok(!JSON.stringify(run).includes(secret));
       }
+    },
+  },
+  {
+    name: 'putUsage replaces the rows of one seq, and the same write twice leaves one set',
+    async run(store, clock) {
+      await newRun(store, RUN_A);
+      const seq = await store.addSubmission(RUN_A, p({ kind: 'initial' as const }));
+      const rows = [
+        sampleUsageRow({ agent: 'synthesis', model: 'openai/gpt-5.1', usd: null }),
+        sampleUsageRow(),
+        sampleUsageRow({ purpose: 'compaction', calls: 1, failed_calls: 0 }),
+      ];
+      clock.advance(HOUR);
+      await store.putUsage(RUN_A, seq, rows, true);
+      await store.putUsage(RUN_A, seq, rows, true);
+      const at = new Date(clock.now()).toISOString();
+      const run = await store.getRun(RUN_A);
+      assert.ok(run);
+      // Rows come back ordered by model, agent and purpose, with the model id's digits intact.
+      assert.deepEqual(run.usage, [
+        {
+          seq,
+          rows: [
+            sampleUsageRow(),
+            sampleUsageRow({ purpose: 'compaction', calls: 1, failed_calls: 0 }),
+            sampleUsageRow({ agent: 'synthesis', model: 'openai/gpt-5.1', usd: null }),
+          ],
+          updated_at: at,
+          final: true,
+        },
+      ]);
+      // A later snapshot replaces the set; it is never added to.
+      clock.advance(1000);
+      await store.putUsage(RUN_A, seq, [sampleUsageRow({ calls: 5 })], true);
+      const again = await store.getRun(RUN_A);
+      assert.deepEqual(again?.usage.map((u) => [u.seq, u.rows.map((r) => r.calls), u.updated_at]), [
+        [seq, [5], new Date(clock.now()).toISOString()],
+      ]);
+      // A final write with no rows clears the seq.
+      await store.putUsage(RUN_A, seq, [], true);
+      assert.deepEqual((await store.getRun(RUN_A))?.usage, []);
+    },
+  },
+  {
+    name: 'putUsage accepts seq 0 for intake, orders getRun().usage by seq and refuses a bad seq',
+    async run(store) {
+      await newRun(store, RUN_A);
+      assert.deepEqual((await store.getRun(RUN_A))?.usage, []);
+      await store.putUsage(RUN_A, 2, [sampleUsageRow({ calls: 2 })], true);
+      await store.putUsage(RUN_A, 0, [sampleUsageRow({ agent: 'classifier', purpose: 'classify', calls: 1 })], true);
+      await store.putUsage(RUN_A, 1, [sampleUsageRow({ calls: 7 })], false);
+      const run = await store.getRun(RUN_A);
+      assert.deepEqual(
+        run?.usage.map((u) => [u.seq, u.final, u.rows[0]?.agent, u.rows[0]?.calls]),
+        [
+          [0, true, 'classifier', 1],
+          [1, false, 'triage', 7],
+          [2, true, 'triage', 2],
+        ],
+      );
+      for (const bad of [-1, 1.5, Number.NaN]) {
+        await assert.rejects(() => store.putUsage(RUN_A, bad, [sampleUsageRow()], true), (err: unknown) => err instanceof RunStoreError);
+      }
+      assert.equal((await store.getRun(RUN_A))?.usage.length, 3);
+    },
+  },
+  {
+    name: 'putUsage refuses a masked or invalid model, a bad agent, an unknown purpose and bad counts before any write',
+    async run(store) {
+      await newRun(store, RUN_A);
+      await store.putUsage(RUN_A, 1, [sampleUsageRow()], true);
+      const before = await store.getRun(RUN_A);
+      const bad: Partial<Record<keyof UsageRow, unknown>>[] = [
+        { model: 'anthropic/claude-haiku-4-5-****1001' },
+        { model: 'no-provider' },
+        { model: 'Anthropic/claude' },
+        { model: 'anthropic/claude haiku' },
+        { agent: 'Triage' },
+        { agent: 'investigate ssfb' },
+        { agent: '' },
+        { purpose: 'report' },
+        { calls: -1 },
+        { input_tokens: 1.5 },
+        { output_tokens: Number.NaN },
+        { cache_read_tokens: 2_147_483_648 },
+        { usd: -0.01 },
+        { usd: Number.POSITIVE_INFINITY },
+        { usd: '0.25' },
+      ];
+      for (const over of bad) {
+        const row = { ...sampleUsageRow(), ...over } as UsageRow;
+        // Put a good row first: nothing of the call may be written.
+        await assert.rejects(
+          () => store.putUsage(RUN_A, 1, [sampleUsageRow({ agent: 'synthesis' }), row], true),
+          (err: unknown) => {
+            assert.ok(err instanceof RunStoreError, `expected RunStoreError for ${JSON.stringify(Object.keys(over))}`);
+            assert.ok(!err.message.includes('****'), 'error message carries the value');
+            return true;
+          },
+        );
+      }
+      const refused = (err: unknown) => err instanceof RunStoreError;
+      // One model, agent and purpose appears once per seq.
+      await assert.rejects(() => store.putUsage(RUN_A, 1, [sampleUsageRow(), sampleUsageRow()], true), refused);
+      await assert.rejects(() => store.putUsage(RUN_A, 1, [sampleUsageRow()], 'yes' as never), refused);
+      assert.deepEqual((await store.getRun(RUN_A))?.usage, before?.usage);
+    },
+  },
+  {
+    name: 'a non-final putUsage never replaces final rows; a final write replaces them',
+    async run(store, clock) {
+      await newRun(store, RUN_A);
+      // Live snapshots replace each other.
+      await store.putUsage(RUN_A, 1, [sampleUsageRow({ calls: 1 })], false);
+      await store.putUsage(RUN_A, 1, [sampleUsageRow({ calls: 2 })], false);
+      let usage = (await store.getRun(RUN_A))?.usage;
+      assert.deepEqual(usage?.map((u) => [u.final, u.rows[0]?.calls]), [[false, 2]]);
+      // The settle write replaces the snapshot.
+      clock.advance(1000);
+      await store.putUsage(RUN_A, 1, [sampleUsageRow({ calls: 3 })], true);
+      const settled = new Date(clock.now()).toISOString();
+      // A live flush that lands after it changes nothing, not even updated_at.
+      clock.advance(1000);
+      await store.putUsage(RUN_A, 1, [sampleUsageRow({ calls: 4 })], false);
+      await store.putUsage(RUN_A, 1, [], false);
+      usage = (await store.getRun(RUN_A))?.usage;
+      assert.deepEqual(usage?.map((u) => [u.final, u.rows[0]?.calls, u.updated_at]), [[true, 3, settled]]);
+      // A second final write (after embedAfterSettle) replaces it.
+      await store.putUsage(RUN_A, 1, [sampleUsageRow({ calls: 5 }), sampleUsageRow({ agent: 'embedder', purpose: 'embed' })], true);
+      usage = (await store.getRun(RUN_A))?.usage;
+      assert.deepEqual(usage?.map((u) => [u.final, u.rows.map((r) => r.agent)]), [[true, ['embedder', 'triage']]]);
+      // The rule is per seq: another seq still takes a live snapshot.
+      await store.putUsage(RUN_A, 2, [sampleUsageRow()], false);
+      assert.deepEqual((await store.getRun(RUN_A))?.usage.map((u) => [u.seq, u.final]), [
+        [1, true],
+        [2, false],
+      ]);
+    },
+  },
+  {
+    name: 'listRuns sums usage into usd_total and tokens_total, and leaves them out without rows',
+    async run(store, clock) {
+      await newRun(store, RUN_A);
+      clock.advance(HOUR);
+      await newRun(store, RUN_B);
+      clock.advance(HOUR);
+      await newRun(store, RUN_C);
+      await store.putUsage(RUN_A, 0, [sampleUsageRow({ agent: 'classifier', purpose: 'classify', usd: 0.125 })], true);
+      await store.putUsage(RUN_A, 1, [sampleUsageRow(), sampleUsageRow({ model: 'openai/gpt-5.1', usd: null })], false);
+      // Priced at nothing: the tokens count, usd_total does not appear.
+      await store.putUsage(RUN_B, 1, [sampleUsageRow({ usd: null })], true);
+      const runs = await store.listRuns();
+      const a = runs.find((r) => r.run_id === RUN_A);
+      const b = runs.find((r) => r.run_id === RUN_B);
+      const c = runs.find((r) => r.run_id === RUN_C);
+      const perRow = 1200 + 300 + 4000 + 500;
+      assert.equal(a?.usd_total, 0.375);
+      assert.equal(a?.tokens_total, 3 * perRow);
+      assert.equal(typeof a?.tokens_total, 'number');
+      assert.ok(b && !('usd_total' in b));
+      assert.equal(b?.tokens_total, perRow);
+      assert.ok(c && !('usd_total' in c) && !('tokens_total' in c));
+    },
+  },
+  {
+    name: 'listRuns sets usd_partial only when priced and unpriced rows are mixed',
+    async run(store, clock) {
+      await newRun(store, RUN_A);
+      clock.advance(HOUR);
+      await newRun(store, RUN_B);
+      clock.advance(HOUR);
+      await newRun(store, RUN_C);
+      // Mixed across seqs: the priced intake and an unpriced submission row.
+      await store.putUsage(RUN_A, 0, [sampleUsageRow({ agent: 'classifier', purpose: 'classify', usd: 0.125 })], true);
+      await store.putUsage(RUN_A, 1, [sampleUsageRow({ usd: null })], true);
+      // Every row priced, one of them at $0.
+      await store.putUsage(RUN_B, 1, [sampleUsageRow({ usd: 0.25 }), sampleUsageRow({ model: 'ollama/qwen3:8b', usd: 0 })], true);
+      // Nothing priced: no total, so nothing to call partial.
+      await store.putUsage(RUN_C, 1, [sampleUsageRow({ usd: null })], true);
+      const runs = await store.listRuns();
+      const a = runs.find((r) => r.run_id === RUN_A);
+      const b = runs.find((r) => r.run_id === RUN_B);
+      const c = runs.find((r) => r.run_id === RUN_C);
+      assert.equal(a?.usd_total, 0.125);
+      assert.equal(a?.usd_partial, true);
+      assert.equal(b?.usd_total, 0.25);
+      assert.ok(b && !('usd_partial' in b));
+      assert.ok(c && !('usd_total' in c) && !('usd_partial' in c));
+      // A final write that prices the missing row clears the mark.
+      await store.putUsage(RUN_A, 1, [sampleUsageRow({ usd: 0.5 })], true);
+      const after = (await store.listRuns()).find((r) => r.run_id === RUN_A);
+      assert.equal(after?.usd_total, 0.625);
+      assert.ok(after && !('usd_partial' in after));
+    },
+  },
+  {
+    name: 'putUsage does not change updated_at or the order of the runs list',
+    async run(store, clock) {
+      await newRun(store, RUN_A);
+      clock.advance(HOUR);
+      await newRun(store, RUN_B);
+      const before = await store.getRun(RUN_A);
+      const order = (await store.listRuns()).map((r) => r.run_id);
+      clock.advance(HOUR);
+      await store.putUsage(RUN_A, 1, [sampleUsageRow()], false);
+      await store.putUsage(RUN_A, 1, [sampleUsageRow()], true);
+      const after = await store.getRun(RUN_A);
+      assert.equal(after?.updated_at, before?.updated_at);
+      assert.equal(after?.phase, before?.phase);
+      assert.equal(after?.usage[0]?.updated_at, new Date(clock.now()).toISOString());
+      const list = await store.listRuns();
+      assert.deepEqual(list.map((r) => r.run_id), order);
+      assert.equal(list.find((r) => r.run_id === RUN_A)?.updated_at, before?.updated_at);
     },
   },
   {

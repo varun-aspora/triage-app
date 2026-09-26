@@ -115,7 +115,7 @@ describe('runCase', () => {
 
   test('returns the documented shape', () => {
     expect(Object.keys(result)).toEqual(
-      expect.arrayContaining(['run_id', 'report', 'tool_calls', 'audit', 'fixture_misses', 'cost_usd', 'wall_ms']),
+      expect.arrayContaining(['run_id', 'report', 'tool_calls', 'audit', 'fixture_misses', 'cost_usd', 'cost_partial', 'wall_ms']),
     );
     expect(result.status).toBe('completed');
     expect(typeof result.run_id).toBe('string');
@@ -142,6 +142,17 @@ describe('runCase', () => {
     expect(checkNoRealIo(result.audit)).toEqual({ ok: true, offending: [] });
     expect(result.fixture_misses).toBe(0);
     expect(result.cost_usd).toBe(0);
+    expect(result.cost_partial).toBe(false);
+  });
+
+  test("the classifier call made through the driver's fake provider is stored as seq 0 (D59)", async () => {
+    const run = await evalRuntime()?.store.getRun(result.run_id);
+    const intake = run?.usage.find((u) => u.seq === 0);
+    expect(intake?.final).toBe(true);
+    expect(intake?.rows.map((r) => [r.model, r.agent, r.purpose, r.calls, r.failed_calls, r.usd])).toEqual([
+      ['faux/classifier', 'classifier', 'classify', 1, 0, 0],
+    ]);
+    expect(run?.usage.map((u) => u.seq)).toEqual([0, 1]);
   });
 
   test('the run event log has the pipeline steps and the Flue events of the root and the delegate', async () => {

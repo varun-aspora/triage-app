@@ -22,6 +22,7 @@ import { sampleBlock, sampleClassification, sampleInputRequest, sampleReport, SY
 import { createRunStore } from '../../runstore/index.ts';
 import type { RunPhase, RunRecord, RunStore } from '../../runstore/types.ts';
 import type { Entity } from '../../types/core.ts';
+import type { SubmissionUsage, UsageRow } from '../../types/usage.ts';
 import { commands as generatedCommands } from '../command-modules.gen.ts';
 import { buildProgram, runCli } from '../index.ts';
 import {
@@ -43,7 +44,7 @@ import { createInputCommand } from './input.command.ts';
 import { createRunCommand } from './run.command.ts';
 import { createStartCommand, type PrepareFn } from './start.command.ts';
 import { createStatusCommand } from './status.command.ts';
-import { createWaitCommand } from './wait.command.ts';
+import { createWaitCommand, printWaitResult, withUsage } from './wait.command.ts';
 import { createWorkerCommand } from './worker.command.ts';
 
 // All values below are synthetic.
@@ -206,6 +207,7 @@ function record(phase: RunPhase, extra: Partial<RunRecord> = {}): RunRecord {
     feedback: [],
     feedback_latest: null,
     embeddings: [],
+    usage: [],
     ...extra,
   };
 }
@@ -931,13 +933,53 @@ describe('ask', () => {
 // ------------------------------------------------------------------ run
 
 describe('run', () => {
-  /** A fake runSubmission that stores a report the way the real pipeline would. */
-  function fakeSubmit(h: TestHome, status: 'completed' | 'failed', order: string[]) {
+  /** Two submissions' worth of rows: intake plus the first submission. */
+  const RUN_USAGE: readonly [number, UsageRow[]][] = [
+    [
+      0,
+      [
+        {
+          model: 'anthropic/claude-haiku-4-5-20251001',
+          agent: 'classifier',
+          purpose: 'classify',
+          calls: 1,
+          failed_calls: 0,
+          input_tokens: 800,
+          output_tokens: 50,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+          usd: 0.02,
+        },
+      ],
+    ],
+    [
+      1,
+      [
+        {
+          model: 'anthropic/claude-sonnet-4-5',
+          agent: 'triage',
+          purpose: 'agent',
+          calls: 4,
+          failed_calls: 1,
+          input_tokens: 12_000,
+          output_tokens: 900,
+          cache_read_tokens: 30_000,
+          cache_write_tokens: 2000,
+          usd: 0.4,
+        },
+      ],
+    ],
+  ];
+  const RUN_TOTAL = '$0.42 · 5 calls (1 failed) · 12.8k in / 30k cache read / 2k cache write / 950 out';
+
+  /** A fake runSubmission that stores a report (and, with withUsage, usage rows) the way the real pipeline would. */
+  function fakeSubmit(h: TestHome, status: 'completed' | 'failed', order: string[], withUsageRows = false) {
     return async (p: PreparedSubmission): Promise<SubmissionResult> => {
       order.push('submit');
       const store = await createRunStore(h.config);
       await store.createRun(p.run_id, redactPersisted(p.request, { names: [...p.redaction_names] }));
       const seq = await store.addSubmission(p.run_id, redactPersisted({ kind: 'initial' as const }));
+      if (withUsageRows) for (const [useq, rows] of RUN_USAGE) await store.putUsage(p.run_id, useq, rows, true);
       if (status === 'completed') {
         await store.putReport(
           p.run_id,
@@ -953,7 +995,7 @@ describe('run', () => {
     };
   }
 
-  function runCmd(h: TestHome, status: 'completed' | 'failed', order: string[]): CliCommand {
+  function runCmd(h: TestHome, status: 'completed' | 'failed', order: string[], withUsageRows = false): CliCommand {
     return createRunCommand({
       boot: async () => {
         order.push('boot');
@@ -962,10 +1004,37 @@ describe('run', () => {
         order.push('prepare');
         return prepareRequest(input, { ...prepareDeps(config, registry), newId: () => RUN_ID });
       },
-      submit: fakeSubmit(h, status, order),
+      submit: fakeSubmit(h, status, order, withUsageRows),
       defaultRequestedBy: fixedUser,
     });
   }
+
+  test('prints the run total over every submission after the report; --json carries the usage', async () => {
+    const h = home();
+    const human = await cli([runCmd(h, 'completed', [], true)], ['run', '--text', TEXT], { config: () => h.config });
+    expect(human.code).toBe(EXIT.OK);
+    expect(human.out).toContain('# Triage report');
+    expect(human.out.trimEnd().split('\n').at(-1)).toBe(`run total: ${RUN_TOTAL}`);
+
+    const h2 = home();
+    const json = await cli([runCmd(h2, 'completed', [], true)], ['run', '--text', TEXT, '--json'], { config: () => h2.config });
+    const doc = v.parse(WaitOutputSchema, jsonLine(json.out));
+    expect(doc.usage?.total.calls).toBe(5);
+    expect(doc.usage?.total.usd).toBeCloseTo(0.42);
+    expect(Object.keys(doc.usage?.by_submission ?? {})).toEqual(['0', '1']);
+    expect([doc.usage?.live, doc.usage?.incomplete]).toEqual([false, false]);
+  });
+
+  test('a failed run prints the run total after the reason; a run without rows prints none', async () => {
+    const h = home();
+    const failed = await cli([runCmd(h, 'failed', [], true)], ['run', '--text', TEXT], { config: () => h.config });
+    expect(failed.code).toBe(EXIT.ERROR);
+    expect(failed.err).toContain('failed: AgentRunError');
+    expect(failed.out).toBe(`run total: ${RUN_TOTAL}\n`);
+    const h2 = home();
+    const plain = await cli([runCmd(h2, 'completed', [])], ['run', '--text', TEXT], { config: () => h2.config });
+    expect(plain.out).not.toContain('run total');
+  });
 
   test('runs in process and prints the report Markdown', async () => {
     const h = home();
@@ -1490,5 +1559,191 @@ describe('a run blocked on a system that did not answer', () => {
     expect(human.code).toBe(6);
     expect(human.out).toContain('is blocked (b1)');
     expect(human.out).toContain(`triage resume ${RUN_ID}`);
+  });
+});
+
+// ------------------------------------------------------------------ usage (D59)
+
+describe('usage on status and wait', () => {
+  const UPDATED = '2026-09-20T10:00:00.000Z';
+  const TOTAL = '$0.42 (partial) · 37 calls (1 failed) · 120k in / 90k cache read / 4k cache write / 8k out';
+
+  function usageRow(over: Partial<UsageRow>): UsageRow {
+    return {
+      model: 'anthropic/claude-sonnet-4-5',
+      agent: 'triage',
+      purpose: 'agent',
+      calls: 1,
+      failed_calls: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      usd: 0,
+      ...over,
+    };
+  }
+
+  /** Adds up to TOTAL; final=false makes submission 1 a live snapshot. */
+  function usage(final = true, triageCalls = 30): SubmissionUsage[] {
+    return [
+      {
+        seq: 0,
+        final: true,
+        updated_at: UPDATED,
+        rows: [usageRow({ model: 'anthropic/claude-haiku-4-5-20251001', agent: 'classifier', purpose: 'classify', input_tokens: 800, output_tokens: 50, usd: 0.001 })],
+      },
+      {
+        seq: 1,
+        final,
+        updated_at: UPDATED,
+        rows: [
+          usageRow({ calls: triageCalls, failed_calls: 1, input_tokens: 110_000, output_tokens: 7000, cache_read_tokens: 90_000, cache_write_tokens: 4000, usd: 0.419 }),
+          usageRow({ model: 'typesafe/jev-1', agent: 'synthesis', calls: 6, input_tokens: 9200, output_tokens: 950, usd: null }),
+        ],
+      },
+    ];
+  }
+
+  test('status prints one cost line and one line per model; --json carries the strict usage', async () => {
+    const { store } = scriptedStore([record('completed', { usage: usage() })]);
+    const h = home();
+    const cmd = createStatusCommand({ openStore: async () => store });
+    const human = await cli([cmd], ['status', RUN_ID], { config: () => h.config });
+    expect(human.code).toBe(EXIT.OK);
+    const lines = human.out.split('\n');
+    const at = lines.indexOf(`cost: ${TOTAL}`);
+    expect(at).toBeGreaterThan(0);
+    expect(lines.slice(at + 1, at + 4)).toEqual([
+      '  - anthropic/claude-haiku-4-5-20251001: <$0.01 · 1 call · 800 in / 0 cache read / 0 cache write / 50 out',
+      '  - anthropic/claude-sonnet-4-5: $0.42 · 30 calls (1 failed) · 110k in / 90k cache read / 4k cache write / 7k out',
+      '  - typesafe/jev-1: no price · 6 calls · 9.2k in / 0 cache read / 0 cache write / 950 out',
+    ]);
+
+    const json = await cli([cmd], ['status', RUN_ID, '--json'], { config: () => h.config });
+    const doc = v.parse(StatusOutputSchema, jsonLine(json.out));
+    expect(doc.usage?.total.calls).toBe(37);
+    expect(doc.usage?.pricing).toBe('partial');
+    expect(doc.usage?.live).toBe(false);
+  });
+
+  test('status on a running run marks the live count and its age; a stalled one is incomplete, never live', async () => {
+    const run = record('investigating', { worker_pid: 4242, usage: usage(false) });
+    const h = home();
+    const now = () => Date.parse(UPDATED) + 4000;
+    const live = createStatusCommand({ openStore: async () => scriptedStore([run]).store, isAlive: () => true, now });
+    const r = await cli([live], ['status', RUN_ID], { config: () => h.config });
+    expect(r.out).toContain(`cost: $0.42 (partial) (live, updated 4s ago) · 37 calls (1 failed)`);
+    expect(v.parse(StatusOutputSchema, jsonLine((await cli([live], ['status', RUN_ID, '--json'], { config: () => h.config })).out)).usage?.live).toBe(true);
+
+    const checked: number[] = [];
+    const dead = createStatusCommand({
+      openStore: async () => scriptedStore([run]).store,
+      isAlive: (pid) => {
+        checked.push(pid);
+        return false;
+      },
+      now,
+    });
+    const stalled = await cli([dead], ['status', RUN_ID], { config: () => h.config });
+    expect(stalled.out).toContain('(incomplete: the worker ended before the final count)');
+    expect(stalled.out).not.toContain('live');
+    const doc = v.parse(StatusOutputSchema, jsonLine((await cli([dead], ['status', RUN_ID, '--json'], { config: () => h.config })).out));
+    expect(doc.status).toBe('stalled');
+    expect(doc.usage).toMatchObject({ live: false, incomplete: true });
+    // The worker is checked once per command, not again for the usage.
+    expect(checked).toEqual([4242, 4242]);
+  });
+
+  test('status on a run with no rows says usage: not recorded and has no usage in --json', async () => {
+    const h = home();
+    await seed(h, { phase: 'completed', report: true });
+    const human = await cli([createStatusCommand()], ['status', RUN_ID], { config: () => h.config });
+    expect(human.out).toContain('\nusage: not recorded\n');
+    expect(human.out).not.toContain('cost:');
+    const doc = jsonLine((await cli([createStatusCommand()], ['status', RUN_ID, '--json'], { config: () => h.config })).out);
+    expect(v.is(StatusOutputSchema, doc)).toBe(true);
+    expect(Object.keys(doc as object)).not.toContain('usage');
+  });
+
+  test('status reads the rows a real folder store holds', async () => {
+    const h = home();
+    const store = await seed(h, { phase: 'completed', report: true });
+    for (const s of usage()) await store.putUsage(RUN_ID, s.seq, s.rows, s.final);
+    const human = await cli([createStatusCommand()], ['status', RUN_ID], { config: () => h.config });
+    expect(human.out).toContain(`cost: ${TOTAL}`);
+  });
+
+  test('wait prints the report, then the run total from the store', async () => {
+    const report = { ...sampleReport(RUN_ID, 'the payout is waiting on the bank') };
+    const done = record('completed', { report, report_md: '# report', usage: usage() });
+    const h = home();
+    const cmd = createWaitCommand({ openStore: async () => scriptedStore([done]).store, isAlive: () => true });
+    const human = await cli([cmd], ['wait', RUN_ID], { config: () => h.config });
+    expect(human.code).toBe(EXIT.OK);
+    expect(human.out).toBe(`# report\nrun total: ${TOTAL}\n`);
+    expect(human.err).toBe('');
+
+    const json = await cli([cmd], ['wait', RUN_ID, '--json'], { config: () => h.config });
+    const doc = v.parse(WaitOutputSchema, jsonLine(json.out));
+    expect(doc.usage?.total.calls).toBe(37);
+  });
+
+  test('wait on a failed or timed-out run prints the run total too; a run without rows has none', async () => {
+    const h = home();
+    const failed = record('failed', { phase_reason: 'SubmissionReadTimeoutError', usage: usage() });
+    const f = await cli([createWaitCommand({ openStore: async () => scriptedStore([failed]).store })], ['wait', RUN_ID], { config: () => h.config });
+    expect(f.err).toContain('failed: SubmissionReadTimeoutError');
+    expect(f.out).toBe(`run total: ${TOTAL}\n`);
+
+    const going = record('investigating', { worker_pid: 4242, usage: usage(false) });
+    let t = Date.parse(UPDATED);
+    const cmd = createWaitCommand({
+      openStore: async () => scriptedStore([going]).store,
+      isAlive: () => true,
+      now: () => t,
+      sleep: async (ms) => void (t += ms),
+    });
+    const timeout = await cli([cmd], ['wait', RUN_ID, '--timeout', '1', '--json'], { config: () => h.config });
+    expect(timeout.code).toBe(EXIT_WAIT_TIMEOUT);
+    expect(v.parse(WaitOutputSchema, jsonLine(timeout.out)).usage?.live).toBe(true);
+
+    const plain = await cli([createWaitCommand({ openStore: async () => scriptedStore([record('completed')]).store })], ['wait', RUN_ID], { config: () => h.config });
+    expect(plain.out).not.toContain('run total');
+  });
+
+  test('wait in human mode writes the live cost to stderr each time it changes, and only then', async () => {
+    const running = (u: SubmissionUsage[]) => record('investigating', { worker_pid: 4242, usage: u });
+    const records = [
+      running([]),
+      running(usage(false, 10)),
+      running(usage(false, 10)),
+      running(usage(false, 20)),
+      record('completed', { report_md: '# report', usage: usage() }),
+    ];
+    const h = home();
+    const make = () =>
+      createWaitCommand({ openStore: async () => scriptedStore(records).store, isAlive: () => true, sleep: async () => undefined });
+    const human = await cli([make()], ['wait', RUN_ID], { config: () => h.config });
+    expect(human.code).toBe(EXIT.OK);
+    expect(human.err).toBe('cost so far: $0.42 (partial) · 17 calls\ncost so far: $0.42 (partial) · 27 calls\n');
+    expect(human.out).toBe(`# report\nrun total: ${TOTAL}\n`);
+
+    const json = await cli([make()], ['wait', RUN_ID, '--json'], { config: () => h.config });
+    expect(json.err).toBe('');
+    expect(v.is(WaitOutputSchema, jsonLine(json.out))).toBe(true);
+  });
+
+  test('withUsage gives triage run the same usage and run total line as wait', () => {
+    const run = record('completed', { usage: usage() });
+    const out = withUsage({ run_id: RUN_ID, status: 'completed' }, run, () => true);
+    expect(v.parse(WaitOutputSchema, out).usage?.total.calls).toBe(37);
+    expect(withUsage({ run_id: RUN_ID, status: 'completed' }, null)).toEqual({ run_id: RUN_ID, status: 'completed' });
+    expect(withUsage({ run_id: RUN_ID, status: 'completed' }, record('completed'))).toEqual({ run_id: RUN_ID, status: 'completed' });
+
+    let text = '';
+    const io = { stdout: { write: (s: string) => (text += s) }, stderr: { write: (s: string) => (text += s) } };
+    expect(printWaitResult(io, false, out, '# report')).toBe(EXIT.OK);
+    expect(text).toBe(`# report\nrun total: ${TOTAL}\n`);
   });
 });

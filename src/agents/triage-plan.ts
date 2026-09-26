@@ -17,7 +17,9 @@
 // The second half wires one run:
 // - triageRuntime() loads config, registry and knowledge once per process,
 //   builds the connectors (real mode only), the sandbox factory and a run
-//   store handle, and installs the tripwire so token usage is metered.
+//   store handle, and installs the tripwire (the safety gate). Token usage
+//   is counted by the usage meter that bootRuntime installs (D59);
+//   finish_report reads it through runUsageInMemory.
 //   configureTriageRuntime() replaces any of these (tests, eval driver).
 // - runDepsFor(runId, init) builds the run's ToolDeps once and returns the
 //   same object on every render. Keeping one object matters: widenIdChain
@@ -68,7 +70,8 @@ import { type Escalation, type EscalationSnapshot, escalationFor, releaseEscalat
 import { sandboxFactory } from './sandbox.ts';
 import { currentKnowledge, type Knowledge, loadKnowledge } from './skills.ts';
 import { logRunEvent, setRunRedactionNames } from '../runlog/event-log.ts';
-import { installedTripwire, installTripwire, runUsage, tripwireOptionsFor } from './tripwire.ts';
+import { runUsageInMemory } from '../usage/meter.ts';
+import { installedTripwire, installTripwire, tripwireOptionsFor } from './tripwire.ts';
 
 /** The pinned Flue identity of the root agent. */
 export const TRIAGE_AGENT_NAME = 'triage';
@@ -422,7 +425,7 @@ function buildRuntime(o: TriageRuntimeOptions): TriageRuntime {
     runStore: o.runStore ?? lazyRunStore(config, getRunStore),
     connectors: o.connectors ?? (real ? realConnectors(config, registry) : {}),
     sandbox: o.sandbox ?? sandboxFactory(config),
-    usage: o.usage ?? runUsage,
+    usage: o.usage ?? runUsageInMemory,
     ...(repoCommit !== undefined ? { repoCommit } : {}),
     ...(o.audit !== undefined ? { audit: o.audit } : {}),
     ...(o.caseId !== undefined ? { caseId: o.caseId } : {}),
@@ -500,6 +503,7 @@ export function lazyRunStore(config: Pick<Config, 'db'>, load: () => Promise<Run
     listRuns: async (...a) => (await store()).listRuns(...a),
     putEmbedding: async (...a) => (await store()).putEmbedding(...a),
     findSimilar: async (...a) => (await store()).findSimilar(...a),
+    putUsage: async (...a) => (await store()).putUsage(...a),
     deleteRun: async (...a) => (await store()).deleteRun(...a),
     listExpired: async (...a) => (await store()).listExpired(...a),
   } satisfies RunStore);
@@ -508,7 +512,8 @@ export function lazyRunStore(config: Pick<Config, 'db'>, load: () => Promise<Run
 /**
  * The run's ToolDeps, built on the first render of the run and returned
  * as the same object afterwards. The triage mount's extra fields are set
- * here: initialData, the UsageReader over runUsage and the CommitReader.
+ * here: initialData, the UsageReader over the meter's runUsageInMemory and
+ * the CommitReader.
  */
 export function runDepsFor(runId: RunId, init: TriageInit, rt: TriageRuntime = triageRuntime(), savedChain?: IdChain): ToolDeps {
   const cached = runDeps.get(runId);
@@ -549,8 +554,10 @@ export function triageToolContext(runId: RunId, deps: ToolDeps, rt: TriageRuntim
 /**
  * Drops the run's in-process state once a response settles: its deps, the
  * escalation store, the connector failure record, the synthesis count, the
- * written-report, opened-question and opened-block marks and the metered
- * usage. Persistent state and the run store keep what matters.
+ * written-report, opened-question and opened-block marks and the tripwire's
+ * pending task decisions. The metered usage is dropped by the settle code
+ * after it is stored (D59). Persistent state and the run store keep what
+ * matters.
  */
 export function settleRun(runId: RunId): void {
   runDeps.delete(runId);

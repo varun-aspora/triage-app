@@ -11,6 +11,10 @@
 // before they are printed, and withheld with pattern names only if the check
 // fails, so a hand-edited file cannot put raw ids on the screen. Config is
 // never printed. Paths come from TRIAGE_HOME, never from the cwd.
+//
+// promote() drops the cost key from an eval case draft's report.json before
+// it checks and moves the draft (D59), so drafts written before feedback.ts
+// stopped copying it do not carry token counts or spend into evals/cases.
 
 import { userInfo } from 'node:os';
 import { relative } from 'node:path';

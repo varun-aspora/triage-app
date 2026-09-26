@@ -66,6 +66,7 @@ function fakeRunStore(): FakeStore {
     listRuns: unused,
     putEmbedding: unused,
     findSimilar: unused,
+    putUsage: unused,
     deleteRun: unused,
     listExpired: unused,
   };

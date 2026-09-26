@@ -8,8 +8,9 @@
 //   one audit line and throws, so the model sees a failed call and the run
 //   goes on. It cannot see arguments; the typed tools gate those.
 // - its observe() charges each task delegation (task_start) to the run's
-//   budget with consumeTask, and sums token usage per model from turn
-//   events. runUsage(runId) returns that sum for finish_report's cost.
+//   budget with consumeTask. Token usage is not counted here: the usage
+//   meter (src/usage/meter.ts, D59) does that, and the tripwire stays the
+//   safety gate only.
 //
 // Flue emits task_start synchronously just before it runs the task
 // operation, so the decision made in observe() is the one the interceptor
@@ -41,7 +42,6 @@ import {
   type RunBudget,
 } from '../gate/budget.ts';
 import { toolsFor } from '../tools/index.ts';
-import type { RunUsage, UsageEntry } from '../tools/finish-report.tool.ts';
 import type { ToolContext, ToolDeps } from '../tools/types.ts';
 import type { AuditTransport } from '../types/audit.ts';
 import { type Entity, type Interface, type RunId, RunIdSchema } from '../types/core.ts';
@@ -148,34 +148,6 @@ export function runBudgetSource(config: Config, registry?: Registry): BudgetSour
   };
 }
 
-// ------------------------------------------------------------ usage
-
-type MutableUsage = { input_tokens: number; output_tokens: number; calls: number };
-
-const usageByRun = new Map<string, Map<string, MutableUsage>>();
-
-/** Summed input and output tokens per model ('provider/model') for one run. Empty when none was seen. */
-export function runUsage(runId: RunId): RunUsage {
-  const perModel = usageByRun.get(runId);
-  const out: Record<string, UsageEntry> = {};
-  for (const [model, u] of perModel ?? []) out[model] = Object.freeze({ ...u });
-  return Object.freeze(out);
-}
-
-function addUsage(runId: string, model: string, input: number, output: number): void {
-  let perModel = usageByRun.get(runId);
-  if (perModel === undefined) usageByRun.set(runId, (perModel = new Map()));
-  const u = perModel.get(model) ?? { input_tokens: 0, output_tokens: 0, calls: 0 };
-  u.input_tokens += count(input);
-  u.output_tokens += count(output);
-  u.calls += 1;
-  perModel.set(model, u);
-}
-
-function count(n: unknown): number {
-  return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : 0;
-}
-
 // ------------------------------------------------------------ the tripwire
 
 export type TripwireOptions = {
@@ -210,7 +182,7 @@ export type Tripwire = FlueInstrumentation & {
   readonly key: symbol;
   /** Whether a tool name passes. */
   allows(toolName: string): boolean;
-  /** Drops this tripwire's pending task decisions and the usage for a finished run. */
+  /** Drops this tripwire's pending task decisions for a finished run. */
   forgetRun(runId: RunId): void;
 };
 
@@ -279,14 +251,6 @@ export function createTripwire(options: TripwireOptions): Tripwire {
     if (event.type === 'task_start') {
       const runId = runIdOf(event.instanceId ?? ctx.id);
       taskDecisions.set(event.taskId, { runId, decision: consume(runId) });
-      return;
-    }
-    if (event.type === 'turn') {
-      const usage = event.response.usage;
-      if (usage === undefined) return;
-      const runId = event.instanceId ?? ctx.id;
-      if (runId === undefined) return;
-      addUsage(runId, `${event.request.providerId}/${event.request.requestedModel}`, usage.input, usage.output);
     }
   };
 
@@ -340,7 +304,6 @@ export function createTripwire(options: TripwireOptions): Tripwire {
     },
     allows: (toolName) => allowed.has(toolName),
     forgetRun(runId) {
-      usageByRun.delete(runId);
       for (const [taskId, d] of taskDecisions) if (d.runId === runId) taskDecisions.delete(taskId);
     },
   };

@@ -25,7 +25,9 @@
 // audit lines from the run folder mirror (<runs>/<run_id>/audit.jsonl),
 // fixture_misses (audit lines with exit fixture_miss, plus strict misses in
 // the identity step, which writes no audit line for them), the report's USD
-// cost and the wall time.
+// cost, whether that cost is partial (a model with no pricing, D59) and the
+// wall time. The classifier call reports its usage to the pipeline like any
+// other, so the run's store rows include the seq 0 classifier row.
 //
 // The fake provider has one queue per process, so cases run one at a time:
 // runCase waits for the previous call to finish before it installs its script.
@@ -165,8 +167,10 @@ export type CaseResult = {
   readonly tool_calls: readonly CaseToolCall[];
   readonly audit: readonly AuditLine[];
   readonly fixture_misses: number;
-  /** The report's cost.usd_total; null when there is no report or no price. */
+  /** The report's cost.usd_total; null when there is no report or no usage was recorded. */
   readonly cost_usd: number | null;
+  /** True when cost_usd leaves out a model with no pricing (report.cost.unpriced_models, D59). */
+  readonly cost_partial: boolean;
   readonly wall_ms: number;
   /** Every model call the faux script routed, in order. */
   readonly model_calls: readonly FauxCall[];
@@ -241,6 +245,7 @@ async function runOne(caseSpec: EvalCase, options: RunCaseOptions): Promise<Case
     audit: Object.freeze(audit),
     fixture_misses: auditMisses + identityMisses.count,
     cost_usd: report?.cost?.usd_total ?? null,
+    cost_partial: (report?.cost?.unpriced_models?.length ?? 0) > 0,
     wall_ms,
     model_calls: Object.freeze([...script.calls]),
     faux_failures: Object.freeze(script.failures()),
@@ -292,8 +297,14 @@ function caseDeps(
   const chain = toIdChain(c);
   return {
     ...base,
-    classify: (input, signal) =>
-      classifyThread(input, { config: rt.config, signal, complete: completeWith(rt.faux.provider) }),
+    // onUsage is passed on so the classifier call is counted as intake usage (seq 0, D59).
+    classify: (input, signal, onUsage) =>
+      classifyThread(input, {
+        config: rt.config,
+        signal,
+        complete: completeWith(rt.faux.provider),
+        ...(onUsage !== undefined ? { onUsage } : {}),
+      }),
     identity:
       options.identity === 'fixtures'
         ? async (request, opts) => {

@@ -30,6 +30,19 @@
 // defaults build a private pi-ai Models instance for the classifier's own
 // provider, or decisionProviderFor(spec). Importing ../models.ts runs its
 // provider registration side effect before the first call.
+//
+// Usage (D59): deps.onUsage hears about the one model call, with model set
+// to the MODEL_CLASSIFIER spec on both paths.
+// - completion path: called once a message comes back, stopReason 'error'
+//   or 'aborted' included (failed), with the message's usage. A timeout, a
+//   caller abort or a thrown provider error has no message, so no call.
+// - decision path: called with the result's usage and the provider-reported
+//   cost. When decide() fails after the provider was asked (a provider
+//   error, a timeout, an abort, answers that do not match the questions),
+//   it is called with failed set and the tokens of the result if one came
+//   back, else 0. When decide() fails before that (no key, bad questions,
+//   already aborted), nothing was sent and there is no call.
+// A callback that throws is ignored; it never changes the classification.
 import { createModels, type AssistantMessage, type Context, type ImageContent, type Provider, type TextContent } from '@earendil-works/pi-ai';
 import { anthropicProvider } from '@earendil-works/pi-ai/providers/anthropic';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
@@ -39,7 +52,7 @@ import * as v from 'valibot';
 import type { Config } from '../config/env.ts';
 import { decide, DecisionError } from '../decisions/decide.ts';
 import { decisionProviderFor, isDecisionSpec } from '../decisions/registry.ts';
-import type { DecisionProvider } from '../decisions/types.ts';
+import type { DecisionProvider, DecisionUsage } from '../decisions/types.ts';
 import { redactPersisted } from '../gate/redact.ts';
 import { acceptsImages, classifierModel, ollamaProvider, parseSpec, type ModelLookup } from '../models.ts';
 import { ClassificationSchema, type Classification } from '../types/classification.ts';
@@ -71,6 +84,22 @@ export type CompleteFn = (
   options: { readonly signal: AbortSignal },
 ) => Promise<AssistantMessage>;
 
+/** One classifier model call, for the run's usage (D59). */
+export type ClassifierUsage = {
+  readonly path: 'completion' | 'decision';
+  /** The MODEL_CLASSIFIER spec, not the name the provider answered with. */
+  readonly model: string;
+  readonly failed: boolean;
+  readonly input: number;
+  readonly output: number;
+  readonly cacheRead: number;
+  readonly cacheWrite: number;
+  /** Completion path, when the provider reports it (Anthropic only). */
+  readonly cacheWrite1h?: number;
+  /** Decision path only: the cost the provider reported, when it is a finite number >= 0. */
+  readonly reportedUsd?: number;
+};
+
 export type ClassifyDeps = {
   readonly config: Config;
   /** Completion path only. Default: defaultComplete(config). */
@@ -83,6 +112,8 @@ export type ClassifyDeps = {
   readonly imageLookup?: ModelLookup;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  /** Called at most once per classify(), when a model call was made. */
+  readonly onUsage?: (u: ClassifierUsage) => void;
 };
 
 export const DEFAULT_CLASSIFIER_TIMEOUT_MS = 60_000;
@@ -142,7 +173,19 @@ async function classifyOnce(input: ClassifyInput, deps: ClassifyDeps): Promise<C
   if (!outcome.ok) return unknownClassification(outcome.error);
 
   const message = outcome.message;
-  if (message.stopReason === 'error' || message.stopReason === 'aborted') {
+  const failed = message.stopReason === 'error' || message.stopReason === 'aborted';
+  const u = message.usage;
+  reportUsage(deps, {
+    path: 'completion',
+    model: spec,
+    failed,
+    input: tokens(u.input),
+    output: tokens(u.output),
+    cacheRead: tokens(u.cacheRead),
+    cacheWrite: tokens(u.cacheWrite),
+    ...(u.cacheWrite1h === undefined ? {} : { cacheWrite1h: tokens(u.cacheWrite1h) }),
+  });
+  if (failed) {
     return unknownClassification(`provider error: ${message.errorMessage ?? message.stopReason}`);
   }
   return parseClassification(textOf(message), sendImages);
@@ -166,17 +209,68 @@ async function classifyByDecision(
     ...(input.redactionNames === undefined ? {} : { redactionNames: input.redactionNames }),
   });
   const questions = classifierQuestions(categories, deps.config.entities);
+  const call: DecisionCall = { sent: false, usage: undefined };
   try {
     const decider = deps.decisions ?? decisionProviderFor(spec, deps.config);
     const result = await decide(
-      decider,
+      watched(decider, call),
       { state, questions },
       { timeoutMs: deps.timeoutMs ?? DEFAULT_CLASSIFIER_TIMEOUT_MS, ...(deps.signal === undefined ? {} : { signal: deps.signal }) },
     );
+    reportUsage(deps, decisionUsage(spec, false, result.usage));
     const outcome = classificationFromAnswers(result.answers);
     return outcome.ok ? outcome.classification : unknownClassification(outcome.error);
   } catch (err) {
+    // call.usage is read now: a result that lands after a timeout is not counted.
+    if (call.sent) reportUsage(deps, decisionUsage(spec, true, call.usage));
     return unknownClassification(decisionFailure(err));
+  }
+}
+
+type DecisionCall = { sent: boolean; usage: DecisionUsage | undefined };
+
+// decide() drops the result when its answers fail the checks, and throws
+// before asking the provider when the questions are bad or the signal is
+// already aborted. Wrapping the provider tells the two apart and keeps the
+// usage of a result decide() refused.
+function watched(inner: DecisionProvider, call: DecisionCall): DecisionProvider {
+  return {
+    id: inner.id,
+    model: inner.model,
+    async decide(request, options) {
+      call.sent = true;
+      const result = await inner.decide(request, options);
+      call.usage = result.usage;
+      return result;
+    },
+  };
+}
+
+function decisionUsage(spec: string, failed: boolean, usage: DecisionUsage | undefined): ClassifierUsage {
+  const cost = usage?.costUsd;
+  return {
+    path: 'decision',
+    model: spec,
+    failed,
+    input: tokens(usage?.inputTokens),
+    output: tokens(usage?.outputTokens),
+    cacheRead: 0,
+    cacheWrite: 0,
+    ...(typeof cost === 'number' && Number.isFinite(cost) && cost >= 0 ? { reportedUsd: cost } : {}),
+  };
+}
+
+// A token count as a non-negative integer; anything else a provider sends counts as 0.
+function tokens(n: number | undefined): number {
+  return typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
+}
+
+function reportUsage(deps: ClassifyDeps, u: ClassifierUsage): void {
+  if (deps.onUsage === undefined) return;
+  try {
+    deps.onUsage(u);
+  } catch {
+    // Usage is bookkeeping; it must not change the classification.
   }
 }
 

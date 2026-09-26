@@ -1,11 +1,12 @@
 // Pieces of the run detail page shared by the completed, running and failed views.
 
-import type { ReactNode } from 'react';
-import type { IdChain, Report, RunDetail, TierDecision } from '../../api/types.ts';
+import { type ReactNode, useState } from 'react';
+import type { IdChain, Report, RunDetail, RunUsageView, TierDecision } from '../../api/types.ts';
 import { Button } from '../../components/Button.tsx';
 import { Icon } from '../../components/Icon.tsx';
 import { PageHeader } from '../../components/PageHeader.tsx';
 import { Panel } from '../../components/Panel.tsx';
+import { Segmented } from '../../components/Segmented.tsx';
 import { StatusTag } from '../../components/StatusTag.tsx';
 import { EVIDENCE_LADDER_STEPS } from '../../lib/constants.ts';
 import { runStatusTone } from '../../lib/status.ts';
@@ -13,14 +14,19 @@ import { formatDateTime, formatDuration, formatTokens, shortRunId } from '../../
 import { downloadText } from './browser.ts';
 import {
   capitalise,
-  costTotals,
-  formatUsd,
+  formatCalls,
+  formatCost,
+  formatTokenSplit,
   permalinkHref,
   reportStatusLook,
   reportVersionLabel,
   STEPPER_PHASES,
   type StepperPhase,
   type StepState,
+  totalTokens,
+  type UsageBreakdown,
+  usageLines,
+  usageNotes,
   YES_NO,
 } from './run-logic.ts';
 
@@ -279,25 +285,89 @@ function SideList({ title, items, empty }: { title: string; items: readonly stri
   );
 }
 
-export function CostPanel({ cost }: { cost: Report['cost'] }) {
-  if (cost === null) {
-    return (
-      <Panel title="Run cost" as="div" style={{ padding: 20 }}>
-        <p className="hint" style={{ margin: 0 }}>
-          Not recorded: a model in this run has no pricing data.
-        </p>
-      </Panel>
-    );
-  }
-  const t = costTotals(cost.models);
+/**
+ * Tokens and cost of every model call in the run (D59), read from the store,
+ * so it covers follow-ups and embeddings that report.cost leaves out. While the
+ * run is running the page polls, so the numbers move with it. wallMs is the
+ * report's wall time, when there is a report.
+ */
+export function UsagePanel({ usage, running, now, wallMs }: { usage: RunUsageView | undefined; running: boolean; now: number; wallMs?: number }) {
+  const [by, setBy] = useState<UsageBreakdown>('model');
+  const notes = usageNotes(usage, running, now);
+  const counted = usage !== undefined && usage.recorded ? usage : undefined;
   return (
     <Panel title="Run cost" as="div" style={{ padding: 20 }}>
-      <KV k="Wall time">{formatDuration(cost.wall_ms)}</KV>
-      <KV k="Model calls">{t.calls}</KV>
-      <KV k="Tokens in / out">
-        {formatTokens(t.input)} / {formatTokens(t.output)}
-      </KV>
-      <KV k="Cost">{formatUsd(cost.usd_total)}</KV>
+      {notes.length > 0 && (
+        <div className="runs-tags" style={{ margin: '0 0 10px', gap: 6 }}>
+          {notes.map((n) => (
+            <StatusTag key={n.text} look={n.look}>
+              {n.text}
+            </StatusTag>
+          ))}
+        </div>
+      )}
+      {counted === undefined ? (
+        <p className="hint" style={{ margin: 0 }}>
+          {running ? 'The first model calls show here once they are counted.' : 'No model calls were counted for this run.'}
+        </p>
+      ) : (
+        <>
+          <KV k="Cost">{formatCost(counted.total, counted.pricing)}</KV>
+          <KV k="Model calls">{formatCalls(counted.total)}</KV>
+          <KV k="Tokens in">{formatTokens(counted.total.input_tokens)}</KV>
+          <KV k="Cache read">{formatTokens(counted.total.cache_read_tokens)}</KV>
+          <KV k="Cache write">{formatTokens(counted.total.cache_write_tokens)}</KV>
+          <KV k="Tokens out">{formatTokens(counted.total.output_tokens)}</KV>
+        </>
+      )}
+      {wallMs !== undefined && <KV k="Wall time">{formatDuration(wallMs)}</KV>}
+      {counted !== undefined && (
+        <div style={{ margin: '14px 0 0' }}>
+          <Segmented
+            label="Break the cost down"
+            value={by}
+            onChange={setBy}
+            options={[
+              { value: 'model', label: 'By model' },
+              { value: 'agent', label: 'By agent' },
+            ]}
+          />
+          <div className="runs-table-wrap" style={{ margin: '10px 0 0' }}>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th scope="col">{by === 'model' ? 'Model' : 'Agent'}</th>
+                  <th scope="col" className="num">
+                    Calls
+                  </th>
+                  <th scope="col" className="num">
+                    Tokens
+                  </th>
+                  <th scope="col" className="num">
+                    Cost
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {usageLines(counted, by).map((line) => (
+                  <tr key={line.key}>
+                    <td className="mono" style={{ fontSize: 12, overflowWrap: 'anywhere' }}>
+                      {line.key}
+                    </td>
+                    <td className="num">{formatCalls(line.totals)}</td>
+                    <td className="num" title={formatTokenSplit(line.totals)}>
+                      {formatTokens(totalTokens(line.totals))}
+                    </td>
+                    <td className="num" style={{ whiteSpace: 'nowrap' }}>
+                      {formatCost(line.totals)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </Panel>
   );
 }

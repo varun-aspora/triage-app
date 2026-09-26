@@ -51,7 +51,7 @@ import {
   triageToolContext,
   watchFinishReport,
 } from './triage-plan.ts';
-import { runUsage } from './tripwire.ts';
+import { dropSubmission, recordUsage, runUsageInMemory } from '../usage/meter.ts';
 import { NO_RETRY } from '../db/pg-retry.ts';
 
 // Model specs are pi-ai built-ins, so modelForTier accepts them without a
@@ -144,6 +144,7 @@ function fakeStore(): RunStore & { calls: string[] } {
     listRuns: record('listRuns'),
     putEmbedding: record('putEmbedding'),
     findSimilar: record('findSimilar'),
+    putUsage: record('putUsage'),
     deleteRun: record('deleteRun'),
     listExpired: record('listExpired'),
   };
@@ -311,15 +312,31 @@ describe('the triage mount', () => {
     settleRun(runId);
   });
 
-  test('the deps carry initialData and a UsageReader backed by runUsage', async () => {
+  test('the deps carry initialData and a UsageReader backed by the meter', async () => {
     const h = home();
     useTestRuntime(h);
     const runId = nextRunId();
     const data = init({ runId });
     const deps = runDepsFor(runId, data);
     expect(deps.initialData).toBe(data);
-    expect(deps.usage).toBe(runUsage);
-    expect(await deps.usage?.(runId)).toEqual(runUsage(runId));
+    expect(deps.usage).toBe(runUsageInMemory);
+    expect(await deps.usage?.(runId)).toEqual([]);
+    const bucket = { submissionId: 'sub_usage_reader' };
+    recordUsage(runId, bucket, {
+      model: 'faux/mid',
+      agent: 'triage',
+      purpose: 'agent',
+      isError: false,
+      input: 10,
+      output: 2,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
+    const rows = await deps.usage?.(runId);
+    expect(rows?.map((r) => [r.model, r.agent, r.calls, r.input_tokens, r.output_tokens])).toEqual([
+      ['faux/mid', 'triage', 1, 10, 2],
+    ]);
+    dropSubmission(runId, bucket.submissionId);
     expect(deps.run.interface).toBe('cli');
     expect(deps.run.window).toEqual(data.request.window);
     // Mock mode: no real connectors and no commit reader are built.
@@ -350,7 +367,7 @@ describe('the triage mount', () => {
     expect(triageRuntime()).toBe(rt);
     expect(rt.config).toBe(h.config);
     expect(rt.sandbox).toBe(noSandbox);
-    expect(rt.usage).toBe(runUsage);
+    expect(rt.usage).toBe(runUsageInMemory);
   });
 });
 

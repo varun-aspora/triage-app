@@ -7,7 +7,14 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Readable } from 'node:stream';
 import { makeTestHome, type TestHome } from '../../../test/support/home.ts';
+import { redactPersisted } from '../../gate/redact.ts';
 import { keyHash, keyString, semanticKey } from '../../mock/key.ts';
+import { listUnreviewed, reviewDirsFrom, type EvalCaseReviewItem } from '../../mock/promote.ts';
+import { recordFeedback } from '../../report/feedback.ts';
+import sampleReport from '../../report/__fixtures__/sample-report.json' with { type: 'json' };
+import { sampleRequest } from '../../runstore/contract.ts';
+import { createFolderRunStore } from '../../runstore/folder.ts';
+import type { Report } from '../../types/report.ts';
 import { commands as generatedCommands } from '../command-modules.gen.ts';
 import { buildProgram, runCli } from '../index.ts';
 import { EXIT } from '../output.ts';
@@ -358,5 +365,110 @@ describe('output and paths', () => {
     }
     expect(existsSync(reviewed(h, ['shared'], 'p-1'))).toBe(true);
     expect(readdirSync(elsewhere)).toEqual([]);
+  });
+});
+
+describe('eval draft cost', () => {
+  // A valid ULID with no run of 6+ digits, so the persisted profile leaves it alone.
+  const RUN = '01J8ZQ7XK3PSEDRMNABCDEFGH1';
+
+  // Keys that would carry token counts or spend: cost, usd*, *tokens*, at any depth.
+  function usageKeys(value: unknown, path = ''): string[] {
+    if (Array.isArray(value)) return value.flatMap((item, i) => usageKeys(item, `${path}[${i}]`));
+    if (value === null || typeof value !== 'object') return [];
+    return Object.entries(value).flatMap(([k, item]) => {
+      const at = path === '' ? k : `${path}.${k}`;
+      return k === 'cost' || k.startsWith('usd') || k.includes('tokens') ? [at] : usageKeys(item, at);
+    });
+  }
+
+  /** A draft as feedback.ts wrote it before D59: report.json still carries cost. */
+  function oldDraft(h: TestHome, runId: string): { dir: string; report: Record<string, unknown> } {
+    const dir = join(h.home, 'evals', '_unreviewed', runId);
+    mkdirSync(dir, { recursive: true });
+    const report = { ...(sampleReport as Record<string, unknown>), run_id: runId };
+    writeFileSync(join(dir, 'report.json'), `${JSON.stringify(report, null, 2)}\n`);
+    writeFileSync(join(dir, 'feedback.md'), '---\nid: x\n---\n');
+    return { dir, report };
+  }
+
+  test('a draft written by recordFeedback is promoted with no cost, usd or tokens key', async () => {
+    const h = home();
+    const store = createFolderRunStore({ runsDir: h.config.paths.runsDir, dataDir: h.config.paths.dataDir });
+    await store.createRun(RUN, redactPersisted(sampleRequest(RUN)));
+    await store.addSubmission(RUN, redactPersisted({ kind: 'initial' as const }));
+    const rep: Report = { ...(sampleReport as unknown as Report), run_id: RUN };
+    await store.putReport(RUN, 1, redactPersisted(rep), redactPersisted('# report\n'));
+    const fb = await recordFeedback(RUN, { verdict: 'correct', given_by: 'reviewer-a', interface: 'cli' }, { store, home: h.home });
+    expect(usageKeys(readJson(fb.draft_files!.report_json))).toEqual([]);
+
+    const r = await review(h, [], { answers: ['y'] });
+    expect(r.out).toContain('promoted 1, declined 0, refused 0, skipped 0');
+    const promoted = join(h.home, 'evals', 'cases', RUN, 'report.json');
+    expect(usageKeys(readJson(promoted))).toEqual([]);
+    expect(readJson(promoted).run_id).toBe(RUN);
+  });
+
+  test('promoting a draft from before the change drops its cost and keeps everything else', async () => {
+    const h = home();
+    const { dir, report } = oldDraft(h, 'run-old');
+    const feedbackBefore = readFileSync(join(dir, 'feedback.md'), 'utf8');
+    const r = await review(h, [], { answers: ['y'] });
+    expect(r.code).toBe(EXIT.OK);
+    expect(r.out).toContain('promoted 1, declined 0, refused 0, skipped 0');
+
+    const target = join(h.home, 'evals', 'cases', 'run-old');
+    const promoted = readJson(join(target, 'report.json'));
+    expect(Object.hasOwn(promoted, 'cost')).toBe(false);
+    expect(usageKeys(promoted)).toEqual([]);
+    const { cost: _cost, ...rest } = report;
+    expect(promoted).toEqual(rest);
+    expect(readFileSync(join(target, 'feedback.md'), 'utf8')).toBe(feedbackBefore);
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  test('a declined or skipped draft is left as it was, cost included', async () => {
+    const h = home();
+    const a = oldDraft(h, 'run-a');
+    const b = oldDraft(h, 'run-b');
+    const before = [readFileSync(join(a.dir, 'report.json'), 'utf8'), readFileSync(join(b.dir, 'report.json'), 'utf8')];
+    const r = await review(h, [], { answers: ['n', 'skip'] });
+    expect(r.out).toContain('promoted 0, declined 1, refused 0, skipped 1');
+    expect(readFileSync(join(a.dir, 'report.json'), 'utf8')).toBe(before[0] as string);
+    expect(readFileSync(join(b.dir, 'report.json'), 'utf8')).toBe(before[1] as string);
+    expect(existsSync(join(h.home, 'evals', 'cases'))).toBe(false);
+  });
+
+  test('an old draft matches a case already promoted without cost', async () => {
+    const h = home();
+    const first = oldDraft(h, 'run-a');
+    await review(h, [], { answers: ['y'] });
+    oldDraft(h, 'run-a');
+    const r = await review(h, [], { answers: ['y'] });
+    expect(r.out).toContain('already promoted with the same content');
+    expect(existsSync(first.dir)).toBe(false);
+  });
+
+  test('y on a draft whose report.json is not an object with cost keeps its bytes (not JSON, an array, no cost)', async () => {
+    const h = home();
+    const cases: [string, string][] = [
+      ['array', '[{"cost":1}]'],
+      ['no-cost', '{"run_id":"x"}'],
+      ['not-json', '{ not json'],
+    ];
+    for (const [runId, text] of cases) {
+      const dir = join(h.home, 'evals', '_unreviewed', runId);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'report.json'), text);
+    }
+    const items = (await listUnreviewed(reviewDirsFrom(h.config))) as EvalCaseReviewItem[];
+    expect(items.map((i) => i.runId)).toEqual(['array', 'no-cost', 'not-json']);
+    await review(h, [], { answers: ['y', 'y', 'y'] });
+    // Each is promoted or refused as promote decides; none is rewritten.
+    for (const [runId, text] of cases) {
+      const moved = join(h.home, 'evals', 'cases', runId, 'report.json');
+      const left = join(h.home, 'evals', '_unreviewed', runId, 'report.json');
+      expect(readFileSync(existsSync(moved) ? moved : left, 'utf8')).toBe(text);
+    }
   });
 });

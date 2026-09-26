@@ -8,7 +8,11 @@
 // a changed statement cannot pass silently. Each call is checked the way
 // Postgres would: the parameter count must match the highest $n, parameters
 // must be plain values, and casts (::timestamptz, ::jsonb, ::vector) must
-// parse. Primary keys, foreign keys and ON DELETE CASCADE are enforced.
+// parse. Primary keys, unique columns and CHECK constraints are enforced.
+// Foreign keys are not, and nothing cascades, because the run store has
+// neither (D60): an insert for a run or submission that does not exist is
+// stored as asked, and a DELETE removes rows from its own table only, so a
+// test sees exactly what the provider's own checks and deletes do.
 //
 // Transactions are serialised by one lock, which stands in for the row and
 // advisory locks the real statements take. A ROLLBACK restores the state
@@ -55,6 +59,23 @@ type EmbRow = {
   created_at: Date;
 };
 
+type UsageRow = {
+  run_id: string;
+  seq: number;
+  model: string;
+  agent: string;
+  purpose: string;
+  calls: number;
+  failed_calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  usd: number | null;
+  final: boolean;
+  updated_at: Date;
+};
+
 type State = {
   migrated: boolean;
   versions: string[];
@@ -85,6 +106,7 @@ type State = {
   idempotency: Map<string, { run_id: string; expires_at: Date }>;
   models: Map<string, { model: string; table_name: string; dims: number; created_at: Date }>;
   emb: Map<string, { dims: number; rows: EmbRow[] }>;
+  usage: UsageRow[];
 };
 
 function emptyState(migrated: boolean): State {
@@ -100,6 +122,7 @@ function emptyState(migrated: boolean): State {
     idempotency: new Map(),
     models: new Map(),
     emb: new Map(),
+    usage: [],
   };
 }
 
@@ -116,7 +139,6 @@ export class FakePgError extends Error {
 }
 
 const unique = (what: string) => new FakePgError('23505', `duplicate key value violates unique constraint on ${what}`);
-const foreignKey = (what: string) => new FakePgError('23503', `insert violates foreign key constraint on ${what}`);
 const missingRelation = (name: string) => new FakePgError('42P01', `relation "${name}" does not exist`);
 
 // ------------------------------------------------------------------ parameters
@@ -189,6 +211,21 @@ function vector(p: Param | undefined, label: string): number[] {
     throw new FakePgError('22P02', `${label}: invalid input syntax for type vector`);
   }
   return parsed as number[];
+}
+
+/** double precision: a number, or its text form. */
+function floatOrNull(p: Param | undefined, label: string): number | null {
+  if (p === null) return null;
+  const n = typeof p === 'string' ? Number(p) : p;
+  if (typeof n !== 'number' || !Number.isFinite(n)) throw new FakePgError('22P02', `${label}: expected double precision`);
+  return n;
+}
+
+/** Postgres integer: a checked int that fits in 32 bits. */
+function int4(p: Param | undefined, label: string): number {
+  const n = int(p, label);
+  if (n < -2_147_483_648 || n > 2_147_483_647) throw new FakePgError('22003', `${label}: integer out of range`);
+  return n;
 }
 
 function bool(p: Param | undefined, label: string): boolean {
@@ -282,6 +319,10 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
     const id = str(p[0], 'run_id');
     return db.runs.has(id) ? [{ run_id: id }] : [];
   },
+  shareRun(p, db) {
+    const id = str(p[0], 'run_id');
+    return db.runs.has(id) ? [{ run_id: id }] : [];
+  },
   setPhase(p, db) {
     const row = runRow(db, str(p[0], 'run_id'));
     if (!row) return [];
@@ -371,7 +412,6 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
   insertSubmission(p, db) {
     const id = str(p[0], 'run_id');
     const seq = int(p[1], 'seq');
-    if (!db.runs.has(id)) throw foreignKey('submissions.run_id');
     if (seq < 1) throw new FakePgError('23514', 'submissions.seq check failed');
     if (db.submissions.some((s) => s.run_id === id && s.seq === seq)) throw unique('submissions_pkey');
     db.submissions.push({
@@ -397,7 +437,6 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
     const id = str(p[0], 'run_id');
     const key = str(p[1], 'key');
     const version = int(p[2], 'version');
-    if (!db.runs.has(id)) throw foreignKey('evidence.run_id');
     if (db.evidence.some((e) => e.run_id === id && e.key === key && e.version === version)) throw unique('evidence_pkey');
     db.evidence.push({ run_id: id, key, version, findings: jsonb(p[3], 'findings'), created_at: ts(p[4], 'created_at') });
     return [];
@@ -428,20 +467,16 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
     return [];
   },
   insertFeedback(p, db) {
-    const id = str(p[0], 'run_id');
-    if (!db.runs.has(id)) return [];
-    const fid = db.nextFeedbackId++;
     db.feedback.push({
-      id: fid,
-      run_id: id,
+      id: db.nextFeedbackId++,
+      run_id: str(p[0], 'run_id'),
       verdict: str(p[1], 'verdict'),
       given_by: str(p[2], 'given_by'),
       given_at: ts(p[3], 'given_at'),
       body: jsonb(p[4], 'body'),
       body_md: strOrNull(p[5], 'body_md'),
     });
-    // bigserial comes back as text from pg.
-    return [{ id: String(fid) }];
+    return [];
   },
   claimKey(p, db) {
     const hash = str(p[0], 'key_sha256');
@@ -546,6 +581,8 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
       .sort((a, b) => b.created_at.getTime() - a.created_at.getTime() || byText(b.run_id, a.run_id));
     return (limit === null ? rows : rows.slice(0, limit)).map((r) => {
       const latest = db.feedback.filter((f) => f.run_id === r.run_id).sort((a, b) => b.id - a.id)[0];
+      const usage = db.usage.filter((u) => u.run_id === r.run_id);
+      const priced = usage.filter((u) => u.usd !== null);
       return {
         run_id: r.run_id,
         created_at: new Date(r.created_at),
@@ -557,6 +594,17 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
         // COUNT(*) is bigint, which pg returns as text.
         submissions: String(db.submissions.filter((s) => s.run_id === r.run_id).length),
         feedback_verdict: latest?.verdict ?? null,
+        // SUM over no non-null value is null; double precision comes back as a number.
+        usd_total: priced.length === 0 ? null : priced.reduce((sum, u) => sum + (u.usd as number), 0),
+        // SUM(...)::bigint, which pg returns as text.
+        tokens_total:
+          usage.length === 0
+            ? null
+            : String(
+                usage.reduce((sum, u) => sum + u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens, 0),
+              ),
+        // EXISTS gives a boolean.
+        usd_unpriced: usage.some((u) => u.usd === null),
       };
     });
   },
@@ -569,14 +617,80 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
   },
   deleteRun(p, db) {
     const id = str(p[0], 'run_id');
-    if (!db.runs.delete(id)) return [];
-    // ON DELETE CASCADE from runs.
+    // The run row only: nothing cascades.
+    return db.runs.delete(id) ? [{ run_id: id }] : [];
+  },
+  deleteSubmissions(p, db) {
+    const id = str(p[0], 'run_id');
     db.submissions = db.submissions.filter((s) => s.run_id !== id);
+    return [];
+  },
+  deleteEvidence(p, db) {
+    const id = str(p[0], 'run_id');
     db.evidence = db.evidence.filter((e) => e.run_id !== id);
+    return [];
+  },
+  deleteReports(p, db) {
+    const id = str(p[0], 'run_id');
     db.reports = db.reports.filter((r) => r.run_id !== id);
+    return [];
+  },
+  deleteFeedback(p, db) {
+    const id = str(p[0], 'run_id');
     db.feedback = db.feedback.filter((f) => f.run_id !== id);
-    for (const table of db.emb.values()) table.rows = table.rows.filter((r) => r.run_id !== id);
-    return [{ run_id: id }];
+    return [];
+  },
+  deleteRunUsage(p, db) {
+    const id = str(p[0], 'run_id');
+    db.usage = db.usage.filter((u) => u.run_id !== id);
+    return [];
+  },
+  usageFinal(p, db) {
+    const id = str(p[0], 'run_id');
+    const seq = int(p[1], 'seq');
+    return db.usage.some((u) => u.run_id === id && u.seq === seq && u.final) ? [{ '?column?': 1 }] : [];
+  },
+  deleteUsage(p, db) {
+    const id = str(p[0], 'run_id');
+    const seq = int(p[1], 'seq');
+    db.usage = db.usage.filter((u) => !(u.run_id === id && u.seq === seq));
+    return [];
+  },
+  insertUsage(p, db) {
+    const id = str(p[0], 'run_id');
+    const row: UsageRow = {
+      run_id: id,
+      seq: int4(p[1], 'seq'),
+      model: str(p[2], 'model'),
+      agent: str(p[3], 'agent'),
+      purpose: str(p[4], 'purpose'),
+      calls: int4(p[5], 'calls'),
+      failed_calls: int4(p[6], 'failed_calls'),
+      input_tokens: int4(p[7], 'input_tokens'),
+      output_tokens: int4(p[8], 'output_tokens'),
+      cache_read_tokens: int4(p[9], 'cache_read_tokens'),
+      cache_write_tokens: int4(p[10], 'cache_write_tokens'),
+      usd: floatOrNull(p[11], 'usd'),
+      final: bool(p[12], 'final'),
+      updated_at: ts(p[13], 'updated_at'),
+    };
+    if (row.seq < 0) throw new FakePgError('23514', 'run_usage.seq check failed');
+    if (
+      db.usage.some(
+        (u) => u.run_id === id && u.seq === row.seq && u.model === row.model && u.agent === row.agent && u.purpose === row.purpose,
+      )
+    ) {
+      throw unique('run_usage_pkey');
+    }
+    db.usage.push(row);
+    return [];
+  },
+  usage(p, db) {
+    const id = str(p[0], 'run_id');
+    return db.usage
+      .filter((u) => u.run_id === id)
+      .sort((a, b) => a.seq - b.seq || byText(a.model, b.model) || byText(a.agent, b.agent) || byText(a.purpose, b.purpose))
+      .map(({ run_id: _run, ...u }) => clone(u));
   },
   lockEmbeddingModels() {
     return [{ pg_advisory_xact_lock: '' }];
@@ -640,8 +754,6 @@ function embeddingHandler(text: string): Handler | undefined {
     return (p, db) => {
       const table = embTable(db, name);
       const id = str(p[0], 'run_id');
-      // INSERT ... SELECT FROM triage.runs: nothing when the run is gone.
-      if (!db.runs.has(id)) return [];
       const embedding = vector(p[5], 'embedding');
       if (embedding.length !== table.dims) {
         throw new FakePgError('22000', `expected ${table.dims} dimensions, not ${embedding.length}`);
@@ -659,7 +771,7 @@ function embeddingHandler(text: string): Handler | undefined {
         (r) => !(r.run_id === row.run_id && r.kind === row.kind && r.submission_seq === row.submission_seq),
       );
       table.rows.push(row);
-      return [{ run_id: id }];
+      return [];
     };
   }
   if (text === sql.listForRun) {
@@ -669,6 +781,14 @@ function embeddingHandler(text: string): Handler | undefined {
         .rows.filter((r) => r.run_id === id)
         .sort((a, b) => byText(a.kind, b.kind) || a.submission_seq - b.submission_seq)
         .map((r) => ({ submission_seq: r.submission_seq, kind: r.kind, text_sha256: r.text_sha256 }));
+    };
+  }
+  if (text === sql.deleteForRun) {
+    return (p, db) => {
+      const table = embTable(db, name);
+      const id = str(p[0], 'run_id');
+      table.rows = table.rows.filter((r) => r.run_id !== id);
+      return [];
     };
   }
   if (text === sql.similar) {
@@ -728,11 +848,15 @@ function migratorHandler(text: string): Handler | undefined {
       return [];
     };
   }
-  // The bodies of 0002_input_requests.sql and 0003_blocks.sql: columns the
-  // fake's rows carry from the start.
+  // The bodies of 0002_input_requests.sql, 0003_blocks.sql,
+  // 0004_run_usage.sql and 0005_drop_foreign_keys.sql: columns and a table
+  // the fake carries from the start, and foreign keys it never had.
   if (
     (text.includes('ADD COLUMN input_request jsonb') && text.includes('ADD COLUMN answer text')) ||
-    (text.includes('ADD COLUMN block jsonb') && text.includes('ADD COLUMN note text'))
+    (text.includes('ADD COLUMN block jsonb') && text.includes('ADD COLUMN note text')) ||
+    text.includes('CREATE TABLE triage.run_usage (') ||
+    (text.includes("WHERE c.contype = 'f' AND c.connamespace = 'triage'::regnamespace") &&
+      text.includes("EXECUTE format('ALTER TABLE triage.%I DROP CONSTRAINT %I'"))
   ) {
     return (_p, db) => {
       if (!db.migrated) throw missingRelation('triage.runs');
@@ -896,6 +1020,7 @@ export function createFakePg(options: FakePgOptions = {}): FakePg {
         idempotency: db.idempotency.size,
         embedding_models: db.models.size,
         embeddings: emb,
+        run_usage: db.usage.length,
       };
     },
     embeddingTables() {

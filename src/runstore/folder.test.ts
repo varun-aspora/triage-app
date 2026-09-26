@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,10 +21,12 @@ import {
   sampleFindings,
   sampleReport,
   sampleRequest,
+  sampleUsageRow,
+  USAGE_MODEL,
   type ContractFactory,
 } from './contract.ts';
 import { createFolderRunStore, folderRunStoreFromConfig } from './folder.ts';
-import { RunStoreRedactionError, type Feedback, type RunStore } from './types.ts';
+import { RunStoreError, RunStoreRedactionError, type Feedback, type RunStore } from './types.ts';
 
 const dirs: string[] = [];
 
@@ -155,6 +157,61 @@ describe('folder provider: layout', () => {
     const submission = JSON.parse(readFileSync(join(dir, 'submissions', String(seq), 'submission.json'), 'utf8')) as unknown;
     expect(submission).toMatchObject({ kind: 'resume', block_id: 'b1', note: 'harbor is back', seq });
     expect(walk(dir)).toEqual(['input.json', 'meta.json', 'submissions/1/submission.json']);
+  });
+
+  test('usage lives in usage/<seq>.json, apart from meta.json, with the model id intact', async () => {
+    let now = Date.parse('2026-09-01T00:00:00.000Z');
+    const { store, runsDir } = makeStore(() => now);
+    await store.createRun(RUN_A, p(sampleRequest(RUN_A)));
+    const dir = join(runsDir, RUN_A);
+    const meta = readFileSync(join(dir, 'meta.json'), 'utf8');
+    now += 60_000;
+    await store.putUsage(RUN_A, 0, [sampleUsageRow({ agent: 'classifier', purpose: 'classify' })], true);
+    await store.putUsage(RUN_A, 1, [sampleUsageRow({ agent: 'synthesis' }), sampleUsageRow()], false);
+
+    expect(walk(dir)).toEqual(['input.json', 'meta.json', 'usage/0.json', 'usage/1.json']);
+    expect(readFileSync(join(dir, 'meta.json'), 'utf8')).toBe(meta);
+    const one = JSON.parse(readFileSync(join(dir, 'usage', '1.json'), 'utf8')) as Record<string, unknown>;
+    expect(one).toEqual({
+      seq: 1,
+      rows: [sampleUsageRow({ agent: 'synthesis' }), sampleUsageRow()],
+      updated_at: '2026-09-01T00:01:00.000Z',
+      final: false,
+    });
+    expect(JSON.stringify(one)).toContain(USAGE_MODEL);
+
+    // A final write with no rows removes the file, like the postgres DELETE.
+    await store.putUsage(RUN_A, 1, [], true);
+    expect(walk(dir)).toEqual(['input.json', 'meta.json', 'usage/0.json']);
+    await store.putUsage(RUN_A, 1, [], true);
+  });
+
+  test('a run without a usage folder reads as no usage, and stray files there are skipped', async () => {
+    const { store, runsDir } = makeStore();
+    await store.createRun(RUN_A, p(sampleRequest(RUN_A)));
+    expect((await store.getRun(RUN_A))?.usage).toEqual([]);
+    const usageDir = join(runsDir, RUN_A, 'usage');
+    mkdirSync(usageDir);
+    writeFileSync(join(usageDir, 'notes.txt'), 'x');
+    writeFileSync(join(usageDir, '01.json'), '{}');
+    writeFileSync(join(usageDir, '.2.json.tmp-1-abc'), '{');
+    expect((await store.getRun(RUN_A))?.usage).toEqual([]);
+    const [summary] = await store.listRuns();
+    expect(summary && 'tokens_total' in summary).toBe(false);
+  });
+
+  test('a corrupt or mismatched usage file is an error that names the file, not its content', async () => {
+    const { store, runsDir } = makeStore();
+    await store.createRun(RUN_A, p(sampleRequest(RUN_A)));
+    await store.putUsage(RUN_A, 2, [sampleUsageRow()], true);
+    const usageDir = join(runsDir, RUN_A, 'usage');
+    writeFileSync(join(usageDir, '3.json'), readFileSync(join(usageDir, '2.json'), 'utf8'));
+    await expect(store.getRun(RUN_A)).rejects.toThrow('corrupt usage file in the run store');
+    writeFileSync(join(usageDir, '3.json'), JSON.stringify({ seq: 3, rows: [{ ...sampleUsageRow(), model: 'x****1' }], updated_at: 'x', final: true }));
+    const err = await store.getRun(RUN_A).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RunStoreError);
+    expect(String(err)).toContain('invalid usage file');
+    expect(String(err)).not.toContain('****');
   });
 
   test('default feedback.md names the latest verdict', async () => {
@@ -308,6 +365,8 @@ describe('folder provider: concurrency and atomicity', () => {
       store.setPhase(RUN_A, 'investigating'),
       store.putFeedback(RUN_A, p(sampleFeedback('pending', '2026-09-02T00:00:00.000Z'))),
       store.claimIdempotencyKey('k', RUN_A, 1000),
+      store.putUsage(RUN_A, 1, [sampleUsageRow()], false),
+      store.putUsage(RUN_A, 0, [sampleUsageRow({ agent: 'classifier', purpose: 'classify' })], true),
     ]);
     const all = [...walk(runsDir), ...walk(dataDir)];
     expect(all.filter((f) => f.includes('.tmp-') || f.endsWith('.lock'))).toEqual([]);
@@ -317,6 +376,7 @@ describe('folder provider: concurrency and atomicity', () => {
     const { store, runsDir } = makeStore();
     await store.createRun(RUN_A, p(sampleRequest(RUN_A)));
     await store.putEvidence(RUN_A, 'ssfb', p(sampleFindings('a')));
+    await store.putUsage(RUN_A, 0, [sampleUsageRow()], true);
     expect(await store.deleteRun(RUN_A)).toBe(true);
     expect(readdirSync(runsDir)).toEqual([]);
   });
@@ -346,6 +406,8 @@ function typeLevelChecks(store: RunStore): void {
   void store.putEvidence(RUN_A, 'ssfb', { value: rawFindings, toJSON: () => rawFindings });
   // @ts-expect-error 'shivalik' is an alias, not an evidence key
   void store.putEvidence(RUN_A, 'shivalik', redactPersisted(rawFindings));
+  // @ts-expect-error usage rows are plain rows checked by schema, not Persisted boxes
+  void store.putUsage(RUN_A, 1, redactPersisted([sampleUsageRow()]), true);
 
   // These compile.
   void store.createRun(RUN_A, redactPersisted(rawRequest));

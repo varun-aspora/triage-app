@@ -275,6 +275,16 @@ describe('registered providers', () => {
     expect(await auth?.resolve({} as never)).toEqual({ auth: { apiKey: 'ollama' } });
   });
 
+  test('the ollama provider resolves OLLAMA_API_KEY when it is set', async () => {
+    const spy = spySetProvider();
+    const base = { ...BASE, MODEL_TIER_CHEAP: 'ollama/key-t061', OLLAMA_BASE_URL: 'http://localhost:11434/v1' };
+    expect(models.registerProviders(cfg({ ...base, OLLAMA_API_KEY: 'proxy-key' }))).toBe(true);
+    expect(await spy.mock.calls[0]?.[0].auth.apiKey?.resolve({} as never)).toEqual({ auth: { apiKey: 'proxy-key' } });
+    // A blank key falls back to the placeholder, and a changed key registers again.
+    expect(models.registerProviders(cfg({ ...base, OLLAMA_API_KEY: '' }))).toBe(true);
+    expect(await spy.mock.calls[1]?.[0].auth.apiKey?.resolve({} as never)).toEqual({ auth: { apiKey: 'ollama' } });
+  });
+
   test('registerProviders does nothing when OLLAMA_BASE_URL is blank', () => {
     const spy = spySetProvider();
     expect(models.registerProviders(cfg({ ...BASE, OLLAMA_BASE_URL: '' }))).toBe(false);

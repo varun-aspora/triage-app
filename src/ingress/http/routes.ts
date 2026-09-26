@@ -2,10 +2,11 @@
 //
 // createTriageRoutes(deps) returns a Hono app with:
 //   POST /triage                       -> 202 {run_id} (or {run_id, deduplicated: true})
-//   GET  /triage                       -> {runs: RunSummary[], next_cursor} (filters in run-list.ts)
+//   GET  /triage                       -> {runs: RunSummary[], next_cursor} (filters in run-list.ts);
+//                                          each row has usd_total, tokens_total and usd_partial once usage is stored
 //   GET  /triage/:run_id               -> {run_id, status, phase, classification, id_chain, report?,
 //                                          created_at, updated_at, requested_by, submissions, feedback,
-//                                          block, block_history, ...}
+//                                          block, block_history, usage, ...}
 //   GET  /triage/:run_id/events        -> {events, next, more}; ?after=<next>&limit=<n>, the run's events.jsonl
 //   POST /triage/:run_id/ask           -> 202 {run_id, submission_id}; 409 while the run is blocked
 //   POST /triage/:run_id/resume        -> 202 {run_id, submission_id}; 409 when the run cannot be resumed (D55)
@@ -32,8 +33,15 @@
 //
 // GET /triage/:run_id passes the whole answer through one more
 // persisted-profile redaction, even though the store holds redacted text only.
-// GET /triage does not: a RunSummary holds ids, enums, counts and timestamps,
-// no free text.
+// The run id and usage (D59) are added after it: the profile masks digit runs,
+// which would mangle a ULID or a model id like claude-haiku-4-5-20251001.
+// usage holds only numbers, schema-checked model specs and agent names. It is
+// live while the run is running and its worker is alive, and incomplete once
+// a run that stopped running, or whose worker died, left a submission without
+// its final count. The worker check is deps.isAlive; without it the status
+// alone decides.
+// GET /triage is not redacted: a RunSummary holds ids, enums, counts,
+// totals and timestamps, no free text.
 //
 // post-to-slack never calls Slack and never reads the body, so a caller's
 // approved_by has no effect. A bearer holder asserting approval is not an
@@ -47,6 +55,7 @@ import { FeedbackError, recordFeedback as defaultRecordFeedback, type FeedbackDe
 import { EVIDENCE_KEYS, RunNotFoundError, type RunRecord, type RunStore } from '../../runstore/types.ts';
 import { RunIdSchema, type KnownIds, type RunId } from '../../types/core.ts';
 import type { TriageRequest } from '../../types/request.ts';
+import { summariseUsage } from '../../usage/summary.ts';
 import { IngressInputError, NoEnabledEntityError, type InputHints } from '../normalise.ts';
 import { MAX_THREAD_FILE_BYTES, type PrepareInput, type PreparedSubmission } from '../prepare.ts';
 import { SlackFetchError } from '../slack.ts';
@@ -119,6 +128,8 @@ export type TriageRouteDeps = {
   readonly idempotencyTtlMs?: number;
   /** A background submission, follow-up or resume failed. Gets the class name only by default. */
   readonly onBackgroundError?: (runId: string, what: BackgroundWork, err: unknown) => void;
+  /** True when a process with this pid exists: the CLI's pidAlive. Left out: every worker counts as alive. */
+  readonly isAlive?: (pid: number) => boolean;
 };
 
 export type TriageRouteDepsSource = TriageRouteDeps | (() => TriageRouteDeps | Promise<TriageRouteDeps>);
@@ -183,7 +194,7 @@ export function createTriageRoutes(source: TriageRouteDepsSource): Hono {
     const deps = await load();
     const run = await deps.store.getRun(runId);
     if (run === null) return notFound(c);
-    return c.json(runView(run));
+    return c.json(runView(run, deps.isAlive));
   });
 
   app.get('/triage/:run_id/events', async (c) => {
@@ -364,16 +375,21 @@ function trackDispatch(deps: SettleDeps): { readonly deps: SettleDeps; readonly 
   return { deps: { ...deps, dispatcher }, dispatched };
 }
 
-/** The GET answer. Everything but the run id goes through the persisted profile again. */
-export function runView(run: RunRecord): Record<string, unknown> {
+/**
+ * The GET answer. Everything but the run id and usage goes through the
+ * persisted profile again. isAlive checks the run's worker pid, so a running
+ * run whose worker died shows its open usage as incomplete, not live.
+ */
+export function runView(run: RunRecord, isAlive?: (pid: number) => boolean): Record<string, unknown> {
   // Optional access throughout: older or partial records (and test fixtures)
   // may lack parts of the request or classification.
   const request = run.request as Partial<TriageRequest> | undefined;
   const source = request?.source;
   const decision = run.classification?.decision;
   const warnings = run.classification?.preflight_warnings;
+  const status = statusOfPhase(run.phase);
   const view = {
-    status: statusOfPhase(run.phase),
+    status,
     phase: run.phase,
     classification: decision ?? null,
     id_chain: run.classification?.id_chain ?? null,
@@ -419,8 +435,11 @@ export function runView(run: RunRecord): Record<string, unknown> {
     })),
     ...(run.report !== null && run.report_md !== null ? { report_md: run.report_md } : {}),
   };
-  // The persisted profile can mask digit runs in a ULID, so the id is put back after.
-  return { run_id: run.run_id, ...redactPersisted(view).value };
+  // The persisted profile can mask digit runs in a ULID or a model id, so both are added after.
+  // A run with no recorded pid is still running as far as anyone can tell.
+  const running = status === 'running' && (run.worker_pid === undefined || isAlive === undefined || isAlive(run.worker_pid));
+  const usage = summariseUsage(run.usage ?? [], { running });
+  return { run_id: run.run_id, ...redactPersisted(view).value, usage };
 }
 
 // ------------------------------------------------------------------ helpers

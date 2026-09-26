@@ -18,6 +18,9 @@
 // - pipeline-classifier-failure: the classifier answers with invalid output.
 //   The run still dispatches, on strong, with classifier_error recorded.
 //
+// Every run's usage is in the store too (D59): the classifier as seq 0 and the
+// run's own calls as seq 1. ./usage.contract.ts covers usage in more depth.
+//
 // The fixture files are flat JSON files, one per case, each holding full
 // fixture records. The fixture store reads cases/<case id>/<kind>/<entity>/
 // <hash>.json, so beforeAll lays them out in a temp tree and boots the eval
@@ -547,9 +550,30 @@ describe('pipeline: runCase output', () => {
       expect(r.audit.every((l) => l.run_id === r.run_id)).toBe(true);
       expect(r.fixture_misses).toBe(0);
       expect(r.cost_usd).toBe(0);
+      expect(r.cost_partial).toBe(false);
     }
     expect(results.map((r) => r.run_id).sort()).toEqual(Object.values(RUN_IDS).sort());
     // No model call reached a queue it was not scripted for.
     expect(fake.failures()).toEqual([]);
+  });
+
+  test('every run stores the classifier call as seq 0 and its own calls as seq 1, final and at $0 (D59)', async () => {
+    for (const r of results) {
+      const run = await storedRun(r);
+      expect(run.usage.map((u) => [u.seq, u.final])).toEqual([
+        [0, true],
+        [1, true],
+      ]);
+      // Invalid classifier output is still a call that did not fail.
+      expect(run.usage[0]?.rows.map((row) => [row.model, row.agent, row.purpose, row.calls, row.failed_calls])).toEqual([
+        ['faux/classifier', 'classifier', 'classify', 1, 0],
+      ]);
+      const agents = run.usage[1]?.rows.map((row) => row.agent) ?? [];
+      expect(agents).toContain('triage');
+      expect(agents.some((a) => a.startsWith('investigate_'))).toBe(true);
+      // Prior cases are off and MODEL_EMBEDDING is blank in the eval home, so nothing is embedded.
+      expect(agents).not.toContain('embedder');
+      expect(run.usage.flatMap((u) => u.rows).every((row) => row.usd === 0)).toBe(true);
+    }
   });
 });

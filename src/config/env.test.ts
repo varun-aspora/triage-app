@@ -155,6 +155,7 @@ describe('defaults with an empty .env', () => {
     expect(c.http.allowSlackPost).toBe(false);
     expect(c.ui.env).toBe('non-production');
     expect(c.runs.priorCases).toBe(false);
+    expect(c.runs.usageFlushMs).toBe(10000);
     expect(c.code).toEqual({ codegraphBin: 'codegraph', qwBin: 'qw', syncBeforeQuery: true });
     expect({ ...c.git }).toEqual({ protocol: 'ssh', host: 'github.com', org: 'Vance-Club', httpsToken: undefined });
     expect(c.repos.syncIntervalMs).toBe(24 * 60 * 60 * 1000);
@@ -309,6 +310,11 @@ describe('type refusals name the key', () => {
     ['TRIAGE_REPOS_SYNC_INTERVAL', '400d'],
     ['TRIAGE_REPOS_SYNC_INTERFACES', 'server,cli'],
     ['TRIAGE_REPOS_SYNC_INTERFACES', 'none,cli'],
+    ['TRIAGE_USAGE_FLUSH_MS', '1999'],
+    ['TRIAGE_USAGE_FLUSH_MS', '1'],
+    ['TRIAGE_USAGE_FLUSH_MS', '-1'],
+    ['TRIAGE_USAGE_FLUSH_MS', '10s'],
+    ['TRIAGE_USAGE_FLUSH_MS', '3600001'],
   ];
 
   test('sync intervals and interfaces parse', () => {
@@ -318,6 +324,18 @@ describe('type refusals name the key', () => {
     expect(fromRecord({ TRIAGE_REPOS_SYNC_INTERVAL: '' }).repos.syncIntervalMs).toBe(24 * 60 * 60 * 1000);
     expect(fromRecord({ TRIAGE_REPOS_SYNC_INTERFACES: 'http, cli' }).repos.syncInterfaces).toEqual(['http', 'cli']);
     expect(fromRecord({ TRIAGE_REPOS_SYNC_INTERFACES: 'none' }).repos.syncInterfaces).toEqual([]);
+  });
+  test('the usage flush interval takes 0 (off), 2000 and above, and blank for the default', () => {
+    expect(fromRecord({ TRIAGE_USAGE_FLUSH_MS: '0' }).runs.usageFlushMs).toBe(0);
+    expect(fromRecord({ TRIAGE_USAGE_FLUSH_MS: '2000' }).runs.usageFlushMs).toBe(2000);
+    expect(fromRecord({ TRIAGE_USAGE_FLUSH_MS: '60000' }).runs.usageFlushMs).toBe(60000);
+    expect(fromRecord({ TRIAGE_USAGE_FLUSH_MS: '' }).runs.usageFlushMs).toBe(10000);
+  });
+
+  test('a refused usage flush interval says what is allowed and never echoes the value', () => {
+    const err = configError(() => fromRecord({ TRIAGE_USAGE_FLUSH_MS: '1999' }));
+    expect(err.message).toContain('must be 0 (off) or at least 2000');
+    expect(err.message).not.toContain('1999');
   });
   for (const [key, value] of cases) {
     test(`${key}=${value}`, () => {

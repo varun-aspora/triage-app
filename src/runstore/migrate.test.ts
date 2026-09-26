@@ -8,8 +8,9 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadModule, parseSync } from 'libpg-query';
+import { loadModule, parsePlPgSQLSync, parseSync } from 'libpg-query';
 import { createPgRunner, type PgClientLike, type PgPoolLike, type PoolFactory } from '../db/pg.ts';
+import { createFakePg } from './fake-pg.ts';
 import { DEFAULT_MIGRATIONS_DIR, listMigrations, migrateRunStore, RunStoreMigrationError } from './migrate.ts';
 import { RunStoreError } from './types.ts';
 
@@ -18,8 +19,10 @@ const MIGRATIONS_DIR = fileURLToPath(new URL('./migrations/', import.meta.url));
 const INIT_SQL = readFileSync(join(MIGRATIONS_DIR, '0001_init.sql'), 'utf8');
 const INPUT_SQL = readFileSync(join(MIGRATIONS_DIR, '0002_input_requests.sql'), 'utf8');
 const BLOCKS_SQL = readFileSync(join(MIGRATIONS_DIR, '0003_blocks.sql'), 'utf8');
+const USAGE_SQL = readFileSync(join(MIGRATIONS_DIR, '0004_run_usage.sql'), 'utf8');
+const DROP_FK_SQL = readFileSync(join(MIGRATIONS_DIR, '0005_drop_foreign_keys.sql'), 'utf8');
 /** Every shipped migration, in order. */
-const ALL_VERSIONS = ['0001_init', '0002_input_requests', '0003_blocks'];
+const ALL_VERSIONS = ['0001_init', '0002_input_requests', '0003_blocks', '0004_run_usage', '0005_drop_foreign_keys'];
 
 // ------------------------------------------------------------------ fake database
 
@@ -180,6 +183,24 @@ describe('migrateRunStore', () => {
       'INSERT INTO triage.schema_migrations (version) VALUES ($1)',
       'COMMIT',
     ]);
+    expect(db.clientCalls(6)).toEqual([
+      'BEGIN',
+      'SELECT pg_advisory_xact_lock(7426150093)',
+      'SELECT version FROM triage.schema_migrations WHERE version = $1',
+      USAGE_SQL,
+      'INSERT INTO triage.schema_migrations (version) VALUES ($1)',
+      'COMMIT',
+    ]);
+    // 0005 is one DO block sent as one statement with no parameters.
+    expect(db.clientCalls(7)).toEqual([
+      'BEGIN',
+      'SELECT pg_advisory_xact_lock(7426150093)',
+      'SELECT version FROM triage.schema_migrations WHERE version = $1',
+      DROP_FK_SQL,
+      'INSERT INTO triage.schema_migrations (version) VALUES ($1)',
+      'COMMIT',
+    ]);
+    expect(db.calls.find((c) => c.text === DROP_FK_SQL)?.params).toBeUndefined();
     const inserts = db.calls.filter((c) => c.text.startsWith('INSERT INTO triage.schema_migrations'));
     expect(inserts.map((c) => c.params)).toEqual(ALL_VERSIONS.map((v) => [v]));
   });
@@ -197,6 +218,8 @@ describe('migrateRunStore', () => {
     expect(second).not.toContain(INIT_SQL);
     expect(second).not.toContain(INPUT_SQL);
     expect(second).not.toContain(BLOCKS_SQL);
+    expect(second).not.toContain(USAGE_SQL);
+    expect(second).not.toContain(DROP_FK_SQL);
     expect(second.some((t) => t.startsWith('INSERT'))).toBe(false);
     // Only the bootstrap transaction opens; no transaction for a skipped file.
     expect(second.filter((t) => t === 'BEGIN')).toHaveLength(1);
@@ -300,6 +323,16 @@ describe('migrateRunStore', () => {
     expect(db.calls).toEqual([]);
   });
 
+  test('over fake-pg, 0005 is applied once and a second start applies nothing', async () => {
+    const fake = createFakePg({ migrated: false });
+    const runner = fake.runner();
+    expect(await migrateRunStore(runner)).toEqual({ applied: ALL_VERSIONS, skipped: [] });
+    expect(fake.calls.filter((c) => c.text === DROP_FK_SQL)).toHaveLength(1);
+    expect(await migrateRunStore(runner)).toEqual({ applied: [], skipped: ALL_VERSIONS });
+    expect(fake.calls.filter((c) => c.text === DROP_FK_SQL)).toHaveLength(1);
+    expect(fake.isMigrated()).toBe(true);
+  });
+
   test('refuses a missing directory', async () => {
     const db = fakeDb();
     const err = await caught(migrateRunStore(runnerFor(db), { dir: join(tmpdir(), 'triage-migrate-missing-dir') }));
@@ -398,9 +431,11 @@ describe('migration files parsed with the Postgres grammar', () => {
     }
   });
 
-  test('only the triage schema and the vector extension are created outside tables; later files only add columns', () => {
-    const allowed = new Set(['CreateSchemaStmt', 'CreateExtensionStmt', 'CreateStmt', 'IndexStmt', 'AlterTableStmt']);
+  test('only the triage schema and the vector extension are created outside tables; later files add columns or tables', () => {
+    const allowed = new Set(['CreateSchemaStmt', 'CreateExtensionStmt', 'CreateStmt', 'IndexStmt', 'AlterTableStmt', 'DoStmt']);
     for (const s of statements) expect([...allowed]).toContain(s.kind);
+    // The one DO block is 0005's, which drops the foreign keys.
+    expect(statements.filter((x) => x.kind === 'DoStmt').map((x) => x.file)).toEqual(['0005_drop_foreign_keys.sql']);
     for (const s of statements.filter((x) => x.kind === 'AlterTableStmt')) {
       expect(s.file).not.toBe('0001_init.sql');
       for (const cmd of (s.node.cmds ?? []) as Json[]) expect(cmd.AlterTableCmd?.subtype).toBe('AT_AddColumn');
@@ -419,17 +454,41 @@ describe('migration files parsed with the Postgres grammar', () => {
     }
   });
 
-  test('the tables from the ticket exist, with cascades from runs', () => {
+  test('the tables from the ticket exist', () => {
     const tables = statements.filter((s) => s.kind === 'CreateStmt').map((s) => s.node.relation.relname as string);
     expect(tables.sort()).toEqual(
-      ['embedding_models', 'evidence', 'feedback', 'idempotency', 'reports', 'runs', 'schema_migrations', 'submissions'].sort(),
+      ['embedding_models', 'evidence', 'feedback', 'idempotency', 'reports', 'run_usage', 'runs', 'schema_migrations', 'submissions'].sort(),
     );
-    for (const child of ['submissions', 'evidence', 'reports', 'feedback']) {
-      const stmt = statements.find((s) => s.kind === 'CreateStmt' && s.node.relation.relname === child);
-      const text = JSON.stringify(stmt?.node);
-      expect(text).toContain('"pktable":{"schemaname":"triage","relname":"runs"');
-      expect(text).toContain('"fk_del_action":"c"');
+  });
+
+  test('foreign keys appear only in 0001_init.sql, which 0005 undoes; no later file adds one (D60)', () => {
+    const withFk = (s: { node: Json }) => JSON.stringify(s.node).includes('"contype":"CONSTR_FOREIGN"');
+    const files = [...new Set(statements.filter(withFk).map((s) => s.file))];
+    expect(files).toEqual(['0001_init.sql']);
+    // 0001 is merged and append-only, so its foreign keys stay in the file and 0005 drops them.
+    const tables = statements.filter((s) => s.kind === 'CreateStmt' && withFk(s)).map((s) => s.node.relation.relname as string);
+    expect(tables.sort()).toEqual(['evidence', 'feedback', 'reports', 'submissions']);
+    for (const f of sqlFiles.filter((x) => x.name > '0001_init.sql')) {
+      expect(`${f.name}: ${f.code}`).not.toMatch(/\breferences\b|foreign\s+key|on\s+delete\s+cascade/i);
     }
+  });
+
+  test('0005 loops over every foreign key in schema triage and drops each one with quoted names', () => {
+    // The PL/pgSQL parse result is typed as the SQL one; its shape differs.
+    const parsed = parsePlPgSQLSync(DROP_FK_SQL) as unknown as { plpgsql_funcs?: Json[] };
+    const [block] = (parsed.plpgsql_funcs ?? []).map((f) => f.PLpgSQL_function as Json);
+    expect(block).toBeDefined();
+    const body = block?.action?.PLpgSQL_stmt_block?.body as Json[];
+    const loop = body.find((stmt) => stmt.PLpgSQL_stmt_fors)?.PLpgSQL_stmt_fors as Json;
+    const select = loop.query.PLpgSQL_expr.query as string;
+    expect(select).toContain('FROM pg_constraint c');
+    expect(select).toContain("c.contype = 'f'");
+    expect(select).toContain("c.connamespace = 'triage'::regnamespace");
+    expect(parseSync(select).stmts).toHaveLength(1);
+    const execute = (loop.body as Json[]).map((stmt) => stmt.PLpgSQL_stmt_dynexecute?.query?.PLpgSQL_expr?.query);
+    expect(execute).toEqual(["format('ALTER TABLE triage.%I DROP CONSTRAINT %I', fk.table_name, fk.constraint_name)"]);
+    // It adds nothing: no table, index or constraint.
+    expect(DROP_FK_SQL.replace(/--[^\n]*/g, '')).not.toMatch(/\b(CREATE|ADD)\b/i);
   });
 });
 

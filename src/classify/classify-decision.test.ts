@@ -4,10 +4,11 @@ import * as v from 'valibot';
 import { configFromRecord, type Config } from '../config/env.ts';
 import { DecisionError } from '../decisions/decide.ts';
 import { fakeDecisionProvider } from '../decisions/fake.ts';
-import type { DecisionAnswer, DecisionProvider, DecisionRequest } from '../decisions/types.ts';
+import type { DecisionAnswer, DecisionProvider, DecisionRequest, DecisionResult } from '../decisions/types.ts';
 import { ClassificationSchema } from '../types/classification.ts';
 import type { IdChain } from '../types/id-chain.ts';
 import type { ThreadMessage } from '../types/request.ts';
+import type { ClassifierUsage } from './classify.ts';
 import { classificationFromAnswers, classifierQuestions, NO_SUBCATEGORY } from './decision.ts';
 import { applyTierPolicy } from './policy.ts';
 import { parseCategories, type CategoryEntry } from './prompt.ts';
@@ -284,6 +285,126 @@ describe('decide() failure', () => {
     const pending = classify(INPUT, { config: config(), categories: CATS, decisions: hang, signal: controller.signal });
     controller.abort();
     expectStrong(await pending);
+  });
+});
+
+// ---------------------------------------------------------------- usage (D59)
+
+describe('onUsage on the decision path', () => {
+  function usageSink() {
+    const seen: ClassifierUsage[] = [];
+    return { seen, onUsage: (u: ClassifierUsage) => void seen.push(u) };
+  }
+
+  // Answers with a fixed usage and a dated model name, as TypeSafe does.
+  function withUsage(usage: { inputTokens: number; outputTokens: number; costUsd?: number }, answers = GOOD): DecisionProvider {
+    return {
+      id: 'typesafe',
+      model: 'typesafe/jev-1.13',
+      decide: async () => ({ answers, model: 'jev-1.13-20260901', usage }) as DecisionResult,
+    };
+  }
+
+  test('tokens and the reported cost, under the MODEL_CLASSIFIER spec', async () => {
+    const { seen, onUsage } = usageSink();
+    const decisions = withUsage({ inputTokens: 465, outputTokens: 81, costUsd: 1.953e-5 });
+    const result = await classify(INPUT, { config: config(), categories: CATS, decisions, onUsage });
+    expect(result.classifier_error).toBeUndefined();
+    expect(seen).toEqual([
+      { path: 'decision', model: 'typesafe/jev-1.13', failed: false, input: 465, output: 81, cacheRead: 0, cacheWrite: 0, reportedUsd: 1.953e-5 },
+    ]);
+  });
+
+  test('the openrouter route keeps its own spec', async () => {
+    const { seen, onUsage } = usageSink();
+    const cfg = config({ MODEL_CLASSIFIER: 'openrouter/typesafe/jev-1.13', OPENROUTER_API_KEY: 'fake-or-key' });
+    await classify(INPUT, { config: cfg, categories: CATS, decisions: withUsage({ inputTokens: 1, outputTokens: 1 }), onUsage });
+    expect(seen[0]?.model).toBe('openrouter/typesafe/jev-1.13');
+  });
+
+  test('the fake provider reports 0 tokens and no cost', async () => {
+    const { seen, onUsage } = usageSink();
+    await classify(INPUT, { config: config(), categories: CATS, decisions: fakeDecisionProvider(() => GOOD), onUsage });
+    expect(seen).toEqual([{ path: 'decision', model: 'typesafe/jev-1.13', failed: false, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }]);
+  });
+
+  test('a cost that is not a finite number >= 0 is left out', async () => {
+    for (const costUsd of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const { seen, onUsage } = usageSink();
+      await classify(INPUT, { config: config(), categories: CATS, decisions: withUsage({ inputTokens: 10, outputTokens: 2, costUsd }), onUsage });
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.reportedUsd).toBeUndefined();
+    }
+  });
+
+  test('a provider DecisionError is one failed call with 0 tokens', async () => {
+    const { seen, onUsage } = usageSink();
+    const decisions = fakeDecisionProvider(() => {
+      throw new DecisionError('unavailable', 'typesafe', { status: 503 });
+    });
+    await classify(INPUT, { config: config(), categories: CATS, decisions, onUsage });
+    expect(seen).toEqual([{ path: 'decision', model: 'typesafe/jev-1.13', failed: true, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }]);
+  });
+
+  test('answers that fail the checks are a failed call that keeps the result tokens', async () => {
+    const { seen, onUsage } = usageSink();
+    const bad = { ...GOOD, category: { kind: 'choice', choice: 'not-an-option' } } as Record<string, DecisionAnswer>;
+    const decisions = withUsage({ inputTokens: 300, outputTokens: 40, costUsd: 0.0001 }, bad);
+    const result = await classify(INPUT, { config: config(), categories: CATS, decisions, onUsage });
+    expect(result.classifier_error).toContain('invalid_response');
+    expect(seen).toEqual([
+      { path: 'decision', model: 'typesafe/jev-1.13', failed: true, input: 300, output: 40, cacheRead: 0, cacheWrite: 0, reportedUsd: 0.0001 },
+    ]);
+  });
+
+  test('a timeout is one failed call with 0 tokens, and a late result is not counted', async () => {
+    const { seen, onUsage } = usageSink();
+    let answer: ((r: DecisionResult) => void) | undefined;
+    const slow: DecisionProvider = {
+      id: 'slow',
+      model: 'slow/m',
+      decide: () => new Promise<DecisionResult>((resolve) => (answer = resolve)),
+    };
+    const result = await classify(INPUT, { config: config(), categories: CATS, decisions: slow, timeoutMs: 20, onUsage });
+    expect(result.classifier_error).toContain('timeout');
+    answer?.({ answers: GOOD, model: 'late', usage: { inputTokens: 999, outputTokens: 9 } } as DecisionResult);
+    await Promise.resolve();
+    expect(seen).toEqual([{ path: 'decision', model: 'typesafe/jev-1.13', failed: true, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }]);
+  });
+
+  test('a caller abort after the request is one failed call', async () => {
+    const { seen, onUsage } = usageSink();
+    const controller = new AbortController();
+    const hang: DecisionProvider = { id: 'hang', model: 'hang/m', decide: () => new Promise(() => undefined) };
+    const pending = classify(INPUT, { config: config(), categories: CATS, decisions: hang, signal: controller.signal, onUsage });
+    // Let decide() reach the provider before aborting.
+    await new Promise((r) => setTimeout(r, 5));
+    controller.abort();
+    await pending;
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.failed).toBe(true);
+  });
+
+  test('nothing is recorded when no request was sent', async () => {
+    const { seen, onUsage } = usageSink();
+    // No key: the provider cannot be built.
+    await classify(INPUT, { config: config({ TYPESAFE_API_KEY: '' }), categories: CATS, complete: noComplete, onUsage });
+    // Already aborted: decide() refuses before asking the provider.
+    const controller = new AbortController();
+    controller.abort();
+    const decisions = fakeDecisionProvider(() => GOOD);
+    await classify(INPUT, { config: config(), categories: CATS, decisions, signal: controller.signal, onUsage });
+    expect(decisions.requests).toHaveLength(0);
+    expect(seen).toEqual([]);
+  });
+
+  test('a callback that throws does not change the classification', async () => {
+    const onUsage = () => {
+      throw new Error('meter down');
+    };
+    const result = await classify(INPUT, { config: config(), categories: CATS, decisions: fakeDecisionProvider(() => GOOD), onUsage });
+    expect(result.classifier_error).toBeUndefined();
+    expect(result.category).toBe('delivery');
   });
 });
 

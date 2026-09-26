@@ -26,6 +26,28 @@
 //   8. embedRun after the settle. Its gaps are returned and never change the
 //      run's status.
 //
+// Usage (D59). The usage meter (src/usage/meter.ts) counts the model calls;
+// this module writes them to the store:
+// - intake (seq 0): the classifier call and the prior-cases embedding are
+//   recorded into the run's intake bucket, and a finally around the
+//   pre-dispatch steps writes them as seq 0, final, on success, failure and
+//   stop alike, then forgets them. answerRun, askRun and resumeRun do not
+//   classify, so they have no intake rows.
+// - each submission: once the receipt gives the Flue submissionId, a timer
+//   writes the rows so far, not final, every TRIAGE_USAGE_FLUSH_MS when they
+//   changed (0 turns it off; ticks never overlap; the timer is unref'd). At
+//   the settle the timer is stopped and any write in flight awaited, then the
+//   rows are written final for every status, before embedAfterSettle. The
+//   embedding after the settle is counted on the same submission and the
+//   rows are written final again. A caller abort writes what is there, not
+//   final, and keeps the rows in memory, because the run goes on.
+// - turns that carried no submissionId are logged as usage_unassigned
+//   (counts only) and dropped.
+// - in mock mode the hash embedder's calls are recorded under the model
+//   HASH_USAGE_MODEL, a faux/* spec, so the run's usage shows as fake.
+// A failed usage write logs usage_write_failed or usage_flush_failed with
+// the error's class name and never changes the run's status.
+//
 // Every step records a phase: preflight, identity, classifying, dispatched,
 // investigating, then completed or failed (or needs_input or blocked, when a
 // tool parked the run).
@@ -100,7 +122,12 @@ import {
 import * as v from 'valibot';
 import { triageRuntime, type TriageRuntime } from '../agents/triage-plan.ts';
 import { Triage } from '../agents/triage.agent.ts';
-import { classify as classifyThread, type ClassifyInput, unknownClassification } from '../classify/classify.ts';
+import {
+  type ClassifierUsage,
+  classify as classifyThread,
+  type ClassifyInput,
+  unknownClassification,
+} from '../classify/classify.ts';
 import { loadPatterns, matchPattern, type Pattern } from '../classify/patterns.ts';
 import { applyTierPolicy, toTierDecision, type TierPolicyContext, type TierPolicyResult } from '../classify/policy.ts';
 import type { Config } from '../config/env.ts';
@@ -110,7 +137,7 @@ import { infraRepoNames, loadRepos } from '../config/repos.ts';
 import { createExecRunner, type ExecRunner } from '../connectors/exec.ts';
 import { mockPortFromFixtures } from '../connectors/mock.ts';
 import { ConnectorError } from '../connectors/types.ts';
-import { createEmbedder, type Embedder, type FetchLike } from '../embed/index.ts';
+import { createEmbedder, type EmbedUsage, type Embedder, type FetchLike, HASH_MODEL } from '../embed/index.ts';
 import { createJsonlAuditSink } from '../gate/audit-sink.ts';
 import { redactModelFacing, redactPersisted } from '../gate/redact.ts';
 import { createMockLayer } from '../mock/index.ts';
@@ -143,6 +170,17 @@ import { type Entity, type Interface, type KnownIds, RunIdSchema, type RunId, ty
 import type { IdChain } from '../types/id-chain.ts';
 import { INPUT_ANSWER_CHAIN_ATTR, INPUT_ANSWER_SIGNAL, type InputRequest, QuestionIdSchema } from '../types/input-request.ts';
 import type { Attachment, TriageRequest } from '../types/request.ts';
+import type { UsageRow } from '../types/usage.ts';
+import {
+  dropIntake,
+  dropSubmission,
+  recordUsage,
+  snapshotIntake,
+  snapshotSubmission,
+  takeUnassigned,
+  type UsageBucket,
+  usageVersion,
+} from '../usage/meter.ts';
 import { type IngressIdentity, NO_IDS_GAP, resolveIngressIdentity } from './identity.ts';
 import { IngressInputError } from './normalise.ts';
 import type { PreparedSubmission } from './prepare.ts';
@@ -152,7 +190,8 @@ import { renderAnswer, renderAsk, renderResume, renderThread, type RenderImages,
 
 export type SubmissionConfig = {
   readonly mock: Pick<Config['mock'], 'enabled'>;
-  readonly runs: Pick<Config['runs'], 'priorCases'>;
+  /** usageFlushMs left out: DEFAULT_USAGE_FLUSH_MS. */
+  readonly runs: Pick<Config['runs'], 'priorCases'> & Partial<Pick<Config['runs'], 'usageFlushMs'>>;
   readonly budgets: Pick<Config['budgets'], 'runTimeoutMs' | 'runMaxAttempts'>;
 };
 
@@ -163,6 +202,9 @@ export type AgentHandle = Pick<AgentInstanceHandle, 'dispatch' | 'read' | 'abort
 export type Dispatcher = { init(agent: Agent, options: InitOptions): AgentHandle };
 
 export type EmbedRunFn = typeof defaultEmbedRun;
+
+/** Calls tick every ms until the returned function is called. The live usage flush takes it; tests inject one. */
+export type UsageFlushTimer = (tick: () => void, ms: number) => () => void;
 
 /** What dispatch, read and the settle need. askRun takes only these. */
 export type SettleDeps = {
@@ -191,6 +233,8 @@ export type SettleDeps = {
    * anything is written. Left out: no check. Not called in mock mode.
    */
   readonly resumePreflight?: (input: { readonly signal: AbortSignal }) => Promise<Pick<PreflightResult, 'steps' | 'warnings'>>;
+  /** Drives the live usage flush (D59). Defaults to an unref'd setInterval. */
+  readonly usageFlushTimer?: UsageFlushTimer;
 };
 
 export type SubmissionDeps = SettleDeps & {
@@ -205,7 +249,8 @@ export type SubmissionDeps = SettleDeps & {
     request: Pick<TriageRequest, 'request_id' | 'interface' | 'messages' | 'hints'>,
     opts: { readonly redactionNames: readonly string[]; readonly signal: AbortSignal },
   ) => Promise<IngressIdentity>;
-  readonly classify: (input: ClassifyInput, signal: AbortSignal) => Promise<Classification>;
+  /** onUsage hears the model call, for the run's intake usage (D59). */
+  readonly classify: (input: ClassifyInput, signal: AbortSignal, onUsage?: (u: ClassifierUsage) => void) => Promise<Classification>;
   /** Defaults to applyTierPolicy. */
   readonly policy?: (raw: unknown, ctx: TierPolicyContext) => TierPolicyResult;
   /** Whether the model behind a tier accepts image input (D36). Must not throw. */
@@ -214,8 +259,8 @@ export type SubmissionDeps = SettleDeps & {
   readonly patterns?: () => Promise<readonly Pattern[]>;
   /** The service names of the likely entities, for the pattern match. */
   readonly servicesFor?: (entities: readonly Entity[]) => readonly string[];
-  /** Called only when TRIAGE_PRIOR_CASES=true. */
-  readonly priorCases: (runId: RunId, signal: AbortSignal) => Promise<PriorCasesResult>;
+  /** Called only when TRIAGE_PRIOR_CASES=true. onUsage goes to the embed call, for the intake usage (D59). */
+  readonly priorCases: (runId: RunId, signal: AbortSignal, onUsage?: (u: EmbedUsage) => void) => Promise<PriorCasesResult>;
   /** Reads an attachment's bytes from its bytes_ref. */
   readonly readAttachment: (bytesRef: string, signal: AbortSignal) => Promise<Uint8Array>;
 };
@@ -343,6 +388,12 @@ export const READ_GRACE_MS = 60_000;
 /** How often a working run reads the store for a stop from another process. */
 export const STOP_POLL_MS = 2000;
 
+/** The live usage interval when the config leaves it out; the TRIAGE_USAGE_FLUSH_MS default. */
+export const DEFAULT_USAGE_FLUSH_MS = 10_000;
+
+/** The model recorded for the mock hash embedder's calls: faux/*, so the usage view marks the run fake. */
+export const HASH_USAGE_MODEL = 'faux/hash-embed';
+
 const IMAGE_MIME = /^image\/(png|jpeg|gif|webp)$/;
 const NO_IMAGES_REASON = 'the model for this tier does not accept images';
 
@@ -402,7 +453,7 @@ export async function runSubmission(prepared: PreparedSubmission, deps: Submissi
 
     await advance(store, runId, 'classifying');
     const classifyStarted = Date.now();
-    const classification = await classifyStep(request, identity, loaded.images, names, deps, signal);
+    const classification = await classifyStep(runId, request, identity, loaded.images, names, deps, signal);
     logRunEvent(runId, 'classifier', { durationMs: Date.now() - classifyStarted, classification });
     const patterns = await loadKnownPatterns(deps, warnings);
     const matched = withPatternMatch(classification, request, patterns, deps);
@@ -425,7 +476,7 @@ export async function runSubmission(prepared: PreparedSubmission, deps: Submissi
 
     let priorCases: PriorCase[] | undefined;
     if (deps.config.runs.priorCases) {
-      const pc = await deps.priorCases(runId, signal);
+      const pc = await deps.priorCases(runId, signal, embedUsageRecorder(runId, 'intake', 0, deps.embedder));
       priorCases = pc.cases.map((c) => ({ ...c }));
       warnings.push(...pc.gaps.map((message) => warning('prior_cases', message)));
     }
@@ -452,6 +503,10 @@ export async function runSubmission(prepared: PreparedSubmission, deps: Submissi
     if (watch.signal.aborted || err instanceof RunStoppedError) throw new RunStoppedError(runId);
     await recordFailed(store, runId, err);
     throw err;
+  } finally {
+    // seq 0 is kept on success, failure and stop alike.
+    await writeUsage(store, runId, 0, snapshotIntake(runId), true);
+    dropIntake(runId);
   }
   watch.dispose();
 
@@ -668,104 +723,241 @@ async function dispatchAndSettle(
     throw err;
   }
 
-  const watch = watchStop(store, runId, deps.stopPollMs, () => handle.abort());
-  // Stopped between the dispatch and the phase write.
-  if (!investigating) watch.trip();
-  const timeoutMs = deps.readTimeoutMs ?? defaultReadTimeoutMs(deps.config);
-  const timeout = AbortSignal.timeout(timeoutMs);
-  const readSignal = AbortSignal.any([callerSignal, timeout, watch.signal]);
-
-  let status: SubmissionStatus;
-  let replyText: string | undefined;
-  let error: string | undefined;
-  let inputRequest: InputRequest | undefined;
-  let block: BlockRecord | undefined;
-  let readError: unknown;
+  const submissionId = receipt.submissionId;
+  const flush = startUsageFlush(runId, seq, submissionId, deps);
   try {
-    // Stopped before the read began: the abort is on its way, there is nothing to wait for.
-    if (watch.signal.aborted) throw watch.signal.reason;
-    const reply = await handle.read(receipt, {
-      signal: readSignal,
-      ...(deps.onEvent !== undefined ? { onEvent: deps.onEvent } : {}),
-    });
-    status = 'completed';
-    replyText = reply.text;
-  } catch (err) {
-    // The caller stopped waiting. The run goes on and stays readable.
-    if (callerSignal.aborted) {
-      watch.dispose();
-      throw err;
-    }
-    readError = err;
-    if (watch.signal.aborted) {
-      status = 'stopped';
-    } else {
-      let cause = err;
-      if (timeout.aborted) {
-        cause = new SubmissionReadTimeoutError(timeoutMs);
-        await handle.abort().catch(() => undefined);
+    const watch = watchStop(store, runId, deps.stopPollMs, () => handle.abort());
+    // Stopped between the dispatch and the phase write.
+    if (!investigating) watch.trip();
+    const timeoutMs = deps.readTimeoutMs ?? defaultReadTimeoutMs(deps.config);
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const readSignal = AbortSignal.any([callerSignal, timeout, watch.signal]);
+
+    let status: SubmissionStatus;
+    let replyText: string | undefined;
+    let error: string | undefined;
+    let inputRequest: InputRequest | undefined;
+    let block: BlockRecord | undefined;
+    let readError: unknown;
+    try {
+      // Stopped before the read began: the abort is on its way, there is nothing to wait for.
+      if (watch.signal.aborted) throw watch.signal.reason;
+      const reply = await handle.read(receipt, {
+        signal: readSignal,
+        ...(deps.onEvent !== undefined ? { onEvent: deps.onEvent } : {}),
+      });
+      status = 'completed';
+      replyText = reply.text;
+    } catch (err) {
+      // The caller stopped waiting. The run goes on and stays readable.
+      if (callerSignal.aborted) {
+        watch.dispose();
+        // Best effort: what is counted so far, not final. The rows stay in
+        // memory for report.cost, since the run goes on in this process.
+        await flush.stop();
+        await writeUsage(store, runId, seq, snapshotSubmission(runId, submissionId), false);
+        throw err;
       }
-      status = 'failed';
-      error = failureReason(cause);
+      readError = err;
+      if (watch.signal.aborted) {
+        status = 'stopped';
+      } else {
+        let cause = err;
+        if (timeout.aborted) {
+          cause = new SubmissionReadTimeoutError(timeoutMs);
+          await handle.abort().catch(() => undefined);
+        }
+        status = 'failed';
+        error = failureReason(cause);
+      }
     }
-  }
-  watch.dispose();
+    watch.dispose();
 
-  if (status === 'completed') {
-    // The response may have ended on ask_requester or stop_blocked: then the
-    // run is parked on the question or the block the tool stored, not done.
-    const run = await store.getRun(runId);
-    if (run !== null && run.phase === 'needs_input' && run.input_request !== null) {
-      status = 'needs_input';
-      inputRequest = run.input_request;
-    } else if (run !== null && run.phase === 'blocked' && run.block !== null) {
-      status = 'blocked';
-      block = run.block;
-      logRunEvent(runId, 'blocked', { submission_seq: seq, block_id: block.block_id, systems: block.systems });
+    if (status === 'completed') {
+      // The response may have ended on ask_requester or stop_blocked: then the
+      // run is parked on the question or the block the tool stored, not done.
+      const run = await store.getRun(runId);
+      if (run !== null && run.phase === 'needs_input' && run.input_request !== null) {
+        status = 'needs_input';
+        inputRequest = run.input_request;
+      } else if (run !== null && run.phase === 'blocked' && run.block !== null) {
+        status = 'blocked';
+        block = run.block;
+        logRunEvent(runId, 'blocked', { submission_seq: seq, block_id: block.block_id, systems: block.systems });
+      }
     }
-  }
-  // A refused write means a stop landed first (an abort from another
-  // process settles the read as failed): the stop wins.
-  if (status === 'completed' && (await setPhaseLogged(store, runId, 'completed')) === false) status = 'stopped';
-  if (status === 'failed' && (await setPhaseLogged(store, runId, 'failed', { reason: error ?? 'Error' })) === false) {
-    status = 'stopped';
-    error = undefined;
-  }
+    // A refused write means a stop landed first (an abort from another
+    // process settles the read as failed): the stop wins.
+    if (status === 'completed' && (await setPhaseLogged(store, runId, 'completed')) === false) status = 'stopped';
+    if (status === 'failed' && (await setPhaseLogged(store, runId, 'failed', { reason: error ?? 'Error' })) === false) {
+      status = 'stopped';
+      error = undefined;
+    }
 
-  // A parked run (needs_input, blocked) is embedded when it settles for real,
-  // like any other. A stopped one is not embedded.
-  const gaps = status === 'completed' || status === 'failed' ? await embedAfterSettle(deps, runId) : [];
-  logRunEvent(runId, 'settled', {
-    submission_seq: seq,
-    submission_id: receipt.submissionId,
-    status,
-    ...(error !== undefined ? { error } : {}),
-    ...(readError !== undefined ? { read_error: readError } : {}),
-    ...(replyText !== undefined ? { reply_text: replyText } : {}),
-    gaps,
-  });
-  return Object.freeze({
-    run_id: runId,
-    status,
-    submission_seq: seq,
-    submission_id: receipt.submissionId,
-    ...(replyText !== undefined ? { reply_text: replyText } : {}),
-    ...(error !== undefined ? { error } : {}),
-    ...(inputRequest !== undefined ? { input_request: inputRequest } : {}),
-    ...(block !== undefined ? { block } : {}),
-    gaps: Object.freeze(gaps),
-  });
+    // The counts are in the store as soon as the status is. The flush is
+    // stopped first, so no live write lands after this one.
+    await flush.stop();
+    await writeUsage(store, runId, seq, snapshotSubmission(runId, submissionId), true);
+
+    // A parked run (needs_input, blocked) is embedded when it settles for real,
+    // like any other. A stopped one is not embedded.
+    const embeds = status === 'completed' || status === 'failed';
+    const gaps = embeds ? await embedAfterSettle(deps, runId, seq, submissionId) : [];
+    // Again with the embedding rows; final replaces final.
+    if (embeds) await writeUsage(store, runId, seq, snapshotSubmission(runId, submissionId), true);
+    dropSubmission(runId, submissionId);
+    logUnassignedUsage(runId);
+    logRunEvent(runId, 'settled', {
+      submission_seq: seq,
+      submission_id: receipt.submissionId,
+      status,
+      ...(error !== undefined ? { error } : {}),
+      ...(readError !== undefined ? { read_error: readError } : {}),
+      ...(replyText !== undefined ? { reply_text: replyText } : {}),
+      gaps,
+    });
+    return Object.freeze({
+      run_id: runId,
+      status,
+      submission_seq: seq,
+      submission_id: receipt.submissionId,
+      ...(replyText !== undefined ? { reply_text: replyText } : {}),
+      ...(error !== undefined ? { error } : {}),
+      ...(inputRequest !== undefined ? { input_request: inputRequest } : {}),
+      ...(block !== undefined ? { block } : {}),
+      gaps: Object.freeze(gaps),
+    });
+  } finally {
+    // Every path, a throw included, stops the live flush.
+    await flush.stop();
+  }
 }
 
-async function embedAfterSettle(deps: SettleDeps, runId: RunId): Promise<string[]> {
+async function embedAfterSettle(deps: SettleDeps, runId: RunId, seq: number, submissionId: string): Promise<string[]> {
   const embed = deps.embedRun ?? defaultEmbedRun;
   try {
-    const r = await embed(deps.store, deps.embedder, runId);
+    const r = await embed(deps.store, deps.embedder, runId, {
+      onUsage: embedUsageRecorder(runId, { submissionId }, seq, deps.embedder),
+    });
     return [...r.gaps];
   } catch (err) {
     // embedRun does not throw by contract; this keeps a broken one from failing the run.
     return [`embeddings skipped (${className(err)})`];
   }
+}
+
+// ------------------------------------------------------------------ usage
+
+type UsageFlush = {
+  /** Stops the timer and waits for a write in flight. Safe to call more than once. */
+  stop(): Promise<void>;
+};
+
+const defaultFlushTimer: UsageFlushTimer = (tick, ms) => {
+  const timer = setInterval(tick, ms);
+  // A pending flush never keeps the process alive.
+  timer.unref?.();
+  return () => clearInterval(timer);
+};
+
+/**
+ * Writes the submission's rows so far, not final, on each tick when the
+ * meter's version for it moved. A tick that finds a write still running is
+ * skipped. A failed write is logged and tried again on the next tick.
+ */
+function startUsageFlush(runId: RunId, seq: number, submissionId: string, deps: SettleDeps): UsageFlush {
+  const ms = deps.config.runs.usageFlushMs ?? DEFAULT_USAGE_FLUSH_MS;
+  if (!(ms > 0)) return { stop: async () => undefined };
+  // 0 is what the meter returns before anything is counted.
+  let written = 0;
+  let inFlight: Promise<void> | undefined;
+  let stopped = false;
+  const tick = (): void => {
+    if (stopped || inFlight !== undefined) return;
+    const version = usageVersion(runId, submissionId);
+    if (version === written) return;
+    const rows = snapshotSubmission(runId, submissionId);
+    inFlight = Promise.resolve()
+      .then(() => deps.store.putUsage(runId, seq, rows, false))
+      .then(
+        () => {
+          written = version;
+        },
+        (err: unknown) => logRunEvent(runId, 'usage_flush_failed', { submission_seq: seq, error: className(err) }),
+      )
+      .finally(() => {
+        inFlight = undefined;
+      });
+  };
+  const cancel = (deps.usageFlushTimer ?? defaultFlushTimer)(tick, ms);
+  return {
+    async stop() {
+      if (!stopped) {
+        stopped = true;
+        cancel();
+      }
+      await inFlight;
+    },
+  };
+}
+
+/** putUsage that never throws: a failure is logged with the class name only. No rows, no write. */
+async function writeUsage(store: RunStore, runId: RunId, seq: number, rows: readonly UsageRow[], final: boolean): Promise<void> {
+  if (rows.length === 0) return;
+  try {
+    await store.putUsage(runId, seq, rows, final);
+  } catch (err) {
+    logRunEvent(runId, 'usage_write_failed', { submission_seq: seq, final, error: className(err) });
+  }
+}
+
+/** Records each embed call into the bucket. The mock hash embedder is recorded as HASH_USAGE_MODEL. */
+function embedUsageRecorder(runId: RunId, bucket: UsageBucket, seq: number, embedder: Embedder | null): (u: EmbedUsage) => void {
+  const fake = embedder?.model === HASH_MODEL;
+  return (u) => {
+    recordUsage(runId, bucket, {
+      model: fake ? HASH_USAGE_MODEL : u.model,
+      agent: 'embedder',
+      purpose: 'embed',
+      isError: u.failed,
+      input: u.inputTokens,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
+    if (u.usageMissing === true) logRunEvent(runId, 'usage_missing', { submission_seq: seq, agent: 'embedder', calls: 1 });
+  };
+}
+
+/** Records the classifier call into the intake bucket. A decision model's cost is the one the provider reported (D59). */
+function classifierUsageRecorder(runId: RunId): (u: ClassifierUsage) => void {
+  return (u) =>
+    recordUsage(runId, 'intake', {
+      model: u.model,
+      agent: 'classifier',
+      purpose: 'classify',
+      isError: u.failed,
+      input: u.input,
+      output: u.output,
+      cacheRead: u.cacheRead,
+      cacheWrite: u.cacheWrite,
+      ...(u.cacheWrite1h !== undefined ? { cacheWrite1h: u.cacheWrite1h } : {}),
+      // Preset so the meter does not price a decision spec itself; null is unpriced.
+      ...(u.path === 'decision' ? { usd: u.reportedUsd ?? null } : {}),
+    });
+}
+
+/** Logs, counts only, the run's turns that carried no submissionId, and forgets them. */
+function logUnassignedUsage(runId: RunId): void {
+  const rows = takeUnassigned(runId);
+  if (rows.length === 0) return;
+  let calls = 0;
+  let tokens = 0;
+  for (const r of rows) {
+    calls += r.calls;
+    tokens += r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_write_tokens;
+  }
+  logRunEvent(runId, 'usage_unassigned', { rows: rows.length, calls, tokens });
 }
 
 // ------------------------------------------------------------------ stop
@@ -859,6 +1051,7 @@ async function identityStep(
 }
 
 async function classifyStep(
+  runId: RunId,
   request: TriageRequest,
   identity: IngressIdentity,
   images: readonly DeliveredAttachment[],
@@ -874,7 +1067,7 @@ async function classifyStep(
     redactionNames: names,
   };
   try {
-    return await deps.classify(input, signal);
+    return await deps.classify(input, signal, classifierUsageRecorder(runId));
   } catch (err) {
     if (signal.aborted) throw err;
     return unknownClassification(`classifier failed: ${className(err)}`);
@@ -1021,7 +1214,7 @@ export function submissionDeps(options: SubmissionDepsOptions = {}): SubmissionD
         sqlTimeouts: { statementTimeoutMs: config.sql.statementTimeoutMs, lockTimeoutMs: config.sql.lockTimeoutMs },
         redactionNames,
       }),
-    classify: (input, signal) => classifyThread(input, { config, signal }),
+    classify: (input, signal, onUsage) => classifyThread(input, { config, signal, ...(onUsage !== undefined ? { onUsage } : {}) }),
     tierAcceptsImages: (tier) => {
       try {
         return acceptsImages(modelForTier(tier, config));
@@ -1031,7 +1224,8 @@ export function submissionDeps(options: SubmissionDepsOptions = {}): SubmissionD
     },
     patterns: () => loadPatterns(config.paths.knowledgeDir),
     servicesFor: (entities) => entities.filter((e) => registry.isEnabled(e)).flatMap((e) => [...registry.services(e)]),
-    priorCases: (runId, signal) => priorCasesFor(config, store, embedder, runId, { signal }),
+    priorCases: (runId, signal, onUsage) =>
+      priorCasesFor(config, store, embedder, runId, { signal, ...(onUsage !== undefined ? { onUsage } : {}) }),
     readAttachment: (bytesRef, signal) => readFile(bytesRef, { signal }),
   };
 }

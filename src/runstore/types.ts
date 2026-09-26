@@ -8,6 +8,10 @@
 // check before it writes (assertPersisted below). The raw thread type cannot
 // reach the store: createRun takes Persisted<TriageRequest> only.
 //
+// The one exception is putUsage (D59). The persisted profile would mask the
+// digits in a model id, so usage rows are checked by UsageRowSchema instead,
+// which allows only a model spec, an agent name, a fixed purpose and numbers.
+//
 // The run id is always passed as its own argument and never read from inside
 // a persisted value. The persisted profile masks runs of 6+ digits, which a
 // ULID can contain, so an id inside a redacted value is not reliable.
@@ -32,6 +36,7 @@ import {
 import type { CodeFindings, EntityFindings } from '../types/findings.ts';
 import type { IdChain } from '../types/id-chain.ts';
 import type { Report } from '../types/report.ts';
+import { UsageRowSchema, type SubmissionUsage, type UsageRow } from '../types/usage.ts';
 import {
   InputRequestSchema,
   InputResolutionSchema,
@@ -298,6 +303,8 @@ export type RunRecord = {
   /** The last entry written; latest wins. */
   readonly feedback_latest: Feedback | null;
   readonly embeddings: readonly EmbeddingMeta[];
+  /** Token usage per submission, ordered by seq (0 = intake). Empty for runs from before D59. */
+  readonly usage: readonly SubmissionUsage[];
 };
 
 export const RunSummarySchema = v.object({
@@ -310,6 +317,12 @@ export const RunSummarySchema = v.object({
   report_status: v.optional(ReportStatusSchema),
   submissions: v.pipe(v.number(), v.integer(), v.minValue(0)),
   feedback_verdict: v.optional(FeedbackVerdictSchema),
+  /** Sum of the priced usage rows; absent when the run has none. */
+  usd_total: v.optional(v.pipe(v.number(), v.minValue(0))),
+  /** Input, output, cache-read and cache-write tokens over every usage row; absent when the run has none. */
+  tokens_total: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0))),
+  /** Set when usd_total leaves out at least one row that has no price. */
+  usd_partial: v.optional(v.literal(true)),
 });
 export type RunSummary = v.InferOutput<typeof RunSummarySchema>;
 
@@ -389,6 +402,14 @@ export interface RunStore {
   /** Stores an embedding, replacing the row with the same kind, model and submission. */
   putEmbedding(runId: RunId, row: Persisted<EmbeddingInput>): Promise<void>;
   findSimilar(query: SimilarQuery): Promise<SimilarHit[]>;
+  /**
+   * Replaces the usage rows of one submission (seq 0 = intake) with a
+   * snapshot; it never adds to them, so a retried write cannot double count.
+   * A non-final write is skipped when that seq already holds final rows. Rows
+   * are checked with UsageRowSchema, not the persisted profile (D59). Does not
+   * change the run's updated_at. Throws RunNotFoundError for an unknown run.
+   */
+  putUsage(runId: RunId, seq: number, rows: readonly UsageRow[], final: boolean): Promise<void>;
   /** Removes everything the store holds for the run. Returns false when it did not exist. */
   deleteRun(runId: RunId): Promise<boolean>;
   /** Runs created strictly before the cutoff, oldest first. */
@@ -496,6 +517,42 @@ export function assertPersisted<T>(value: Persisted<T>, what: string): T {
   const check = checkEgress(inner);
   if (!check.ok) throw new RunStoreRedactionError(what, check.unmasked, check.paths);
   return inner;
+}
+
+/** The largest value of a Postgres integer column, the type of every usage count. Both providers refuse more. */
+export const MAX_USAGE_COUNT = 2_147_483_647;
+
+const UsageRowsSchema = v.array(UsageRowSchema);
+
+const byText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+/** Byte order of model, agent and purpose: the order both providers store and return usage rows in. */
+export function byUsageKey(a: UsageRow, b: UsageRow): number {
+  return byText(a.model, b.model) || byText(a.agent, b.agent) || byText(a.purpose, b.purpose);
+}
+
+/**
+ * Checks a putUsage call before anything is written (D59). Rows go through
+ * UsageRowSchema, not the persisted profile, so a model id keeps its digits
+ * and a masked one is refused. Errors name paths, never values. Returns the
+ * rows sorted by model, agent and purpose.
+ */
+export function checkUsage(seq: number, rows: readonly UsageRow[], final: boolean): { seq: number; rows: UsageRow[] } {
+  if (!Number.isSafeInteger(seq) || seq < 0) throw new RunStoreError('invalid usage seq');
+  if (typeof final !== 'boolean') throw new RunStoreError('invalid usage final flag');
+  const result = v.safeParse(UsageRowsSchema, rows);
+  if (!result.success) {
+    const paths = [...new Set(result.issues.map((i) => v.getDotPath(i) ?? '(root)'))];
+    throw new RunStoreError(`invalid usage rows: ${paths.join(', ')}`);
+  }
+  const checked = result.output;
+  checked.forEach((row, i) => {
+    const counts = [row.calls, row.failed_calls, row.input_tokens, row.output_tokens, row.cache_read_tokens, row.cache_write_tokens];
+    if (counts.some((n) => n > MAX_USAGE_COUNT)) throw new RunStoreError(`invalid usage rows: ${i} has a count above ${MAX_USAGE_COUNT}`);
+  });
+  const keys = new Set(checked.map((r) => `${r.model} ${r.agent} ${r.purpose}`));
+  if (keys.size !== checked.length) throw new RunStoreError('usage rows repeat a model, agent and purpose');
+  return { seq, rows: checked.sort(byUsageKey) };
 }
 
 export function assertQuestionId(questionId: string): string {

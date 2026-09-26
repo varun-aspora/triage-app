@@ -15,7 +15,6 @@ import {
   installedTripwire,
   installTripwire,
   runBudgetSource,
-  runUsage,
   SANDBOX_TOOL_NAMES,
   type Tripwire,
   TripwireDeniedError,
@@ -392,36 +391,33 @@ describe('task budget', () => {
 
 // ------------------------------------------------------------------ usage
 
-describe('runUsage', () => {
-  test('sums input and output tokens per model for that run only', () => {
-    const { tripwire } = harness();
-    const a = freshRunId();
-    const b = freshRunId();
-    cleanups.push(() => tripwire.forgetRun(a), () => tripwire.forgetRun(b));
-    const ctx = { id: a } as never;
-    tripwire.observe(turn(a, 'anthropic', 'claude-sonnet-4-5', 100, 20), ctx);
-    tripwire.observe(turn(a, 'anthropic', 'claude-sonnet-4-5', 50, 5), ctx);
-    tripwire.observe(turn(a, 'openai', 'gpt-5-mini', 7, 3), ctx);
-    tripwire.observe(turn(b, 'anthropic', 'claude-sonnet-4-5', 1000, 1000), ctx);
-    // An operation roll-up repeats the turn totals, so it is not counted again.
-    tripwire.observe({ type: 'operation', usage: { input: 999, output: 999 }, instanceId: a } as unknown as FlueObservation, ctx);
-    // A turn without usage is skipped.
-    tripwire.observe({ ...turn(a, 'x', 'y', 0, 0), response: {} } as unknown as FlueObservation, ctx);
-
-    expect(runUsage(a)).toEqual({
-      'anthropic/claude-sonnet-4-5': { input_tokens: 150, output_tokens: 25, calls: 2 },
-      'openai/gpt-5-mini': { input_tokens: 7, output_tokens: 3, calls: 1 },
-    });
-    expect(runUsage(b)).toEqual({ 'anthropic/claude-sonnet-4-5': { input_tokens: 1000, output_tokens: 1000, calls: 1 } });
-    expect(runUsage(freshRunId())).toEqual({});
+describe('usage is not the tripwire\'s job (D59)', () => {
+  test('the module exports no usage reader', async () => {
+    const mod = await import('./tripwire.ts');
+    expect(Object.keys(mod)).not.toContain('runUsage');
   });
 
-  test('forgetRun drops a finished run', () => {
-    const { tripwire } = harness();
-    const a = freshRunId();
-    tripwire.observe(turn(a, 'anthropic', 'claude-haiku-4-5', 1, 1), { id: a } as never);
-    tripwire.forgetRun(a);
-    expect(runUsage(a)).toEqual({});
+  test('turn and operation events change no budget and do not throw', async () => {
+    const { tripwire, audit } = harness();
+    const runId = freshRunId();
+    const ctx = { id: runId } as never;
+    tripwire.observe(turn(runId, 'anthropic', 'claude-sonnet-4-5', 100, 20), ctx);
+    tripwire.observe({ type: 'operation', usage: { input: 9, output: 9 }, instanceId: runId } as unknown as FlueObservation, ctx);
+    tripwire.observe({ ...turn(runId, 'x', 'y', 0, 0), response: {} } as unknown as FlueObservation, ctx);
+    expect(getRunBudget(runId)).toBeUndefined();
+    expect(audit.lines).toEqual([]);
+  });
+
+  test('forgetRun still drops the run\'s pending task decisions', async () => {
+    const { tripwire, h } = harness();
+    const runId = freshRunId();
+    const budget = runBudgetSource(h.config, h.registry)(runId);
+    tripwire.observe(taskStart('pending', runId), { id: runId } as never);
+    const charged = budget.state().tasks;
+    tripwire.forgetRun(runId);
+    // The decision is gone, so the task operation is charged again.
+    await tripwire.interceptor({ type: 'task', taskId: 'pending' }, ctxFor(runId), async () => undefined);
+    expect(budget.state().tasks).toBe(charged + 1);
   });
 });
 

@@ -50,7 +50,12 @@ export type Config = {
     /** Postgres only (D57): attempts per call on a lost connection; the wait doubles from delayMs up to maxDelayMs, with jitter. */
     readonly retry: { readonly attempts: number; readonly delayMs: number; readonly maxDelayMs: number };
   };
-  readonly runs: { readonly retentionDays?: number; readonly priorCases: boolean };
+  readonly runs: {
+    readonly retentionDays?: number;
+    readonly priorCases: boolean;
+    /** D59: ms between live usage writes while a submission runs; 0 is off. */
+    readonly usageFlushMs: number;
+  };
   readonly approval: { readonly mode: ApprovalMode };
   readonly mock: { readonly enabled: boolean; readonly strict: boolean; readonly record: boolean };
   readonly budgets: {
@@ -91,6 +96,8 @@ export type Config = {
     /** Direct TypeSafe decision calls (src/decisions/). */
     readonly typesafeApiKey?: string;
     readonly ollamaBaseUrl?: string;
+    /** Sent by the ollama provider; blank means the placeholder 'ollama'. */
+    readonly ollamaApiKey?: string;
   };
   readonly evals: { readonly judgeModel?: string; readonly maxCostUsd?: number };
   readonly http: { readonly port: number; readonly authToken?: string; readonly allowSlackPost: boolean };
@@ -185,7 +192,11 @@ export function configFromRecord(
         maxDelayMs: r.requiredInt('TRIAGE_DB_RETRY_MAX_DELAY_MS'),
       },
     },
-    runs: { retentionDays: r.int('TRIAGE_RUNS_RETENTION_DAYS'), priorCases: r.bool('TRIAGE_PRIOR_CASES') },
+    runs: {
+      retentionDays: r.int('TRIAGE_RUNS_RETENTION_DAYS'),
+      priorCases: r.bool('TRIAGE_PRIOR_CASES'),
+      usageFlushMs: r.requiredInt('TRIAGE_USAGE_FLUSH_MS'),
+    },
     approval: { mode: r.enumOf<ApprovalMode>('TRIAGE_APPROVAL_MODE') },
     mock: {
       enabled: r.bool('TRIAGE_MOCK_MODE'),
@@ -231,6 +242,7 @@ export function configFromRecord(
       openrouterApiKey: r.str('OPENROUTER_API_KEY'),
       typesafeApiKey: r.str('TYPESAFE_API_KEY'),
       ollamaBaseUrl: r.str('OLLAMA_BASE_URL'),
+      ollamaApiKey: r.str('OLLAMA_API_KEY'),
     },
     evals: { judgeModel: r.str('TRIAGE_EVAL_JUDGE_MODEL'), maxCostUsd: r.num('TRIAGE_EVAL_MAX_COST_USD') },
     http: {
@@ -272,6 +284,10 @@ export function configFromRecord(
   // Raw string, no enum check (D32): preflight warns on an unknown value.
   const deployMode = r.str(DEPLOY_MODE_KEY) ?? '';
 
+  // 0 is off; a short interval would write to the store every turn.
+  if (config.runs.usageFlushMs > 0 && config.runs.usageFlushMs < MIN_USAGE_FLUSH_MS) {
+    r.problem('TRIAGE_USAGE_FLUSH_MS', `must be 0 (off) or at least ${MIN_USAGE_FLUSH_MS}`);
+  }
   if (config.mock.enabled && config.mock.record) {
     r.problem('TRIAGE_RECORD_FIXTURES', 'requires TRIAGE_MOCK_MODE=false');
   }
@@ -391,6 +407,9 @@ const DURATION = /^(\d{1,6})(m|h|d)$/;
 const UNIT_MS: Readonly<Record<string, number>> = { m: 60_000, h: 3_600_000, d: 86_400_000 };
 const MIN_DURATION_MS = 60_000;
 const MAX_DURATION_MS = 365 * 86_400_000;
+
+/** The shortest live usage interval (D59); 0 turns it off instead. */
+export const MIN_USAGE_FLUSH_MS = 2000;
 
 // Reads typed values from the record. Problems are collected so one error lists every bad key.
 class Reader {

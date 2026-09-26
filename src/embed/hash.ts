@@ -1,7 +1,7 @@
 // A deterministic hashing-trick embedder for mock mode: each lowercase word is
 // hashed into one of a fixed number of buckets with a hash-derived sign, and
 // the result is L2-normalised. It makes no call and gives lexical similarity
-// that tests and evals can rely on (P2 3.5).
+// that tests and evals can rely on (P2 3.5). It reports 0 input tokens.
 
 import type { EmbedClient } from './spec.ts';
 
@@ -51,6 +51,6 @@ export function cosine(a: readonly number[], b: readonly number[]): number {
 export function createHashClient(dims = HASH_DIMS): EmbedClient {
   return async (texts, opts = {}) => {
     opts.signal?.throwIfAborted();
-    return texts.map((t) => hashEmbed(t, dims));
+    return { vectors: texts.map((t) => hashEmbed(t, dims)), inputTokens: 0 };
   };
 }

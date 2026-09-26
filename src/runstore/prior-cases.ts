@@ -18,7 +18,7 @@
 import * as v from 'valibot';
 import type { Config } from '../config/env.ts';
 import { requestText } from '../embed/case-text.ts';
-import type { Embedder } from '../embed/index.ts';
+import type { EmbedUsage, Embedder } from '../embed/index.ts';
 import { CategorySchema } from '../types/classification.ts';
 import { ReportStatusSchema, type RunId } from '../types/core.ts';
 import type { RunRecord, RunStore, SimilarHit } from './types.ts';
@@ -63,6 +63,8 @@ export type PriorCasesOptions = {
   readonly signal?: AbortSignal;
   /** Clock for age_days; defaults to Date.now. */
   readonly now?: () => number;
+  /** Passed to embed(): what the one embedding call used (D59). */
+  readonly onUsage?: (u: EmbedUsage) => void;
 };
 
 export type PriorCasesResult = {
@@ -105,7 +107,10 @@ async function retrieve(
   const text = requestText(current);
   if (text.value === '') return [];
 
-  const opts = options.signal !== undefined ? { signal: options.signal } : {};
+  const opts = {
+    ...(options.signal !== undefined ? { signal: options.signal } : {}),
+    ...(options.onUsage !== undefined ? { onUsage: options.onUsage } : {}),
+  };
   const vectors = await embedder.embed([text], opts);
   const vector = vectors[0];
   if (vectors.length !== 1 || vector === undefined) throw new Error('embedder returned the wrong number of vectors');

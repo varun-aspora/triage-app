@@ -9,6 +9,7 @@ import { createFakeModel, text } from '../mock/fake-model.ts';
 import { CATEGORIES, ClassificationSchema } from '../types/classification.ts';
 import type { IdChain } from '../types/id-chain.ts';
 import type { ThreadMessage } from '../types/request.ts';
+import type { ClassifierUsage } from './classify.ts';
 import {
   buildClassifierPrompt,
   CLASSIFIER_PROMPT_MARKER,
@@ -278,6 +279,119 @@ describe('failure paths return unknown and never throw', () => {
     const c = unknownClassification('x');
     expect(v.is(ClassificationSchema, c)).toBe(true);
     expect(c).toMatchObject({ category: 'unknown', tier_proposed: 'strong', confidence: 0, classifier_error: 'x' });
+  });
+});
+
+// ---------------------------------------------------------------- usage (D59)
+
+describe('onUsage', () => {
+  // Records every message the provider returns, so the test can compare usage.
+  function recordingComplete() {
+    const messages: AssistantMessage[] = [];
+    const inner = completeWith(fake.provider);
+    const complete: typeof inner = async (spec, context, options) => {
+      const message = await inner(spec, context, options);
+      messages.push(message);
+      return message;
+    };
+    return { messages, complete };
+  }
+
+  function usageSink() {
+    const seen: ClassifierUsage[] = [];
+    return { seen, onUsage: (u: ClassifierUsage) => void seen.push(u) };
+  }
+
+  test('called once with the faux message usage and the MODEL_CLASSIFIER spec', async () => {
+    fake.script([text(JSON.stringify(VALID))]);
+    const { messages, complete } = recordingComplete();
+    const { seen, onUsage } = usageSink();
+    const result = await classify(INPUT, { config: config(), complete, categories: CATS, onUsage });
+    expect(result.category).toBe('delivery');
+    const usage = (messages[0] as AssistantMessage).usage;
+    expect(usage.input).toBeGreaterThan(0);
+    expect(seen).toEqual([
+      {
+        path: 'completion',
+        model: 'faux/classifier',
+        failed: false,
+        input: usage.input,
+        output: usage.output,
+        cacheRead: usage.cacheRead,
+        cacheWrite: usage.cacheWrite,
+      },
+    ]);
+  });
+
+  test('stopReason error is a failed call and its tokens still count', async () => {
+    const failing: FauxResponseFactory = () => {
+      throw new Error('upstream 503');
+    };
+    fake.script([failing]);
+    const { messages, complete } = recordingComplete();
+    const { seen, onUsage } = usageSink();
+    const result = await classify(INPUT, { config: config(), complete, categories: CATS, onUsage });
+    expectUnknown(result, /^provider error/);
+    expect(messages[0]?.stopReason).toBe('error');
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ path: 'completion', model: 'faux/classifier', failed: true, input: messages[0]?.usage.input });
+  });
+
+  test('unparseable output is a call that did not fail', async () => {
+    fake.script([text('not json')]);
+    const { seen, onUsage } = usageSink();
+    await classify(INPUT, { config: config(), complete: completeWith(fake.provider), categories: CATS, onUsage });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.failed).toBe(false);
+  });
+
+  test('cacheWrite1h is passed through and bad counts become 0', async () => {
+    const message: AssistantMessage = {
+      ...text(JSON.stringify(VALID)),
+      usage: {
+        input: 120,
+        output: 30,
+        cacheRead: 400,
+        cacheWrite: 50,
+        cacheWrite1h: 20,
+        totalTokens: 620,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    };
+    const { seen, onUsage } = usageSink();
+    await classify(INPUT, { config: config(), complete: async () => message, categories: CATS, onUsage });
+    expect(seen).toEqual([
+      { path: 'completion', model: 'faux/classifier', failed: false, input: 120, output: 30, cacheRead: 400, cacheWrite: 50, cacheWrite1h: 20 },
+    ]);
+
+    const odd: AssistantMessage = { ...message, usage: { ...message.usage, input: Number.NaN, output: -3, cacheWrite1h: 2.6 } };
+    const second = usageSink();
+    await classify(INPUT, { config: config(), complete: async () => odd, categories: CATS, onUsage: second.onUsage });
+    expect(second.seen[0]).toMatchObject({ input: 0, output: 0, cacheWrite1h: 3 });
+  });
+
+  test('not called on a timeout, a caller abort or a thrown provider error', async () => {
+    const { seen, onUsage } = usageSink();
+    const hang = () => new Promise<AssistantMessage>(() => {});
+    await classify(INPUT, { config: config(), complete: hang, categories: CATS, timeoutMs: 20, onUsage });
+    const controller = new AbortController();
+    const pending = classify(INPUT, { config: config(), complete: hang, categories: CATS, signal: controller.signal, onUsage });
+    controller.abort();
+    await pending;
+    const throwing = async (): Promise<AssistantMessage> => {
+      throw new Error('connection refused');
+    };
+    await classify(INPUT, { config: config(), complete: throwing, categories: CATS, onUsage });
+    expect(seen).toEqual([]);
+  });
+
+  test('a callback that throws does not change the classification', async () => {
+    fake.script([text(JSON.stringify(VALID))]);
+    const onUsage = () => {
+      throw new Error('meter down');
+    };
+    const result = await classify(INPUT, { config: config(), complete: completeWith(fake.provider), categories: CATS, onUsage });
+    expect(result).toEqual({ ...VALID, images_seen: false } as typeof result);
   });
 });
 

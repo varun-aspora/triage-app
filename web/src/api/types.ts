@@ -7,10 +7,12 @@ import type { Category, PreflightWarning, TierDecision } from '../../../src/type
 import type { Entity, Interface, KnownIdKey, ReportStatus, Tier } from '../../../src/types/core.ts';
 import type { IdChain } from '../../../src/types/id-chain.ts';
 import type { Report } from '../../../src/types/report.ts';
+import type { RunUsageView, UsageTotals } from '../../../src/types/usage.ts';
 import type { DoctorStatus, EvidenceKey, FeedbackVerdict, FindingVerdict, GuideStatus, RunPhase, RunStatus } from '../lib/constants.ts';
 
 export type { BlockRecord, Category, ConnectorFailure, DoctorStatus, Entity, EvidenceKey, FeedbackVerdict, FindingVerdict, GuideStatus, IdChain };
-export type { Interface, KnownIdKey, PreflightWarning, Report, ReportStatus, ResolvedBlock, RunPhase, RunStatus, Tier, TierDecision };
+export type { Interface, KnownIdKey, PreflightWarning, Report, ReportStatus, ResolvedBlock, RunPhase, RunStatus, RunUsageView, Tier, TierDecision };
+export type { UsageTotals };
 
 // ------------------------------------------------------------------ ui
 
@@ -57,6 +59,12 @@ export type RunSummary = {
   report_status?: ReportStatus;
   submissions: number;
   feedback_verdict?: FeedbackVerdict;
+  /** Sum of the priced usage rows (D59); absent when none is priced. */
+  usd_total?: number;
+  /** Input, output and cache tokens over every usage row; absent when the run has none. */
+  tokens_total?: number;
+  /** Set when usd_total leaves out at least one unpriced row. */
+  usd_partial?: true;
 };
 
 export type ListRunsQuery = {
@@ -115,7 +123,7 @@ export type FindingRef = {
 
 export type EvidenceProgress = { key: EvidenceKey; version: number };
 
-/** GET /triage/:run_id. Everything but run_id has been through the persisted-profile redaction. */
+/** GET /triage/:run_id. Everything but run_id and usage has been through the persisted-profile redaction. */
 export type RunDetail = {
   run_id: string;
   status: RunStatus;
@@ -142,6 +150,8 @@ export type RunDetail = {
   submissions: SubmissionView[];
   feedback: FeedbackEntry[];
   report_md?: string;
+  /** Tokens and cost of every model call in the run (D59). Absent from a server older than D59. */
+  usage?: RunUsageView;
 };
 
 export type ThreadMessageInput = { ts: string; author: string; text: string; is_parent?: boolean };

@@ -8,7 +8,7 @@ import { makeTestHome, type TestHome } from '../../../test/support/home.ts';
 import { redactPersisted } from '../../gate/redact.ts';
 import { RUN_A, RUN_B, RUN_C, SYNTHETIC_PHONE, sampleClassification, sampleReport, sampleRequest } from '../../runstore/contract.ts';
 import { embedRun } from '../../runstore/embed-run.ts';
-import { createEmbedder, HASH_MODEL } from '../../embed/index.ts';
+import { createEmbedder, HASH_MODEL, type Embedder, type EmbedUsage } from '../../embed/index.ts';
 import { createRunStore } from '../../runstore/index.ts';
 import type { RunStore } from '../../runstore/types.ts';
 import { commands as generatedCommands } from '../command-modules.gen.ts';
@@ -96,9 +96,9 @@ describe('runs reembed', () => {
     const lines = r.out.trim().split('\n');
     expect(lines).toHaveLength(1);
     const body = JSON.parse(lines[0] as string);
-    expect(Object.keys(body).sort()).toEqual(['embedded', 'failed', 'runs', 'skipped', 'unchanged']);
+    expect(Object.keys(body).sort()).toEqual(['embedded', 'failed', 'runs', 'skipped', 'tokens', 'unchanged']);
     expect(Object.values(body).every((n) => typeof n === 'number')).toBe(true);
-    expect(body).toEqual({ runs: 2, embedded: 2, unchanged: 0, skipped: 0, failed: 0 });
+    expect(body).toEqual({ runs: 2, embedded: 2, unchanged: 0, skipped: 0, failed: 0, tokens: 0 });
     for (const leak of [RUN_A, RUN_B, 'transfer', HASH_MODEL, EMBEDDING, h.home]) expect(r.out).not.toContain(leak);
     expect(spy.count).toBe(0);
   });
@@ -112,7 +112,7 @@ describe('runs reembed', () => {
     const spy = fetchSpy();
     const r = await reembedCli(h, ['--missing', '--json'], cmdWith(spy));
     expect(r.code).toBe(EXIT.OK);
-    expect(JSON.parse(r.out)).toEqual({ runs: 3, embedded: 2, unchanged: 0, skipped: 1, failed: 0 });
+    expect(JSON.parse(r.out)).toEqual({ runs: 3, embedded: 2, unchanged: 0, skipped: 1, failed: 0, tokens: 0 });
     for (const id of [RUN_A, RUN_B, RUN_C]) {
       const rows = (await store.getRun(id))?.embeddings ?? [];
       expect(rows.map((e) => e.kind).sort()).toEqual(['case', 'request']);
@@ -126,7 +126,7 @@ describe('runs reembed', () => {
     await seed(h, [RUN_A]);
     const r = await reembedCli(h, [], cmdWith(fetchSpy()));
     expect(r.code).toBe(EXIT.OK);
-    expect(r.out).toBe('runs 1, embedded 1, unchanged 0, skipped 0, failed 0\n');
+    expect(r.out).toBe('runs 1, embedded 1, unchanged 0, skipped 0, failed 0, tokens 0\n');
   });
 
   test('the default command makes no fetch call in mock mode', async () => {
@@ -151,7 +151,7 @@ describe('runs reembed', () => {
     const spy = fetchSpy();
     const json = await reembedCli(h, ['--json'], cmdWith(spy));
     expect(json.code).toBe(EXIT.OK);
-    expect(JSON.parse(json.out)).toEqual({ disabled: true, runs: 0, embedded: 0, unchanged: 0, skipped: 0, failed: 0 });
+    expect(JSON.parse(json.out)).toEqual({ disabled: true, runs: 0, embedded: 0, unchanged: 0, skipped: 0, failed: 0, tokens: 0 });
     const human = await reembedCli(h, [], cmdWith(spy));
     expect(human.out).toContain('embeddings disabled');
     expect((await store.getRun(RUN_A))?.embeddings).toEqual([]);
@@ -176,7 +176,7 @@ describe('runs reembed', () => {
 
     const json = await reembedCli(h, ['--json'], cmdWith(fetchSpy(), { store: async () => failing }));
     expect(json.code).toBe(EXIT.ERROR);
-    expect(JSON.parse(json.out)).toEqual({ runs: 1, embedded: 0, unchanged: 0, skipped: 0, failed: 1 });
+    expect(JSON.parse(json.out)).toEqual({ runs: 1, embedded: 0, unchanged: 0, skipped: 0, failed: 1, tokens: 0 });
   });
 
   test('a store that cannot list runs is a JSON error with the error class only', async () => {
@@ -204,4 +204,48 @@ describe('runs reembed', () => {
     expect(r.out).not.toContain('some-embedder');
     expect(spy.count).toBe(0);
   });
+
+  test('the summary adds up the input tokens the embedder reports, in both forms', async () => {
+    const h = home();
+    await seed(h, [RUN_A, RUN_B]);
+    const r = await reembedCli(h, ['--json'], cmdWith(fetchSpy(), { embedder: () => countingEmbedder([{ inputTokens: 13 }, { inputTokens: 29 }]) }));
+    expect(r.code).toBe(EXIT.OK);
+    expect(JSON.parse(r.out)).toEqual({ runs: 2, embedded: 2, unchanged: 0, skipped: 0, failed: 0, tokens: 42 });
+
+    const human = await reembedCli(h, [], cmdWith(fetchSpy(), { embedder: () => countingEmbedder([{ inputTokens: 7 }]) }));
+    expect(human.out).toBe('runs 2, embedded 2, unchanged 0, skipped 0, failed 0, tokens 14\n');
+  });
+
+  test('calls without a count add 0 and are counted as usage_missing; a failed call adds its 0', async () => {
+    const h = home();
+    await seed(h, [RUN_A, RUN_B, RUN_C]);
+    const script = [{ inputTokens: 5 }, { inputTokens: 0, usageMissing: true as const }, { inputTokens: 0, failed: true }];
+    const r = await reembedCli(h, ['--json'], cmdWith(fetchSpy(), { embedder: () => countingEmbedder(script) }));
+    expect(r.code).toBe(EXIT.ERROR);
+    expect(JSON.parse(r.out)).toEqual({ runs: 3, embedded: 2, unchanged: 0, skipped: 0, failed: 1, tokens: 5, usage_missing: 1 });
+
+    const human = await reembedCli(h, [], cmdWith(fetchSpy(), { embedder: () => countingEmbedder(script) }));
+    expect(human.out.split('\n')[0]).toBe('runs 3, embedded 2, unchanged 0, skipped 0, failed 1, tokens 5 (1 call reported no count)');
+  });
 });
+
+type ScriptedUsage = { inputTokens: number; usageMissing?: true; failed?: boolean };
+
+/**
+ * An embedder that reports the scripted usage for each call in turn (the last
+ * entry repeats) and returns one 4-dimension vector per text. A failed entry
+ * reports, then throws, as src/embed/index.ts does.
+ */
+function countingEmbedder(script: readonly ScriptedUsage[]): Embedder {
+  let i = 0;
+  return {
+    model: HASH_MODEL,
+    async embed(texts, opts = {}) {
+      const u = script[Math.min(i++, script.length - 1)] as ScriptedUsage;
+      const usage: EmbedUsage = { model: EMBEDDING, inputTokens: u.inputTokens, failed: u.failed === true, ...(u.usageMissing ? { usageMissing: true } : {}) };
+      opts.onUsage?.(usage);
+      if (u.failed === true) throw new Error('scripted embedding failure');
+      return texts.map((_, k) => [1, k, 0, 0]);
+    },
+  };
+}

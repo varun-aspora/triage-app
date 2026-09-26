@@ -79,6 +79,9 @@ export const KEYS: readonly KeySpec[] = [
   // Run store (D43). Blank retention means keep.
   { name: 'TRIAGE_RUNS_RETENTION_DAYS', type: 'int', group: 'runstore', example: '365', min: 1 },
   { name: 'TRIAGE_PRIOR_CASES', type: 'bool', group: 'runstore', default: 'false' },
+  // D59: how often a running submission writes its usage counts so far. 0 turns live counts off;
+  // otherwise at least 2000 (env.ts checks that, since min here must allow 0).
+  { name: 'TRIAGE_USAGE_FLUSH_MS', type: 'int', group: 'runstore', default: '10000', min: 0, max: 3_600_000 },
 
   // Approval (D39). slack is parsed so the policy check can refuse it by name.
   { name: 'TRIAGE_APPROVAL_MODE', type: 'enum', group: 'approval', default: 'cli', values: ['cli', 'slack'] },
@@ -131,6 +134,8 @@ export const KEYS: readonly KeySpec[] = [
   // Not read yet: pi-ai's openai provider uses its own base URL.
   { name: 'OPENAI_BASE_URL', type: 'string', group: 'providers', example: 'https://api.openai.com/v1' },
   { name: 'OLLAMA_BASE_URL', type: 'string', group: 'providers' },
+  // Sent by the ollama provider (src/models.ts); blank sends the placeholder 'ollama', which a plain Ollama ignores.
+  { name: 'OLLAMA_API_KEY', type: 'string', group: 'providers', secret: true },
 
   // Evals (D42)
   { name: 'TRIAGE_EVAL_JUDGE_MODEL', type: 'string', group: 'evals', example: 'openai/gpt-6-sol' },

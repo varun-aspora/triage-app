@@ -1,59 +1,18 @@
 // Suite spend meter (D42, P1 §3.7). Prices come from the model's pi-ai cost
-// metadata through calculateCost, never from a provider's own usage.cost, so
-// a faux or local model costs 0 and a known model costs what pi-ai says.
+// metadata through calculateCost (usageCostUsd in src/usage/price.ts), never
+// from a provider's own usage.cost, so a faux or local model costs 0 and a
+// known model costs what pi-ai says.
 // The one exception is a decision model (src/decisions/): pi-ai has no entry
 // for it, so addUsd meters the cost its provider reports.
 //
 // Bad input fails loudly: a NaN or negative token count, a model with no cost
 // metadata or a cap that is not a number would otherwise make overCap quietly
 // return false and let a suite spend without limit.
-import { calculateCost, type Api, type Model, type Usage } from '@earendil-works/pi-ai';
+import { CostError, usageCostUsd, type CostModel, type UsageTokens } from '../usage/price.ts';
 
-/** The parts of a pi-ai model the meter reads. */
-export type CostModel = Pick<Model<Api>, 'provider' | 'id' | 'cost'>;
-
-/** Token counts as pi-ai reports them. A usage.cost present on the input is ignored. */
-export type UsageTokens = Pick<Usage, 'input' | 'output' | 'cacheRead' | 'cacheWrite'> &
-  Partial<Pick<Usage, 'cacheWrite1h'>>;
-
-export class CostError extends Error {
-  override readonly name = 'CostError';
-}
-
-const TOKEN_FIELDS = ['input', 'output', 'cacheRead', 'cacheWrite'] as const;
-
-function count(value: unknown, field: string): number {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-    throw new CostError(`usage.${field} must be a finite number >= 0`);
-  }
-  return value;
-}
-
-/** The USD cost of one usage record on one model, from its cost metadata. */
-export function usageCostUsd(model: CostModel, usage: UsageTokens): number {
-  const rates = model?.cost;
-  if (!rates || TOKEN_FIELDS.some((f) => typeof rates[f] !== 'number' || !Number.isFinite(rates[f]))) {
-    throw new CostError(`model ${model?.provider}/${model?.id} has no cost metadata`);
-  }
-  const [input, output, cacheRead, cacheWrite] = TOKEN_FIELDS.map((f) => count(usage?.[f], f)) as [
-    number,
-    number,
-    number,
-    number,
-  ];
-  const fresh: Usage = {
-    input,
-    output,
-    cacheRead,
-    cacheWrite,
-    totalTokens: input + output + cacheRead + cacheWrite,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-  };
-  if (usage.cacheWrite1h !== undefined) fresh.cacheWrite1h = count(usage.cacheWrite1h, 'cacheWrite1h');
-  // calculateCost writes into usage.cost, so it gets a fresh record. It reads
-  // only model.cost.
-  return calculateCost(model as Model<Api>, fresh).total;
-}
+// The pricer moved to src/usage/price.ts (D59) so the run meter shares it.
+// These re-exports keep the eval providers and their tests unchanged.
+export { CostError, usageCostUsd, type CostModel, type UsageTokens };
 
 /**
  * Parses a cap. Blank (undefined, null, empty or whitespace) means no cap and
