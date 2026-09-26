@@ -5,3 +5,4 @@ env = false
 [test]
 # Regenerates the *.gen.ts import lists and installs the no-io guard.
 preload = ["./test/support/bun-preload.ts"]
+onlyFailures = true
