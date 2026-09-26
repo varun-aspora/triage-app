@@ -130,7 +130,7 @@ export function createPgRunner(dsn: string, deps: PgRunnerDeps = {}): PgRunner {
   assertPostgresDsn(dsn);
   const factory = deps.poolFactory ?? defaultPoolFactory;
   const retry = deps.retry ?? NO_RETRY;
-  const wait = deps.sleep ?? ((ms: number) => realSleep(ms));
+  const wait = deps.sleep ?? realSleep;
   const random = deps.random ?? Math.random;
   const pool = factory({ connectionString: dsn.trim(), ...POOL_DEFAULTS });
   // pg emits 'error' when an idle client drops. Without a listener that
@@ -251,7 +251,7 @@ function forget(key: string, runner: PgRunner): void {
  * after the output is printed. A later getSharedPgRunner builds a new runner.
  */
 export async function closeSharedPgRunners(): Promise<void> {
-  await Promise.allSettled([...shared.values()].map(async (runner) => runner.close()));
+  await Promise.allSettled([...shared.values()].map((runner) => runner.close()));
 }
 
 export function getSharedPgRunner(config: Pick<Config, 'db'>, deps: PgRunnerDeps = {}): PgRunner {

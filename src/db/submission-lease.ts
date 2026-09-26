@@ -68,7 +68,7 @@ export async function readSubmissionLease(store: LeaseSource, flueSubmissionId: 
 
 /** The fields stalled detection reads. Null for a missing row or one with a status this code does not know. */
 export function leaseOf(submission: AgentSubmission | null): SubmissionLease | null {
-  if (submission === null || submission === undefined) return null;
+  if (submission == null) return null;
   const status = submission.status as string;
   if (!(SUBMISSION_LEASE_STATUSES as readonly string[]).includes(status)) return null;
   const expires = submission.leaseExpiresAt;
