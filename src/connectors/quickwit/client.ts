@@ -20,6 +20,7 @@
 // qw_audit and ours correlate by meta.started_at.
 import type { Config } from '../../config/env.ts';
 import { RegistryError, type Registry } from '../../config/registry.ts';
+import { sleep } from '../../db/pg-retry.ts';
 import { buildLogsQuery, quickwitGateConfig, type LogsQueryInput, type QuickwitGateConfig } from '../../gate/quickwit.ts';
 import { resolveWindow, toSince } from '../../gate/quickwit-window.ts';
 import { quickwitSlot } from '../../gate/semaphore.ts';
@@ -213,24 +214,6 @@ function shapeData(
   if (result.kind === 'groups') return { groups: result.groups, ...common, truncated: result.truncated };
   const hits = result.hits.map((h) => projectHit(h, fields));
   return { hits, ...common, truncated: result.num_hits > hits.length };
-}
-
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
-  if (ms <= 0) {
-    signal.throwIfAborted();
-    return Promise.resolve();
-  }
-  return new Promise((resolve, reject) => {
-    const onAbort = (): void => {
-      clearTimeout(timer);
-      reject(signal.reason);
-    };
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
 }
 
 export function createQuickwitConnector(deps: QuickwitConnectorDeps): QuickwitConnector {
