@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { RunDetail, RunUsageView, TierDecision, UsageTotals } from '../../api/types.ts';
+import type { RunDetail, RunRequest, RunUsageView, TierDecision, UsageTotals } from '../../api/types.ts';
 import {
   blockedSteps,
   buildStartBody,
@@ -11,15 +11,20 @@ import {
   formatTokenSplit,
   formatUsd,
   inferFailure,
+  isLongText,
   joinEntityLabels,
   listCost,
   MAX_CONTEXT,
   type NewRunForm,
   newIdempotencyKey,
+  PASTED_AUTHOR,
   permalinkHref,
   reportVersionLabel,
+  requestSourceLine,
   runningSteps,
+  runTitle,
   sinceFor,
+  splitLead,
   submissionCost,
   usageLines,
   usageNotes,
@@ -356,5 +361,51 @@ describe('usage (D59)', () => {
     expect(listCost({ phase: 'investigating', usd_total: 0.1, tokens_total: 10 })).toEqual({ text: '$0.10', live: true });
     expect(listCost({ phase: 'needs_input' }).live).toBe(true);
     expect(listCost({ phase: 'blocked', usd_total: 0.1 }).live).toBe(false);
+  });
+});
+
+describe('request (D66)', () => {
+  const msg = (text: string, is_parent = false, author = 'ops') => ({ author, text, is_parent });
+  const req = (over: Partial<RunRequest> = {}): RunRequest => ({ source: 'slack', messages: [], attachments: 0, ...over });
+
+  test('splitLead puts the parent first, else the first message; the rest keep their order', () => {
+    const a = msg('a');
+    const b = msg('b', true);
+    const c = msg('c');
+    expect(splitLead([a, b, c])).toEqual({ lead: b, rest: [a, c] });
+    expect(splitLead([a, c])).toEqual({ lead: a, rest: [c] });
+    expect(splitLead([])).toEqual({ lead: undefined, rest: [] });
+  });
+
+  test('runTitle: the current ask, else the first line of the lead message, clamped; else Run', () => {
+    expect(runTitle({ current_ask: 'where is the refund', request: req({ messages: [msg('other', true)] }) })).toBe('where is the refund');
+    expect(runTitle({ current_ask: '  ', request: req({ messages: [msg('\n  refund   missing  \nmore detail', true)] }) })).toBe('refund missing');
+    const long = 'x'.repeat(300);
+    const title = runTitle({ current_ask: null, request: req({ messages: [msg(long)] }) });
+    expect(title.length).toBe(120);
+    expect(title.endsWith('…')).toBe(true);
+    expect(runTitle({ current_ask: null, request: req() })).toBe('Run');
+    expect(runTitle({ current_ask: null, request: req({ messages: [msg('   ')] }) })).toBe('Run');
+    expect(runTitle({ current_ask: null })).toBe('Run');
+  });
+
+  test('requestSourceLine: an open link, a masked link, then a label by source', () => {
+    const link = 'https://acme.slack.com/archives/C1/p1727275322000100';
+    expect(requestSourceLine({ permalink: link, request: req() })).toEqual({ text: 'Open in Slack', href: link });
+    const masked = requestSourceLine({ permalink: 'https://acme.slack.com/archives/C1/p****0100', request: req() });
+    expect(masked.text).toBe('Slack thread (link masked)');
+    expect(masked.href).toBeUndefined();
+    expect(requestSourceLine({ request: req({ source: 'thread_file' }) }).text).toBe('From a thread file');
+    expect(requestSourceLine({ request: req({ source: 'text' }) }).text).toBe('Sent as text');
+    expect(requestSourceLine({ request: req({ source: 'json', messages: [msg('hi', true, PASTED_AUTHOR)] }) }).text).toBe('Pasted in the web form');
+    expect(requestSourceLine({ request: req({ source: 'json', messages: [msg('hi', true, 'support')] }) }).text).toBe('Sent as JSON');
+    expect(requestSourceLine({}).text).toBe('Not recorded');
+  });
+
+  test('isLongText counts wrapped lines, not only line breaks', () => {
+    expect(isLongText('short')).toBe(false);
+    expect(isLongText('a\n'.repeat(8).trimEnd())).toBe(false);
+    expect(isLongText('a\n'.repeat(9).trimEnd())).toBe(true);
+    expect(isLongText('word '.repeat(80))).toBe(true);
   });
 });

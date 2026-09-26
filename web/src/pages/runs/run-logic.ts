@@ -6,6 +6,7 @@ import type {
   EvidenceKey,
   KnownIdKey,
   ReportStatus,
+  RequestMessage,
   RunDetail,
   RunPhase,
   RunSummary,
@@ -58,6 +59,9 @@ export function reportStatusLook(status: ReportStatus): StatusLook {
 
 export type IdRow = { key: KnownIdKey; value: string };
 
+/** The author the web form gives pasted text; the run page reads it back to say where a request came from. */
+export const PASTED_AUTHOR = 'pasted';
+
 /** The server's limit on context (MAX_CONTEXT_CHARS). */
 export const MAX_CONTEXT = 20_000;
 
@@ -109,7 +113,7 @@ export function buildStartBody(form: NewRunForm, now: number): BuildResult {
     if (text === '') errors.thread = 'Paste the thread messages.';
     // Pasted text arrives as one message: the thread author and timestamps
     // are not known, and the agent only needs the words.
-    else thread = { messages: [{ ts: (now / 1000).toFixed(6), author: 'pasted', text, is_parent: true }] };
+    else thread = { messages: [{ ts: (now / 1000).toFixed(6), author: PASTED_AUTHOR, text, is_parent: true }] };
   }
 
   const context = form.context.trim();
@@ -322,6 +326,67 @@ export function investigatorLook(state: InvestigatorRow['state']): StatusLook {
 export function permalinkHref(permalink: string | undefined): string | undefined {
   if (permalink === undefined || permalink.includes('*')) return undefined;
   return /^https:\/\//.test(permalink) ? permalink : undefined;
+}
+
+// ------------------------------------------------------------------ request (D66)
+
+/** The message shown first (the parent, or else the first one) and the others in thread order. */
+export function splitLead(messages: readonly RequestMessage[]): { lead: RequestMessage | undefined; rest: RequestMessage[] } {
+  const at = messages.findIndex((m) => m.is_parent);
+  const i = at >= 0 ? at : 0;
+  return { lead: messages[i], rest: messages.filter((_, j) => j !== i) };
+}
+
+export const TITLE_MAX = 120;
+
+/** The page title: the report's current ask, else the first line of the first message, else 'Run'. */
+export function runTitle(run: Pick<RunDetail, 'current_ask' | 'request'>): string {
+  if (run.current_ask !== null && run.current_ask.trim() !== '') return run.current_ask;
+  const text = splitLead(run.request?.messages ?? []).lead?.text ?? '';
+  const line = text
+    .split('\n')
+    .map((l) => l.replace(/\s+/g, ' ').trim())
+    .find((l) => l !== '');
+  if (line === undefined) return 'Run';
+  return line.length > TITLE_MAX ? `${line.slice(0, TITLE_MAX - 1).trimEnd()}…` : line;
+}
+
+export type SourceLine = { text: string; href?: string; title?: string };
+
+/** Where the request came from: a Slack link when it can be opened, else a label by source. */
+export function requestSourceLine(run: Pick<RunDetail, 'permalink' | 'request'>): SourceLine {
+  const href = permalinkHref(run.permalink);
+  if (href !== undefined) return { text: 'Open in Slack', href };
+  if (run.permalink !== undefined) {
+    return { text: 'Slack thread (link masked)', title: 'The stored link has masked digits, so it cannot be opened from here' };
+  }
+  switch (run.request?.source) {
+    case 'slack':
+      return { text: 'Slack thread' };
+    case 'thread_file':
+      return { text: 'From a thread file' };
+    case 'text':
+      return { text: 'Sent as text' };
+    case 'json':
+      // The web form sends pasted text as one JSON message under PASTED_AUTHOR.
+      return { text: run.request.messages.some((m) => m.author === PASTED_AUTHOR) ? 'Pasted in the web form' : 'Sent as JSON' };
+    case undefined:
+      return { text: 'Not recorded' };
+  }
+}
+
+/** Lines the side column shows before a message is clamped, and about how many characters fit on one. */
+export const CLAMP_LINES = 8;
+const CHARS_PER_LINE = 36;
+
+/** True when the text likely runs past CLAMP_LINES in the 300px column, so it needs a Show more. */
+export function isLongText(text: string): boolean {
+  let lines = 0;
+  for (const l of text.split('\n')) {
+    lines += Math.max(1, Math.ceil(l.length / CHARS_PER_LINE));
+    if (lines > CLAMP_LINES) return true;
+  }
+  return false;
 }
 
 /** 'Report v2 of 3': submissions with a report, out of all submissions. Undefined when none has a report. */

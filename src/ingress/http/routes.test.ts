@@ -573,6 +573,94 @@ describe('GET /triage/:run_id detail fields', () => {
   });
 });
 
+describe('GET /triage/:run_id request (D66)', () => {
+  const AT = '2026-09-24T00:00:00.000Z';
+
+  function withRequest(request: unknown): RunRecord {
+    return { ...record(RUN_A, 'investigating'), request: request as RunRecord['request'] };
+  }
+
+  async function requestOf(run: RunRecord): Promise<{ text: string; json: Record<string, unknown> }> {
+    const res = await harness({ runs: { [RUN_A]: run } }).app.request(`/triage/${RUN_A}`);
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    return { text, json: JSON.parse(text) as Record<string, unknown> };
+  }
+
+  test('a slack request: the thread, the hints given, the attachment count, and the permalink as before', async () => {
+    const run = withRequest({
+      interface: 'slack',
+      requested_by: 'U0TESTUSER',
+      source: { kind: 'slack', channel_id: 'C0TEST', thread_ts: '1695460000.123456', permalink: PERMALINK },
+      messages: [
+        // The stored copy is the persisted profile, so a Slack ts is usually masked already.
+        { ts: '****0000.****3456', author: 'ops-bot', text: `transfer stuck for ${SYNTHETIC_PHONE}`, is_parent: true },
+        { ts: AT, author: 'ops-lead', text: 'any update?', is_parent: false },
+      ],
+      attachments: [{ name: 'shot.png', mime: 'image/png', bytes_ref: 'a1' }],
+      hints: { ids: { user_id: 'u-test-1' }, entities: ['ssfb'], tier: 'mid' },
+      window: { from: AT, to: AT },
+      received_at: AT,
+    });
+    const { text, json } = await requestOf(run);
+    expect(text).not.toContain(SYNTHETIC_PHONE);
+    expect(typeof json.permalink).toBe('string');
+    expect(json.request).toEqual({
+      source: 'slack',
+      messages: [
+        { author: 'ops-bot', text: 'transfer stuck for ****3210', is_parent: true },
+        { author: 'ops-lead', text: 'any update?', is_parent: false, at: AT },
+      ],
+      hints: { ids: { user_id: 'u-test-1' }, entities: ['ssfb'], tier: 'mid' },
+      attachments: 1,
+    });
+  });
+
+  test('a pasted (json) request has no hints key when none were given', async () => {
+    const run = withRequest({
+      interface: 'http',
+      requested_by: 'ops@example.com',
+      source: { kind: 'json' },
+      messages: [{ ts: '****0000.****0000', author: 'pasted', text: 'line one\nline two', is_parent: true }],
+      attachments: [],
+      hints: {},
+    });
+    const { json } = await requestOf(run);
+    expect(json.request).toEqual({
+      source: 'json',
+      messages: [{ author: 'pasted', text: 'line one\nline two', is_parent: true }],
+      attachments: 0,
+    });
+    expect('permalink' in json).toBe(false);
+  });
+
+  test('the added context message is split out of the thread', async () => {
+    const run = withRequest({
+      source: { kind: 'text' },
+      messages: [
+        { ts: AT, author: 'support', text: 'refund missing', is_parent: true },
+        { ts: AT, author: 'added context', text: `already checked KYC for ${SYNTHETIC_PHONE}`, is_parent: false },
+      ],
+      hints: { time_window: { from: AT, to: AT } },
+    });
+    const { text, json } = await requestOf(run);
+    expect(text).not.toContain(SYNTHETIC_PHONE);
+    const req = json.request as { messages: { author: string }[]; context?: string; hints?: unknown; attachments: number };
+    expect(req.messages.map((m) => m.author)).toEqual(['support']);
+    expect(req.context).toBe('already checked KYC for ****3210');
+    expect(req.hints).toEqual({ time_window: { from: AT, to: AT } });
+    expect(req.attachments).toBe(0);
+  });
+
+  test('a record without these fields renders: no request key, or an empty thread', () => {
+    expect('request' in runView(record(RUN_A, 'created'))).toBe(false);
+    const { request: _dropped, ...older } = record(RUN_A, 'failed');
+    expect('request' in runView(older as unknown as RunRecord)).toBe(false);
+    const sourceOnly = runView(withRequest({ source: { kind: 'thread_file' } }));
+    expect(sourceOnly.request).toEqual({ source: 'thread_file', messages: [], attachments: 0 });
+  });
+});
+
 describe('GET /triage/:run_id usage (D59)', () => {
   const AT = '2026-09-24T00:05:00.000Z';
   const LATER = '2026-09-24T00:06:00.000Z';

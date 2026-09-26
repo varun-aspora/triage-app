@@ -123,6 +123,25 @@ export type FindingRef = {
 
 export type EvidenceProgress = { key: EvidenceKey; version: number };
 
+/** One thread message of the stored request. at only when the stored ts still parses (Slack ts digits are usually masked). */
+export type RequestMessage = { author: string; text: string; is_parent: boolean; at?: string };
+
+/** The stored request on GET /triage/:run_id (D66): the thread, the added context and the hints given with it. */
+export type RunRequest = {
+  source: 'slack' | 'thread_file' | 'text' | 'json';
+  /** The thread only; the context message is split out into context. */
+  messages: RequestMessage[];
+  context?: string;
+  /** Only the keys the request carried; absent when none. IDs are the masked values. */
+  hints?: {
+    ids?: Partial<Record<KnownIdKey, string>>;
+    entities?: Entity[];
+    tier?: Tier;
+    time_window?: { from: string; to: string };
+  };
+  attachments: number;
+};
+
 /** GET /triage/:run_id. Everything but run_id and usage has been through the persisted-profile redaction. */
 export type RunDetail = {
   run_id: string;
@@ -139,6 +158,8 @@ export type RunDetail = {
   /** Slack runs only. The redacted copy: render it as a link only when it has no '*'. */
   permalink?: string;
   current_ask: string | null;
+  /** What was asked (D66). Absent from an older server, or for a record with no stored source. */
+  request?: RunRequest;
   /** The open block while the run waits on a system that did not answer (status blocked); null otherwise. */
   block: BlockRecord | null;
   /** Closed blocks, oldest first, each with how it was resolved. */

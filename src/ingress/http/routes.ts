@@ -54,9 +54,9 @@ import { redactPersisted } from '../../gate/redact.ts';
 import { FeedbackError, recordFeedback as defaultRecordFeedback, type FeedbackDeps, type FeedbackInput, type FeedbackResult } from '../../report/feedback.ts';
 import { EVIDENCE_KEYS, RunNotFoundError, type RunRecord, type RunStore } from '../../runstore/types.ts';
 import { RunIdSchema, type KnownIds, type RunId } from '../../types/core.ts';
-import type { TriageRequest } from '../../types/request.ts';
+import type { RequestHints, RequestSource, ThreadMessage, TriageRequest } from '../../types/request.ts';
 import { summariseUsage } from '../../usage/summary.ts';
-import { IngressInputError, NoEnabledEntityError, type InputHints } from '../normalise.ts';
+import { CONTEXT_AUTHOR, IngressInputError, NoEnabledEntityError, type InputHints } from '../normalise.ts';
 import { MAX_THREAD_FILE_BYTES, type PrepareInput, type PreparedSubmission } from '../prepare.ts';
 import { SlackFetchError } from '../slack.ts';
 import { SlackPermalinkError } from '../slack-url.ts';
@@ -388,6 +388,7 @@ export function runView(run: RunRecord, isAlive?: (pid: number) => boolean): Rec
   const decision = run.classification?.decision;
   const warnings = run.classification?.preflight_warnings;
   const status = statusOfPhase(run.phase);
+  const asked = request !== undefined ? requestView(request) : undefined;
   const view = {
     status,
     phase: run.phase,
@@ -405,6 +406,8 @@ export function runView(run: RunRecord, isAlive?: (pid: number) => boolean): Rec
     // This is the persisted copy, so its p<digits> part is usually masked.
     ...(source?.kind === 'slack' ? { permalink: source.permalink } : {}),
     current_ask: run.report?.request?.current_ask ?? null,
+    // The stored thread, context and hints (D66). Already the persisted copy, and redacted again below.
+    ...(asked !== undefined ? { request: asked } : {}),
     ...(warnings !== undefined ? { preflight_warnings: warnings } : {}),
     evidence: EVIDENCE_KEYS.flatMap((key) => {
       const item = run.evidence?.[key];
@@ -440,6 +443,69 @@ export function runView(run: RunRecord, isAlive?: (pid: number) => boolean): Rec
   const running = status === 'running' && (run.worker_pid === undefined || isAlive === undefined || isAlive(run.worker_pid));
   const usage = summariseUsage(run.usage ?? [], { running });
   return { run_id: run.run_id, ...redactPersisted(view).value, usage };
+}
+
+/** One thread message in the run view. at is present only when the stored ts still parses (the persisted profile masks Slack ts digits). */
+type RequestMessageView = { author: string; text: string; is_parent: boolean; at?: string };
+
+/** GET /triage/:run_id `request` (D66). */
+type RequestView = {
+  source: RequestSource['kind'];
+  /** The thread only; the appended context message is split out into context. */
+  messages: RequestMessageView[];
+  context?: string;
+  /** Only the keys the request carried; absent when none. */
+  hints?: Partial<RequestHints>;
+  attachments: number;
+};
+
+/**
+ * The stored request for the run page. Undefined for a record with no
+ * source, which older records and test fixtures can be. Optional access
+ * throughout, like runView.
+ */
+function requestView(request: Partial<TriageRequest>): RequestView | undefined {
+  const kind = request.source?.kind;
+  if (kind === undefined) return undefined;
+  const all = Array.isArray(request.messages) ? request.messages : [];
+  const isContext = (m: ThreadMessage): boolean => m.author === CONTEXT_AUTHOR && m.is_parent !== true;
+  const context = all
+    .filter(isContext)
+    .map((m) => m.text)
+    .filter((t) => typeof t === 'string' && t.trim() !== '')
+    .join('\n\n');
+  const messages = all
+    .filter((m) => !isContext(m))
+    .map((m) => {
+      const at = typeof m.ts === 'string' ? messageTime(m.ts) : undefined;
+      return { author: m.author ?? '', text: m.text ?? '', is_parent: m.is_parent === true, ...(at !== undefined ? { at } : {}) };
+    });
+  const h = request.hints;
+  const hints: Partial<RequestHints> = {};
+  if (h?.ids !== undefined && Object.keys(h.ids).length > 0) hints.ids = h.ids;
+  if (h?.entities !== undefined && h.entities.length > 0) hints.entities = h.entities;
+  if (h?.tier !== undefined) hints.tier = h.tier;
+  if (h?.time_window !== undefined) hints.time_window = h.time_window;
+  return {
+    source: kind,
+    messages,
+    ...(context !== '' ? { context } : {}),
+    ...(Object.keys(hints).length > 0 ? { hints } : {}),
+    attachments: Array.isArray(request.attachments) ? request.attachments.length : 0,
+  };
+}
+
+const SLACK_TS_RE = /^(\d{1,14})(?:\.(\d{1,6}))?$/;
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T/;
+
+/** An ISO time from a Slack ts or an ISO timestamp; undefined when masked or unparseable. */
+function messageTime(ts: string): string | undefined {
+  const m = SLACK_TS_RE.exec(ts);
+  let ms = Number.NaN;
+  if (m !== null) ms = Number(m[1]) * 1000 + Math.floor(Number((m[2] ?? '').padEnd(6, '0')) / 1000);
+  else if (ISO_RE.test(ts)) ms = Date.parse(ts);
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
 }
 
 // ------------------------------------------------------------------ helpers
