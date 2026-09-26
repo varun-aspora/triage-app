@@ -3,7 +3,9 @@
 //
 // No network, SQL or subprocess call happens here. The one outward call is
 // the embedding probe, and it goes through an embedder the caller injects;
-// in mock mode it is skipped. Rows name env keys and never print a value.
+// in mock mode it is skipped. Rows name env keys and never print a value,
+// with one exception: the tracing row prints the Braintrust project name,
+// which names a project and is not a credential (D82).
 // TRIAGE_DEPLOY_MODE is not read here: it belongs to pre-flight alone (D32).
 
 import { existsSync, readdirSync, statSync } from 'node:fs';
@@ -293,6 +295,21 @@ async function embeddingCheck(ctx: DoctorContext): Promise<DoctorCheck[]> {
   }
 }
 
+// ------------------------------------------------------------------ tracing
+
+// Braintrust tracing (D82), from config only: no call to Braintrust. Enabled
+// without a key never gets here, since loadConfig refuses it. The key and the
+// app URL are named, never printed.
+async function tracingCheck(ctx: DoctorContext): Promise<DoctorCheck[]> {
+  const t = ctx.config.tracing;
+  const key = 'TRIAGE_BRAINTRUST_ENABLED';
+  if (!t.enabled) return withId('tracing', [row('disabled', [key], `tracing off: ${key} is false`)]);
+  const keys = [key, 'BRAINTRUST_API_KEY', 'BRAINTRUST_PROJECT_NAME', 'TRIAGE_BRAINTRUST_CONTENT'];
+  if (t.appUrl !== undefined) keys.push('BRAINTRUST_APP_URL');
+  const plane = t.appUrl !== undefined ? ', data plane from BRAINTRUST_APP_URL' : '';
+  return withId('tracing', [row('ok', keys, `tracing on: project ${t.projectName}, content ${t.content}${plane}`)]);
+}
+
 // ------------------------------------------------------------------ fixtures
 
 const UNREVIEWED = '_unreviewed';
@@ -353,6 +370,7 @@ export const configChecks: readonly NamedCheck[] = Object.freeze([
   { id: 'sandbox', run: sandboxCheck },
   { id: 'models', run: modelsCheck },
   { id: 'embedding', run: embeddingCheck },
+  { id: 'tracing', run: tracingCheck },
   { id: 'fixtures', run: fixturesCheck },
   { id: 'rules', run: rulesCheck },
 ]);

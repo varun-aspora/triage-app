@@ -30,6 +30,13 @@
 //   8. embedRun after the settle. Its gaps are returned and never change the
 //      run's status.
 //
+// Tracing (D82), when it is on: the classifier gets the run id, and the
+// prior-cases lookup and the embedding after the settle ask for a trace
+// span, so their model calls show in Braintrust tagged with the run. Once
+// the dispatch receipt is back, the submission's root span id is written to
+// the store as soon as the root is captured (trace_span_write_failed when
+// that write fails). With tracing off none of this does anything.
+//
 // Usage (D59). The usage meter (src/usage/meter.ts) counts the model calls;
 // this module writes them to the store:
 // - intake (seq 0): the id decision call (agent identity), the classifier
@@ -205,6 +212,7 @@ import {
   type RunStore,
   type SubmissionInput,
 } from '../runstore/types.ts';
+import { onTraceRoot } from '../tracing/braintrust.ts';
 import { BLOCK_RESUME_SIGNAL, type BlockRecord, MAX_RESUME_NOTE_CHARS } from '../types/block.ts';
 import {
   type Classification,
@@ -296,6 +304,8 @@ export type SettleDeps = {
   readonly lease?: SubmissionLeaseReader;
   /** How long a resume of a stalled run waits for the aborted submission to settle. Default STALLED_ABORT_WAIT_MS. */
   readonly stalledAbortWaitMs?: number;
+  /** Hands over a Flue submission's trace root once captured (D82). Defaults to onTraceRoot from src/tracing/braintrust.ts. */
+  readonly traceRoot?: (flueSubmissionId: string, cb: (root: { readonly spanId: string }) => void) => void;
   /**
    * The CLI worker's pid. Written with the dispatched phase of a submission
    * that is not a steer (D72), so the worker that resumes a stalled run
@@ -1012,6 +1022,7 @@ async function dispatchAndSettle(
     await Promise.resolve()
       .then(() => store.setSubmissionFlueId(runId, seq, receipt.submissionId))
       .catch((err: unknown) => logRunEvent(runId, 'flue_id_write_failed', { submission_seq: seq, error: className(err) }));
+    recordTraceRoot(deps.traceRoot ?? onTraceRoot, store, runId, seq, receipt.submissionId);
     investigating = steer || (await markInvestigating(store, runId));
   } catch (err) {
     if (err instanceof RunStoppedError) throw err;
@@ -1230,6 +1241,28 @@ async function steerJoined(runId: RunId, submissionId: string, deps: SettleDeps)
   return usageVersion(runId, submissionId) === 0;
 }
 
+/**
+ * Writes the submission's Braintrust root span id (D82) once the root is
+ * captured: at once when it already was, else when it is. A no-op with
+ * tracing off. The write is best effort: a failure is a pipeline line.
+ * The runtime's recorder (traceRootRecorder) writes the same value when it
+ * finds the submission in the store; this one needs no store lookup, so a
+ * slow setSubmissionFlueId cannot leave the column empty.
+ */
+function recordTraceRoot(
+  traceRoot: NonNullable<SettleDeps['traceRoot']>,
+  store: RunStore,
+  runId: RunId,
+  seq: number,
+  flueSubmissionId: string,
+): void {
+  traceRoot(flueSubmissionId, (root) => {
+    void Promise.resolve()
+      .then(() => store.setSubmissionTraceSpanId(runId, seq, root.spanId))
+      .catch((err: unknown) => logRunEvent(runId, 'trace_span_write_failed', { submission_seq: seq, error: className(err) }));
+  });
+}
+
 /** What embedAfterSettle reads from the deps. */
 export type EmbedAfterSettleDeps = Pick<SettleDeps, 'store' | 'embedder' | 'embedRun'>;
 
@@ -1239,6 +1272,8 @@ export async function embedAfterSettle(deps: EmbedAfterSettleDeps, runId: RunId,
   try {
     const r = await embed(deps.store, deps.embedder, runId, {
       onUsage: embedUsageRecorder(runId, { submissionId }, seq, deps.embedder),
+      // Records the embedding call as a trace span for the run (D82); runs reembed never sets it.
+      traced: true,
     });
     return [...r.gaps];
   } catch (err) {
@@ -1507,6 +1542,8 @@ async function classifyStep(
     basicState: identity.basic_state,
     images: images.map((i) => ({ mimeType: i.mimeType, data: i.data })),
     redactionNames: names,
+    // Tags the classifier's trace span (D82).
+    runId,
   };
   try {
     return await deps.classify(input, signal, classifierUsageRecorder(runId));
@@ -1713,7 +1750,7 @@ export function submissionDeps(options: SubmissionDepsOptions = {}): SubmissionD
     patterns: () => loadPatterns(config.paths.knowledgeDir),
     servicesFor: (entities) => entities.filter((e) => registry.isEnabled(e)).flatMap((e) => [...registry.services(e)]),
     priorCases: (runId, signal, onUsage) =>
-      priorCasesFor(config, store, embedder, runId, { signal, ...(onUsage !== undefined ? { onUsage } : {}) }),
+      priorCasesFor(config, store, embedder, runId, { signal, traced: true, ...(onUsage !== undefined ? { onUsage } : {}) }),
     readAttachment: (bytesRef, signal) => readFile(bytesRef, { signal }),
   };
 }

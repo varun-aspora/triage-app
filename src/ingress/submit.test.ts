@@ -2079,6 +2079,71 @@ describe('the worker pid and the Flue id (D71)', () => {
   });
 });
 
+// ------------------------------------------------------------------ tracing (D82)
+
+describe('tracing wiring (D82)', () => {
+  const SPAN = 'ec025e77d7ac0536';
+
+  test('the classifier gets the run id, and the embedding after the settle asks for a trace span', async () => {
+    let classified: unknown;
+    const h = harness({
+      classify: async (input) => {
+        classified = input.runId;
+        return goodClassification();
+      },
+    });
+    await runSubmission(prepared(), h.deps);
+    expect(classified).toBe(RUN_ID);
+    expect(h.spies.embedRun).toHaveLength(1);
+    expect(h.spies.embedRun[0]?.[3]).toMatchObject({ traced: true });
+  });
+
+  test("the root span id is written to the submission once it is captured, and a failed write is logged", async () => {
+    const h = harness();
+    const asked: string[] = [];
+    await runSubmission(prepared(), {
+      ...h.deps,
+      traceRoot: (flueSubmissionId, cb) => {
+        asked.push(flueSubmissionId);
+        cb({ spanId: SPAN });
+      },
+    });
+    expect(asked).toEqual(['sub-1']);
+    await waitFor(async () => (await h.store.getRun(RUN_ID))?.submissions[0]?.trace_span_id === SPAN);
+
+    const runsDir = mkdtempSync(join(tmpdir(), 'triage-submit-trace-'));
+    dirs.push(runsDir);
+    installRunEventLog({ runsDir, observe: () => () => undefined });
+    try {
+      const failing = harness();
+      const store = new Proxy(failing.store, {
+        get(target, prop) {
+          if (prop === 'setSubmissionTraceSpanId') return async () => Promise.reject(new TypeError('column missing'));
+          const value = Reflect.get(target, prop, target) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const result = await runSubmission(prepared(), { ...failing.deps, store, traceRoot: (_id, cb) => cb({ spanId: SPAN }) });
+      expect(result.status).toBe('completed');
+      await flushRunEventLog();
+      const { events } = await readRunEvents(runsDir, RUN_ID);
+      const failed = events.filter((e) => e.source === 'pipeline' && e.type === 'trace_span_write_failed').map((e) => e.data);
+      expect(failed).toEqual([{ submission_seq: 1, error: 'TypeError' }]);
+    } finally {
+      await flushRunEventLog();
+      uninstallRunEventLog();
+    }
+  });
+});
+
+async function waitFor(check: () => Promise<boolean>): Promise<void> {
+  for (let i = 0; i < 50; i++) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('condition not met');
+}
+
 // ------------------------------------------------------------------ usage (D59)
 
 describe('usage', () => {

@@ -181,7 +181,7 @@ export async function resolveIngressIdentity(
 type Read = { readonly ids: Partial<KnownIds>; readonly extraction: IdExtraction; readonly gaps: readonly string[] };
 
 /** The ids from the thread, before hints: the decision when it can run, else the labels. */
-async function readIds(request: Pick<TriageRequest, 'messages' | 'hints'>, deps: IngressIdentityDeps): Promise<Read> {
+async function readIds(request: Pick<TriageRequest, 'request_id' | 'messages' | 'hints'>, deps: IngressIdentityDeps): Promise<Read> {
   const fields = deps.knownIdFields;
   const texts = orderedTexts(request.messages);
   const hinted = hintedIds(request.hints);
@@ -221,6 +221,8 @@ async function readIds(request: Pick<TriageRequest, 'messages' | 'hints'>, deps:
     const result = await decide(watched(deps.decision.provider(spec), call), built.request, {
       signal: deps.signal,
       ...(deps.decision.timeoutMs === undefined ? {} : { timeoutMs: deps.decision.timeoutMs }),
+      // The trace span (D82): the run, and the ingress names it masks in 'redacted' content mode.
+      trace: { runId: request.request_id, purpose: 'identity', names: deps.redactionNames ?? [] },
     });
     reportUsage(deps.decision, usageOf(spec, false, result.usage));
     const mapped = idsFromAnswers(built, result.answers);
