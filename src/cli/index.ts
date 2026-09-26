@@ -205,11 +205,7 @@ function checkPaths(
       }
     }
   }
-  return commands
-    .map((command, index) => ({ command, index }))
-    .sort((a, b) => {
-      const x = a.command.path.join(' ');
-      const y = b.command.path.join(' ');
-      return x < y ? -1 : x > y ? 1 : 0;
-    });
+  return [...seen]
+    .sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0))
+    .map(([, index]) => ({ command: commands[index] as CliCommand, index }));
 }
