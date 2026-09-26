@@ -29,6 +29,7 @@ import {
   timerOffReason,
 } from '../ops/repos-autosync.ts';
 import { type RepoSyncResult, repoStatus, type syncRepos, UnknownRepoError } from '../ops/repos.ts';
+import { internalError } from './internal-error.ts';
 
 export const MAX_SYNC_JOBS = 20;
 
@@ -68,10 +69,7 @@ export function createReposRoutes(deps: ReposRouteDeps): Hono {
   const newId = deps.newId ?? newRunId;
   const iso = (): string => new Date(now()).toISOString();
 
-  app.onError((err, c) => {
-    console.error(`triage http: ${c.req.method} ${c.req.routePath} failed (${err instanceof Error ? err.name : 'error'})`);
-    return c.json({ error: 'internal error' }, 500);
-  });
+  app.onError(internalError);
 
   app.post('/repos/sync', async (c) => {
     const body = await readBody(c);

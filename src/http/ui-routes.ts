@@ -19,6 +19,7 @@ import { type Context, Hono } from 'hono';
 import type { Config } from '../config/env.ts';
 import { loadRegistry } from '../config/registry.ts';
 import type { Entity } from '../types/core.ts';
+import { internalError } from './internal-error.ts';
 import { UI_PREFIX } from './ui-public.ts';
 
 export type UiRouteDeps = {
@@ -73,10 +74,7 @@ export function createUiRoutes(deps: UiRouteDeps): Hono {
   // Only a found dir is kept, so building the console needs no server restart.
   const distDir = async (): Promise<string | undefined> => (dist ??= await findDistDir(deps.distDir));
 
-  app.onError((err, c) => {
-    console.error(`triage http: ${c.req.method} ${c.req.routePath} failed (${err instanceof Error ? err.name : 'error'})`);
-    return c.json({ error: 'internal error' }, 500);
-  });
+  app.onError(internalError);
 
   app.get(`${UI_PREFIX}/config.json`, (c) => {
     c.header('Cache-Control', 'no-store');
