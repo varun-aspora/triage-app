@@ -381,6 +381,12 @@ Append-only. When a decision is reversed, add a new entry that supersedes it; do
 - **Rejected**: running the persisted profile before the scrub (the scrub turns its `****` into `<redacted>`, which the store's scan refuses as an unmasked credential); a separate stored field for the error text (the phase reason is already read by `wait`, `run`, the resume message and the HTTP API).
 - **Assumptions**: ingress redaction names (Slack profile names) are not passed, since `dispatchAndSettle` does not have them. A model or provider error is not expected to quote a requester's name; the persisted patterns still mask emails, phone numbers and long digit runs. The full error, stack included, still goes to the event log as before.
 
+### D68. The CLI ends the shared pg pools when its command is done (2026-09-26)
+- **Chosen**: `main()` in `src/cli/main.ts` calls `closeSharedPgRunners()` (`src/db/pg.ts`) in a `finally` after `runCli`, whatever the exit code. It ends every shared pool and drops it from the map, so a later `getSharedPgRunner` in the same process builds a new one. The server entry is not touched.
+- **Why**: with `TRIAGE_DB_PROVIDER=postgres` every command that opens the run store (`status`, `wait`, `ask`, `input`, `resume`, `stop`, `logs`, `runs *` and the rest) printed its output and then stayed alive until the pool's idle connections timed out (`idleTimeoutMillis`, 30 s). `triage status` now exits in well under a second.
+- **Rejected**: `allowExitOnIdle: true` on the pool (it would change the long-running server and worker too, and a pool with an idle client still open is less clear than an explicit end); `process.exit()` in `bin/triage.mjs` (can cut off stdout that has not been flushed when output is piped); closing the store in each command (fifteen places to keep in step).
+- **Assumptions**: no CLI command leaves work running on the pool after it returns; the worker awaits embedding and the usage flush before it settles.
+
 ## Assumptions (explicit; each needs your confirmation or correction)
 
 | # | Assumption | Basis | If wrong |
