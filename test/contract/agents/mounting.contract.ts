@@ -39,8 +39,11 @@ let b: Booted;
 
 const TRIAGE_TOOLS = ['ask_requester', 'finish_report', 'note_evidence', 'resolve_identity', 'stop_blocked'];
 // The sets T06.6 asserts, with the SSFB flags off (the test home leaves them blank).
-const BASE_TOOLS = ['http_call', 'logs_search', 'note_evidence', 'sql_select'];
-const CODE_TOOLS = ['code_explore', 'code_impact', 'code_node', 'repo_grep', 'repo_read'];
+// Every investigator reads its own entity's repos; the deep one adds CodeGraph.
+const REPO_TOOLS = ['repo_grep', 'repo_read'];
+const CODEGRAPH_TOOLS = ['code_explore', 'code_impact', 'code_node'];
+const BASE_TOOLS = ['http_call', 'logs_search', 'note_evidence', 'sql_select', ...REPO_TOOLS];
+const CODE_TOOLS = [...CODEGRAPH_TOOLS, ...REPO_TOOLS];
 const SSFB_ALWAYS = ['detect_silent_reversals', 'get_account_statement'];
 const SSFB_ONLY = [...SSFB_ALWAYS, 'cbs_call', 'decrypt_fields', 'encrypt_lookup_value'];
 const ENTITY_IO = ['sql_select', 'http_call', 'logs_search'];
@@ -64,7 +67,7 @@ const frameworkTools = (call: SeenCall): string[] => call.tools.filter((t) => FR
 
 function expectedDelegateTools(entity: Entity, deep: boolean): string[] {
   const base = entity === 'ssfb' ? [...BASE_TOOLS, ...SSFB_ALWAYS] : BASE_TOOLS;
-  return sorted(deep ? [...base, ...CODE_TOOLS] : base);
+  return sorted(deep ? [...base, ...CODEGRAPH_TOOLS] : base);
 }
 
 function delegateEnv(h: ContractHome): DelegateEnv {

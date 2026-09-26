@@ -434,6 +434,8 @@ export const CODE_TOOLS = [
   'repo_read',
   'repo_grep',
 ] as const;
+/** The code tools both investigator variants have, scoped to their entity's repos. */
+export const REPO_TOOLS = ['repo_read', 'repo_grep'] as const;
 /** Flue sandbox tools, on every agent through the one inherited sandbox (D45). */
 export const SANDBOX_TOOLS = ['read', 'write', 'edit', 'bash', 'grep', 'glob'] as const;
 /** Flue framework tools. */
@@ -456,7 +458,8 @@ const SKILL_TOOLS = ['activate_skill', 'read_skill_resource'] as const;
 
 /**
  * The tools an agent may have. entity matters for the investigators only:
- * SSFB adds SSFB_EXTRA_TOOLS. The deep investigator adds the code tools.
+ * SSFB adds SSFB_EXTRA_TOOLS. Both investigators have REPO_TOOLS; the deep
+ * one adds the rest of the code tools.
  */
 export function allowedTools(agent: AgentKind, entity?: Entity): ReadonlySet<string> {
   const base: string[] = [...SANDBOX_TOOLS, ...SKILL_TOOLS];
@@ -465,7 +468,7 @@ export function allowedTools(agent: AgentKind, entity?: Entity): ReadonlySet<str
       return new Set([...base, ...TRIAGE_TOOLS, 'task']);
     case 'investigator':
     case 'investigator_deep': {
-      const tools = [...base, ...INVESTIGATOR_TOOLS, 'finish'];
+      const tools: string[] = [...base, ...INVESTIGATOR_TOOLS, ...REPO_TOOLS, 'finish'];
       if (entity === 'ssfb') tools.push(...SSFB_EXTRA_TOOLS);
       if (agent === 'investigator_deep') tools.push(...CODE_TOOLS);
       return new Set(tools);

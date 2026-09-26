@@ -6,6 +6,10 @@
 // src/server/main.ts boots everything. This file owns the process: the Node
 // version check, the listening line, exit codes, and SIGINT/SIGTERM, which
 // stop the server and exit 130/143. A shutdown that hangs exits after 60s.
+//
+// On a signal, src/server/shutdown.ts first writes a stderr line and a
+// server_shutdown line to each active run's event log, so a run killed by
+// the stop says so, and flushes the event log again before the exit.
 
 const [major, minor] = process.versions.node.split('.').map(Number);
 if (major < 22 || (major === 22 && minor < 19)) {
@@ -31,20 +35,28 @@ try {
 }
 process.stdout.write(`triage-server: listening on port ${server.port}\n`);
 
-function shutdown(exitCode) {
+const { noteShutdown, flushBeforeExit } = await import('../src/server/shutdown.ts');
+
+function exit(exitCode) {
+  flushBeforeExit();
+  process.exit(exitCode);
+}
+
+function shutdown(signal, exitCode) {
   setTimeout(() => {
     process.stderr.write('triage-server: shutdown timed out\n');
-    process.exit(exitCode);
+    exit(exitCode);
   }, 60_000).unref();
+  noteShutdown(signal);
   server.stop().then(
-    () => process.exit(exitCode),
+    () => exit(exitCode),
     (err) => {
       // The name only, as for boot errors.
       const name = typeof err?.name === 'string' && err.name !== '' ? err.name : 'unknown error';
       process.stderr.write(`triage-server: shutdown failed (${name})\n`);
-      process.exit(exitCode);
+      exit(exitCode);
     },
   );
 }
-process.once('SIGINT', () => shutdown(130));
-process.once('SIGTERM', () => shutdown(143));
+process.once('SIGINT', () => shutdown('SIGINT', 130));
+process.once('SIGTERM', () => shutdown('SIGTERM', 143));

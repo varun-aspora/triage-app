@@ -135,11 +135,12 @@ import { ConfigError } from '../config/errors.ts';
 import type { Registry } from '../config/registry.ts';
 import { infraRepoNames, loadRepos } from '../config/repos.ts';
 import { createExecRunner, type ExecRunner } from '../connectors/exec.ts';
+import { errorText, safeErrorText, scrubSecrets, stripAddresses } from '../connectors/error-text.ts';
 import { mockPortFromFixtures } from '../connectors/mock.ts';
 import { ConnectorError } from '../connectors/types.ts';
 import { createEmbedder, type EmbedUsage, type Embedder, type FetchLike, HASH_MODEL } from '../embed/index.ts';
 import { createJsonlAuditSink } from '../gate/audit-sink.ts';
-import { redactModelFacing, redactPersisted } from '../gate/redact.ts';
+import { checkEgress, redactModelFacing, redactPersisted } from '../gate/redact.ts';
 import { createMockLayer } from '../mock/index.ts';
 import { acceptsImages, modelForTier } from '../models.ts';
 import { netTcpConnect } from '../ops/doctor/probes.ts';
@@ -1138,17 +1139,32 @@ export function className(err: unknown): string {
   return err.name !== '' ? err.name : 'Error';
 }
 
-function failureReason(err: unknown): string {
+/** Most characters of error text a stored phase reason keeps, like the audit reason (D63). */
+const MAX_REASON_TEXT_CHARS = 300;
+
+/**
+ * The phase reason for a failed run: the class name, then the error's text
+ * and its causes, for example "AgentRunError: <the settlement error Flue
+ * attached>". The text is scrubbed like a tool error (D63), capped, and
+ * masked with the persisted profile. When the masked text would still fail the
+ * store's scan, only the class name is kept, so the failed phase is written.
+ */
+export function failureReason(err: unknown): string {
   const name = className(err);
   const outcome = (err as { outcome?: unknown } | null)?.outcome;
-  return outcome === 'aborted' ? `${name} (aborted)` : name;
+  const head = outcome === 'aborted' ? `${name} (aborted)` : name;
+  // The persisted profile goes last: it only accepts its own masks, so a later scrub would undo them.
+  const scrubbed = safeErrorText(stripAddresses(scrubSecrets(errorText(err))), [], MAX_REASON_TEXT_CHARS);
+  const text = redactPersisted(scrubbed).value;
+  if (text === '' || text === name || !checkEgress(text).ok) return head;
+  return `${head}: ${text}`;
 }
 
 async function recordFailed(store: RunStore, runId: RunId, err: unknown): Promise<void> {
-  // The whole error, stack included, goes to the event log; the store keeps the class name only.
+  // The whole error, stack included, goes to the event log; the store keeps the masked, capped reason.
   logRunEvent(runId, 'failed', { error: err });
   try {
-    await store.setPhase(runId, 'failed', { reason: className(err) });
+    await store.setPhase(runId, 'failed', { reason: failureReason(err) });
   } catch {
     // The original error matters more; the run may not exist yet.
   }

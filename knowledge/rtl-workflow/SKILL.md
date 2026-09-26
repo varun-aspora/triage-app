@@ -50,6 +50,15 @@ check after a KYC SDK closes; does not advance) and `POST /go-back`.
 
 There is no `workflow_instances` table.
 
+`workflow_executions` is looked up by `reference_id`, which for a harbor form
+is the `form_id`. No user id column is documented for it, so do not filter on
+a guessed `user_id`: get the `form_id` first (from harbor or the ID chain). To
+see the real columns, read `information_schema.columns` for the table:
+
+```
+sql_select { service: 'workflow', sql: "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position", params: ['workflow_executions'] }
+```
+
 ## Queries
 
 Where the form is:

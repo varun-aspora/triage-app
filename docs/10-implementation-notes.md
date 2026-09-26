@@ -156,7 +156,7 @@ For an existing `.env`:
 
 | Change | Decision |
 |---|---|
-| `ask_requester` on the Triage root; `needs_input` phase and input requests in both run stores (`0002_input_requests.sql`); `answerRun` and the `triage.input_answer` signal; `triage input`; `run`/`wait` ask at a terminal; `status` shows the question; `ask` refuses while one is open; `TRIAGE_MAX_ASKS_PER_RUN`; the run's id chain mirrored into persistent state | D53 |
+| `ask_requester` on the Triage root; `needs_input` phase and input requests in both run stores (`input_request` and `input_history` on `triage.runs` in `0001_init.sql`); `answerRun` and the `triage.input_answer` signal; `triage input`; `run`/`wait` ask at a terminal; `status` shows the question; `ask` refuses while one is open; `TRIAGE_MAX_ASKS_PER_RUN`; the run's id chain mirrored into persistent state | D53 |
 
 Departures from the P6 design, all the owner's scope (CLI only):
 
@@ -173,7 +173,6 @@ Assumptions made, not verified against a real system:
 For an existing `.env`:
 
 - `TRIAGE_MAX_ASKS_PER_RUN` can be left out; the default (10, raised from 2 on 2026-09-25) applies. `0` leaves the tool unmounted.
-- A postgres run store gets `0002_input_requests.sql` on the next start; the folder store needs nothing.
 
 ### Model catalog refresh
 
@@ -223,7 +222,7 @@ Known gaps:
 
 | Change | Decision |
 |---|---|
-| `blocked` phase (not terminal) and status; `block` and `block_history` on the run, `RunStore.putBlock` and `resolveBlock`; `markStopped` closes an open block as `cancelled`; a submission of kind `resume` with `block_id` and `note`; migration `0003_blocks.sql` | D55 |
+| `blocked` phase (not terminal) and status; `block` and `block_history` on the run, `RunStore.putBlock` and `resolveBlock`; `markStopped` closes an open block as `cancelled`; a submission of kind `resume` with `block_id` and `note`; the columns in `0001_init.sql` | D55 |
 | `src/tools/_lib/connector-failures.ts`: the tool pipeline records every "did not answer" outcome per run (system, tool, code, time); `stop_blocked` on the Triage root, checked against that record, refused while a question or block is open, egress check with refuse semantics on the reason; the finish check treats it as a valid end; one instruction line | D55 |
 | `resumeRun` and `resumeRefusal` (`src/ingress/submit.ts`), the `triage.resume` signal (`renderResume`), settle status `blocked` with nothing embedded, `blocked` and `resume` lines in the step log | D55 |
 | `triage resume <run_id> [message]`; `triage ask` refuses a blocked run; `status`, `wait` and `run` show the block, exit 6 (`EXIT_BLOCKED`); `triage logs --follow` settles on blocked | D55 |
@@ -231,7 +230,7 @@ Known gaps:
 | Console: the blocked view with the block panel and the Resume form (name, multi-line message), the same form on the failed and stopped views when the run has a submission, earlier blocks, a `waiting` step state | D55 |
 | `test/contract/agents/blocked.contract.ts`: park, resume on the same conversation, a refused stop, a failed-after-dispatch resume, with the fake model | D55 |
 
-A Postgres run store gets `0003_blocks.sql` on the next start; the folder store needs nothing. Shared edits: `src/runstore/types.ts`, `src/types/block.ts` (new), `src/cli/lib/output-schemas.ts`, `src/ingress/http/run-list.ts`, `src/ingress/worker-payload.ts`, the console enums.
+Shared edits: `src/runstore/types.ts`, `src/types/block.ts` (new), `src/cli/lib/output-schemas.ts`, `src/ingress/http/run-list.ts`, `src/ingress/worker-payload.ts`, the console enums.
 
 Built as a workflow, one agent per subject (store; tools and ingress; CLI, HTTP, console and the contract test), after the shared edits. Checked in mock mode on 2026-09-26: typecheck clean; `bun run test` 5144 pass; `bun run test:web` 88 pass; `bun run test:contract` 173 pass; `bun run ci` all steps passed.
 
@@ -286,7 +285,7 @@ Known gaps:
 | `src/types/usage.ts`: `UsageRowSchema`, `SubmissionUsageSchema`, `RunUsageViewSchema`, the model and agent patterns | D59 |
 | `src/usage/price.ts`: `priceUsage` and `EMBEDDING_PRICES`; `usageCostUsd` moved here from `src/evals/cost.ts`, which re-exports it | D59 |
 | `src/usage/meter.ts`: the meter, installed by `startOnce` in `src/ingress/runtime.ts` (`BootOptions.usageMeter: false` turns it off in tests); `src/usage/summary.ts`: `summariseUsage` | D59 |
-| `RunStore.putUsage`, `RunRecord.usage`, `RunSummary.usd_total` / `tokens_total` / `usd_partial`; migration `0004_run_usage.sql`; `usage/<seq>.json` in the folder store; `checkUsage` in `src/runstore/types.ts` | D59 |
+| `RunStore.putUsage`, `RunRecord.usage`, `RunSummary.usd_total` / `tokens_total` / `usd_partial`; table `triage.run_usage` in `0001_init.sql`; `usage/<seq>.json` in the folder store; `checkUsage` in `src/runstore/types.ts` | D59 |
 | `src/classify/classify.ts`: `ClassifyDeps.onUsage` on both paths; `src/embed`: `onUsage` on `embed()` with the provider's token count | D59 |
 | `src/ingress/submit.ts`: seq 0 at intake, the live flush, the settle writes, the embed rows; new key `TRIAGE_USAGE_FLUSH_MS` | D59 |
 | `finish_report` sums the meter's rows; the tripwire no longer counts usage; `report.cost` and the `report.md` Cost section gain cache, USD and partial columns | D59 |
@@ -295,7 +294,7 @@ Known gaps:
 | Eval drafts and promoted eval cases carry no `cost` (`draftReport` in `src/report/feedback.ts`, `dropDraftCost` in `src/mock/promote.ts`) | D59 |
 | `test/contract/usage-attribution.contract.ts`: records the Flue events of one faux run with a delegate and the strong synthesis | D59 |
 
-A Postgres run store gets `0004_run_usage.sql` on the next start; the folder store needs nothing. Runs from before the change show `not recorded`.
+Runs from before the change show `not recorded`.
 
 What Flue 2.0.8 puts on its events (checked in `@flue/runtime` dist and by the contract test):
 
@@ -338,8 +337,8 @@ Known gaps:
 
 ### No foreign keys in the run store (D60, 2026-09-26)
 
-- 2026-09-26: removed every foreign key from the run store, per the owner's rule in `src/runstore/migrations/AGENTS.md`. `0004_run_usage.sql` lost its `REFERENCES`; the new `0005_drop_foreign_keys.sql` drops the rest with a `DO` block over `pg_constraint`; the per-model embedding table DDL has none. `deleteRun` in `postgres.ts` deletes from every table itself; `putFeedback`, `putEmbedding` and `putUsage` check the run under `FOR KEY SHARE`; the feedback and embedding inserts are plain `VALUES` now. `fake-pg.ts` enforces no foreign key and cascades nothing. New contract cases: `deleteRun` clears every kind of row across two embedding models and leaves other runs alone; every write on a deleted run throws `RunNotFoundError`; `putReport` on an unknown run throws `RunNotFoundError`. The folder provider is unchanged.
-- A Postgres run store gets `0005_drop_foreign_keys.sql` on the next start. It was checked against fake-pg and the Postgres grammar (libpg-query, including the PL/pgSQL body), not against a live database.
+- 2026-09-26: removed every foreign key from the run store, per the owner's rule in `src/runstore/migrations/AGENTS.md`. `0001_init.sql` creates no foreign key, and the per-model embedding table DDL has none. `deleteRun` in `postgres.ts` deletes from every table itself; `putFeedback`, `putEmbedding` and `putUsage` check the run under `FOR KEY SHARE`; the feedback and embedding inserts are plain `VALUES` now. `fake-pg.ts` enforces no foreign key and cascades nothing. New contract cases: `deleteRun` clears every kind of row across two embedding models and leaves other runs alone; every write on a deleted run throws `RunNotFoundError`; `putReport` on an unknown run throws `RunNotFoundError`. The folder provider is unchanged.
+- `0001_init.sql` was checked against fake-pg and the Postgres grammar (libpg-query), not against a live database.
 
 ## Commit trailer note
 

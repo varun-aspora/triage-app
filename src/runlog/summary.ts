@@ -52,9 +52,19 @@ export function summariseEvent(line: Pick<RunEventLine, 'source' | 'type' | 'dat
       return `${str(d.verdict)}${d.cancelled === true ? ' (cancel)' : ''}${d.notes !== undefined ? ` ${excerpt(d.notes)}` : ''}`;
     case 'stop':
       return `by ${str(d.by)} from ${str(d.stopped_from)}`;
+    case 'server_shutdown':
+      return shutdownSummary(d);
     default:
       return lifecycleSummary(line.type, d) ?? excerpt(d);
   }
+}
+
+/** The signal, then what the run was doing when the server stopped. */
+function shutdownSummary(d: Data): string {
+  const parts = [`server stopped (${str(d.signal)})`, `${num(d.active_runs)} active runs`];
+  if (d.phase !== undefined) parts.push(`in ${str(d.phase)}`);
+  if (d.attempt !== undefined) parts.push(`attempt ${num(d.attempt)}`);
+  return parts.join(' · ');
 }
 
 /** Where an event ran: the root agent or a delegate's session. */

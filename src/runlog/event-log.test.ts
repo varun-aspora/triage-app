@@ -4,8 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FlueEventContext, FlueObservation } from '@flue/runtime';
 import {
+  activeRuns,
   EVENTS_FILE,
   flushRunEventLog,
+  flushRunEventLogSync,
   installRunEventLog,
   logRunEvent,
   setRunRedactionNames,
@@ -151,5 +153,26 @@ describe('readRunEvents', () => {
 
   test('a bad run id is refused', async () => {
     await expect(readRunEvents('/tmp', '../escape')).rejects.toThrow('run_id');
+  });
+});
+
+describe('active runs', () => {
+  test('a run is active from submission_running until its submissions settle, with its last phase and attempt', () => {
+    const { emit } = setup();
+    expect(activeRuns()).toEqual([]);
+    logRunEvent(RUN, 'phase', { phase: 'identity' });
+    logRunEvent(RUN, 'phase', { phase: 'investigating' });
+    emit({ type: 'submission_running', instanceId: RUN, submissionId: 's1', kind: 'dispatch', attemptCount: 1, maxAttempts: 10 });
+    emit({ type: 'submission_running', instanceId: RUN, submissionId: 's1', kind: 'dispatch', attemptCount: 3, maxAttempts: 10 });
+    expect(activeRuns()).toEqual([{ runId: RUN, attempt: 3, phase: 'investigating' }]);
+    emit({ type: 'submission_settled', instanceId: RUN, submissionId: 's1', outcome: 'aborted' });
+    expect(activeRuns()).toEqual([]);
+  });
+
+  test('flushRunEventLogSync writes the queued lines before returning', () => {
+    const { runsDir } = setup();
+    logRunEvent(RUN, 'phase', { phase: 'investigating' });
+    flushRunEventLogSync();
+    expect(lines(runsDir).map((l) => l.type)).toEqual(['phase']);
   });
 });

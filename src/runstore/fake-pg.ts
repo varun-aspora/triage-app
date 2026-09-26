@@ -848,21 +848,6 @@ function migratorHandler(text: string): Handler | undefined {
       return [];
     };
   }
-  // The bodies of 0002_input_requests.sql, 0003_blocks.sql,
-  // 0004_run_usage.sql and 0005_drop_foreign_keys.sql: columns and a table
-  // the fake carries from the start, and foreign keys it never had.
-  if (
-    (text.includes('ADD COLUMN input_request jsonb') && text.includes('ADD COLUMN answer text')) ||
-    (text.includes('ADD COLUMN block jsonb') && text.includes('ADD COLUMN note text')) ||
-    text.includes('CREATE TABLE triage.run_usage (') ||
-    (text.includes("WHERE c.contype = 'f' AND c.connamespace = 'triage'::regnamespace") &&
-      text.includes("EXECUTE format('ALTER TABLE triage.%I DROP CONSTRAINT %I'"))
-  ) {
-    return (_p, db) => {
-      if (!db.migrated) throw missingRelation('triage.runs');
-      return [];
-    };
-  }
   return undefined;
 }
 

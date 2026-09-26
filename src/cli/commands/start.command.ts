@@ -19,7 +19,7 @@ import { loadRegistry, type Registry } from '../../config/registry.ts';
 import { redactPersisted } from '../../gate/redact.ts';
 import { spawnWorker } from '../../ingress/detach.ts';
 import { prepareDeps, prepareRequest, type PrepareInput, type PreparedSubmission } from '../../ingress/prepare.ts';
-import { className } from '../../ingress/submit.ts';
+import { failureReason } from '../../ingress/submit.ts';
 import type { WorkerPayload } from '../../ingress/worker-payload.ts';
 import { emitJson, StartOutputSchema } from '../lib/output-schemas.ts';
 import { configureRequestArgs, parseRequestArgs, reportInputError } from '../lib/request-args.ts';
@@ -83,7 +83,7 @@ export function createStartCommand(options: StartCommandOptions = {}): CliComman
           redaction_names: [...prepared.redaction_names],
         });
       } catch (err) {
-        await store.setPhase(runId, 'failed', { reason: className(err) }).catch(() => undefined);
+        await store.setPhase(runId, 'failed', { reason: failureReason(err) }).catch(() => undefined);
         printError(io, json, 'ERROR', err instanceof Error ? err.message : 'could not start the worker');
         return EXIT.ERROR;
       }

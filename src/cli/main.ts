@@ -1,8 +1,10 @@
 // CLI entry used by bin/triage.mjs. Builds the program from the generated
-// command list with the real process io and a lazy config loader, then runs it.
+// command list with the real process io and a lazy config loader, then runs it
+// and ends the shared pg pools, so the process exits once the output is out.
 
 import { findModules, INDEX_SPECS, REPO_ROOT } from '../../scripts/gen-indexes.ts';
 import { loadConfig, type Config } from '../config/env.ts';
+import { closeSharedPgRunners } from '../db/pg.ts';
 import { commands } from './command-modules.gen.ts';
 import { buildProgram, describeError, runCli } from './index.ts';
 import { EXIT, printError } from './output.ts';
@@ -37,5 +39,9 @@ export async function main(argv: readonly string[], ctx: CliContext = processCon
     printError(ctx.io, argv.includes('--json'), 'ERROR', describeError(err).message);
     return EXIT.ERROR;
   }
-  return runCli(program, argv);
+  try {
+    return await runCli(program, argv);
+  } finally {
+    await closeSharedPgRunners();
+  }
 }

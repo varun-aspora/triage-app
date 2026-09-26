@@ -14,13 +14,16 @@
 // host. The body is read up to MAX_HTTP_BODY_BYTES and cut there.
 //
 // Messages name entities, services and env var names, never a URL, host or
-// token. In mock mode the fixture answers through withMock and fetch is never
+// token. A failed request keeps the fetch error's own words with the URL,
+// host, header values and addresses taken out. A non-2xx answer is not an
+// error: its status and body go back to the model as the result. In mock mode the fixture answers through withMock and fetch is never
 // called.
 import type { Config } from '../../config/env.ts';
 import type { Registry } from '../../config/registry.ts';
 import { CBS_SERVICE, type HttpDecision } from '../../gate/http.ts';
 import type { HttpCallFacts } from '../../mock/key.ts';
 import type { Entity } from '../../types/core.ts';
+import { errorText, safeErrorText, scrubSecrets, stripAddresses } from '../error-text.ts';
 import { withMock } from '../mock.ts';
 import { ConnectorError, MAX_HTTP_BODY_BYTES, type ConnectorContext, type ConnectorOutcome } from '../types.ts';
 import { connectorHeaders, resolveAuth } from './auth.ts';
@@ -180,10 +183,22 @@ export function createHttpConnector(deps: HttpConnectorDeps): HttpConnector {
 
       const timeout = AbortSignal.timeout(timeoutMs);
       const combined = AbortSignal.any([signal, timeout]);
-      const failed = (): never => {
+      // The fetch error and its cause ("fetch failed: getaddrinfo ENOTFOUND
+      // ..."), without the base URL, its host, header values or addresses.
+      const secrets = [
+        api.value,
+        base.href,
+        base.origin,
+        base.host,
+        base.hostname,
+        url.href,
+        ...Object.values(headers.headers).flatMap((v) => [v, ...v.split(/\s+/)]),
+      ];
+      const failed = (err: unknown): never => {
         if (signal.aborted) throw signal.reason;
         if (timeout.aborted) throw new ConnectorError('timeout', `${where}: no answer within ${timeoutMs} ms`);
-        throw new ConnectorError('unreachable', `${where}: the request failed`);
+        const said = safeErrorText(stripAddresses(scrubSecrets(errorText(err), secrets)));
+        throw new ConnectorError('unreachable', `${where}: the request failed${said !== '' ? `: ${said}` : ''}`);
       };
 
       let response: Response;
@@ -195,8 +210,8 @@ export function createHttpConnector(deps: HttpConnectorDeps): HttpConnector {
           signal: combined,
           ...(payload !== undefined ? { body: payload } : {}),
         });
-      } catch {
-        return failed();
+      } catch (err) {
+        return failed(err);
       }
 
       if ((response.status >= 300 && response.status < 400) || response.type === 'opaqueredirect') {
@@ -207,8 +222,8 @@ export function createHttpConnector(deps: HttpConnectorDeps): HttpConnector {
       let read: { bytes: Uint8Array; truncated: boolean };
       try {
         read = await readCapped(response, MAX_HTTP_BODY_BYTES, combined);
-      } catch {
-        return failed();
+      } catch (err) {
+        return failed(err);
       }
       const data: HttpCallData = Object.freeze({
         status: response.status,

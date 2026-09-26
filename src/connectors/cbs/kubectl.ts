@@ -13,6 +13,7 @@
 // config file on stdin, so the path, body, token and credentials never appear
 // in argv, and no shell runs in the pod.
 import { assertSafeArg, UnsafeArgError, type ExecResult, type ExecRunner } from '../exec.ts';
+import { safeErrorText, scrubSecrets, stripAddresses } from '../error-text.ts';
 import { ConnectorError } from '../types.ts';
 
 export const KUBECTL_BIN = 'kubectl';
@@ -152,13 +153,45 @@ function abortError(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
 }
 
-/** Maps an ExecResult that did not exit 0 to a ConnectorError. Never echoes stderr. */
-function failure(r: ExecResult, what: string, signal: AbortSignal): unknown {
+/**
+ * Maps an ExecResult that did not exit 0 to a ConnectorError. Keeps a short
+ * stderr excerpt with the env values behind the call (context, namespace,
+ * selector, container, and for curl the URL and header values), credentials,
+ * URLs and addresses taken out.
+ */
+function failure(r: ExecResult, what: string, signal: AbortSignal, secrets: readonly string[]): unknown {
   if (r.aborted) return abortError(signal);
   if (r.spawnError !== undefined) return new ConnectorError('unreachable', `kubectl could not be started (${r.spawnError})`);
   if (r.timedOut) return new ConnectorError('timeout', `${what} timed out`);
   if (r.truncated) return new ConnectorError('cap_exceeded', `${what} output passed the size cap`);
-  return new ConnectorError('unreachable', `${what} exited with code ${r.exitCode ?? 'none'}`);
+  const said = safeErrorText(stripAddresses(scrubSecrets(r.stderr, secrets)), [], STDERR_CHARS);
+  return new ConnectorError('unreachable', `${what} exited with code ${r.exitCode ?? 'none'}${said !== '' ? `: ${said}` : ''}`);
+}
+
+const STDERR_CHARS = 500;
+
+/** The env values a kubectl stderr may echo. */
+function kubeSecrets(k: KubeConfig, extra: readonly string[] = []): string[] {
+  return [k.context, k.namespace, k.selector, k.container, ...extra];
+}
+
+/**
+ * The request URL and the parts of it curl's own errors name: "Could not
+ * resolve host: <hostname>", "Failed to connect to <hostname> port 8443".
+ * Every CBS URL is built on the gateway URL, so this covers the gateway host.
+ */
+function urlParts(url: string): string[] {
+  try {
+    const u = new URL(url);
+    return [url, u.href, u.origin, u.host, u.hostname];
+  } catch {
+    return [url];
+  }
+}
+
+/** A header value and its parts ("Bearer <token>" gives the token too). */
+function valueParts(values: readonly string[]): string[] {
+  return values.flatMap((v) => [v, ...v.split(/\s+/)]);
 }
 
 async function runKubectl(
@@ -186,7 +219,7 @@ type PodItem = { metadata?: { name?: unknown; deletionTimestamp?: unknown }; sta
 /** Runs get pods and returns the first Running pod that is not being deleted. */
 export async function resolvePod(exec: ExecRunner, k: KubeConfig, signal: AbortSignal): Promise<string> {
   const r = await runKubectl(exec, k, getPodsArgv(k), 'kubectl get pods', signal);
-  if (r.exitCode !== 0 || r.truncated) throw failure(r, 'kubectl get pods', signal);
+  if (r.exitCode !== 0 || r.truncated) throw failure(r, 'kubectl get pods', signal, kubeSecrets(k));
   let items: unknown;
   try {
     items = (JSON.parse(r.stdout) as PodList).items;
@@ -231,7 +264,7 @@ export async function readCredentials(
   signal: AbortSignal,
 ): Promise<Credentials> {
   const r = await runKubectl(exec, k, getSecretArgv(k, secret), 'kubectl get secret', signal);
-  if (r.exitCode !== 0 || r.truncated) throw failure(r, 'kubectl get secret', signal);
+  if (r.exitCode !== 0 || r.truncated) throw failure(r, 'kubectl get secret', signal, kubeSecrets(k, [secret.namespace, secret.name]));
   let data: unknown;
   try {
     data = (JSON.parse(r.stdout) as { data?: unknown }).data;
@@ -357,7 +390,7 @@ export async function podCurl(
   // A cut output has lost the status line at its end, so it cannot be read.
   if (r.truncated) throw new ConnectorError('cap_exceeded', 'the CBS response passed the size cap');
   if (r.exitCode === CURL_TIMEOUT_EXIT) throw new ConnectorError('timeout', 'curl in the CBS pod timed out');
-  if (r.exitCode !== 0) throw failure(r, 'curl in the CBS pod', opts.signal);
+  if (r.exitCode !== 0) throw failure(r, 'curl in the CBS pod', opts.signal, kubeSecrets(k, [pod, ...urlParts(req.url), ...valueParts(req.headers.map(([, v]) => v))]));
   const at = r.stdout.lastIndexOf(STATUS_MARKER);
   if (at < 0) throw new ConnectorError('unreachable', 'curl in the CBS pod gave no status code');
   const status = Number(r.stdout.slice(at + STATUS_MARKER.length).trim());

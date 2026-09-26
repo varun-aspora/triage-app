@@ -3,7 +3,7 @@
 // A path from the model is checked as text first (no NUL, not absolute, no
 // '..', no segment starting with '.'), then resolved with realpath, and the
 // result must still sit under the realpath of <TRIAGE_REPOS_DIR>/<repo> with
-// no dot segment. Checking after realpath is what stops a symlink inside the
+// no dot segment. The repo directory itself must not be a symlink. Checking after realpath is what stops a symlink inside the
 // repo from pointing at a file outside it, or at .git/ or a dotfile inside it.
 //
 // Refusal messages are fixed texts and never echo the path or the repo name.
@@ -105,7 +105,11 @@ export function checkRelPath(relPath: unknown): { ok: true; segments: string[] }
   return { ok: true, segments };
 }
 
-/** Realpath of <reposDir>/<repo>, checked to sit under the realpath of reposDir. */
+/**
+ * Realpath of <reposDir>/<repo>. It must be exactly <realpath(reposDir)>/<repo>:
+ * the repo directory itself must not be a symlink, so a repo cannot point at
+ * another entity's checkout (or anywhere else) under a name the caller may use.
+ */
 export function resolveRepoRoot(
   reposDir: string | undefined,
   repo: unknown,
@@ -122,7 +126,7 @@ export function resolveRepoRoot(
   } catch {
     return refuse('repo_missing');
   }
-  if (root === realBase || !isWithin(realBase, root)) return refuse('outside');
+  if (root !== join(realBase, repo)) return refuse('outside');
   try {
     if (!statSync(root).isDirectory()) return refuse('repo_missing');
   } catch {

@@ -16,7 +16,9 @@
 //
 // An unreachable database never throws. The hop is marked unreachable, the
 // same database is not tried again in this call, and hops that needed an id
-// the failed hop would have produced are marked unreachable too.
+// the failed hop would have produced are marked unreachable too. The
+// connector's error (already scrubbed of DSN parts by pg-client.ts) goes into
+// errors, so the resolve_identity tool can tell the model why a hop failed.
 //
 // SQL is never built here: this file has no template literals and no string
 // concatenation (checked by identity-core.test.ts).
@@ -62,10 +64,20 @@ export type IdentityCoreDeps = {
   readonly sqlTimeouts: TxnTimeouts;
 };
 
+/** Why a statement failed: the connector code and its message. Not part of the IdChain. */
+export type HopError = {
+  readonly hop: string;
+  readonly source: string;
+  readonly code: string;
+  readonly error: string;
+};
+
 export type IdChainResult = {
   readonly id_chain: IdChain;
   /** The same items as id_chain.basic_state. */
   readonly basic_state: readonly BasicStateItem[];
+  /** Statements that failed, with the reason. Absent when none did. */
+  readonly errors?: readonly HopError[];
 };
 
 /** Thrown for bad input or a malformed fixture. Names fields and hops, never values. */
@@ -109,7 +121,8 @@ export async function resolveIdChain(input: Partial<KnownIds>, deps: IdentityCor
   await walk.basicState();
 
   const id_chain = v.parse(IdChainSchema, { ids: walk.ids, hops: walk.hopList, basic_state: walk.state });
-  return Object.freeze({ id_chain, basic_state: id_chain.basic_state });
+  const errors = walk.errors.length > 0 ? { errors: Object.freeze([...walk.errors]) } : {};
+  return Object.freeze({ id_chain, basic_state: id_chain.basic_state, ...errors });
 }
 
 function stripBlank(input: Partial<KnownIds>): Record<string, unknown> {
@@ -126,6 +139,7 @@ class Walk {
   readonly ids: { -readonly [K in KnownIdKey]?: string };
   readonly hopList: IdHop[] = [];
   readonly state: BasicStateItem[] = [];
+  readonly errors: HopError[] = [];
   /** Ids a failed hop would have produced. */
   private readonly blocked = new Set<KnownIdKey>();
   /** Env var names that could not be reached in this call. */
@@ -461,6 +475,7 @@ class Walk {
       if (!isConnectorError(err) || err.code === 'strict_miss') throw err;
       if (CONNECTION_CODES.has(err.code)) this.down.add(target);
       audit(deps.mock.enabled ? 'mock' : 'real', err.code, null);
+      this.errors.push({ hop: stmt.hop, source: sourceOf(stmt), code: err.code, error: err.message });
       return { kind: 'unreachable', taken_at };
     }
   }

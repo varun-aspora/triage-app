@@ -439,7 +439,7 @@ describe('start', () => {
     expect(runs).toHaveLength(1);
     const run = await (await createRunStore(h.config)).getRun(runs[0]!.run_id);
     expect(run?.phase).toBe('failed');
-    expect(run?.phase_reason).toBe('WorkerSpawnError');
+    expect(run?.phase_reason).toBe('WorkerSpawnError: could not start the worker: ENOENT');
   });
 });
 
@@ -600,7 +600,7 @@ describe('worker', () => {
     class BootFailure extends Error {}
     const worker = createWorkerCommand({
       boot: async () => {
-        throw new BootFailure('detail that must not be stored');
+        throw new BootFailure('could not reach postgres://triage:hunter2@db.internal:5432/triage');
       },
       pid: () => 1414,
     });
@@ -609,7 +609,7 @@ describe('worker', () => {
     expect(r.code).toBe(EXIT.ERROR);
     const run = await (await createRunStore(h.config)).getRun(RUN_ID);
     expect(run?.phase).toBe('failed');
-    expect(run?.phase_reason).toBe('BootFailure');
+    expect(run?.phase_reason).toBe('BootFailure: could not reach <url>');
     expect(run?.worker_pid).toBe(1414);
   });
 
@@ -643,13 +643,13 @@ describe('worker', () => {
     expect(submitted).toBe(0);
   });
 
-  test('a runtime that fails to start is recorded as failed with the error class name', async () => {
+  test('a runtime that fails to start is recorded as failed with its masked error text', async () => {
     const h = home();
     const p = await prepared(h);
     class BootFailure extends Error {}
     const worker = createWorkerCommand({
       boot: async () => {
-        throw new BootFailure('secret detail that must not be stored');
+        throw new BootFailure('login failed, password=hunter2');
       },
       pid: () => 999,
     });
@@ -660,7 +660,7 @@ describe('worker', () => {
     expect(r.code).toBe(EXIT.ERROR);
     const run = await (await createRunStore(h.config)).getRun(RUN_ID);
     expect(run?.phase).toBe('failed');
-    expect(run?.phase_reason).toBe('BootFailure');
+    expect(run?.phase_reason).toBe('BootFailure: login failed, password=****');
     expect(run?.worker_pid).toBe(999);
   });
 });
@@ -837,6 +837,34 @@ describe('status', () => {
     await seed(h, { runId: OTHER_RUN, phase: 'identity' });
     const noPid = await cli([createStatusCommand({ isAlive: dead })], ['status', OTHER_RUN, '--json'], { config: () => h.config });
     expect((jsonLine(noPid.out) as { status: string }).status).toBe('running');
+  });
+
+  test('a failed or stopped run shows its reason, in --json and the human form', async () => {
+    const h = home();
+    const reason = 'AgentRunError: [flue] Agent run failed (submission sub-1).: stream ended early';
+    await seed(h, { phase: 'failed', reason });
+    const cmd = createStatusCommand({ isAlive: () => false });
+    const r = await cli([cmd], ['status', RUN_ID, '--json'], { config: () => h.config });
+    const doc = jsonLine(r.out);
+    expect(v.is(StatusOutputSchema, doc)).toBe(true);
+    expect(doc).toMatchObject({ status: 'failed', reason });
+    const human = await cli([cmd], ['status', RUN_ID], { config: () => h.config });
+    expect(human.out).toContain(`reason: ${reason}`);
+
+    await seed(h, { runId: OTHER_RUN, phase: 'stopped', reason: 'cancelled' });
+    const stopped = await cli([cmd], ['status', OTHER_RUN, '--json'], { config: () => h.config });
+    expect(jsonLine(stopped.out)).toMatchObject({ status: 'stopped', reason: 'cancelled' });
+  });
+
+  test('a failed run with no stored reason says unknown failure; a running one has no reason', async () => {
+    const h = home();
+    await seed(h, { phase: 'failed' });
+    await seed(h, { runId: OTHER_RUN, phase: 'investigating' });
+    const cmd = createStatusCommand({ isAlive: () => true });
+    const failed = await cli([cmd], ['status', RUN_ID, '--json'], { config: () => h.config });
+    expect(jsonLine(failed.out)).toMatchObject({ status: 'failed', reason: 'unknown failure' });
+    const running = await cli([cmd], ['status', OTHER_RUN, '--json'], { config: () => h.config });
+    expect(jsonLine(running.out)).not.toHaveProperty('reason');
   });
 
   test('a run with no classification yet has tier_final null', async () => {

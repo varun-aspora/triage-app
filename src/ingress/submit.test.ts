@@ -545,7 +545,7 @@ describe('classifier and identity failures', () => {
     await expect(runSubmission(prepared(), h.deps)).rejects.toThrow('no fixture');
     expect(h.flue.dispatches).toHaveLength(0);
     expect((await h.store.getRun(RUN_ID))?.phase).toBe('failed');
-    expect((await h.store.getRun(RUN_ID))?.phase_reason).toBe('FixtureMissError');
+    expect((await h.store.getRun(RUN_ID))?.phase_reason).toBe('FixtureMissError: no fixture');
   });
 
   test('a dispatch rejection records failed and is passed on', async () => {
@@ -553,7 +553,7 @@ describe('classifier and identity failures', () => {
     await expect(runSubmission(prepared(), h.deps)).rejects.toBeInstanceOf(AgentInstanceExistsError);
     const run = await h.store.getRun(RUN_ID);
     expect(run?.phase).toBe('failed');
-    expect(run?.phase_reason).toBe('AgentInstanceExistsError');
+    expect(run?.phase_reason).toBe(`AgentInstanceExistsError: Agent instance "${RUN_ID}" already exists.`);
     expect(h.spies.embedRun).toHaveLength(0);
   });
 });
@@ -561,7 +561,7 @@ describe('classifier and identity failures', () => {
 // ------------------------------------------------------------------ read and settle
 
 describe('read and settle', () => {
-  test('a read rejection records phase failed with the class name and keeps the evidence', async () => {
+  test('a read rejection records phase failed with the settlement error and keeps the evidence', async () => {
     const findings = {
       evidence: [{ source: 'db' as const, at: NOW.toISOString(), query_or_path: 'harbor.account_forms', summary: 'form verified' }],
       timeline: [],
@@ -574,15 +574,16 @@ describe('read and settle', () => {
         await store.putEvidence(RUN_ID, 'ssfb', redactPersisted(findings));
       },
       read: async () => {
-        throw new AgentRunError({ outcome: 'failed', submissionId: 'sub-1' });
+        throw new AgentRunError({ outcome: 'failed', submissionId: 'sub-1', cause: { name: 'ProviderError', message: 'stream ended early' } });
       },
     });
     const result = await runSubmission(prepared(), h.deps);
     expect(result.status).toBe('failed');
-    expect(result.error).toBe('AgentRunError');
+    const reason = 'AgentRunError: [flue] Agent run failed (submission sub-1).: stream ended early';
+    expect(result.error).toBe(reason);
     const run = await h.store.getRun(RUN_ID);
     expect(run?.phase).toBe('failed');
-    expect(run?.phase_reason).toBe('AgentRunError');
+    expect(run?.phase_reason).toBe(reason);
     expect(run?.evidence.ssfb?.findings).toEqual(findings);
     expect(h.calls.filter((c) => c.method === 'putEvidence')).toHaveLength(1);
     expect(h.calls.some((c) => c.method === 'deleteRun')).toBe(false);
@@ -595,7 +596,24 @@ describe('read and settle', () => {
       },
     });
     const result = await runSubmission(prepared(), h.deps);
-    expect(result.error).toBe('AgentRunError (aborted)');
+    expect(result.error).toBe('AgentRunError (aborted): [flue] Agent run was aborted (submission sub-1).');
+  });
+
+  test('the stored reason has secrets, addresses and PII masked, and is capped', async () => {
+    const h = harness({
+      read: async () => {
+        throw new AgentRunError({
+          outcome: 'failed',
+          submissionId: 'sub-1',
+          cause: { message: `postgres://triage:hunter2@10.1.2.3:5432/db for jane.doe@example.com, Authorization: Bearer abcdefghijklmnop1234 ${'x'.repeat(2000)}` },
+        });
+      },
+    });
+    await runSubmission(prepared(), h.deps);
+    const reason = (await h.store.getRun(RUN_ID))?.phase_reason ?? '';
+    expect(reason.startsWith('AgentRunError: ')).toBe(true);
+    for (const leak of ['hunter2', '10.1.2.3', 'jane.doe@example.com', 'abcdefghijklmnop1234']) expect(reason).not.toContain(leak);
+    expect(reason.length).toBeLessThanOrEqual('AgentRunError: '.length + 300);
   });
 
   test('a read that outlives the read timeout fails the run and asks Flue to abort', async () => {
@@ -608,7 +626,7 @@ describe('read and settle', () => {
     });
     const result = await runSubmission(prepared(), h.deps);
     expect(result.status).toBe('failed');
-    expect(result.error).toBe(new SubmissionReadTimeoutError(20).name);
+    expect(result.error).toBe(`${new SubmissionReadTimeoutError(20).name}: gave up waiting for the run after 20 ms`);
     expect(h.flue.aborts).toBe(1);
   });
 

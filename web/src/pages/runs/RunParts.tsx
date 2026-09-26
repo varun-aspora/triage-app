@@ -1,7 +1,7 @@
 // Pieces of the run detail page shared by the completed, running and failed views.
 
 import { type ReactNode, useState } from 'react';
-import type { IdChain, Report, RunDetail, RunUsageView, TierDecision } from '../../api/types.ts';
+import type { IdChain, Report, RequestMessage, RunDetail, RunRequest, RunUsageView, TierDecision } from '../../api/types.ts';
 import { Button } from '../../components/Button.tsx';
 import { Icon } from '../../components/Icon.tsx';
 import { PageHeader } from '../../components/PageHeader.tsx';
@@ -17,9 +17,13 @@ import {
   formatCalls,
   formatCost,
   formatTokenSplit,
+  isLongText,
   permalinkHref,
   reportStatusLook,
   reportVersionLabel,
+  requestSourceLine,
+  runTitle,
+  splitLead,
   STEPPER_PHASES,
   type StepperPhase,
   type StepState,
@@ -87,7 +91,7 @@ export function RunHeader({ run, extraMeta }: { run: RunDetail; extraMeta?: Reac
 
   return (
     <PageHeader
-      title={run.current_ask !== null && run.current_ask.trim() !== '' ? run.current_ask : 'Run'}
+      title={runTitle(run)}
       documentTitle={`Run ${shortRunId(run.run_id)}`}
       breadcrumb={[{ label: 'Runs', to: '/runs' }, { label: run.run_id }]}
       actions={actions}
@@ -157,6 +161,119 @@ export function PhaseStepper({ steps }: { steps: Record<StepperPhase, StepState>
 }
 
 // ------------------------------------------------------------------ side panels
+
+/**
+ * What was asked (D66): where it came from, the thread, the added context and
+ * what was given with it. The stored copy is the persisted profile, so IDs and
+ * digit runs are masked. Nothing when the server sent no request.
+ */
+export function RequestPanel({ run }: { run: Pick<RunDetail, 'permalink' | 'request'> }) {
+  const [all, setAll] = useState(false);
+  const request = run.request;
+  if (request === undefined) return null;
+  const source = requestSourceLine(run);
+  const { lead, rest } = splitLead(request.messages);
+  const count = request.messages.length;
+  return (
+    <Panel title="Request" as="div" style={{ padding: 20 }}>
+      <div className="runs-req-source">
+        {source.href !== undefined ? (
+          <a href={source.href} className="link" target="_blank" rel="noreferrer noopener">
+            {source.text}
+          </a>
+        ) : (
+          <span title={source.title}>{source.text}</span>
+        )}
+        {request.attachments > 0 && (
+          <span>
+            {' '}
+            · {request.attachments} {request.attachments === 1 ? 'attachment' : 'attachments'}
+          </span>
+        )}
+      </div>
+      {lead === undefined ? (
+        <p className="hint" style={{ margin: '10px 0 0' }}>
+          No messages were stored.
+        </p>
+      ) : (
+        <>
+          <RequestMessageView message={lead} />
+          {all && rest.map((m, i) => <RequestMessageView key={i} message={m} />)}
+          {rest.length > 0 && (
+            <button type="button" className="runs-text-btn runs-req-more" aria-expanded={all} onClick={() => setAll((x) => !x)}>
+              {all ? 'Show the first message only' : `Show all ${count} messages`}
+            </button>
+          )}
+        </>
+      )}
+      {request.context !== undefined && (
+        <div className="runs-req-block">
+          <div className="runs-req-label">Additional context</div>
+          <ClampedText text={request.context} />
+        </div>
+      )}
+      {request.hints !== undefined && <RequestHints hints={request.hints} />}
+    </Panel>
+  );
+}
+
+function RequestMessageView({ message }: { message: RequestMessage }) {
+  return (
+    <div className="runs-req-msg">
+      <div className="runs-req-head">
+        <span className="runs-req-author">{message.author !== '' ? message.author : 'unknown'}</span>
+        {message.at !== undefined && <span>{formatDateTime(message.at)}</span>}
+      </div>
+      <ClampedText text={message.text} />
+    </div>
+  );
+}
+
+/** Text with its line breaks, clamped to a few lines with a Show more when it is long. */
+function ClampedText({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  if (text.trim() === '') return <Dash />;
+  const long = isLongText(text);
+  return (
+    <>
+      <div className={long && !open ? 'runs-req-text clamp' : 'runs-req-text'}>{text}</div>
+      {long && (
+        <button type="button" className="runs-text-btn runs-req-more" aria-expanded={open} onClick={() => setOpen((x) => !x)}>
+          {open ? 'Show less' : 'Show more'}
+        </button>
+      )}
+    </>
+  );
+}
+
+function RequestHints({ hints }: { hints: NonNullable<RunRequest['hints']> }) {
+  const ids = Object.entries(hints.ids ?? {}).filter((e): e is [string, string] => typeof e[1] === 'string');
+  return (
+    <div className="runs-req-block">
+      <div className="runs-req-label">Given with the request</div>
+      {ids.map(([k, val]) => (
+        <KV key={k} k={<span className="mono">{k}</span>}>
+          <span className="mono">{val}</span>
+        </KV>
+      ))}
+      {hints.entities !== undefined && (
+        <KV k="Entities">
+          <Tags items={hints.entities} />
+        </KV>
+      )}
+      {hints.tier !== undefined && (
+        <KV k="Tier">
+          <span className="mono">{hints.tier}</span>
+        </KV>
+      )}
+      {hints.time_window !== undefined && (
+        <KV k="Time window">
+          {formatDateTime(hints.time_window.from)} to {formatDateTime(hints.time_window.to)}
+        </KV>
+      )}
+    </div>
+  );
+}
 
 export function ClassificationPanel({ decision, full }: { decision: TierDecision; full: boolean }) {
   const p = decision.proposed;

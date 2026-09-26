@@ -363,3 +363,14 @@ describe('createMemoryAuditSink', () => {
     expect(sink.lines).toHaveLength(0);
   });
 });
+
+describe('makeAuditLine: sqlstate', () => {
+  test('a SQL failure keeps its SQLSTATE; lines without one have no field', () => {
+    expect(makeAuditLine(base({ exit: 'query_error', sqlstate: '42703' })).sqlstate).toBe('42703');
+    expect('sqlstate' in makeAuditLine(base())).toBe(false);
+  });
+
+  test('deny: a value that is not a SQLSTATE throws', () => {
+    expect(rejectedFields(() => makeAuditLine(base({ sqlstate: 'column "x" does not exist' })))).toEqual(['sqlstate']);
+  });
+});

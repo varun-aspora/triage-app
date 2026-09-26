@@ -1,4 +1,5 @@
-// SQL gate: admits exactly one read-only SELECT and refuses everything else.
+// SQL gate: admits exactly one read-only SELECT, or an EXPLAIN of one, and
+// refuses everything else.
 //
 // The query is parsed with libpg-query, the real Postgres grammar compiled to
 // WASM, so the gate sees the same statement the server would. It does not run
@@ -9,10 +10,26 @@
 // What is admitted:
 // - one statement whose root is SELECT (including WITH ... SELECT, UNION and
 //   friends, VALUES and TABLE t), with at most one trailing ';'
+// - EXPLAIN of such a SELECT, with or without ANALYZE, in the bare form
+//   (EXPLAIN ANALYZE VERBOSE ...) or the option list form
+//   (EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ...). EXPLAIN ANALYZE runs its
+//   statement, so the wrapped SELECT goes through exactly the checks a bare
+//   SELECT does (the same walker over the same node type), and only the
+//   options in EXPLAIN_OPTIONS are accepted. EXPLAIN of anything that is not
+//   a SELECT (DML, CREATE TABLE AS, EXECUTE, DECLARE) is refused.
 // - CTEs that are themselves SELECTs (no INSERT/UPDATE/DELETE/MERGE inside)
 // - functions from the allowlist in sql-functions.ts, called by plain name
 // - casts to the scalar types in sql-functions.ts, and arrays of them
-// - relations outside pg_catalog, information_schema and pg_*
+// - relations outside pg_catalog and pg_*. information_schema is readable
+//   for schema discovery (information_schema.columns and friends), except
+//   its internal _pg_* views and the views about foreign servers, foreign
+//   data wrappers, foreign tables and user mappings (INFORMATION_SCHEMA_DENIED),
+//   which show FDW options, remote hosts and, for user mappings, passwords.
+//   Those names are refused unqualified too, because an unqualified name
+//   resolves to the view when search_path includes information_schema.
+//   routines.routine_definition and views.view_definition stay readable:
+//   Postgres fills them only for objects the querying role owns, so they show
+//   nothing the role could not already read from its own schema.
 // - $n parameters numbered contiguously from $1
 //
 // What is refused: INTO, FOR UPDATE/SHARE (any locking clause), LATERAL over a
@@ -64,6 +81,7 @@ export const SQL_REFUSAL_CODES = [
   'SET_RETURNING_FUNCTION',
   'CAST_NOT_ALLOWED',
   'CATALOG_RELATION',
+  'EXPLAIN_OPTION',
   'BAD_PARAM',
   'PARSE_ERROR',
 ] as const;
@@ -79,6 +97,9 @@ export type SqlAllowed = {
   aggregateOnly: boolean;
   // Highest $n used; the caller must bind exactly this many params.
   paramCount: number;
+  // Set when the statement is EXPLAIN of a SELECT. The caller must run the
+  // text as it is: a row-cap wrapper around EXPLAIN is not valid SQL.
+  explain?: { analyze: boolean };
 };
 export type SqlRefused = { ok: false; code: SqlRefusalCode; message: string };
 export type SqlCheck = SqlAllowed | SqlRefused;
@@ -86,7 +107,42 @@ export type SqlCheck = SqlAllowed | SqlRefused;
 export const MAX_SQL_LENGTH = 20_000;
 
 const DML_STATEMENTS = new Set(['InsertStmt', 'UpdateStmt', 'DeleteStmt', 'MergeStmt']);
-const CATALOG_SCHEMAS = new Set(['pg_catalog', 'information_schema']);
+const INFORMATION_SCHEMA = 'information_schema';
+// information_schema views that stay refused, by lowercase name: the foreign
+// server, wrapper, table and user mapping views (FDW options, remote hosts,
+// passwords). Every internal _pg_* view is refused as well.
+const INFORMATION_SCHEMA_DENIED: ReadonlySet<string> = new Set([
+  'column_options',
+  'foreign_data_wrapper_options',
+  'foreign_data_wrappers',
+  'foreign_server_options',
+  'foreign_servers',
+  'foreign_table_options',
+  'foreign_tables',
+  'user_mapping_options',
+  'user_mappings',
+]);
+const INFORMATION_SCHEMA_INTERNAL_PREFIX = '_pg_';
+
+// EXPLAIN options, by the lowercase name the parser produces. The value is
+// the set of accepted arguments; booleans also accept no argument, 0 and 1.
+// Postgres takes only these words for an EXPLAIN boolean (not yes or no).
+const BOOLEAN_ARGS: ReadonlySet<string> = new Set(['true', 'false', 'on', 'off']);
+const EXPLAIN_OPTIONS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ['analyze', BOOLEAN_ARGS],
+  ['verbose', BOOLEAN_ARGS],
+  ['costs', BOOLEAN_ARGS],
+  ['settings', BOOLEAN_ARGS],
+  ['generic_plan', BOOLEAN_ARGS],
+  ['buffers', BOOLEAN_ARGS],
+  ['wal', BOOLEAN_ARGS],
+  ['timing', BOOLEAN_ARGS],
+  ['summary', BOOLEAN_ARGS],
+  ['memory', BOOLEAN_ARGS],
+  ['serialize', new Set(['none', 'text', 'binary'])],
+  ['format', new Set(['text', 'json', 'yaml', 'xml'])],
+]);
+const NON_BOOLEAN_OPTIONS: ReadonlySet<string> = new Set(['serialize', 'format']);
 const ID_PARTS = new Set(['phone', 'mobile', 'email', 'utr', 'cif']);
 
 class Refusal {
@@ -137,14 +193,30 @@ function check(sql: string): SqlAllowed {
 
   const first = stmts[0];
   const root = isObject(first) ? first.stmt : undefined;
-  const [kind, select] = isObject(root) ? (Object.entries(root)[0] ?? []) : [];
-  if (kind !== 'SelectStmt' || !isObject(select)) {
+  const [kind, body] = isObject(root) ? (Object.entries(root)[0] ?? []) : [];
+  if (kind === 'ExplainStmt' && isObject(body)) {
+    const analyze = checkExplainOptions(body.options);
+    const [innerKind, inner] = isObject(body.query) ? (Object.entries(body.query)[0] ?? []) : [];
+    if (innerKind !== 'SelectStmt' || !isObject(inner)) {
+      if (innerKind !== undefined && DML_STATEMENTS.has(innerKind)) {
+        refuse('NOT_SELECT', 'EXPLAIN may wrap only a SELECT; EXPLAIN ANALYZE would run the write. If a write is needed, recommend it in the report instead.');
+      }
+      refuse('UTILITY', 'EXPLAIN may wrap only a SELECT; CREATE TABLE AS, EXECUTE, DECLARE and other statements are refused.');
+    }
+    return { ...checkSelect(inner), explain: { analyze } };
+  }
+  if (kind !== 'SelectStmt' || !isObject(body)) {
     if (kind !== undefined && DML_STATEMENTS.has(kind)) {
       refuse('NOT_SELECT', 'only SELECT is allowed. If a write is needed, recommend it in the report instead.');
     }
-    refuse('UTILITY', 'only SELECT is allowed; SET, SHOW, EXPLAIN, COPY, DDL and other statements are refused.');
+    refuse('UTILITY', 'only SELECT or EXPLAIN of a SELECT is allowed; SET, SHOW, COPY, DDL and other statements are refused.');
   }
+  return checkSelect(body);
+}
 
+// The checks for one SelectStmt node. A bare SELECT and the SELECT inside an
+// EXPLAIN both come through here, so EXPLAIN never gets a weaker path.
+function checkSelect(select: JsonObject): SqlAllowed {
   const walker = new Walker();
   walker.walk(select);
   const paramCount = walker.paramCount();
@@ -158,6 +230,48 @@ function check(sql: string): SqlAllowed {
     aggregateOnly: isAggregateOnly(select),
     paramCount,
   };
+}
+
+// Checks the EXPLAIN option list and returns whether ANALYZE is on. The bare
+// form (EXPLAIN ANALYZE VERBOSE) arrives as the same DefElem list.
+function checkExplainOptions(options: Json | undefined): boolean {
+  let analyze = false;
+  for (const item of Array.isArray(options) ? options : []) {
+    const def = isObject(item) && isObject(item.DefElem) ? item.DefElem : undefined;
+    const name = typeof def?.defname === 'string' ? def.defname : '';
+    const accepted = EXPLAIN_OPTIONS.get(name);
+    if (def === undefined || accepted === undefined) {
+      refuse('EXPLAIN_OPTION', `EXPLAIN option ${name || '(unknown)'} is not allowed; use ANALYZE, VERBOSE, COSTS, SETTINGS, BUFFERS, WAL, TIMING, SUMMARY, MEMORY, SERIALIZE or FORMAT.`);
+    }
+    const on = explainArg(name, def.arg, accepted);
+    if (name === 'analyze') analyze = on;
+  }
+  return analyze;
+}
+
+// Reads one option argument. Returns whether a boolean option is on; the
+// value is ignored for FORMAT and SERIALIZE.
+function explainArg(name: string, arg: Json | undefined, accepted: ReadonlySet<string>): boolean {
+  const bad = (): never => refuse('EXPLAIN_OPTION', `EXPLAIN option ${name} has a value that is not allowed.`);
+  if (arg === undefined) {
+    if (NON_BOOLEAN_OPTIONS.has(name)) bad();
+    return true;
+  }
+  if (!isObject(arg)) bad();
+  const node = arg as JsonObject;
+  if (isObject(node.String) && typeof node.String.sval === 'string') {
+    const value = node.String.sval.toLowerCase();
+    if (!accepted.has(value)) bad();
+    return value !== 'false' && value !== 'off';
+  }
+  if (NON_BOOLEAN_OPTIONS.has(name)) bad();
+  if (isObject(node.Integer)) {
+    const n = node.Integer.ival ?? 0;
+    if (n !== 0 && n !== 1) bad();
+    return n === 1;
+  }
+  if (isObject(node.Boolean)) return node.Boolean.boolval === true;
+  return bad();
 }
 
 // The parser drops empty statements, so 'SELECT 1;;' parses as one. The scanner
@@ -288,11 +402,16 @@ class Walker {
     const rel = typeof node.relname === 'string' ? node.relname : '';
     const catalog = typeof node.catalogname === 'string' ? node.catalogname : undefined;
     const schemaLower = schema?.toLowerCase();
+    const relLower = rel.toLowerCase();
+    if ((schemaLower !== undefined && schemaLower.startsWith('pg_')) || relLower.startsWith('pg_')) {
+      refuse('CATALOG_RELATION', 'system catalogs (pg_catalog, pg_*) are not readable; use information_schema.columns or information_schema.tables to look up a schema.');
+    }
+    const infoSchemaOrUnqualified = schemaLower === undefined || schemaLower === INFORMATION_SCHEMA;
     if (
-      (schemaLower !== undefined && (CATALOG_SCHEMAS.has(schemaLower) || schemaLower.startsWith('pg_'))) ||
-      rel.toLowerCase().startsWith('pg_')
+      infoSchemaOrUnqualified &&
+      (INFORMATION_SCHEMA_DENIED.has(relLower) || relLower.startsWith(INFORMATION_SCHEMA_INTERNAL_PREFIX))
     ) {
-      refuse('CATALOG_RELATION', 'system catalogs (pg_catalog, information_schema, pg_*) are not readable.');
+      refuse('CATALOG_RELATION', `information_schema.${rel} is not readable; use information_schema.columns or information_schema.tables.`);
     }
     const name = [catalog, schema, rel].filter((p) => p !== undefined).join('.');
     this.relations.push({ name, qualified: schema !== undefined });

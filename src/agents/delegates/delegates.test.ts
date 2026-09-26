@@ -29,7 +29,9 @@ const RUN = 'run_delegates_0001';
 const FAKE_ENC_KEY = 'QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB';
 
 const CODE_TOOLS = ['code_explore', 'code_impact', 'code_node', 'repo_grep', 'repo_read'];
-const BASE_TOOLS = ['http_call', 'logs_search', 'note_evidence', 'sql_select'];
+const REPO_TOOLS = ['repo_grep', 'repo_read'];
+const CODEGRAPH_TOOLS = ['code_explore', 'code_impact', 'code_node'];
+const BASE_TOOLS = ['http_call', 'logs_search', 'note_evidence', 'sql_select', ...REPO_TOOLS];
 const SSFB_ALWAYS = ['detect_silent_reversals', 'get_account_statement'];
 const SSFB_FLAGGED = ['cbs_call', 'decrypt_fields', 'encrypt_lookup_value'];
 const ENTITY_IO = ['sql_select', 'http_call', 'logs_search'];
@@ -170,14 +172,15 @@ describe('tool sets (mock mode, credentials blank)', () => {
       }
     });
 
-    test(`${label}: deep set is the normal set plus the code tools, no duplicates`, () => {
+    test(`${label}: both variants mount repo_grep and repo_read; deep adds the CodeGraph tools, no duplicates`, () => {
       const env = envOf(home({ flags }));
       for (const e of ENTITIES) {
         const normal = namesOf(investigatorMounts(e, RUN, { env }).tools);
         const deep = namesOf(investigatorMounts(e, RUN, { env, deep: true }).tools);
         expect(new Set(deep).size).toBe(deep.length);
-        expect(sorted(deep)).toEqual(sorted([...normal, ...CODE_TOOLS]));
-        for (const name of CODE_TOOLS) expect(normal).not.toContain(name);
+        expect(sorted(deep)).toEqual(sorted([...normal, ...CODEGRAPH_TOOLS]));
+        for (const name of REPO_TOOLS) expect(normal).toContain(name);
+        for (const name of CODEGRAPH_TOOLS) expect(normal).not.toContain(name);
       }
     });
 
@@ -206,14 +209,36 @@ describe('tool sets (mock mode, credentials blank)', () => {
     });
   }
 
-  test('with TRIAGE_REPOS_DIR blank the deep variant drops repo_read and repo_grep but keeps the rest', () => {
+  test('with TRIAGE_REPOS_DIR blank both variants drop repo_read and repo_grep; deep keeps CodeGraph', () => {
     const h = makeTestHome({ overrides: { MODEL_TIER_STRONG: STRONG, TRIAGE_REPOS_DIR: '' } });
     homes.push(h);
     const env = envOf(h);
+    const normal = namesOf(investigatorMounts('atspl', RUN, { env }).tools);
     const deep = namesOf(investigatorMounts('atspl', RUN, { env, deep: true }).tools);
-    expect(deep).not.toContain('repo_read');
-    expect(deep).not.toContain('repo_grep');
+    for (const name of REPO_TOOLS) {
+      expect(normal).not.toContain(name);
+      expect(deep).not.toContain(name);
+    }
+    expect(sorted(normal)).toEqual(sorted(ENTITY_IO.concat('note_evidence')));
     expect(deep).toContain('code_explore');
+  });
+
+  test('an investigator repo list holds only its entity pins: rtl gets workflow-op, not harbor', () => {
+    const env = envOf(home());
+    const repoInput = (e: Entity, deep: boolean): string[] => {
+      const tool = investigatorMounts(e, RUN, { env, deep }).tools.find((t) => t.name === 'repo_read');
+      const repo = (tool?.input as { entries?: { repo?: { options?: string[] } } } | undefined)?.entries?.repo;
+      return [...(repo?.options ?? [])];
+    };
+    for (const deep of [false, true]) {
+      const rtl = repoInput('rtl', deep);
+      expect(rtl).toContain('workflow-op');
+      expect(rtl).toContain('banking-service');
+      expect(rtl).not.toContain('harbor');
+      expect(rtl).not.toContain('prod-ssfb-aspora-argo');
+      expect(repoInput('ssfb', deep)).toContain('harbor');
+      expect(repoInput('ssfb', deep)).not.toContain('banking-service');
+    }
   });
 });
 
@@ -265,8 +290,10 @@ describe('delegate body', () => {
     const text = render(def);
     expect(sorted(namesOf(hooks.tools))).toEqual(sorted([...BASE_TOOLS, ...SSFB_ALWAYS]));
     const skillNames = hooks.skills.map((s) => s.name);
-    expect(skillNames.length).toBeGreaterThan(0);
-    for (const name of skillNames) expect(name.startsWith('ssfb-')).toBe(true);
+    expect(skillNames.length).toBeGreaterThan(1);
+    expect(skillNames).toContain('repo-map');
+    expect(skillNames).not.toContain('codegraph-limits');
+    for (const name of skillNames.filter((n) => n !== 'repo-map')) expect(name.startsWith('ssfb-')).toBe(true);
     expect(skillNames).not.toContain('ssfb-overview');
     expect(text).toContain('# Investigator');
     expect(text).toContain('# Logs');
@@ -279,10 +306,25 @@ describe('delegate body', () => {
     const env = envOf(home());
     for (const e of ENTITIES) {
       const mounts = investigatorMounts(e, RUN, { env });
-      for (const s of mounts.skills) expect(s.name.startsWith(`${e}-`)).toBe(true);
+      for (const s of mounts.skills.filter((x) => x.name !== 'repo-map')) expect(s.name.startsWith(`${e}-`)).toBe(true);
       for (const other of ENTITIES.filter((x) => x !== e)) {
         expect(mounts.instructions).not.toContain(`# ${other.toUpperCase()} logs`);
       }
+    }
+  });
+
+  test('the deep variant also mounts codegraph-limits; both carry the fallback order', () => {
+    const env = envOf(home());
+    const deep = investigatorMounts('rtl', RUN, { env, deep: true });
+    const normal = investigatorMounts('rtl', RUN, { env });
+    expect(deep.skills.map((s) => s.name)).toEqual(expect.arrayContaining(['repo-map', 'codegraph-limits']));
+    expect(normal.skills.map((s) => s.name)).not.toContain('codegraph-limits');
+    for (const m of [normal, deep]) {
+      expect(m.instructions).toContain('## When a source fails or lacks the data');
+      const order = ['Read the error', 'Look it up in the code', 'Try another rung', 'Only then record the gap'];
+      const at = order.map((phrase) => m.instructions.indexOf(phrase));
+      expect(at.every((i) => i >= 0)).toBe(true);
+      expect([...at].sort((a, b) => a - b)).toEqual(at);
     }
   });
 

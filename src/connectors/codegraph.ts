@@ -31,6 +31,7 @@ import {
   type SyncOnce,
 } from '../ops/codegraph.ts';
 import { currentCommit } from '../ops/repos.ts';
+import { safeErrorText } from './error-text.ts';
 import type { ExecRunner } from './exec.ts';
 import { ConnectorError } from './types.ts';
 
@@ -100,6 +101,8 @@ export type CodeQueryResult = {
   readonly commit: string | null;
   /** Set when codegraph exited non-zero; the output may explain why. */
   readonly exit_code?: number;
+  /** With exit_code: an excerpt of codegraph's stderr, repo paths made relative. */
+  readonly error?: string;
 };
 
 export type CodegraphConnector = {
@@ -119,6 +122,9 @@ export type CodegraphConnectorDeps = {
 export function codegraphBinBlank(config: Config): boolean {
   return rawKeyState(config, CODEGRAPH_BIN_KEY) === 'empty' || config.code.codegraphBin.trim() === '';
 }
+
+/** Characters of stderr kept when codegraph exits non-zero. */
+const STDERR_CHARS = 1000;
 
 function notConfigured(message: string): ConnectorError {
   return new ConnectorError('not_configured', message);
@@ -172,6 +178,9 @@ export function createCodegraphConnector(deps: CodegraphConnectorDeps): Codegrap
         truncated: res.truncated,
         commit: head.status === 'ok' ? head.commit : null,
         ...(res.exitCode !== 0 ? { exit_code: res.exitCode ?? -1 } : {}),
+        ...(res.exitCode !== 0 && res.stderr.trim() !== ''
+          ? { error: safeErrorText(relativise(res.stderr, r.dir), [], STDERR_CHARS) }
+          : {}),
       });
     },
   });

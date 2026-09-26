@@ -1,5 +1,14 @@
 import { describe, expect, test } from 'bun:test';
-import { MAX_TIMEOUT_MS, buildReadOnlyTxn, readOnlyConnectionOptions, wrapWithCap } from './sql-txn.ts';
+import { ALLOW_CASES } from './sql-cases.ts';
+import { validateSelect } from './sql.ts';
+import {
+  MAX_TIMEOUT_MS,
+  buildReadOnlyTxn,
+  explainStatement,
+  readOnlyConnectionOptions,
+  skipLeadingComments,
+  wrapWithCap,
+} from './sql-txn.ts';
 
 const WRAPPED = 'SELECT * FROM (SELECT 1\n) _capped LIMIT $1';
 
@@ -117,6 +126,62 @@ describe('wrapWithCap', () => {
       expect(() => wrapWithCap('SELECT 1', bad)).toThrow(RangeError);
     });
   }
+});
+
+describe('explainStatement', () => {
+  test('runs the EXPLAIN unwrapped, inside the same read-only transaction and timeouts', () => {
+    const text = explainStatement('  EXPLAIN (ANALYZE, BUFFERS) SELECT a FROM t WHERE b = $1 ;\n; ');
+    expect(text).toBe('EXPLAIN (ANALYZE, BUFFERS) SELECT a FROM t WHERE b = $1');
+    expect(buildReadOnlyTxn({ statementTimeoutMs: 30000, lockTimeoutMs: 2000 }, text)).toEqual([
+      'BEGIN READ ONLY',
+      'SET LOCAL statement_timeout = 30000',
+      'SET LOCAL lock_timeout = 2000',
+      'EXPLAIN (ANALYZE, BUFFERS) SELECT a FROM t WHERE b = $1',
+      'COMMIT',
+    ]);
+  });
+
+  test('refuses text that is not an EXPLAIN', () => {
+    expect(() => explainStatement('SELECT 1')).toThrow(RangeError);
+    expect(() => explainStatement('explained')).toThrow(RangeError);
+    expect(() => explainStatement('/* EXPLAIN */ SELECT 1')).toThrow(RangeError);
+    expect(() => explainStatement('-- EXPLAIN SELECT 1')).toThrow(RangeError);
+    expect(() => explainStatement('/* unclosed EXPLAIN SELECT 1')).toThrow(RangeError);
+    expect(() => explainStatement(42 as unknown as string)).toThrow(TypeError);
+  });
+
+  test('accepts leading comments and keeps them in the text that runs', () => {
+    expect(explainStatement('/* x */ EXPLAIN SELECT 1')).toBe('/* x */ EXPLAIN SELECT 1');
+    expect(explainStatement('-- hi\nEXPLAIN ANALYZE SELECT 1;')).toBe('-- hi\nEXPLAIN ANALYZE SELECT 1');
+    expect(explainStatement('/* a /* b */ c */ explain select 1')).toBe('/* a /* b */ c */ explain select 1');
+  });
+
+  test('agrees with the gate: every admitted EXPLAIN builds, and every admitted plain SELECT does not', () => {
+    for (const c of ALLOW_CASES) {
+      const check = validateSelect(c.sql);
+      expect([c.name, check.ok]).toEqual([c.name, true]);
+      if (!check.ok) continue;
+      if (check.explain !== undefined) {
+        expect([c.name, explainStatement(c.sql)]).toEqual([c.name, c.sql.trim().replace(/[\s;]+$/, '')]);
+      } else {
+        expect(() => explainStatement(c.sql)).toThrow(RangeError);
+      }
+    }
+  });
+});
+
+describe('skipLeadingComments', () => {
+  test('drops whitespace, line comments and nested block comments at the start only', () => {
+    expect(skipLeadingComments('  \n\tSELECT 1')).toBe('SELECT 1');
+    expect(skipLeadingComments('-- a\r-- b\nSELECT 1 -- c')).toBe('SELECT 1 -- c');
+    expect(skipLeadingComments('/* a /* b */ still a */SELECT /* d */ 1')).toBe('SELECT /* d */ 1');
+    expect(skipLeadingComments('SELECT 1')).toBe('SELECT 1');
+  });
+
+  test('an unclosed comment leaves nothing', () => {
+    expect(skipLeadingComments('/* a /* b */ SELECT 1')).toBe('');
+    expect(skipLeadingComments('-- only a comment')).toBe('');
+  });
 });
 
 describe('readOnlyConnectionOptions', () => {

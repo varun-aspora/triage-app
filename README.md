@@ -37,6 +37,7 @@ Mock mode is the default (`TRIAGE_MOCK_MODE=true`, `TRIAGE_MOCK_STRICT=true`): e
 | `bun run build` | `vite build` into `dist/`, then the web console into `web/dist/`. Not needed to run the CLI or the server, which run from `src/` |
 | `bun run build:web` | Builds only the web console, which the server serves at `/ui/` |
 | `bun run dev:web` | The web console on Vite's dev server (port 5173), proxying the API to `localhost:3000` |
+| `bun run serve:web` | Builds the web console and serves the build on port 5173 with the same proxy, without reloading on file changes |
 | `bun run test:web` | Unit tests for the web console (`bun test ./web/src`) |
 | `bun run ci` | Typecheck, unit tests, contract suite and classifier suite against a temp eval home |
 | `bun run triage -- <command>` | The CLI: `run`, `start`, `wait`, `status`, `ask`, `post`, `feedback`, `doctor`, `preflight`, `tunnel`, `repos sync`, `models refresh`, `fixtures review`, `runs`, `evals` |

@@ -11,8 +11,15 @@
 // group_by runs `qw search` projected to the group field and the groups are
 // counted here. When Quickwit matched more hits than qw returned, the groups
 // are partial and truncated is set.
+//
+// A failed qw call keeps an excerpt of its stderr, with URLs and addresses
+// taken out, so the model sees why. stderr that says the login or its token
+// refresh failed is an outage (checked first: a token refresh answered with
+// '400 Bad Request: invalid_grant' is not a bad query); stderr that says the
+// query was rejected makes the error a refusal the model can fix.
 import { assertQwSafe, QwArgError, type LogsQueryMode } from '../../gate/quickwit.ts';
 import type { ExecResult, ExecRunner } from '../exec.ts';
+import { safeErrorText, scrubSecrets, stripAddresses } from '../error-text.ts';
 import { ConnectorError, MAX_EXEC_OUTPUT_BYTES } from '../types.ts';
 import type { LogGroup, LogHit, TransportResult } from './client.ts';
 
@@ -37,9 +44,32 @@ export type QwSearchRequest = {
 /** Every flag the qw transport may put into argv. Anything else in argv is a value. */
 export const QW_FLAGS: ReadonlySet<string> = new Set(['--since', '--max-hits', '-o', '--fields', '--context']);
 
+/** Where stderr says Quickwit rejected the query itself, so the model can fix it. */
+const QUERY_REJECTED = /\b(?:http|status(?: code)?):? ?400\b|bad request|failed to parse|parse error|syntax error|invalid query|query parser|unknown field|field .{0,80}does not exist|no field named/i;
+
+const STDERR_CHARS = 1000;
+
+/**
+ * ": <stderr excerpt>" with URLs, addresses, tokens and the qw binary path
+ * taken out, or ''. The context name stays: our own message names it.
+ */
+function stderrExcerpt(stderr: string, req: QwSearchRequest): string {
+  const safe = safeErrorText(stripAddresses(scrubSecrets(stderr, [req.bin])), [], STDERR_CHARS);
+  return safe === '' ? '' : `: ${safe}`;
+}
+
 /** Where stderr says the context has no usable login. */
 const NOT_LOGGED_IN =
   /not logged in|no (?:cached |valid )?token|token (?:has )?expired|login required|run [`'"]?qw login|unauthenticated|401 unauthorized/i;
+
+/**
+ * Where stderr says the login is there but did not work: an OIDC token
+ * refresh that failed, a revoked grant, a 401 or 403. Checked before
+ * QUERY_REJECTED, since these often carry "400 Bad Request" too.
+ */
+// "token" alone is not enough: a query parser says "unexpected token".
+const AUTH_FAILED =
+  /invalid_grant|invalid_token|invalid_client|\boidc\b|\bunauthori[sz]ed\b|\bforbidden\b|\b(?:http|status(?: code)?):? ?40[13]\b|\b40[13] (?:unauthori[sz]ed|forbidden)\b|\b(?:(?:refresh|access|id) token|token refresh|refresh(?:ing)?(?: the)? token|auth(?:entication|orization)?|login|sso)\b.{0,20}\b(?:failed|failure|error|expired|revoked|invalid|denied|rejected)\b/i;
 
 function val(value: string): string {
   assertQwSafe(value);
@@ -118,8 +148,20 @@ function checkResult(result: ExecResult, req: QwSearchRequest, sub: string): voi
         `qw is not logged in for context ${req.context}; run qw login --context ${req.context} on the host`,
       );
     }
-    // stderr is left out: it can name the endpoint behind the context.
-    throw new ConnectorError('unreachable', `qw ${sub} failed with exit code ${String(result.exitCode)}`);
+    // stderr is kept with URLs, addresses and tokens taken out: it can name
+    // the endpoint behind the context. A failed login is an outage like a
+    // missing one; a rejected query is a refusal the model can fix.
+    const said = stderrExcerpt(result.stderr, req);
+    if (AUTH_FAILED.test(result.stderr)) {
+      throw new ConnectorError(
+        'unreachable',
+        `qw could not authenticate for context ${req.context}; run qw login --context ${req.context} on the host${said}`,
+      );
+    }
+    if (QUERY_REJECTED.test(result.stderr)) {
+      throw new ConnectorError('refused', `Quickwit rejected the qw ${sub} query (exit code ${String(result.exitCode)})${said}`);
+    }
+    throw new ConnectorError('unreachable', `qw ${sub} failed with exit code ${String(result.exitCode)}${said}`);
   }
 }
 

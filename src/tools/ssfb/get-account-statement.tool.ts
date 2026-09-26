@@ -23,6 +23,7 @@
 import type { FlueLogger } from '@flue/runtime';
 import { defineTool, type ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
+import { safeErrorText, stripAddresses } from '../../connectors/error-text.ts';
 import type { HttpConnector } from '../../connectors/http/client.ts';
 import type { MockPort } from '../../connectors/mock.ts';
 import type { SqlConnector } from '../../connectors/sql/pg-client.ts';
@@ -288,6 +289,29 @@ export type FetchStatementArgs = {
   readonly signal: AbortSignal;
 };
 
+/** Most characters of a non-2xx page body kept in the error. */
+const ERROR_BODY_CHARS = 300;
+
+/**
+ * ": <excerpt>" of a non-2xx page body (rhythm's own reason), scrubbed of
+ * credentials, URLs and addresses and capped, or ''. The tool pipeline then
+ * applies the model-facing redaction to the whole result.
+ */
+function bodyExcerpt(body: unknown): string {
+  let text: string;
+  if (typeof body === 'string') text = body;
+  else if (body === undefined || body === null) return '';
+  else {
+    try {
+      text = JSON.stringify(body) ?? '';
+    } catch {
+      return '';
+    }
+  }
+  const safe = safeErrorText(stripAddresses(text), [], ERROR_BODY_CHARS);
+  return safe === '' ? '' : `: ${safe}`;
+}
+
 function statusError(status: number): boolean {
   return status < 200 || status >= 300;
 }
@@ -360,7 +384,7 @@ export function readStatement(value: unknown, tool: string): StatementRead {
   let truncated = false;
   for (const page of fetch.pages) {
     if (statusError(page.status)) {
-      error = `rhythm answered HTTP ${page.status} on page ${page.page}`;
+      error = `rhythm answered HTTP ${page.status} on page ${page.page}${bodyExcerpt(page.body)}`;
       break;
     }
     if (page.truncated) {

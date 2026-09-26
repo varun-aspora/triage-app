@@ -28,7 +28,7 @@ import { AskForm, SlackPostPanel } from './RunForms.tsx';
 import { StepsPanel } from './RunSteps.tsx';
 import { VerdictPanel } from './RunVerdict.tsx';
 import { verdictLabel } from './verdict-logic.ts';
-import { ClassificationPanel, Dash, EvidencePanel, IdChainPanel, KV, PhaseStepper, RunHeader, UsagePanel } from './RunParts.tsx';
+import { ClassificationPanel, Dash, EvidencePanel, IdChainPanel, KV, PhaseStepper, RequestPanel, RunHeader, UsagePanel } from './RunParts.tsx';
 import { blockedSteps, deriveInvestigators, followUpPending, inferFailure, investigatorLook, permalinkHref, runningSteps, submissionCost } from './run-logic.ts';
 import './runs.css';
 
@@ -162,6 +162,7 @@ function RunningView({ run, refreshError, onChanged }: { run: RunDetail; refresh
           <StepsPanel runId={run.run_id} live />
         </div>
         <aside className="runs-side">
+          <RequestPanel run={run} />
           {run.id_chain !== null && <IdChainPanel chain={run.id_chain} />}
           {run.classification !== null && <ClassificationPanel decision={run.classification} full={false} />}
           <UsagePanel usage={run.usage} running now={now} />
@@ -210,6 +211,7 @@ function BlockedView({
           <StepsPanel runId={run.run_id} live={false} />
         </div>
         <aside className="runs-side">
+          <RequestPanel run={run} />
           {run.id_chain !== null && <IdChainPanel chain={run.id_chain} />}
           {run.classification !== null && <ClassificationPanel decision={run.classification} full={false} />}
           <UsagePanel usage={run.usage} running={false} now={now} />
@@ -298,6 +300,7 @@ function FailedView({
           <StepsPanel runId={run.run_id} live={false} />
         </div>
         <aside className="runs-side">
+          <RequestPanel run={run} />
           {run.id_chain !== null && <IdChainPanel chain={run.id_chain} />}
           {run.classification !== null && <ClassificationPanel decision={run.classification} full={false} />}
           <UsagePanel usage={run.usage} running={false} now={now} />
@@ -431,7 +434,10 @@ function CompletedView({
                 The run finished without a stored report. The Request tab shows what was asked.
               </Notice>
             </div>
-            <aside className="runs-side">{usagePanel}</aside>
+            <aside className="runs-side">
+              <RequestPanel run={run} />
+              {usagePanel}
+            </aside>
           </div>
         ) : (
           <div className="runs-cols">
@@ -449,6 +455,7 @@ function CompletedView({
               <SlackPostPanel />
             </div>
             <aside className="runs-side">
+              <RequestPanel run={run} />
               <ClassificationPanel decision={report.classification} full />
               <IdChainPanel chain={report.id_chain} />
               <EvidencePanel report={report} />
@@ -561,7 +568,7 @@ function RequestTab({ run }: { run: RunDetail }) {
   return (
     <div className="runs-cols">
       <div className="runs-main">
-        <Panel title="Request" description="What was asked and how. The stored thread is redacted, so it is not shown here.">
+        <Panel title="Request" description="What was asked and how.">
           <KV k="Current ask">{run.current_ask ?? <Dash />}</KV>
           <KV k="Requested by">{run.requested_by}</KV>
           <KV k="Sent from">{run.interface}</KV>
@@ -642,9 +649,10 @@ function RequestTab({ run }: { run: RunDetail }) {
         <BlockHistoryPanel history={blockHistory(run)} />
         <PreflightWarnings run={run} />
       </div>
-      {run.id_chain !== null && (
+      {(run.request !== undefined || run.id_chain !== null) && (
         <aside className="runs-side">
-          <IdChainPanel chain={run.id_chain} />
+          <RequestPanel run={run} />
+          {run.id_chain !== null && <IdChainPanel chain={run.id_chain} />}
         </aside>
       )}
     </div>

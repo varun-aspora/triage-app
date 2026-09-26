@@ -3,7 +3,7 @@ import type { ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
 import { releaseEscalation } from '../../src/agents/escalation.ts';
 import type { Config } from '../../src/config/env.ts';
-import type { RunSelectInput, SqlConnector, SqlSelectOutcome } from '../../src/connectors/sql/pg-client.ts';
+import { type RunSelectInput, type SqlConnector, type SqlSelectOutcome, SqlStateError } from '../../src/connectors/sql/pg-client.ts';
 import { ConnectorError, envVarName } from '../../src/connectors/types.ts';
 import { createMemoryAuditSink, type MemoryAuditSink } from '../../src/gate/audit-sink.ts';
 import { createRunBudget, releaseRunBudget } from '../../src/gate/budget.ts';
@@ -256,6 +256,10 @@ describe('sql_select: non-SELECT forms are refused before any I/O', () => {
     ['RESET', 'RESET statement_timeout', []],
     ['SHOW', 'SHOW statement_timeout', []],
     ['data-modifying CTE', 'WITH d AS (DELETE FROM delivery_requests WHERE id = $1 RETURNING id) SELECT * FROM d', [CUSTOMER]],
+    ['EXPLAIN ANALYZE DELETE', 'EXPLAIN ANALYZE DELETE FROM delivery_requests WHERE id = $1', [CUSTOMER]],
+    ['EXPLAIN ANALYZE of a data-modifying CTE', 'EXPLAIN ANALYZE WITH d AS (DELETE FROM delivery_requests RETURNING id) SELECT * FROM d', []],
+    ['EXPLAIN ANALYZE SELECT INTO', 'EXPLAIN ANALYZE SELECT * INTO t2 FROM delivery_requests', []],
+    ['EXPLAIN ANALYZE then a second statement', 'EXPLAIN ANALYZE SELECT 1; DELETE FROM delivery_requests', []],
   ];
 
   for (const mode of ['real', 'mock'] as const) {
@@ -287,6 +291,16 @@ describe('sql_select: non-SELECT forms are refused before any I/O', () => {
     expect(env.output.message).toStartWith('Refused: system catalogs');
     expect(h.sql.calls).toHaveLength(0);
     expect(h.audit.lines.map((l) => l.decision)).toEqual(['deny']);
+  });
+
+  test('a query that cannot be wrapped says why', async () => {
+    // A statement timeout above the wrapper's ceiling makes buildReadOnlyTxn throw.
+    const h = setup({ env: { ...REAL, TRIAGE_SQL_STATEMENT_TIMEOUT_MS: '4000000' } });
+    const env = await call(h, { service: 'package', sql: SELECT_ONE, params: [CUSTOMER] });
+    expect(env.output.status).toBe('refused');
+    expect(env.output.message).toContain('could not be wrapped for a read-only run (buildReadOnlyTxn: statementTimeoutMs must be an integer from 1 to 3600000)');
+    expect(h.audit.lines.at(-1)!.reason).toContain('sql: wrap failed (RangeError): buildReadOnlyTxn: statementTimeoutMs');
+    expect(h.sql.calls).toHaveLength(0);
   });
 
   test('a $n count that does not match params is refused', async () => {
@@ -421,6 +435,21 @@ describe('sql_select: mock mode', () => {
     expect(keyString(got.key as never)).toBe(keyString(expected));
   });
 
+  test('an EXPLAIN has its own fixture key, and a miss is no data rather than the SELECT rows', async () => {
+    const h = setup({ env: { TRIAGE_MOCK_STRICT: 'false' } });
+    await call(h, { service: 'package', sql: SELECT_ONE, params: [CUSTOMER] });
+    await call(h, { service: 'package', sql: `EXPLAIN ${SELECT_ONE}`, params: [CUSTOMER] });
+    const env = await call(h, { service: 'package', sql: `/* plan */ EXPLAIN ANALYZE ${SELECT_ONE}`, params: [CUSTOMER] });
+    const keys = h.storeKeys.map((k) => keyString(k.key as never));
+    expect(new Set(keys).size).toBe(3);
+    expect((h.storeKeys[1]!.key as { explain?: string }).explain).toBe('plan');
+    expect((h.storeKeys[2]!.key as { explain?: string }).explain).toBe('analyze');
+    expect((h.storeKeys[0]!.key as { explain?: string }).explain).toBeUndefined();
+    expect(env.output.status).toBe('refused');
+    expect(env.output.message).toContain('No sql_select fixture');
+    expect(h.sql.calls).toHaveLength(0);
+  });
+
   test('rows beyond TRIAGE_SQL_MAX_ROWS are cut and truncated is true', async () => {
     const rows = [row(1), row(2), row(3), row(4), row(5)];
     const h = setup({ fixtureResult: { rows } });
@@ -491,11 +520,91 @@ describe('sql_select: real mode', () => {
     expect(dataOf(env).rows).toHaveLength(3);
   });
 
-  test('a connector refusal comes back as refused without the connector message', async () => {
+  test('an EXPLAIN runs unwrapped in the same read-only plan, with no cap parameter', async () => {
+    const plan = [{ 'QUERY PLAN': 'Index Scan using delivery_requests_ref on delivery_requests' }];
+    const h = setup({ env: REAL, sql: fakeSql(plan) });
+    const sql = `EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) ${SELECT_ONE};`;
+    const env = await call(h, { service: 'package', sql, params: [CUSTOMER] });
+    expect(env.output.status).toBe('ok');
+    const input = h.sql.calls[0]!;
+    expect(input.plan).toEqual([
+      'BEGIN READ ONLY',
+      `SET LOCAL statement_timeout = ${h.config.sql.statementTimeoutMs}`,
+      `SET LOCAL lock_timeout = ${h.config.sql.lockTimeoutMs}`,
+      `EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) ${SELECT_ONE}`,
+      'COMMIT',
+    ]);
+    expect(input.params).toEqual([CUSTOMER]);
+    expect(dataOf(env).rows).toEqual(plan);
+    expect(h.audit.lines[0]!.summary_redacted).toContain('explain_analyze');
+  });
+
+  test('an EXPLAIN is still scope-checked: an out-of-chain id is denied before I/O', async () => {
+    const h = setup({ env: REAL });
+    const env = await call(h, { service: 'package', sql: `EXPLAIN ANALYZE ${SELECT_ONE}`, params: [STRANGER] });
+    expect(env.output.status).toBe('refused');
+    expect(h.sql.calls).toHaveLength(0);
+  });
+
+  test('information_schema.columns is readable for schema discovery', async () => {
+    const h = setup({ env: REAL, sql: fakeSql([{ column_name: 'reference_id', data_type: 'text' }]) });
+    const env = await call(h, {
+      service: 'package',
+      sql: 'SELECT column_name, data_type FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position',
+      params: ['delivery_requests'],
+    });
+    expect(env.output.status).toBe('ok');
+    expect(h.sql.calls[0]!.plan[3]).toEndWith(') _capped LIMIT $2');
+    expect(h.sql.calls[0]!.params).toEqual(['delivery_requests', 4]);
+  });
+
+  test('a query error tells the model what Postgres said, the SQLSTATE and what to check, and is not a gap or a failure', async () => {
+    const server = 'column "stauts" does not exist. Hint: Perhaps you meant to reference the column "t.status".';
+    const fail = new SqlStateError('refused', `atspl:package: query failed: undefined column (SQLSTATE 42703): ${server}`, '42703', 'query', server);
+    const h = setup({ env: REAL, sql: fakeSql([], { fail }) });
+    const env = await call(h, { service: 'package', sql: SELECT_ONE, params: [CUSTOMER] });
+    expect(env.output.status).toBe('refused');
+    expect(env.output.message).toStartWith(
+      'Query failed on atspl:package: column "stauts" does not exist. Hint: Perhaps you meant to reference the column "t.status" (SQLSTATE 42703, undefined column).',
+    );
+    expect(env.output.message).toContain('information_schema.columns');
+    expect(env.output.message).not.toContain('Record the gap');
+    const line = h.audit.lines[0]!;
+    expect(line.decision).toBe('allow');
+    expect(line.exit).toBe('query_error');
+    expect(line.sqlstate).toBe('42703');
+    expect(line.reason).toStartWith('sqlstate 42703: undefined column: column "stauts" does not exist.');
+  });
+
+  test('a privilege error stays a gap and records its SQLSTATE', async () => {
+    const fail = new SqlStateError('refused', 'atspl:package: no privilege (42501)', '42501', 'access', 'permission denied for table payouts.');
+    const h = setup({ env: REAL, sql: fakeSql([], { fail }) });
+    const env = await call(h, { service: 'package', sql: SELECT_ONE, params: [CUSTOMER] });
+    expect(env.output.status).toBe('refused');
+    expect(env.output.message).toContain('permission denied for table payouts (SQLSTATE 42501, insufficient privilege).');
+    expect(env.output.message).toContain('Try another source for the same facts; record the gap if none has them.');
+    const line = h.audit.lines[0]!;
+    expect(line.decision).toBe('deny');
+    expect(line.exit).toBe('refused');
+    expect(line.sqlstate).toBe('42501');
+  });
+
+  test('a statement timeout says to narrow the query or read its plan', async () => {
+    const fail = new SqlStateError('timeout', 'atspl:package: the statement timed out (57014)', '57014', 'timeout');
+    const h = setup({ env: REAL, sql: fakeSql([], { fail }) });
+    const env = await call(h, { service: 'package', sql: SELECT_ONE, params: [CUSTOMER] });
+    expect(env.output.status).toBe('unreachable');
+    expect(env.output.message).toContain('SQLSTATE 57014');
+    expect(env.output.message).toContain('EXPLAIN');
+    expect(h.audit.lines[0]!.sqlstate).toBe('57014');
+  });
+
+  test('a connector refusal comes back as refused with its reason but without the DSN', async () => {
     const fail = new ConnectorError('refused', `atspl:package: query failed (42P01): ${FAKE_DSN}`);
     const h = setup({ env: REAL, sql: fakeSql([], { fail }) });
     const env = await call(h, { service: 'package', sql: SELECT_ONE, params: [CUSTOMER] });
     expect(env.output.status).toBe('refused');
+    expect(env.output.message).toContain('query failed (42P01)');
     expect(JSON.stringify(env)).not.toContain('Sup3rS3cretPw');
     expect(JSON.stringify(h.audit.lines)).not.toContain('Sup3rS3cretPw');
   });
@@ -548,5 +657,9 @@ describe('sql_select: description', () => {
     expect(text).toContain('"Refused: ..."');
     expect(text).toContain('"not configured for <entity>:<service>"');
     expect(text).toContain('recommend it under actions in the report');
+    expect(text).toContain('information_schema.columns');
+    expect(text).toContain('EXPLAIN ANALYZE');
+    expect(text).toContain('no row cap');
+    expect(text).toContain('SQLSTATE');
   });
 });

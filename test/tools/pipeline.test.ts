@@ -5,6 +5,7 @@ import * as v from 'valibot';
 import { escalationFor, releaseEscalation } from '../../src/agents/escalation.ts';
 import type { Config } from '../../src/config/env.ts';
 import type { Capability } from '../../src/config/registry.ts';
+import { ConnectorError } from '../../src/connectors/types.ts';
 import { createMemoryAuditSink } from '../../src/gate/audit-sink.ts';
 import { createRunBudget, releaseRunBudget, type RunBudget } from '../../src/gate/budget.ts';
 import { FixtureMissError } from '../../src/mock/errors.ts';
@@ -879,10 +880,217 @@ describe('connector failures', () => {
     for (const part of FAKE_DSN_PARTS) expect(text).not.toContain(part);
   });
 
+  test('a retryable SQL condition (deadlock, serialization, memory) is not recorded; a real outage still is', async () => {
+    const h = setup({ env: REAL, maxToolCalls: 20 });
+    for (const sqlstate of ['40P01', '40001', '53200']) {
+      const err = Object.assign(new Error('deadlock detected'), { code: 'unreachable', sqlstate, serverMessage: 'deadlock detected' });
+      const env = await runIoTool(failing(h, err), runCtx(h));
+      expect(env.output.status).toBe('unreachable');
+      expect(env.output.message).toContain('Retry the same query once');
+    }
+    expect(connectorFailuresFor(h.runId)).toEqual([]);
+    await runIoTool(failing(h, Object.assign(new Error('connection failure'), { code: 'unreachable', sqlstate: '08006' })), runCtx(h));
+    await runIoTool(failing(h, coded('timeout')), runCtx(h));
+    expect(connectorFailuresFor(h.runId).map((f) => f.code)).toEqual(['unreachable', 'timeout']);
+  });
+
   test('the record is released with the run', async () => {
     const h = setup({ env: REAL });
     await runIoTool(failing(h, coded('unreachable')), runCtx(h));
     expect(releaseConnectorFailures(h.runId)).toBe(true);
     expect(connectorFailuresFor(h.runId)).toEqual([]);
+  });
+});
+
+// ------------------------------------------------------------------ SQL errors
+
+describe('SQL errors', () => {
+  const sqlError = (code: string, sqlstate: unknown, message = 'boom', serverMessage?: string): Error =>
+    Object.assign(new Error(message), { code, sqlstate, ...(serverMessage !== undefined ? { serverMessage } : {}) });
+  const failing = (h: Harness, err: unknown) =>
+    sqlSpec(h, {
+      real: async () => {
+        throw err;
+      },
+    });
+
+  test('a query error gives the model the Postgres text, the SQLSTATE and its description; the DSN never shows', async () => {
+    const h = setup({ env: { ...REAL, SSFB_HARBOR_DB_URL: FAKE_DSN } });
+    // The quoted value may be a stored row value, not the model's input, so
+    // it is masked (pg-client masks at the source; this is the second pass).
+    const server = `invalid input syntax for type uuid: "${ACCOUNT_NO}" at ${FAKE_DSN}`;
+    const leaky = sqlError('refused', '22P02', `ssfb:harbor: query failed (SQLSTATE 22P02): ${server}`, server);
+    const env = await runIoTool(failing(h, leaky), runCtx(h));
+    expect(env.output.status).toBe('refused');
+    expect(env.output.message).toStartWith(
+      'Query failed on ssfb:harbor: invalid input syntax for type uuid: "<value>" at <url> (SQLSTATE 22P02, invalid text representation).',
+    );
+    expect(JSON.stringify(env)).not.toContain(ACCOUNT_NO);
+    const text = JSON.stringify(env) + JSON.stringify(h.audit.lines) + h.logs.join('\n');
+    for (const part of FAKE_DSN_PARTS) expect(text).not.toContain(part);
+    expect(h.audit.lines.at(-1)).toMatchObject({ decision: 'allow', exit: 'query_error', sqlstate: '22P02' });
+    // The audit reason passes the persisted profile, which masks the digits.
+    expect(h.audit.lines.at(-1)!.reason).toStartWith('sqlstate 22P02: invalid text representation: invalid input syntax');
+    expect(h.audit.lines.at(-1)!.reason).not.toContain(ACCOUNT_NO);
+    // The log line keeps codes only.
+    expect(h.logs.some((l) => l.startsWith('warn') && l.includes('22P02'))).toBe(true);
+    expect(h.logs.join('\n')).not.toContain('invalid input syntax');
+    // A query the model can fix is not a system failure stop_blocked may cite.
+    expect(connectorFailuresFor(h.runId)).toEqual([]);
+  });
+
+  test('without the Postgres text, the description stands in for it', async () => {
+    const h = setup({ env: REAL, maxToolCalls: 20 });
+    const want: [string, string][] = [
+      ['42703', 'undefined column (SQLSTATE 42703, undefined column)'],
+      ['42P01', 'undefined table (SQLSTATE 42P01, undefined table)'],
+      ['42883', 'undefined function (SQLSTATE 42883, undefined function)'],
+      ['42601', 'syntax error (SQLSTATE 42601, syntax error)'],
+      ['22003', 'numeric value out of range (SQLSTATE 22003, numeric value out of range)'],
+      ['54000', 'program limit exceeded (SQLSTATE 54000, program limit exceeded)'],
+    ];
+    for (const [sqlstate, description] of want) {
+      const env = await runIoTool(failing(h, sqlError('refused', sqlstate)), runCtx(h));
+      expect(env.output.message).toContain(description);
+      expect(env.output.message).toContain('retry');
+    }
+  });
+
+  test('an access error keeps its reason and points at another source first', async () => {
+    const h = setup({ env: REAL });
+    const env = await runIoTool(
+      failing(h, sqlError('refused', '28P01', 'x', 'password authentication failed for user "<redacted>"')),
+      runCtx(h),
+    );
+    expect(env.output.status).toBe('refused');
+    expect(env.output.message).toContain('password authentication failed for user "<redacted>" (SQLSTATE 28P01, invalid authorization).');
+    expect(env.output.message).toContain('Try another source for the same facts; record the gap if none has them.');
+    expect(h.audit.lines.at(-1)).toMatchObject({ decision: 'deny', exit: 'refused', sqlstate: '28P01' });
+  });
+
+  test('serialization, deadlock, disk and memory errors are retryable, not access problems', async () => {
+    const h = setup({ env: REAL, maxToolCalls: 20 });
+    for (const sqlstate of ['40001', '40P01', '53100', '53200']) {
+      const env = await runIoTool(failing(h, sqlError('unreachable', sqlstate, 'x', 'canceling statement due to conflict with recovery')), runCtx(h));
+      expect(env.output.status).toBe('unreachable');
+      expect(env.output.message).toContain('canceling statement due to conflict with recovery');
+      expect(env.output.message).toContain('Retry the same query once');
+      expect(env.output.message).not.toContain('access or configuration');
+    }
+  });
+
+  test('a malformed sqlstate is ignored and the connector message is used', async () => {
+    const h = setup({ env: REAL });
+    const env = await runIoTool(failing(h, sqlError('refused', 'not a code')), runCtx(h));
+    expect(env.output.message).toStartWith('sql_select on ssfb:harbor was refused (refused): boom.');
+    expect(h.audit.lines.at(-1)!.sqlstate).toBeUndefined();
+  });
+});
+
+// ------------------------------------------------------------------ tool errors reach the model
+
+describe('tool errors reach the model', () => {
+  const failing = (h: Harness, err: unknown) =>
+    sqlSpec(h, {
+      real: async () => {
+        throw err;
+      },
+    });
+  const coded = (code: string, message: string, cause?: unknown): Error =>
+    Object.assign(new Error(message, cause !== undefined ? { cause } : undefined), { code });
+
+  test('each connector code carries the real message and a hint that is not only "record the gap"', async () => {
+    const h = setup({ env: REAL, maxToolCalls: 20 });
+    const cases: [Error, string, string, string][] = [
+      [coded('refused', 'ssfb:harbor: Quickwit rejected the query (HTTP 400): failed to parse query: unknown field "lvl"'), 'refused',
+        'sql_select on ssfb:harbor was refused (refused): Quickwit rejected the query (HTTP 400): failed to parse query: unknown field "lvl".', 'retry'],
+      [coded('cap_exceeded', 'the response passed the 4194304 byte cap'), 'refused',
+        'sql_select on ssfb:harbor was refused (cap_exceeded): the response passed the 4194304 byte cap.', 'Narrow the call'],
+      [coded('readonly_role_required', 'the role behind SSFB_HARBOR_DB_URL can write'), 'refused',
+        'sql_select on ssfb:harbor was refused (readonly_role_required): the role behind SSFB_HARBOR_DB_URL can write.', 'Try another source'],
+      [coded('timeout', 'ssfb:harbor: no answer within 10000 ms'), 'unreachable',
+        'ssfb:harbor did not answer (timeout): no answer within 10000 ms.', 'Retry once, or narrow the call'],
+      [coded('unreachable', 'qw search failed with exit code 2: error: index "logs-v9" not found'), 'unreachable',
+        'ssfb:harbor did not answer (unreachable): qw search failed with exit code 2: error: index "logs-v9" not found.', 'Retry once later or try another source'],
+      [new Error('socket hang up', { cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }) }), 'unreachable',
+        'ssfb:harbor did not answer (error): socket hang up: read ECONNRESET.', 'try another source'],
+    ];
+    for (const [err, status, start, hint] of cases) {
+      const env = await runIoTool(failing(h, err), runCtx(h));
+      expect(env.output.status).toBe(status as 'refused');
+      expect(env.output.message).toStartWith(start);
+      expect(env.output.message).toContain(hint);
+      expect(String(env.output.message).toLowerCase()).not.toMatch(/^[^.]*\. record the gap\.?$/);
+    }
+  });
+
+  test('secrets and other records are scrubbed or redacted from the text, the audit line and the log', async () => {
+    const h = setup({ env: REAL });
+    const other = 'meera.iyer@example.com';
+    const pan = '5500005555555559';
+    const message = [
+      `could not connect to ${FAKE_DSN}`,
+      'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.c2VjcmV0LXRva2Vu.sig-SEEDED',
+      'Cookie: session=cookie-SEEDED-77; theme=dark',
+      'x-api-key=apikey-SEEDED-99',
+      `row for ${other} with card ${pan} and card 4111 1111 1111 1111`,
+    ].join('\n');
+    const env = await runIoTool(failing(h, coded('unreachable', message)), runCtx(h));
+    const text = JSON.stringify(env);
+    const everything = text + JSON.stringify(h.audit.lines) + h.logs.join('\n');
+    for (const part of FAKE_DSN_PARTS) expect(everything).not.toContain(part);
+    for (const seed of ['eyJhbGciOiJIUzI1NiJ9', 'cookie-SEEDED-77', 'apikey-SEEDED-99', 'meera.iyer', pan, '4111 1111 1111 1111']) {
+      expect(everything).not.toContain(seed);
+    }
+    expect(env.output.message).toContain('could not connect to <url>');
+    expect(env.output.message).toContain('Authorization: <redacted>');
+    expect(env.output.message).toContain('@example.com');
+  });
+
+  test('a ConnectorError reaches the model with its own message, not the raw cause it attached', async () => {
+    const h = setup({ env: REAL });
+    const raw = new TypeError('fetch failed', { cause: Object.assign(new Error('getaddrinfo ENOTFOUND qw-raw-host'), { code: 'ENOTFOUND' }) });
+    const err = new ConnectorError('unreachable', 'Quickwit at SSFB_QW_URL could not be reached: fetch failed', { cause: raw });
+    const env = await runIoTool(failing(h, err), runCtx(h));
+    expect(env.output.message).toStartWith('ssfb:harbor did not answer (unreachable): Quickwit at SSFB_QW_URL could not be reached: fetch failed.');
+    const everything = JSON.stringify(env) + JSON.stringify(h.audit.lines) + h.logs.join('\n');
+    expect(everything).not.toContain('qw-raw-host');
+    expect(everything).not.toContain('ENOTFOUND');
+  });
+
+  test('the causes of a plain error are scrubbed before they reach the model', async () => {
+    const h = setup({ env: REAL });
+    const cause = Object.assign(new Error('getaddrinfo ENOTFOUND raw-db-host.internal'), { code: 'ENOTFOUND' });
+    const env = await runIoTool(failing(h, new Error('socket failed', { cause })), runCtx(h));
+    expect(env.output.message).toContain('socket failed: getaddrinfo ENOTFOUND <host>');
+    expect(JSON.stringify(env) + JSON.stringify(h.audit.lines)).not.toContain('raw-db-host');
+  });
+
+  test('the text is capped', async () => {
+    const h = setup({ env: REAL });
+    const env = await runIoTool(failing(h, coded('unreachable', `boom ${'y'.repeat(10_000)}`)), runCtx(h));
+    const message = String(env.output.message ?? '');
+    expect(message.length).toBeLessThan(1800);
+    expect(message).toContain('...');
+    expect(h.audit.lines.at(-1)!.reason!.length).toBeLessThan(400);
+  });
+
+  test('audit lines keep their shape: the same fields, with the excerpt in reason', async () => {
+    const h = setup({ env: REAL, maxToolCalls: 20 });
+    await runIoTool(failing(h, coded('unreachable', 'connect ECONNREFUSED')), runCtx(h));
+    await runIoTool(failing(h, coded('refused', 'no')), runCtx(h));
+    await runIoTool(failing(h, Object.assign(new Error('x'), { code: 'refused', sqlstate: '42703', serverMessage: 'column "a" does not exist' })), runCtx(h));
+    const [unreachableLine, refusedLine, queryLine] = h.audit.lines;
+    const base = ['decision', 'duration_ms', 'entity', 'exit', 'interface', 'run_id', 'service', 'summary_redacted', 'target', 'tool', 'transport', 'ts'];
+    expect(Object.keys(unreachableLine!).sort()).toEqual([...base, 'reason'].sort());
+    expect(unreachableLine!.reason).toBe('connector: unreachable: connect ECONNREFUSED');
+    expect(Object.keys(refusedLine!).sort()).toEqual([...base, 'reason'].sort());
+    expect(refusedLine!.reason).toBe('connector: refused: no');
+    expect(Object.keys(queryLine!).sort()).toEqual([...base, 'reason', 'sqlstate'].sort());
+    expect(queryLine!.reason).toBe('sqlstate 42703: undefined column: column "a" does not exist');
+    // The failure record for stop_blocked is unchanged: codes only.
+    expect(connectorFailuresFor(h.runId)).toEqual([
+      { system: 'ssfb:harbor', tool: 'sql_select', code: 'unreachable', at: FIXED_NOW.toISOString() },
+    ]);
   });
 });

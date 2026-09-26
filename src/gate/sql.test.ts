@@ -179,6 +179,96 @@ describe('parameters', () => {
   });
 });
 
+describe('EXPLAIN', () => {
+  test('explain is set only for EXPLAIN, with analyze read from either form', () => {
+    expect(allowed('SELECT 1').explain).toBeUndefined();
+    expect(allowed('EXPLAIN SELECT 1').explain).toEqual({ analyze: false });
+    expect(allowed('EXPLAIN ANALYZE SELECT 1').explain).toEqual({ analyze: true });
+    expect(allowed('EXPLAIN (ANALYZE, FORMAT JSON) SELECT 1').explain).toEqual({ analyze: true });
+    expect(allowed('EXPLAIN (ANALYZE off) SELECT 1').explain).toEqual({ analyze: false });
+    expect(allowed('EXPLAIN (ANALYZE 0, BUFFERS) SELECT 1').explain).toEqual({ analyze: false });
+    expect(allowed('/* x */ EXPLAIN ANALYZE SELECT 1').explain).toEqual({ analyze: true });
+    expect(allowed('-- hi\nEXPLAIN SELECT 1').explain).toEqual({ analyze: false });
+  });
+
+  test('booleans take true, false, on, off, 0 and 1 only, as in Postgres', () => {
+    for (const value of ['true', 'false', 'on', 'off', 'TRUE', 'Off', '0', '1']) {
+      expect([value, validateSelect(`EXPLAIN (BUFFERS ${value}) SELECT 1`).ok]).toEqual([value, true]);
+    }
+    for (const value of ['yes', 'no', 'y', 'n', '2']) {
+      expect([value, codeOf(validateSelect(`EXPLAIN (BUFFERS ${value}) SELECT 1`))]).toEqual([value, 'EXPLAIN_OPTION']);
+    }
+  });
+
+  test('the wrapped SELECT gets the same verdict as the SELECT alone', () => {
+    const selects = [
+      'SELECT a FROM t WHERE b = $1',
+      'SELECT customer_id, count(*) FROM t GROUP BY customer_id',
+      'SELECT status, count(*) FROM t GROUP BY status',
+      'SELECT * FROM t FOR UPDATE',
+      'WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x',
+      'SELECT * INTO t2 FROM t',
+      'SELECT * FROM pg_catalog.pg_authid',
+      'SELECT pg_sleep(1)',
+      'SELECT generate_series(1, 3)',
+      "SELECT 't'::regclass",
+      'SELECT a FROM t WHERE b = $2',
+      'SELECT column_name FROM information_schema.columns WHERE table_name = $1',
+    ];
+    for (const sql of selects) {
+      const bare = validateSelect(sql);
+      for (const prefix of ['EXPLAIN ', 'EXPLAIN ANALYZE ', 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ']) {
+        const wrapped = validateSelect(prefix + sql);
+        expect([sql, codeOf(wrapped)]).toEqual([sql, codeOf(bare)]);
+        if (bare.ok && wrapped.ok) {
+          expect(wrapped.tables).toEqual(bare.tables);
+          expect(wrapped.paramCount).toBe(bare.paramCount);
+          expect(wrapped.aggregateOnly).toBe(bare.aggregateOnly);
+        }
+      }
+    }
+  });
+});
+
+describe('information_schema', () => {
+  test('readable, while pg_catalog and pg_* stay refused', () => {
+    expect(allowed('SELECT column_name, data_type FROM information_schema.columns WHERE table_name = $1').paramCount).toBe(1);
+    for (const sql of [
+      'SELECT * FROM pg_catalog.pg_attribute',
+      'SELECT * FROM pg_attribute',
+      'SELECT * FROM information_schema.columns c JOIN pg_catalog.pg_class p ON true',
+      'SELECT * FROM information_schema.pg_something',
+    ]) {
+      expect([sql, codeOf(validateSelect(sql))]).toEqual([sql, 'CATALOG_RELATION']);
+    }
+  });
+
+  test('the foreign server, wrapper, table and user mapping views are refused, qualified or not', () => {
+    const views = [
+      'column_options',
+      'foreign_data_wrapper_options',
+      'foreign_data_wrappers',
+      'foreign_server_options',
+      'foreign_servers',
+      'foreign_table_options',
+      'foreign_tables',
+      'user_mapping_options',
+      'user_mappings',
+      '_pg_foreign_servers',
+    ];
+    for (const view of views) {
+      for (const sql of [`SELECT * FROM information_schema.${view}`, `SELECT * FROM ${view}`, `SELECT * FROM mydb.information_schema.${view}`]) {
+        expect([sql, codeOf(validateSelect(sql))]).toEqual([sql, 'CATALOG_RELATION']);
+      }
+      expect(allowed(`SELECT * FROM app.${view}`).tables).toEqual([`app.${view}`]);
+    }
+  });
+
+  test('a discovery query is not aggregate-only, so it runs in scope rather than systemic', () => {
+    expect(allowed("SELECT column_name FROM information_schema.columns WHERE table_name = 'x'").aggregateOnly).toBe(false);
+  });
+});
+
 describe('aggregateOnly', () => {
   const cases: [string, boolean][] = [
     ['SELECT status, count(*) FROM t GROUP BY status', true],

@@ -169,10 +169,12 @@ describe('tool sets from HLD §2', () => {
     expect(allowedTools('investigator', 'rtl').has('finish_report')).toBe(false);
   });
 
-  test('SSFB extras only on SSFB investigators, code tools only on deep and code_walker', () => {
+  test('SSFB extras only on SSFB investigators, CodeGraph only on deep and code_walker, repo tools on all three', () => {
     expect(allowedTools('investigator', 'ssfb').has('cbs_call')).toBe(true);
     expect(allowedTools('investigator', 'atspl').has('cbs_call')).toBe(false);
     expect(allowedTools('investigator', 'ssfb').has('code_explore')).toBe(false);
+    expect(allowedTools('investigator', 'rtl').has('repo_grep')).toBe(true);
+    expect(allowedTools('investigator', 'rtl').has('repo_read')).toBe(true);
     expect(allowedTools('investigator_deep', 'rtl').has('code_explore')).toBe(true);
     expect(allowedTools('code_walker').has('sql_select')).toBe(false);
     expect(allowedTools('code_walker').has('repo_grep')).toBe(true);

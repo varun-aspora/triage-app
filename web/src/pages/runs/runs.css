@@ -354,3 +354,60 @@
 .runs-steps .waiting {
   font-weight: 600;
 }
+
+/* The Request panel (D66): the stored thread in the 300px side column. */
+.runs-req-source {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.runs-req-msg {
+  margin: 12px 0 0;
+}
+
+.runs-req-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0 0 4px;
+}
+
+.runs-req-author {
+  font-weight: 500;
+  color: var(--text-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.runs-req-text {
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.runs-req-text.clamp {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 8;
+  line-clamp: 8;
+  overflow: hidden;
+}
+
+.runs-req-more {
+  height: 28px;
+  padding: 0;
+  font-size: 13px;
+}
+
+.runs-req-block {
+  margin: 14px 0 0;
+}
+
+.runs-req-label {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0 0 4px;
+}

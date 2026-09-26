@@ -275,7 +275,26 @@ describe('argv shape per tool (fake runner)', () => {
     const { ctx } = makeRun(world, createCodegraphConnector({ config: world.config, runner }));
     const out = data(await call(node.create(ctx, 'code_walker'), { repo: 'harbor', symbol: 'Nope' }));
     expect(out).toMatchObject({ exit_code: 1, output: 'symbol not found\n' });
+    expect(out['error']).toBeUndefined();
     expect(out['index_sync']).toBeUndefined();
+  });
+
+  test('a non-zero exit with stderr keeps a repo-relative excerpt of it and a hint', async () => {
+    const world = makeWorld({ env: { CODEGRAPH_SYNC_BEFORE_QUERY: 'false' } });
+    const dir = repoDir(world);
+    const runner = createFakeRunner([
+      {
+        bin: 'codegraph',
+        argv: ['node', '-p', dir, '--', 'Nope'],
+        result: { exitCode: 2, stdout: '', stderr: `error: index at ${dir}/.codegraph is locked` },
+      },
+      gitStep(dir),
+    ]);
+    const { ctx } = makeRun(world, createCodegraphConnector({ config: world.config, runner }));
+    const out = data(await call(node.create(ctx, 'code_walker'), { repo: 'harbor', symbol: 'Nope' }));
+    expect(out).toMatchObject({ exit_code: 2, error: 'error: index at .codegraph is locked' });
+    expect(String(out['hint'])).toContain('repo_grep');
+    expect(JSON.stringify(out)).not.toContain(dir);
   });
 
   test('output is capped for the model and marked truncated', async () => {

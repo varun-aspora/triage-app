@@ -41,6 +41,8 @@ export const AuditLineSchema = v.pipe(
     action: v.optional(v.picklist(['allow', 'block'])),
     // decrypt_fields records a count only.
     count: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0))),
+    // sql_select failures: the Postgres SQLSTATE, e.g. 42703.
+    sqlstate: v.optional(v.pipe(v.string(), v.regex(/^[0-9A-Z]{5}$/))),
   }),
   v.forward(
     v.check((line) => line.decision !== 'deny' || (line.reason ?? '').trim().length > 0, 'a deny line needs a reason'),

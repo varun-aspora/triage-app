@@ -52,7 +52,7 @@ describe('finish_report missing twice', () => {
 
   test('the submission fails after exactly one finish_required signal', async () => {
     expect(result.status).toBe('failed');
-    expect(result.error).toBe('AgentRunError');
+    expect(result.error).toMatch(/^AgentRunError: /);
     const calls = rootCalls(result);
     expect(calls).toHaveLength(3);
     // No signal before the first stop, one after it, and no second one before the fail.

@@ -10,7 +10,9 @@
 // strict mock miss (a loud tool error that names the semantic key). A
 // connector error that is not a refusal comes back as "did not answer" and
 // is also recorded for the run (connector-failures.ts), which is what lets
-// stop_blocked park the run on that system (D55).
+// stop_blocked park the run on that system (D55). Every connector error the
+// model sees carries its real reason (scrubbed, capped, model-facing
+// redaction) and a hint for what to try next.
 //
 // Staging is owned here and nowhere else: stageRows() writes the full result
 // to /data/<toolCallId>.json in the sandbox. On the virtual sandbox it writes
@@ -19,8 +21,10 @@
 
 import type { FlueLogger, Sandbox } from '@flue/runtime';
 import type { Config } from '../../config/env.ts';
+import { errorText, excerpt, safeErrorText, scrubSecrets, stripAddresses } from '../../connectors/error-text.ts';
 import { makeAuditLine } from '../../gate/audit.ts';
 import { checkScope, type LogsMode } from '../../gate/scope.ts';
+import { classifySqlState, isSqlState, maskSqlValues, sqlErrorMessage } from '../../gate/sql-errors.ts';
 import { redactModelFacing, redactPersisted } from '../../gate/redact.ts';
 import { FixtureMissError } from '../../mock/errors.ts';
 import type { FixtureEntity, FixtureKind, SemanticKey } from '../../mock/types.ts';
@@ -203,6 +207,7 @@ type AuditExtra = {
   readonly reason?: string;
   readonly summary?: string;
   readonly gate?: GateDecision;
+  readonly sqlstate?: string;
 };
 
 // Connector error codes (T04.1) that mean a policy refusal rather than an outage.
@@ -212,6 +217,54 @@ function errorCode(err: unknown): string | undefined {
   if (err === null || typeof err !== 'object') return undefined;
   const code = (err as { code?: unknown }).code;
   return typeof code === 'string' && /^[a-z_]{1,40}$/.test(code) ? code : undefined;
+}
+
+// The SQLSTATE a SQL connector error carries (SqlStateError), checked for shape.
+function sqlStateOf(err: unknown): string | undefined {
+  if (err === null || typeof err !== 'object') return undefined;
+  const sqlstate = (err as { sqlstate?: unknown }).sqlstate;
+  return isSqlState(sqlstate) ? sqlstate : undefined;
+}
+
+// What the model is told to do next after a connector refusal. None of them
+// ends at "give up": each names a change to try first.
+const REFUSAL_HINTS: Readonly<Record<string, string>> = {
+  refused: 'Change the call to fit what the message says and retry; if this source cannot answer it, try another source and record the gap if none can.',
+  readonly_role_required:
+    'Reads on this database are blocked until its role is made read-only. Try another source for the same facts; record the gap if none has them.',
+  cap_exceeded: 'The answer was too large. Narrow the call (shorter time window, fewer rows, fields or hits) and retry.',
+};
+const TIMEOUT_HINT = 'Retry once, or narrow the call (shorter time window, smaller result); if it still fails, try another source and record the gap if none answers.';
+const UNREACHABLE_HINT = 'Retry once later or try another source for the same facts; record the gap if nothing else answers.';
+
+/** Error detail on the audit line: shorter than what the model gets. */
+const AUDIT_DETAIL_CHARS = 300;
+
+// The server's own text on a SQL connector error (SqlStateError.serverMessage).
+// pg-client masks stored values at the source; masking again here (it is
+// idempotent) covers a connector that did not.
+function serverMessageOf(err: unknown, sqlstate: string): string | undefined {
+  const text = (err as { serverMessage?: unknown } | null)?.serverMessage;
+  return typeof text === 'string' && text.trim() !== '' ? safeErrorText(maskSqlValues(sqlstate, stripAddresses(scrubSecrets(text)))) : undefined;
+}
+
+// The connector's message (for a ConnectorError only that: the connector
+// built it from the cause with its secrets taken out) or an error's text and
+// scrubbed causes, scrubbed again and capped, without the
+// "<entity>:<service>: " prefix most connector messages start with. URLs and
+// addresses are replaced as well, in case a connector passed on a DSN or an
+// endpoint it did not know to scrub. A SQL error has its stored values masked.
+function errorDetail(err: unknown, where: string, sqlstate: string | undefined): string {
+  const server = sqlstate !== undefined ? serverMessageOf(err, sqlstate) : undefined;
+  if (server !== undefined) return server;
+  let text = errorText(err);
+  if (text.startsWith(`${where}: `)) text = text.slice(where.length + 2);
+  text = stripAddresses(scrubSecrets(text));
+  return safeErrorText(sqlstate !== undefined ? maskSqlValues(sqlstate, text) : text);
+}
+
+function sentence(text: string): string {
+  return /[.!?]$/.test(text) ? text : `${text}.`;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -264,6 +317,7 @@ export async function runIoTool<K extends FixtureKind, T>(
           ? { rule_index: gate.rule_index, action: gate.action }
           : {}),
         ...(spec.count !== undefined ? { count: spec.count } : {}),
+        ...(extra.sqlstate !== undefined ? { sqlstate: extra.sqlstate } : {}),
       },
       { names },
     );
@@ -368,28 +422,84 @@ export async function runIoTool<K extends FixtureKind, T>(
       audit({ decision: 'allow', exit: 'fixture_miss', transport: 'mock', summary: `${spec.tool} ${where}: strict fixture miss`, gate });
       throw err;
     }
-    // Fixed texts only: a connector error message could carry a host or DSN.
-    ctx.log.warn(`${spec.tool} ${where} failed (${code ?? (err instanceof Error ? err.name : 'error')})`);
+    // The real reason goes back to the model, so it can fix the call or pick
+    // the next step: the connector's message (connectors scrub what they know
+    // of DSNs, URLs and tokens; scrubSecrets runs again here for anything
+    // shaped like a credential), capped, then the model-facing redaction in
+    // finish(). A SQL error adds its SQLSTATE, the fixed description and the
+    // advice for it (src/gate/sql-errors.ts), with stored values masked. The
+    // audit reason carries a shorter excerpt and passes the persisted
+    // profile; the log line and the failure record keep codes only. The
+    // model-facing text is also persisted (the run event log, the Flue
+    // session history), and the persisted profile only knows the run
+    // customer's names, so what could name anyone else is taken out at the
+    // source, in the connectors and here, not by that profile.
+    const sqlstate = sqlStateOf(err);
+    const sql = sqlstate !== undefined ? classifySqlState(sqlstate) : undefined;
+    const detail = errorDetail(err, where, sqlstate);
+    const noted = (reason: string): string => (detail === '' ? reason : `${reason}: ${excerpt(detail, AUDIT_DETAIL_CHARS)}`);
+    ctx.log.warn(
+      `${spec.tool} ${where} failed (${code ?? (err instanceof Error ? err.name : 'error')}${sqlstate !== undefined ? ` ${sqlstate}` : ''})`,
+      ...(sqlstate !== undefined ? [{ sqlstate }] : []),
+    );
     if (code === 'not_configured') {
       audit({ decision: 'deny', exit: 'not_configured', transport: 'real', reason: `not configured: ${spec.backing.envName}`, gate });
       return notConfiguredEnvelope();
     }
-    if (code !== undefined && REFUSAL_CODES.has(code)) {
-      audit({ decision: 'deny', exit: code, transport: 'real', reason: `connector: ${code}`, gate });
-      return refuse(`Refused by the ${where} connector (${code}). Record the gap and try another source.`);
+    if (sql?.category === 'query') {
+      // The gate allowed it and the database rejected it: the model can fix
+      // the query, so this is neither a gap nor a failure of the system.
+      audit({
+        decision: 'allow',
+        exit: 'query_error',
+        transport: 'real',
+        reason: noted(`sqlstate ${sql.sqlstate}: ${sql.description}`),
+        gate,
+        sqlstate: sql.sqlstate,
+      });
+      return refuse(sqlErrorMessage(sql, where, serverMessageOf(err, sql.sqlstate)));
     }
-    audit({ decision: 'allow', exit: code ?? 'error', transport: 'real', gate });
-    // The one outcome stop_blocked may later cite (D55). Only the codes the
-    // block record knows; anything else is an 'error'.
-    recordConnectorFailure(toolContext.runId, {
-      system: where,
-      tool: spec.tool,
-      code: code === 'unreachable' || code === 'timeout' ? code : 'error',
-      at: now().toISOString(),
+    if (code !== undefined && REFUSAL_CODES.has(code)) {
+      audit({
+        decision: 'deny',
+        exit: code,
+        transport: 'real',
+        reason: noted(sql !== undefined ? `connector: ${code}, sqlstate ${sql.sqlstate}: ${sql.description}` : `connector: ${code}`),
+        gate,
+        ...(sql !== undefined ? { sqlstate: sql.sqlstate } : {}),
+      });
+      return refuse(
+        sql !== undefined
+          ? sqlErrorMessage(sql, where, serverMessageOf(err, sql.sqlstate))
+          : `${sentence(`${spec.tool} on ${where} was refused (${code})${detail !== '' ? `: ${detail}` : ''}`)} ${REFUSAL_HINTS[code] ?? REFUSAL_HINTS['refused']}`,
+      );
+    }
+    audit({
+      decision: 'allow',
+      exit: code ?? 'error',
+      transport: 'real',
+      gate,
+      ...(detail !== '' ? { reason: noted(`connector: ${code ?? 'error'}`) } : {}),
+      ...(sql !== undefined ? { sqlstate: sql.sqlstate } : {}),
     });
+    // The one outcome stop_blocked may later cite (D55). Only the codes the
+    // block record knows; anything else is an 'error'. A passing server
+    // condition (a deadlock, a serialization failure, memory pressure: SQL
+    // category 'retryable') is not recorded: the model is told to retry, and
+    // one deadlock must not let stop_blocked park the run.
+    if (sql?.category !== 'retryable') {
+      recordConnectorFailure(toolContext.runId, {
+        system: where,
+        tool: spec.tool,
+        code: code === 'unreachable' || code === 'timeout' ? code : 'error',
+        at: now().toISOString(),
+      });
+    }
     return finish(
       (t) => unreachable(t, now),
-      `${where} did not answer (${code ?? 'error'}). Record the gap and try another source.`,
+      sql !== undefined
+        ? sqlErrorMessage(sql, where, serverMessageOf(err, sql.sqlstate))
+        : `${sentence(`${where} did not answer (${code ?? 'error'})${detail !== '' ? `: ${detail}` : ''}`)} ${code === 'timeout' ? TIMEOUT_HINT : UNREACHABLE_HINT}`,
     );
   }
 

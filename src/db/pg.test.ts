@@ -5,6 +5,7 @@ import { describe, expect, test } from 'bun:test';
 import { EventEmitter } from 'node:events';
 import { ConfigError } from '../config/errors.ts';
 import {
+  closeSharedPgRunners,
   createPgRunner,
   getSharedPgRunner,
   type PgClientLike,
@@ -420,6 +421,21 @@ describe('getSharedPgRunner', () => {
     await own.close();
     expect(getSharedPgRunner(config, { poolFactory: factory })).toBe(shared);
     await shared.close();
+  });
+
+  test('closeSharedPgRunners ends every shared pool, and the next call builds a new runner', async () => {
+    const first = fakePool();
+    const second = fakePool();
+    const a = getSharedPgRunner(config, { poolFactory: first.factory });
+    const b = getSharedPgRunner(config, { poolFactory: second.factory });
+    await closeSharedPgRunners();
+    expect(first.pool.ended).toBe(1);
+    expect(second.pool.ended).toBe(1);
+    const again = getSharedPgRunner(config, { poolFactory: first.factory });
+    expect(again).not.toBe(a);
+    expect(again).not.toBe(b);
+    await closeSharedPgRunners();
+    expect(first.pool.ended).toBe(2);
   });
 
   test('refuses the sqlite provider, naming TRIAGE_DB_PROVIDER only', () => {

@@ -28,6 +28,17 @@
 // they were queued in. A write that fails is dropped and counted; it never
 // reaches the agent.
 //
+// flushRunEventLogSync() writes whatever is queued right away, for a process
+// about to exit (the server's SIGINT/SIGTERM handler), where the next
+// setImmediate may never come.
+//
+// The same subscriber keeps the process's active runs: a run is active from
+// Flue's submission_running (sent on every attempt, so the set is re-learned
+// after a restart) until its submission_settled. The last pipeline phase and
+// the attempt count ride along. activeRuns() reads it without touching the
+// run store, so the server can name the runs a shutdown kills
+// (src/server/shutdown.ts).
+//
 // installRunEventLog() installs one subscriber per process under a symbol
 // key (like the tripwire), so a second call only updates the runs dir.
 
@@ -52,6 +63,15 @@ export type RunEventLine = {
   readonly data: unknown;
 };
 
+/** A run with a submission this process is driving. */
+export type ActiveRun = {
+  readonly runId: string;
+  /** attemptCount of its latest submission_running. */
+  readonly attempt: number;
+  /** The last phase logged for it, when one was. */
+  readonly phase?: string;
+};
+
 type Pending = { readonly runId: string; readonly line: RunEventLine; readonly names: readonly string[] };
 
 type State = {
@@ -62,6 +82,9 @@ type State = {
   dropped: number;
   names: Map<string, readonly string[]>;
   sessions: Map<string, SessionMemory>;
+  /** run id -> submission id -> attempt count, for the running submissions. */
+  running: Map<string, Map<string, number>>;
+  phases: Map<string, string>;
   now: () => Date;
 };
 
@@ -78,6 +101,8 @@ function state(): State {
     dropped: 0,
     names: new Map(),
     sessions: new Map(),
+    running: new Map(),
+    phases: new Map(),
     now: () => new Date(),
   };
   return g[KEY];
@@ -123,6 +148,7 @@ export function setRunRedactionNames(runId: string, names: readonly string[]): v
 export function logRunEvent(runId: string, type: string, data: unknown = {}): void {
   const s = state();
   if (s.runsDir === null || !v.is(RunIdSchema, runId)) return;
+  trackPipeline(s, runId, type, data);
   enqueue(s, runId, { ts: s.now().toISOString(), source: 'pipeline', type, data });
 }
 
@@ -130,6 +156,27 @@ export function logRunEvent(runId: string, type: string, data: unknown = {}): vo
 export async function flushRunEventLog(): Promise<void> {
   const s = state();
   while (s.queue.length > 0 || s.draining) await new Promise((resolve) => setImmediate(resolve));
+}
+
+/** Writes every queued line now, in order. For a process about to exit; never throws. */
+export function flushRunEventLogSync(): void {
+  const s = state();
+  if (s.queue.length === 0) return;
+  // A drain already scheduled on setImmediate then finds the queue empty.
+  s.draining = true;
+  drain(s);
+}
+
+/** The runs with a submission running in this process, oldest first. Empty until the log is installed. */
+export function activeRuns(): readonly ActiveRun[] {
+  const s = state();
+  const out: ActiveRun[] = [];
+  for (const [runId, submissions] of s.running) {
+    const attempt = Math.max(0, ...submissions.values());
+    const phase = s.phases.get(runId);
+    out.push(phase === undefined ? { runId, attempt } : { runId, attempt, phase });
+  }
+  return out;
 }
 
 /** How many lines could not be written since the log was installed. */
@@ -145,6 +192,7 @@ function onObservation(observation: FlueObservation, ctx: FlueEventContext): voi
   const event = observation as unknown as Record<string, unknown>;
   const runId = typeof event.instanceId === 'string' ? event.instanceId : ctx.id;
   if (!v.is(RunIdSchema, runId)) return;
+  trackSubmission(s, runId, event);
   const sessionKey = `${runId}\u0000${String(event.session ?? '')}\u0000${String(event.harness ?? '')}`;
   let memory = s.sessions.get(sessionKey);
   if (memory === undefined) {
@@ -164,6 +212,34 @@ function onObservation(observation: FlueObservation, ctx: FlueEventContext): voi
     type: String(type),
     data,
   });
+}
+
+function trackSubmission(s: State, runId: string, event: Record<string, unknown>): void {
+  const submissionId = typeof event.submissionId === 'string' ? event.submissionId : '';
+  if (event.type === 'submission_running') {
+    let submissions = s.running.get(runId);
+    if (submissions === undefined) {
+      submissions = new Map();
+      s.running.set(runId, submissions);
+    }
+    submissions.set(submissionId, typeof event.attemptCount === 'number' ? event.attemptCount : 0);
+  } else if (event.type === 'submission_settled') {
+    const submissions = s.running.get(runId);
+    submissions?.delete(submissionId);
+    if (submissions !== undefined && submissions.size > 0) return;
+    s.running.delete(runId);
+    s.phases.delete(runId);
+  }
+}
+
+function trackPipeline(s: State, runId: string, type: string, data: unknown): void {
+  if (type === 'phase') {
+    const phase = (data as { phase?: unknown } | null)?.phase;
+    if (typeof phase === 'string') s.phases.set(runId, phase);
+  } else if ((type === 'settled' || type === 'failed') && !s.running.has(runId)) {
+    // A run that ends without a submission (refused, failed before dispatch) would otherwise keep its phase.
+    s.phases.delete(runId);
+  }
 }
 
 function enqueue(s: State, runId: string, line: RunEventLine): void {

@@ -128,6 +128,12 @@ describe('semanticKey differences', () => {
       keyHash(semanticKey('sql_select', { ...sqlBase, entity: 'rtl' }))],
     ['sql null param vs empty text', () => keyHash(semanticKey('sql_select', { ...sqlBase, params: [null] })), () =>
       keyHash(semanticKey('sql_select', { ...sqlBase, params: [''] }))],
+    ['sql SELECT vs EXPLAIN', () => keyHash(semanticKey('sql_select', sqlBase)), () =>
+      keyHash(semanticKey('sql_select', { ...sqlBase, explain: 'plan' }))],
+    ['sql SELECT vs EXPLAIN ANALYZE', () => keyHash(semanticKey('sql_select', sqlBase)), () =>
+      keyHash(semanticKey('sql_select', { ...sqlBase, explain: 'analyze' }))],
+    ['sql EXPLAIN vs EXPLAIN ANALYZE', () => keyHash(semanticKey('sql_select', { ...sqlBase, explain: 'plan' })), () =>
+      keyHash(semanticKey('sql_select', { ...sqlBase, explain: 'analyze' }))],
     ['http method', () => keyHash(semanticKey('http_call', httpBase)), () =>
       keyHash(semanticKey('http_call', { ...httpBase, method: 'POST' }))],
     ['http path id', () => keyHash(semanticKey('http_call', httpBase)), () =>
@@ -239,5 +245,18 @@ describe('errors and canonical JSON', () => {
     // sha256("{}") = 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
     expect(hashKeyString('{}')).toBe('44136fa355b3678a');
     expect(keyHash({})).toBe('44136fa355b3678a');
+  });
+});
+
+describe('semanticKey: sql_select explain', () => {
+  test('a plain SELECT key has no explain field, so recorded fixtures keep their hash', () => {
+    expect(keyString(semanticKey('sql_select', sqlBase))).toBe(
+      '{"entity":"atspl","params":["c-1"],"service":"package","tables":["delivery_requests"]}',
+    );
+  });
+
+  test('an EXPLAIN key names the kind, and an unknown kind is refused', () => {
+    expect(keyString(semanticKey('sql_select', { ...sqlBase, explain: 'analyze' }))).toContain('"explain":"analyze"');
+    expect(() => semanticKey('sql_select', { ...sqlBase, explain: 'full' as never })).toThrow(SemanticKeyError);
   });
 });

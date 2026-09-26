@@ -31,7 +31,7 @@ question:
 
 Read state and logs about a failure. Never replay the user's failed action.
 Every evidence item records the rung it came from in `source`: `api`, `db`,
-`logs`, `cbs`, or `code` for the deep variant.
+`logs`, `cbs`, or `code` for a line you read in a repo.
 
 ## When a tool cannot answer
 
@@ -43,12 +43,41 @@ Every tool result has a `status`:
   `<entity>:<service> api not configured` and go to the next rung. Do not retry.
 - `unreachable`: the system could not be reached. Add a gap with the message
   and continue with the other rungs. Do not loop on it.
-- `refused`: the gate said no, and the message says why. Fix the call if the
-  reason says how (for example, add a filter or use a parameter). Do not try to
-  get around a refusal with a different tool. If the message says the budget is
-  exhausted, stop calling tools and write your findings.
+- `refused`: the call was stopped or failed. The start of the message says
+  which kind:
+  - `Refused: ...` is policy: the gate or the scope check. Examples are a
+    relation that is not readable, an id not in the run's ids, a function,
+    cast or HTTP method that is not allowed, or a write. Fix the call if the
+    reason says how (add a filter, use a `$n` parameter, send one plain
+    SELECT). Never get the same data another way with a different tool.
+  - `Query failed on ... (SQLSTATE <code>, ...)` is a mistake in your query,
+    such as an unknown column or table, a type mismatch or a syntax error. The
+    gate allowed it and the database rejected it. Fix it as the next section
+    says.
+  - `<tool> on <system> was refused (<code>): ...` came from the system
+    itself. Do what the advice after it says: narrow the call, or try another
+    source.
+  - `budget exhausted, finish with what you have`: stop calling tools and
+    write your findings.
 
 A gap is a finding. Report it plainly; never fill it with a guess.
+
+## When a source fails or lacks the data
+
+A query error, an unknown column, a missing table or endpoint, or a log search
+with no hits is not yet a gap. None of this applies to a `Refused: ...`
+policy message. Try these in order:
+
+1. Read the error and fix what it names. A `Query failed` message carries the
+   database's own text and says what to check. Retry once.
+2. Look it up in the code or the schema. For a table or column, run
+   `sql_select` on `information_schema.columns` or `information_schema.tables`
+   for that service. In your entity's repos, `repo_grep` and `repo_read` show
+   migrations (columns and tables), models (field names), handlers
+   (endpoints and log labels) and config (what is switched on). The
+   `repo-map` skill says which repo holds which service.
+3. Try another rung of the ladder for the same fact.
+4. Only then record the gap, and name the fallbacks you tried in it.
 
 ## Scope: only the run's ids
 
@@ -105,15 +134,21 @@ These exist on the SSFB investigator only, and some only when configured:
   absent, or do not list the service, record the gap.
 - `cbs_call`: the CBS rung above, when mounted.
 
-## Deep variant: code tools
+## Code tools
 
-If you have `code_explore`, `code_node`, `code_impact`, `repo_read` and
-`repo_grep`, use them only to explain what the data and logs show. Start with
-CodeGraph (`code_explore`, then `code_node` for a symbol and its callers); fall
-back to `repo_grep` for literal error text or log labels.
-Graph output points you somewhere; it is not evidence. Read the lines with
-`repo_read` and cite repo, file and lines in an evidence item with source
-`code`.
+`repo_grep` and `repo_read` cover only your entity's repos. Use them to fix a
+call or explain what the data and logs show, not to start a code review. Every
+call counts against your tool cap for this entity, so make a few targeted
+reads: grep for the exact column, label or error text, then read only the
+lines around the match. Cite
+repo, file and lines in an evidence item with source `code`. For a deeper code
+question, say so in your reply so the parent can ask `code_walker`.
+
+The deep variant also has `code_explore`, `code_node` and `code_impact`. Start
+with CodeGraph (`code_explore`, then `code_node` for a symbol and its callers);
+fall back to `repo_grep` for literal error text or log labels. Graph output
+points you somewhere; it is not evidence. Read the lines with `repo_read`
+before you cite them.
 
 ## Findings
 
