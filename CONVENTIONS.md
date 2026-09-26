@@ -26,6 +26,7 @@ changes, update this file with it.
 - src/report/ (rendering, T08; together with src/gate/audit.ts, the only code that reads config.display.envLabel)
 - src/runstore/ and src/embed/ (T09; src/runstore/ settles the HLD vs P2 path conflict)
 - src/runlog/ (the per-run event log, D54)
+- src/tracing/ (Braintrust tracing, D82; only braintrust.ts imports the braintrust package, and a source guard in test/guards/rules.ts enforces it)
 - src/evals/ (T10)
 - src/ops/ (T11; src/ops/preflight.ts is the only consumer of deployModeForPreflight)
 - knowledge/ (T12)
