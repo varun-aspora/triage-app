@@ -24,7 +24,7 @@ import { join } from 'node:path';
 import type { FlueLogger } from '@flue/runtime';
 import { defineTool, type ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
-import { loadRepos, REPOS_FILE, repoEnum, type RepoPin } from '../../config/repos.ts';
+import { REPOS_FILE, repoEnum, type RepoPin } from '../../config/repos.ts';
 import {
   checkQueryText,
   type CodegraphConnector,
@@ -39,6 +39,7 @@ import { CODEGRAPH_BIN_KEY, type CodegraphResult, REPOS_DIR_KEY, type SyncOnce }
 import type { ToolEnvelope } from '../../types/tool-result.ts';
 import { type BackingRef, type GateDecision, runIoTool } from '../_lib/pipeline.ts';
 import type { Mount, ToolContext, ToolDeps, ToolModule } from '../types.ts';
+import { pinsFor } from './_lib/code-tool.ts';
 
 declare module '../_lib/context.ts' {
   interface ToolConnectors {
@@ -65,7 +66,9 @@ export type CodeToolSpec = {
 
 function manifest(ctx: Pick<ToolContext, 'config' | 'registry'>): readonly RepoPin[] | undefined {
   if (!existsSync(join(ctx.config.paths.resourcesDir, REPOS_FILE))) return undefined;
-  return loadRepos(ctx.config, ctx.registry);
+  const pins = pinsFor(ctx.config, ctx.registry);
+  if (pins instanceof Error) throw pins;
+  return pins;
 }
 
 /**
@@ -202,9 +205,8 @@ async function runCodeQuery(
 ): Promise<ToolEnvelope> {
   const repo = flue.data['repo'];
   const text = flue.data[spec.field];
-  const known = typeof repo === 'string' && repos.includes(repo);
   // Only a listed repo name goes into audit lines and messages.
-  const repoName = known ? repo : 'unknown';
+  const repoName = typeof repo === 'string' && repos.includes(repo) ? repo : 'unknown';
   const query = typeof text === 'string' ? text : '';
   const service = `code:${repoName}`;
   const deps = ctx.deps;
