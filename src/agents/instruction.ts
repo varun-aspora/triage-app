@@ -95,17 +95,14 @@ function briefSection(
   window: string,
   services: MethodOptions['services'],
 ): string {
-  const entity = entities.length === 1 ? (entities[0] as Entity) : '<one enabled entity per brief>';
-  const inPlay =
-    entities.length === 1 && services?.[entities[0] as Entity]?.length
-      ? (services[entities[0] as Entity] as readonly string[]).join(', ')
-      : '<the services of that entity that matter here>';
+  const only = entities.length === 1 ? entities[0] : undefined;
+  const onlyServices = only === undefined ? undefined : services?.[only];
   const values: Record<(typeof BRIEF_FIELDS)[number], string> = {
-    Entity: entity,
+    Entity: only ?? '<one enabled entity per brief>',
     Question: '<one precise question for that entity>',
     Ids: ids === 'none resolved yet' ? '<the ids that entity can use>' : ids,
     Window: window,
-    'Services in play': inPlay,
+    'Services in play': onlyServices?.length ? onlyServices.join(', ') : '<the services of that entity that matter here>',
     Return: 'EntityFindings. <what to quote or count>',
   };
   return [

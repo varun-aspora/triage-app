@@ -41,15 +41,15 @@ export interface EscalationInput {
   readonly budgetExhausted: boolean;
 }
 
-function isEntityRecord(
-  r: RecordedFindings,
-): r is { readonly entity: Entity; readonly findings: EntityFindings } {
+type EntityRecord = Extract<RecordedFindings, { readonly entity: Entity }>;
+
+function isEntityRecord(r: RecordedFindings): r is EntityRecord {
   return r.entity !== 'code';
 }
 
 // An entity blames itself when it has at least one hypothesis at medium or
 // high confidence and does not point at another entity.
-function blamesItself(r: { readonly entity: Entity; readonly findings: EntityFindings }): boolean {
+function blamesItself(r: EntityRecord): boolean {
   const f = r.findings;
   if (f.confidence === 'low' || f.hypotheses.length === 0) return false;
   return f.suggested_next_entity === undefined || f.suggested_next_entity === r.entity;
