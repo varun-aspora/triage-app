@@ -103,8 +103,9 @@ The note, in markdown.
   drop such a claim silently and do not state it as fact.
 - **Placeholder ids.** Ids in examples, queries and recipes are always
   placeholders: lowercase snake case in angle brackets, such as
-  `<customer_id>`, `<form_id>`, `<account_id>` or `<account_number>`. Never
-  put a real id, name, phone number or account number in a note.
+  `<customer_id>`, `<account_form_id>`, `<account_id>` or
+  `<account_number>`. Never put a real id, name, phone number or account
+  number in a note.
 - **Tools, not scripts.** Queries and checks are written as tool calls
   (`sql_select`, `http_call`, `logs_search` and so on) with placeholder
   parameters. Notes never name wrapper scripts, local paths, CLI flags or

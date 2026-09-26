@@ -379,7 +379,7 @@ describe('pipeline: SSFB and RTL fan-out', () => {
           text('report written'),
         ],
         investigate_ssfb: [
-          toolCall('sql_select', { service: 'workflow', sql: WORKFLOW_SQL, params: [chain.ids.form_id] }),
+          toolCall('sql_select', { service: 'workflow', sql: WORKFLOW_SQL, params: [chain.ids.account_form_id] }),
           toolCall(
             'note_evidence',
             findings({
@@ -391,7 +391,7 @@ describe('pipeline: SSFB and RTL fan-out', () => {
           text('recorded'),
         ],
         investigate_rtl: [
-          toolCall('sql_select', { service: 'workflow', sql: WORKFLOW_SQL, params: [chain.ids.form_id] }),
+          toolCall('sql_select', { service: 'workflow', sql: WORKFLOW_SQL, params: [chain.ids.account_form_id] }),
           toolCall(
             'note_evidence',
             findings({

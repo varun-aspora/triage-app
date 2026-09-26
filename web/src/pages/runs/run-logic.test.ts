@@ -98,8 +98,8 @@ describe('buildStartBody', () => {
         tierMode: 'choose',
         tier: 'strong',
         ids: [
-          { key: 'user_id', value: ' u1 ' },
-          { key: 'utr', value: '' },
+          { key: 'aspora_user_id', value: ' u1 ' },
+          { key: 'account_number', value: '' },
         ],
         from: '2026-09-24T00:00',
         to: '2026-09-25T18:00',
@@ -110,7 +110,7 @@ describe('buildStartBody', () => {
     if (!r.ok) return;
     expect(r.body.entities).toEqual(['ssfb', 'rtl']);
     expect(r.body.tier).toBe('strong');
-    expect(r.body.ids).toEqual({ user_id: 'u1' });
+    expect(r.body.ids).toEqual({ aspora_user_id: 'u1' });
     expect(r.body.time_window?.from).toBe(new Date('2026-09-24T00:00').toISOString());
   });
 
@@ -130,8 +130,8 @@ describe('buildStartBody', () => {
         requestedBy: '',
         entitiesMode: 'choose',
         ids: [
-          { key: 'utr', value: 'a' },
-          { key: 'utr', value: 'b' },
+          { key: 'account_number', value: 'a' },
+          { key: 'account_number', value: 'b' },
         ],
         from: '2026-09-24T00:00',
       },
@@ -148,7 +148,7 @@ describe('buildStartBody', () => {
 test('formFieldOf maps server field paths', () => {
   expect(formFieldOf('messages.0.text')).toBe('thread');
   expect(formFieldOf('slack_url')).toBe('thread');
-  expect(formFieldOf('ids.utr')).toBe('ids');
+  expect(formFieldOf('ids.account_number')).toBe('ids');
   expect(formFieldOf('time_window.from')).toBe('time_window');
   expect(formFieldOf('Idempotency-Key')).toBeUndefined();
 });

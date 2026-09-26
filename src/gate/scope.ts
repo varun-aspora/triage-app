@@ -50,7 +50,7 @@ function chainValues(key: KnownIdKey, value: string): { group: Group; value: str
   const out: { group: Group; value: string }[] = [];
   for (const found of extractIdShaped(value)) {
     out.push({ group: groupOf(found.kind), value: found.normalised });
-    if (found.kind === 'phone' || (key === 'phone' && found.kind === 'digits')) {
+    if (found.kind === 'phone' || (key === 'phone_number' && found.kind === 'digits')) {
       const all = found.raw.replace(/\D/g, '');
       out.push({ group: 'num', value: all });
       if (all.length > PHONE_DIGITS) out.push({ group: 'num', value: lastDigits(all) });

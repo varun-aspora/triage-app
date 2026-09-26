@@ -39,21 +39,6 @@ export const TIERS = ['cheap', 'mid', 'strong'] as const;
 
 export const ENTITIES = ['ssfb', 'atspl', 'rtl'] as const;
 
-export const KNOWN_ID_KEYS = [
-  'horus_customer_id',
-  'customer_id',
-  'user_id',
-  'old_user_id',
-  'form_id',
-  'account_form_id',
-  'alphadesk_user_id',
-  'device_id',
-  'account_id',
-  'account_number',
-  'phone',
-  'utr',
-] as const;
-
 export const REPORT_STATUSES = ['root_cause_confirmed', 'resolved', 'pending_user', 'pending_bank', 'inconclusive'] as const;
 
 export const FEEDBACK_VERDICTS = ['correct', 'partial', 'wrong', 'pending'] as const;

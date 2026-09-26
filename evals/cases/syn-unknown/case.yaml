@@ -11,12 +11,12 @@ request:
       text: |-
         User 3a1f9d3b-cccd-41c5-a991-b48b6d58eb00 says "it is not working". No other detail yet.
 ids:
-  user_id: 3a1f9d3b-cccd-41c5-a991-b48b6d58eb00
+  aspora_user_id: 3a1f9d3b-cccd-41c5-a991-b48b6d58eb00
 id_chain:
   ids:
-    user_id: 3a1f9d3b-cccd-41c5-a991-b48b6d58eb00
+    aspora_user_id: 3a1f9d3b-cccd-41c5-a991-b48b6d58eb00
   hops:
-    - from: user_id
+    - from: aspora_user_id
       source: ssfb:harbor.account_forms
       status: not_found
       taken_at: "2026-09-13T06:00:00.000Z"

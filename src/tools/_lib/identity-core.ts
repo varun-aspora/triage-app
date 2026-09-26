@@ -1,9 +1,10 @@
-// The deterministic ID chain (LLD 04 §2.2 and §3, HLD 02 §1.5, D22, D26, D33).
+// The deterministic ID chain (LLD 04 §2.2 and §3, HLD 02 §1.5, D22, D26, D33, D69).
 //
 // resolveIdChain(ids, deps) walks the hop table with the fixed statements in
 // identity-statements.ts and then runs the three basic-state reads. The
 // ingress identity step (T07.3) and the resolve_identity tool (T05.5) both
-// call it, so there is one implementation.
+// call it, so there is one implementation. phone_number and country have no
+// hop; they stay in the chain as given.
 //
 // Each statement:
 // - runs through the T04.2 SQL connector inside the read-only transaction
@@ -144,8 +145,6 @@ class Walk {
   private readonly blocked = new Set<KnownIdKey>();
   /** Env var names that could not be reached in this call. */
   private readonly down = new Set<string>();
-  /** User ids whose forms have been read already. */
-  private readonly usersRead = new Set<string>();
   private readonly deps: IdentityCoreDeps;
 
   constructor(deps: IdentityCoreDeps, ids: KnownIds) {
@@ -158,50 +157,29 @@ class Walk {
   async hops(): Promise<void> {
     const S = IDENTITY_STATEMENTS;
 
-    // Horus Customer ID is the harbor customer_id, not the userId.
-    const horus = await this.hop(S.horus_customer_id, 'horus_customer_id', ['customer_id', 'account_form_id'], 'customer_id');
-    if (horus !== null) this.fromCustomerRows(horus.rows);
-
-    // The old template's UserId: try external_user_ref first, then customer_id.
-    const asUser = await this.hop(S.old_user_id_as_user, 'old_user_id', ['user_id', 'account_form_id'], 'user_id');
-    if (asUser !== null) {
-      this.usersRead.add(this.ids.old_user_id as string);
-      this.fromFormRows(asUser.rows);
-      if (asUser.status === 'resolved') {
-        this.record(S.old_user_id_as_customer, 'old_user_id', 'skipped', this.nowIso());
-      } else {
-        const asCustomer = await this.hop(S.old_user_id_as_customer, 'old_user_id', ['customer_id', 'account_form_id'], 'customer_id');
-        if (asCustomer !== null) this.fromCustomerRows(asCustomer.rows);
-      }
+    // An account id or bank account number leads back to the customer
+    // through the rhythm mapping. These run first, and only while no
+    // customer id is known, so the customer hops below can use what they give.
+    if (this.ids.customer_id === undefined) {
+      const byId = await this.hop(S.account_id, 'account_id', ['customer_id'], 'customer_id');
+      if (byId !== null) this.fromMappingRows(byId.rows);
+    }
+    if (this.ids.customer_id === undefined) {
+      const byNumber = await this.hop(S.account_number, 'account_number', ['customer_id'], 'customer_id');
+      if (byNumber !== null) this.fromMappingRows(byNumber.rows);
     }
 
-    // The Alphadesk user id is the userId. It may not resolve for returning-user device re-binds.
-    const alphadesk = await this.hop(S.alphadesk_user_id, 'alphadesk_user_id', ['user_id', 'account_form_id'], 'user_id');
-    if (alphadesk !== null) {
-      this.usersRead.add(this.ids.alphadesk_user_id as string);
-      this.fromFormRows(alphadesk.rows);
-    }
+    // customer_id is the harbor customer_id, not the CIF id.
+    const customer = await this.hop(S.customer_id, 'customer_id', ['account_form_id'], 'account_form_id');
+    if (customer !== null) this.fromCustomerRows(customer.rows);
 
-    // A user_id given directly (or produced above) whose forms were not read yet.
-    const userId = this.ids.user_id;
-    if (userId !== undefined && !this.usersRead.has(userId)) {
-      const byUser = await this.hop(S.user_id, 'user_id', ['account_form_id'], 'account_form_id');
-      if (byUser !== null) {
-        this.usersRead.add(userId);
-        this.fromFormRows(byUser.rows);
-      }
-    }
+    // The Aspora user id is harbor external_user_ref. The newest form is taken.
+    const user = await this.hop(S.aspora_user_id, 'aspora_user_id', ['account_form_id'], 'account_form_id');
+    if (user !== null) this.fromFormRows(user.rows);
 
-    // account_form_id / nstp_application_id. The workflow form_id is the same id.
-    const formKey: KnownIdKey =
-      this.ids.account_form_id === undefined && this.ids.form_id !== undefined ? 'form_id' : 'account_form_id';
-    const form = await this.hop(S.account_form_id, formKey, ['user_id', 'form_id'], 'user_id');
-    if (form !== null && form.status === 'resolved') {
-      const row = form.rows[0] as Record<string, unknown>;
-      this.set('user_id', row.external_user_ref);
-      this.set('account_form_id', row.form_id);
-      this.set('form_id', row.form_id);
-    }
+    // account_form_id / nstp_application_id. The form row names the user.
+    const form = await this.hop(S.account_form_id, 'account_form_id', ['aspora_user_id'], 'aspora_user_id');
+    if (form !== null) this.fromFormRows(form.rows);
 
     // The harbor customer for the form, when no customer id is known yet.
     if (this.ids.customer_id === undefined) {
@@ -212,38 +190,26 @@ class Walk {
     await this.workflow();
 
     // customer_id to the rhythm accounts.
-    const accounts = await this.hop(S.customer_id, 'customer_id', ['account_id', 'account_number'], 'account_id');
+    const accounts = await this.hop(S.customer_accounts, 'customer_id', ['account_id', 'account_number'], 'account_id');
     if (accounts !== null && accounts.status === 'resolved') {
       const row = accounts.rows[0] as Record<string, unknown>;
       this.set('account_id', row.account_id);
       this.set('account_number', row.account_number);
     }
-
-    // device_id through guardian. The join is unverified, so the hop says so
-    // and nothing else is chained from the user id it gives.
-    const device = await this.hop(S.device_id, 'device_id', ['user_id'], 'user_id');
-    if (device !== null && device.status === 'resolved') {
-      const last = this.hopList[this.hopList.length - 1] as IdHop;
-      this.hopList[this.hopList.length - 1] = { ...last, status: 'unverified' };
-      this.set('user_id', (device.rows[0] as Record<string, unknown>).subject);
-    }
   }
 
-  /** form_id on the SSFB workflow copy, then the RTL copy when the first has nothing. */
+  /** account_form_id on the SSFB workflow copy, then the RTL copy when the first has nothing. */
   private async workflow(): Promise<void> {
     const S = IDENTITY_STATEMENTS;
-    if (this.ids.form_id === undefined && this.ids.account_form_id !== undefined) {
-      this.ids.form_id = this.ids.account_form_id;
-    }
-    const ssfb = await this.hop(S.form_id_ssfb, 'form_id', [], undefined);
+    const ssfb = await this.hop(S.workflow_ssfb, 'account_form_id', [], undefined);
     if (ssfb === null) return;
     if (ssfb.status === 'resolved') {
-      this.workflowState(S.form_id_ssfb, ssfb.rows);
-      this.record(S.form_id_rtl, 'form_id', 'skipped', this.nowIso());
+      this.workflowState(S.workflow_ssfb, ssfb.rows);
+      this.record(S.workflow_rtl, 'account_form_id', 'skipped', this.nowIso());
       return;
     }
-    const rtl = await this.hop(S.form_id_rtl, 'form_id', [], undefined);
-    if (rtl !== null && rtl.status === 'resolved') this.workflowState(S.form_id_rtl, rtl.rows);
+    const rtl = await this.hop(S.workflow_rtl, 'account_form_id', [], undefined);
+    if (rtl !== null && rtl.status === 'resolved') this.workflowState(S.workflow_rtl, rtl.rows);
   }
 
   private workflowState(stmt: IdentityStatement, rows: Rows): void {
@@ -267,8 +233,16 @@ class Walk {
   private fromFormRows(rows: Rows): void {
     const row = rows[0];
     if (row === undefined) return;
-    this.set('user_id', row.external_user_ref);
+    this.set('aspora_user_id', row.external_user_ref);
     this.set('account_form_id', row.form_id);
+  }
+
+  private fromMappingRows(rows: Rows): void {
+    const row = rows[0];
+    if (row === undefined) return;
+    this.set('customer_id', row.customer_id);
+    this.set('account_id', row.account_id);
+    this.set('account_number', row.account_number);
   }
 
   /** Sets an id only when it is not known yet. Input ids always win. */

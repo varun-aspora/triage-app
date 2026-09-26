@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
 import { escalationFor, releaseEscalation } from '../../src/agents/escalation.ts';
 import type { Config } from '../../src/config/env.ts';
+import { KNOWN_IDS_FILE, loadKnownIdFields } from '../../src/config/known-ids.ts';
 import type { RunSelectInput, SqlConnector, SqlSelectOutcome } from '../../src/connectors/sql/pg-client.ts';
 import { ConnectorError, envVarName } from '../../src/connectors/types.ts';
 import { createMemoryAuditSink, type MemoryAuditSink } from '../../src/gate/audit-sink.ts';
@@ -16,7 +20,7 @@ import { createToolDeps } from '../../src/tools/_lib/context.ts';
 import { allToolNames, conformanceCases, conformanceProblems, toolsFor } from '../../src/tools/index.ts';
 import { RESOLVE_IDENTITY, type SeedResult, toolModule } from '../../src/tools/resolve-identity.tool.ts';
 import { toolModule as sqlSelectModule } from '../../src/tools/sql-select.tool.ts';
-import type { ToolDeps } from '../../src/tools/types.ts';
+import type { ToolContext, ToolDeps } from '../../src/tools/types.ts';
 import { KNOWN_ID_KEYS } from '../../src/types/core.ts';
 import type { IdChain } from '../../src/types/id-chain.ts';
 import { type ToolEnvelope, ToolEnvelopeSchema } from '../../src/types/tool-result.ts';
@@ -34,7 +38,6 @@ const DSNS = {
   SSFB_HARBOR_DB_URL: dsn('harbor_fake'),
   SSFB_RHYTHM_DB_URL: dsn('rhythm_fake'),
   SSFB_WORKFLOW_DB_URL: dsn('workflow_fake'),
-  SSFB_GUARDIAN_DB_URL: dsn('guardian_fake'),
   RTL_WORKFLOW_DB_URL: dsn('rtl_workflow_fake'),
 };
 const IDENTITY_ENVS = Object.keys(DSNS);
@@ -44,7 +47,6 @@ const CUST = 'c0ffee00-1111-4222-8333-444455556666';
 const FORM = 'f0f0f0f0-2222-4333-8444-555566667777';
 const FORM2 = 'f1f1f1f1-2222-4333-8444-555566667777';
 const USER = 'a1a1a1a1-3333-4444-8555-666677778888';
-const DEVICE = 'dddddddd-4444-4555-8666-777788889999';
 const STRANGER = 'deadbeef-9999-4888-8777-666655554444';
 const STRANGER_FORM = 'beefbeef-8888-4777-8666-555544443333';
 const STRANGER_CUST = 'cafecafe-7777-4666-8555-444433332222';
@@ -67,7 +69,7 @@ const FORM_FIXTURES = Object.fromEntries([
 
 /** Fixtures for STRANGER: a user whose form and customer are not the run's. */
 const STRANGER_FIXTURES = Object.fromEntries([
-  fx('user_id', 'user_id', STRANGER, [{ form_id: STRANGER_FORM, external_user_ref: STRANGER }]),
+  fx('aspora_user_id', 'aspora_user_id', STRANGER, [{ form_id: STRANGER_FORM, external_user_ref: STRANGER }]),
   fx('account_form_id', 'account_form_id', STRANGER_FORM, [{ form_id: STRANGER_FORM, external_user_ref: STRANGER }]),
   fx('account_form_id.customer', 'account_form_id', STRANGER_FORM, [
     { customer_id: STRANGER_CUST, account_form_id: STRANGER_FORM },
@@ -235,6 +237,40 @@ describe('resolve_identity: schema', () => {
     expect(conformanceProblems(toolModule, tool)).toEqual([]);
   });
 
+  /** A tool context whose home resources dir is `dir`. create() reads only config.paths from it. */
+  const contextWithResources = (dir: string): ToolContext => {
+    const ctx = makeToolContext();
+    return { ...ctx, config: { ...ctx.config, paths: { ...ctx.config.paths, resourcesDir: dir } } };
+  };
+
+  test('each id key is described by its field in resources/known-ids.json', () => {
+    const tool = toolModule.create(makeToolContext(), 'triage');
+    const ids = entriesOf(entriesOf(tool.input)['ids']);
+    const fields = loadKnownIdFields(join(import.meta.dir, '..', '..', 'resources'));
+    for (const field of fields) {
+      const entry = ids[field.key] as { wrapped: v.GenericSchema };
+      expect(v.getDescription(entry.wrapped), field.key).toBe(field.description);
+    }
+  });
+
+  test('the descriptions follow the home known-ids.json, not text in the code', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'triage-known-ids-'));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const source = join(import.meta.dir, '..', '..', 'resources', KNOWN_IDS_FILE);
+    const doc = JSON.parse(readFileSync(source, 'utf8')) as { fields: { key: string; description: string }[] };
+    for (const f of doc.fields) f.description = `Home text for ${f.key}.`;
+    writeFileSync(join(dir, KNOWN_IDS_FILE), JSON.stringify(doc));
+    const ids = entriesOf(entriesOf(toolModule.create(contextWithResources(dir), 'triage').input)['ids']);
+    expect(v.getDescription((ids['aspora_user_id'] as { wrapped: v.GenericSchema }).wrapped)).toBe('Home text for aspora_user_id.');
+  });
+
+  test('a known-ids.json whose keys differ from KNOWN_ID_KEYS stops create()', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'triage-known-ids-'));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    writeFileSync(join(dir, KNOWN_IDS_FILE), JSON.stringify({ fields: [] }));
+    expect(() => toolModule.create(contextWithResources(dir), 'triage')).toThrow('known-ids.json');
+  });
+
   test('schema has no free-form query fields at any level', () => {
     const tool = toolModule.create(makeToolContext(), 'triage');
     const names = new Set<string>();
@@ -256,6 +292,9 @@ describe('resolve_identity: schema', () => {
     expect(parse({ ids: { customer_id: CUST } })).toBe(true);
     expect(parse({ ids: { customer_id: CUST }, entity_hint: 'ssfb' })).toBe(true);
     expect(parse({ ids: { sql: 'SELECT 1' } })).toBe(false);
+    for (const removed of ['horus_customer_id', 'user_id', 'old_user_id', 'form_id', 'device_id', 'phone', 'utr']) {
+      expect(parse({ ids: { [removed]: CUST } }), removed).toBe(false);
+    }
     expect(parse({ ids: { customer_id: "x' OR 1=1 --" } })).toBe(false);
     expect(parse({ ids: { customer_id: '   ' } })).toBe(false);
     expect(parse({ ids: { customer_id: 'a'.repeat(129) } })).toBe(false);
@@ -293,9 +332,9 @@ describe('resolve_identity: mock mode', () => {
     expect(env.output.taken_at).toBe(NOW.toISOString());
     const result = resultFor(env, 'account_form_id') as SeedResult;
     expect(result.status).toBe('linked');
-    expect([...result.added].sort()).toEqual(['account_form_id', 'form_id', 'user_id']);
+    expect([...result.added].sort()).toEqual(['account_form_id', 'aspora_user_id']);
     const chain = dataOf(env).id_chain;
-    expect(chain.ids).toMatchObject({ customer_id: CUST, account_form_id: FORM, form_id: FORM, user_id: USER });
+    expect(chain.ids).toMatchObject({ customer_id: CUST, account_form_id: FORM, aspora_user_id: USER });
     expect(dataOf(env).entity_hint).toBe('ssfb');
     // The run chain is the one returned.
     expect(h.deps.idChain().ids).toEqual(chain.ids);
@@ -378,10 +417,10 @@ describe('resolve_identity: scope', () => {
   test('deny: model-supplied foreign id with no hop to the chain -> unverified, IdChain unchanged, next scope check denies it', async () => {
     const h = setup({ fixtures: STRANGER_FIXTURES });
     const before = h.deps.idChain();
-    const env = await call(h.tool, { ids: { user_id: STRANGER } });
+    const env = await call(h.tool, { ids: { aspora_user_id: STRANGER } });
 
     expect(env.output.status).toBe('ok');
-    const result = resultFor(env, 'user_id') as SeedResult;
+    const result = resultFor(env, 'aspora_user_id') as SeedResult;
     expect(result.status).toBe('unverified');
     expect(result.added).toEqual([]);
     expect(h.deps.idChain()).toBe(before);
@@ -394,7 +433,7 @@ describe('resolve_identity: scope', () => {
 
     // The decision is audited as a deny, with keys and statuses only.
     const deny = h.audit.lines.find((l) => l.decision === 'deny');
-    expect(deny?.reason).toContain('user_id unverified');
+    expect(deny?.reason).toContain('aspora_user_id unverified');
     expect(serializeAuditLine(deny as never)).not.toContain(STRANGER);
 
     for (const id of [STRANGER, STRANGER_FORM, STRANGER_CUST]) {
@@ -406,23 +445,39 @@ describe('resolve_identity: scope', () => {
 
   test('deny: a chain id sent next to a foreign id does not carry the foreign id in', async () => {
     const h = setup({ fixtures: STRANGER_FIXTURES });
-    const env = await call(h.tool, { ids: { customer_id: CUST, user_id: STRANGER } });
+    const env = await call(h.tool, { ids: { customer_id: CUST, aspora_user_id: STRANGER } });
     expect(resultFor(env, 'customer_id')?.status).toBe('in_chain');
-    expect(resultFor(env, 'user_id')?.status).toBe('unverified');
-    expect(h.deps.idChain().ids.user_id).toBeUndefined();
+    expect(resultFor(env, 'aspora_user_id')?.status).toBe('unverified');
+    expect(h.deps.idChain().ids.aspora_user_id).toBeUndefined();
     expect((await selectForm(h, STRANGER)).output.status).toBe('refused');
   });
 
-  test('deny: a device id whose unverified guardian hop gives the chain user does not join', async () => {
+  test('an account id links back to the run customer through the rhythm mapping', async () => {
+    const ACCOUNT = 'acacacac-5555-4666-8777-888899990000';
     const h = setup({
-      chain: { ids: { user_id: USER }, hops: [], basic_state: [] },
-      fixtures: Object.fromEntries([fx('device_id', 'device_id', DEVICE, [{ subject: USER }])]),
+      fixtures: Object.fromEntries([
+        fx('account_id.customer', 'account_id', ACCOUNT, [{ customer_id: CUST, account_id: ACCOUNT, account_number: '000011112222' }]),
+      ]),
     });
-    const env = await call(h.tool, { ids: { device_id: DEVICE } });
-    const result = resultFor(env, 'device_id') as SeedResult;
-    expect(result.status).toBe('unverified');
-    expect(result.hops.find((hop) => hop.from === 'device_id')?.status).toBe('unverified');
-    expect(h.deps.idChain().ids.device_id).toBeUndefined();
+    const env = await call(h.tool, { ids: { account_id: ACCOUNT } });
+    const result = resultFor(env, 'account_id') as SeedResult;
+    expect(result.status).toBe('linked');
+    expect(result.hops[0]).toMatchObject({ from: 'account_id', to: 'customer_id', status: 'resolved' });
+    expect(h.deps.idChain().ids.account_id).toBe(ACCOUNT);
+  });
+
+  test('phone_number and country have no hop: in the chain they come back in_chain, else not_found', async () => {
+    const h = setup({ chain: { ids: { customer_id: CUST, phone_number: '+447700900123', country: 'GB' }, hops: [], basic_state: [] } });
+    const known = await call(h.tool, { ids: { phone_number: '+447700900123', country: 'GB' } });
+    expect(resultFor(known, 'phone_number')).toMatchObject({ status: 'in_chain', hops: [] });
+    expect(resultFor(known, 'country')).toMatchObject({ status: 'in_chain', hops: [] });
+
+    const other = await call(h.tool, { ids: { phone_number: '+447700900999', country: 'AE' } });
+    expect(resultFor(other, 'phone_number')?.status).toBe('not_found');
+    expect(resultFor(other, 'country')?.status).toBe('not_found');
+    expect(h.deps.idChain().ids).toMatchObject({ phone_number: '+447700900123', country: 'GB' });
+    // Nothing was read for either key.
+    expect(h.reads).toEqual([]);
   });
 
   test('an id that finds nothing is not_found and does not join', async () => {

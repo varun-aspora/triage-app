@@ -1,6 +1,6 @@
 // The classifier (HLD 02 §1.5, LLD 04 §2.3 and §3, D9, D22, D36, D41, D43).
 //
-// classify() asks MODEL_CLASSIFIER once and validates the answer with
+// classify() asks MODEL_DECISION once and validates the answer with
 // ClassificationSchema. It never throws: invalid, unparseable or unreachable
 // output, a timeout and a config problem all return category 'unknown' with
 // classifier_error set, and the tier policy then routes the run to strong
@@ -32,7 +32,7 @@
 // provider registration side effect before the first call.
 //
 // Usage (D59): deps.onUsage hears about the one model call, with model set
-// to the MODEL_CLASSIFIER spec on both paths.
+// to the MODEL_DECISION spec on both paths.
 // - completion path: called once a message comes back, stopReason 'error'
 //   or 'aborted' included (failed), with the message's usage. A timeout, a
 //   caller abort or a thrown provider error has no message, so no call.
@@ -54,7 +54,7 @@ import { decide, DecisionError } from '../decisions/decide.ts';
 import { decisionProviderFor, isDecisionSpec } from '../decisions/registry.ts';
 import type { DecisionProvider, DecisionUsage } from '../decisions/types.ts';
 import { redactPersisted } from '../gate/redact.ts';
-import { acceptsImages, classifierModel, ollamaProvider, parseSpec, type ModelLookup } from '../models.ts';
+import { acceptsImages, decisionModel, ollamaProvider, parseSpec, type ModelLookup } from '../models.ts';
 import { ClassificationSchema, type Classification } from '../types/classification.ts';
 import type { BasicStateItem, IdChain } from '../types/id-chain.ts';
 import type { ThreadMessage } from '../types/request.ts';
@@ -87,7 +87,7 @@ export type CompleteFn = (
 /** One classifier model call, for the run's usage (D59). */
 export type ClassifierUsage = {
   readonly path: 'completion' | 'decision';
-  /** The MODEL_CLASSIFIER spec, not the name the provider answered with. */
+  /** The MODEL_DECISION spec, not the name the provider answered with. */
   readonly model: string;
   readonly failed: boolean;
   readonly input: number;
@@ -104,7 +104,7 @@ export type ClassifyDeps = {
   readonly config: Config;
   /** Completion path only. Default: defaultComplete(config). */
   readonly complete?: CompleteFn;
-  /** Decision path only. Default: decisionProviderFor(MODEL_CLASSIFIER, config). */
+  /** Decision path only. Default: decisionProviderFor(MODEL_DECISION, config). */
   readonly decisions?: DecisionProvider;
   /** Default: <knowledgeDir>/classifier/categories.json. */
   readonly categories?: readonly CategoryEntry[];
@@ -142,7 +142,7 @@ export async function classify(input: ClassifyInput, deps: ClassifyDeps): Promis
 }
 
 async function classifyOnce(input: ClassifyInput, deps: ClassifyDeps): Promise<Classification> {
-  const spec = classifierModel(deps.config);
+  const spec = decisionModel(deps.config);
   const provider = parseSpec(spec)?.provider ?? '';
   const categories = deps.categories ?? (await loadCategories(deps.config.paths.knowledgeDir));
   if (isDecisionSpec(spec)) return classifyByDecision(input, deps, spec, provider, categories);
@@ -427,7 +427,7 @@ export function completeWith(provider: Provider): CompleteFn {
 export function defaultComplete(config: Config): CompleteFn {
   return async (spec, context, { signal }) => {
     const parsed = parseSpec(spec);
-    if (parsed === undefined) throw new Error('MODEL_CLASSIFIER is not a provider/model spec');
+    if (parsed === undefined) throw new Error('MODEL_DECISION is not a provider/model spec');
     const provider = providerFor(parsed.provider, parsed.modelId, config);
     if (provider === undefined) {
       throw new Error(`no default completion for provider ${parsed.provider}; pass deps.complete`);

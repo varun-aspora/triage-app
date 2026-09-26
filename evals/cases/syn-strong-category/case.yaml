@@ -16,19 +16,19 @@ request:
       is_parent: false
       text: Customer asks how long the cooling period lasts and whether it can be skipped.
 ids:
-  horus_customer_id: bcd13fd4-330b-4374-92da-e797470596a0
+  customer_id: bcd13fd4-330b-4374-92da-e797470596a0
 id_chain:
   ids:
-    horus_customer_id: bcd13fd4-330b-4374-92da-e797470596a0
-    user_id: 488dc269-e74b-445e-a755-556d4ad4d324
+    customer_id: bcd13fd4-330b-4374-92da-e797470596a0
+    aspora_user_id: 488dc269-e74b-445e-a755-556d4ad4d324
     account_number: "730016900121845"
   hops:
-    - from: horus_customer_id
-      to: user_id
+    - from: customer_id
+      to: aspora_user_id
       source: ssfb:harbor.customer
       status: resolved
       taken_at: "2026-09-10T09:00:00.000Z"
-    - from: user_id
+    - from: aspora_user_id
       to: account_number
       source: ssfb:harbor.accounts
       status: resolved

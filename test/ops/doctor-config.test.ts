@@ -57,7 +57,7 @@ function rowFor(report: DoctorReport, id: string, key: string): DoctorCheck {
 }
 
 const VALID_MODELS = {
-  MODEL_CLASSIFIER: 'anthropic/claude-haiku-4-5',
+  MODEL_DECISION: 'anthropic/claude-haiku-4-5',
   MODEL_TIER_CHEAP: 'anthropic/claude-haiku-4-5',
   MODEL_TIER_MID: 'anthropic/claude-sonnet-4-5',
   MODEL_TIER_STRONG: 'anthropic/claude-opus-4-5',
@@ -195,7 +195,7 @@ describe('secret leak', () => {
       out[name] = `seeded-secret-${String(n).padStart(3, '0')}-q7z`;
     }
     // Model specs must parse, so the unique part is the model id.
-    for (const k of ['MODEL_CLASSIFIER', 'MODEL_TIER_CHEAP', 'MODEL_TIER_MID', 'MODEL_TIER_STRONG', 'MODEL_CODE_WALKER', 'TRIAGE_EVAL_JUDGE_MODEL']) {
+    for (const k of ['MODEL_DECISION', 'MODEL_TIER_CHEAP', 'MODEL_TIER_MID', 'MODEL_TIER_STRONG', 'MODEL_CODE_WALKER', 'TRIAGE_EVAL_JUDGE_MODEL']) {
       out[k] = `anthropic/seeded-model-${k.toLowerCase()}-q7z`;
     }
     out.MODEL_EMBEDDING = 'ollama/seeded-embed-model-q7z';
@@ -330,26 +330,26 @@ describe('models check', () => {
   });
 
   test('openrouter on a tier is fail; on the classifier it is ok', async () => {
-    const rs = await models({ MODEL_TIER_MID: 'openrouter/x', MODEL_CLASSIFIER: 'openrouter/x', OPENROUTER_API_KEY: 'fake-or-key-01' });
+    const rs = await models({ MODEL_TIER_MID: 'openrouter/x', MODEL_DECISION: 'openrouter/x', OPENROUTER_API_KEY: 'fake-or-key-01' });
     expect(slot(rs, 'MODEL_TIER_MID')?.status).toBe('fail');
-    expect(slot(rs, 'MODEL_CLASSIFIER')?.status).toBe('ok');
+    expect(slot(rs, 'MODEL_DECISION')?.status).toBe('ok');
   });
 
   test('openrouter on the classifier with a blank OPENROUTER_API_KEY is fail', async () => {
-    const rs = await models({ MODEL_CLASSIFIER: 'openrouter/x', OPENROUTER_API_KEY: '' });
-    expect(slot(rs, 'MODEL_CLASSIFIER')).toMatchObject({ status: 'fail', key_names: ['MODEL_CLASSIFIER', 'OPENROUTER_API_KEY'] });
+    const rs = await models({ MODEL_DECISION: 'openrouter/x', OPENROUTER_API_KEY: '' });
+    expect(slot(rs, 'MODEL_DECISION')).toMatchObject({ status: 'fail', key_names: ['MODEL_DECISION', 'OPENROUTER_API_KEY'] });
   });
 
   test('typesafe on the classifier is ok with TYPESAFE_API_KEY and fail without it', async () => {
-    const ok = await models({ MODEL_CLASSIFIER: 'typesafe/jev-1.13', TYPESAFE_API_KEY: 'fake-ts-key-01' });
-    expect(slot(ok, 'MODEL_CLASSIFIER')?.status).toBe('ok');
-    const blank = await models({ MODEL_CLASSIFIER: 'typesafe/jev-1.13', TYPESAFE_API_KEY: '' });
-    expect(slot(blank, 'MODEL_CLASSIFIER')).toMatchObject({ status: 'fail', key_names: ['MODEL_CLASSIFIER', 'TYPESAFE_API_KEY'] });
+    const ok = await models({ MODEL_DECISION: 'typesafe/jev-1.13', TYPESAFE_API_KEY: 'fake-ts-key-01' });
+    expect(slot(ok, 'MODEL_DECISION')?.status).toBe('ok');
+    const blank = await models({ MODEL_DECISION: 'typesafe/jev-1.13', TYPESAFE_API_KEY: '' });
+    expect(slot(blank, 'MODEL_DECISION')).toMatchObject({ status: 'fail', key_names: ['MODEL_DECISION', 'TYPESAFE_API_KEY'] });
   });
 
   test('openrouter/typesafe on the classifier needs OPENROUTER_API_KEY', async () => {
-    const rs = await models({ MODEL_CLASSIFIER: 'openrouter/typesafe/jev-1.13', OPENROUTER_API_KEY: 'fake-or-key-01' });
-    expect(slot(rs, 'MODEL_CLASSIFIER')?.status).toBe('ok');
+    const rs = await models({ MODEL_DECISION: 'openrouter/typesafe/jev-1.13', OPENROUTER_API_KEY: 'fake-or-key-01' });
+    expect(slot(rs, 'MODEL_DECISION')?.status).toBe('ok');
   });
 
   test('typesafe on a tier or the judge is fail', async () => {

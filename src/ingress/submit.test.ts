@@ -848,7 +848,7 @@ describe('submissionDeps in mock mode', () => {
       expect(result.status).toBe('completed');
       expect(result.gaps).toEqual(['embeddings disabled']);
       const init = initialDataOf({ flue } as Harness);
-      // MODEL_CLASSIFIER is blank in a test home, so the classifier fails upward.
+      // MODEL_DECISION is blank in a test home, so the classifier fails upward.
       expect(init.classification.tier_final).toBe('strong');
       expect(init.preflight_warnings).toContainEqual({ step: 'identity', message: 'no ids in request' });
       const run = await runtime.runStore.getRun(RUN_ID);
@@ -1536,6 +1536,32 @@ describe('usage', () => {
     const unpriced = harness({ classify: decision() });
     await runSubmission(prepared({ runId: RUN_2 }), unpriced.deps);
     expect((await unpriced.store.getRun(RUN_2))?.usage[0]?.rows[0]).toMatchObject({ model: spec, input_tokens: 300, usd: null });
+  });
+
+  test('the id decision is counted in the intake as agent identity, and the identity event says how the ids were read', async () => {
+    const spec = 'typesafe/jev-1.13';
+    const decided: SubmissionDeps['identity'] = async (_request, { onUsage }) => {
+      onUsage?.({ model: spec, failed: false, input: 120, output: 8, reportedUsd: 0.001 });
+      return {
+        id_chain: { ids: {}, hops: [], basic_state: [] },
+        basic_state: [],
+        gaps: [],
+        extraction: { extractor: 'decision', candidates: { customer_id: 1 }, dropped: {}, fields: { customer_id: { outcome: 'none', probability: 0.8 } } },
+      };
+    };
+    const h = harness();
+    await runSubmission(prepared(), { ...h.deps, identity: decided });
+    const rows = (await h.store.getRun(RUN_ID))?.usage[0]?.rows ?? [];
+    expect(rows.find((r) => r.agent === 'identity')).toMatchObject({
+      model: spec,
+      purpose: 'identify',
+      calls: 1,
+      input_tokens: 120,
+      output_tokens: 8,
+      usd: 0.001,
+    });
+    const identity = (await pipeline()).find(([type]) => type === 'identity')?.[1];
+    expect(identity).toMatchObject({ extractor: 'decision', candidates: { customer_id: 1 }, fields: { customer_id: { outcome: 'none', probability: 0.8 } } });
   });
 
   test('a failure between the classifier and the dispatch still writes seq 0', async () => {

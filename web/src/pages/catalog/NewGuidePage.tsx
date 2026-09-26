@@ -221,7 +221,7 @@ function NewGuideForm({ data, onSaved }: { data: ServicesResponse; onSaved: (r: 
       <Panel title="Note" description="Markdown. Headings follow the other service guides.">
         <Field
           label={<span className="visually-hidden">Note body</span>}
-          hint="Use placeholders such as <customer_id> or <form_id>. No real ids, URLs, hosts or env var names."
+          hint="Use placeholders such as <customer_id> or <account_form_id>. No real ids, URLs, hosts or env var names."
           error={errorFor('body')}
         >
           <Textarea className="mono" rows={14} style={{ fontSize: 13 }} value={text} onChange={(e) => change(setBody)(e.target.value)} spellCheck={false} />

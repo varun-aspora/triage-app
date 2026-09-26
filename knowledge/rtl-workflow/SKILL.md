@@ -52,7 +52,8 @@ There is no `workflow_instances` table.
 
 `workflow_executions` is looked up by `reference_id`, which for a harbor form
 is the `form_id`. No user id column is documented for it, so do not filter on
-a guessed `user_id`: get the `form_id` first (from harbor or the ID chain). To
+a guessed `user_id`: get the `form_id` first (the chain's `account_form_id`,
+or from harbor). To
 see the real columns, read `information_schema.columns` for the table:
 
 ```

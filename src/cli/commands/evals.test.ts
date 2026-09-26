@@ -213,8 +213,8 @@ describe('triage evals: registration and refusals', () => {
 });
 
 describe('triage evals: suites', () => {
-  test('the classifier provider list defaults to faux, even when MODEL_CLASSIFIER is a real model', async () => {
-    const e = evalHome({ MODEL_CLASSIFIER: 'openai/gpt-5-mini' });
+  test('the classifier provider list defaults to faux, even when MODEL_DECISION is a real model', async () => {
+    const e = evalHome({ MODEL_DECISION: 'openai/gpt-5-mini' });
     let seen: readonly string[] | undefined;
     const r = await cli(['classifier', '--json'], () => e.config, {
       applyPromptfooEnv: () => {},
@@ -357,7 +357,7 @@ describe('triage evals pseudonymise', () => {
     const rewritten = v.parse(CaseSchema, parseYaml(readFileSync(c.file, 'utf8')));
     expect(validateCaseIds(rewritten)).toEqual({ ok: true });
     expect(rewritten.ids.account_number).not.toBe(before.ids.account_number);
-    expect(rewritten.ids.horus_customer_id).not.toBe(before.ids.horus_customer_id);
+    expect(rewritten.ids.customer_id).not.toBe(before.ids.customer_id);
     expect(readFileSync(c.file, 'utf8')).not.toContain(String(before.ids.account_number));
     expect(r.out).not.toContain(KEY);
   });

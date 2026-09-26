@@ -23,7 +23,7 @@ import { redactPersisted } from '../../gate/redact.ts';
 import { loadRulesFile } from '../../gate/rules-file.ts';
 import { REFRESHABLE_PROVIDERS } from '../../model-catalog.ts';
 import { ensureConfiguredModels, type EnsureResult } from '../../model-refresh.ts';
-import { classifierModel, codeWalkerModel, lookupModel, modelForTier, parseSpec, type ModelLookup } from '../../models.ts';
+import { decisionModel, codeWalkerModel, lookupModel, modelForTier, parseSpec, type ModelLookup } from '../../models.ts';
 import { ENTITIES, type Entity } from '../../types/core.ts';
 import { describeError } from './run.ts';
 import type { DoctorCheck, DoctorContext, DoctorStatus, NamedCheck } from './types.ts';
@@ -199,7 +199,7 @@ async function modelsCheck(ctx: DoctorContext): Promise<DoctorCheck[]> {
   const c = ctx.config;
   const lookup = ctx.modelLookup ?? lookupModel;
   const rows: Row[] = await refreshRows(ctx);
-  rows.push(slotRow(c, 'MODEL_CLASSIFIER', () => classifierModel(c), lookup).row);
+  rows.push(slotRow(c, 'MODEL_DECISION', () => decisionModel(c), lookup).row);
   rows.push(slotRow(c, 'MODEL_TIER_CHEAP', () => modelForTier('cheap', c), lookup).row);
   rows.push(slotRow(c, 'MODEL_TIER_MID', () => modelForTier('mid', c), lookup).row);
   const strong = slotRow(c, 'MODEL_TIER_STRONG', () => modelForTier('strong', c), lookup);

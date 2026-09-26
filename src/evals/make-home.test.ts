@@ -116,7 +116,7 @@ describe('evals/home/.env.example', () => {
       MODEL_TIER_CHEAP: 'faux/cheap',
       MODEL_TIER_MID: 'faux/mid',
       MODEL_TIER_STRONG: 'faux/strong',
-      MODEL_CLASSIFIER: 'faux/classifier',
+      MODEL_DECISION: 'faux/classifier',
       MODEL_EMBEDDING: '',
       TRIAGE_EVAL_JUDGE_MODEL: '',
       TRIAGE_ENTITIES: 'ssfb,atspl,rtl',

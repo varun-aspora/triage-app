@@ -56,7 +56,8 @@ Read-only, when the base URL is configured; otherwise `http_call` answers
 "not configured for atspl:package" and that is a gap to record.
 
 - `GET /api/v1/deliveries/<delivery_id>`
-- `GET /api/v1/deliveries/user/<user_id>`
+- `GET /api/v1/deliveries/user/<customer_id>` (the package `user_id` is the
+  harbor customer_id)
 
 `POST /api/v1/deliveries/<delivery_id>/retry`, `.../sync-status` and the
 vendor webhook are writes. Do not call them; recommend a retry in the report.

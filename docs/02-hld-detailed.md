@@ -13,7 +13,7 @@ flowchart TB
     end
 
     subgraph Classify["src/classify"]
-        CLS["classify.ts<br/>structured call on MODEL_CLASSIFIER<br/>input: thread + IdChain + basic state"]
+        CLS["classify.ts<br/>structured call on MODEL_DECISION<br/>input: thread + IdChain + basic state"]
         POL["policy.ts<br/>ordered deterministic tier rules"]
         KBM["patterns.ts<br/>known-pattern index from knowledge/patterns"]
     end
@@ -108,7 +108,7 @@ Same factory with `model: MODEL_TIER_STRONG`, thinking `high`, plus the code too
 
 Order in ingress: normalise → **resolve identity deterministically** (same code as the `resolve_identity` tool) → fetch basic state (harbor customer state, form status, account freeze; three fixed reads) → classify → policy → dispatch. Classifying after the id chain and state are known is what stops the Slack `Tag`/`Summary` from mis-tiering the run; the survey showed they are wrong often. In mock mode the identity step answers from fixtures like everything else.
 
-- `classify.ts`: one structured-output call on `MODEL_CLASSIFIER` through pi-ai with schema validation. Invalid or unparseable output → `category: unknown`, `tier_final: strong`, `classifier_error` recorded. Images are attached when the classifier model is multimodal; otherwise `images_seen: false` is recorded and the report says screenshots were not analysed.
+- `classify.ts`: one structured-output call on `MODEL_DECISION` (named `MODEL_CLASSIFIER` before D69) through pi-ai with schema validation. Invalid or unparseable output → `category: unknown`, `tier_final: strong`, `classifier_error` recorded. Images are attached when the classifier model is multimodal; otherwise `images_seen: false` is recorded and the report says screenshots were not analysed.
 - `policy.ts`: ordered rules (§4.3). Both proposed and final tiers are saved.
 - `patterns.ts`: loads `knowledge/patterns/patterns.json` and does a cheap signature match (regex on error text, service, category) to set `matched_pattern_id`.
 
@@ -120,7 +120,7 @@ All `defineTool` with a Valibot object input and envelope output. Every I/O tool
 
 | Tool | Mounted on | Model-visible input | Gate | Output |
 |---|---|---|---|---|
-| `resolve_identity` | Triage | `{ids: Partial<KnownIds>, entity_hint?}` | fixed parameterised statements only; hop table in the LLD; also tries "UserId is actually a customer_id" and the guardian `device_id` branch | `IdChain` with per-hop status |
+| `resolve_identity` | Triage | `{ids: Partial<KnownIds>, entity_hint?}` | fixed parameterised statements only; hop table in the LLD; the seven D69 keys, input fields and descriptions built from `resources/known-ids.json` | `IdChain` with per-hop status |
 | `logs_search` | investigators, deep | `{service, message?, error?, terms?, fields?, from?, to?, level?, max_hits?, group_by?, normalize?, count?}` | `quickwit.ts`: builds one Quickwit query string from the typed input, then sends it over the entity's **transport** (D44): `http` → REST call to `<ENTITY>_QUICKWIT_URL` with the configured auth; `qw` → `execFile(QW_BIN, ['search', index, query, '--since', …, '-o', 'json', '--fields', …, '--context', <ENTITY>_QW_CONTEXT])`, fixed argv, no shell, query charset-checked (`count`/`group_by` map to `qw count`/`qw histogram`). The model cannot see or choose the transport. Window defaults to the request window and is always applied; `max_hits ≤ <ENTITY>_QUICKWIT_MAX_HITS`; per-entity semaphore; per-word AND on `error`; UUID first-segment rule; `normalize` ports the sim-binding message normalisation | hits or grouped counts, `taken_at` |
 | `sql_select` | investigators, deep | `{service, sql, params?}` | `sql.ts` (§3) | rows, `row_count`, `taken_at` |
 | `http_call` | investigators, deep | `{service, path, method?: 'GET', query?, body?}` | `http.ts` (§3): URL resolved against the service base and checked for same origin and segment-boundary prefix; then `rules.ts` evaluates `<entity>.api.rules.json` on the built path (first match wins; no match → GET/HEAD allow, else block); per-service auth header from the registry; `x-customer-id` set from the IdChain (charset-validated), never from the model; `service: finacle` refused here (no network route; use `cbs_call`) | status, body (size-capped), `taken_at`, `rule_index` |

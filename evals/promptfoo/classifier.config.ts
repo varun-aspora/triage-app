@@ -44,7 +44,7 @@ export class SuiteConfigError extends Error {
 }
 
 export type BuildClassifierSuiteOptions = {
-  /** Classifier model specs to compare side by side. Default: [MODEL_CLASSIFIER]. */
+  /** Classifier model specs to compare side by side. Default: [MODEL_DECISION]. */
   readonly providers?: readonly string[];
   readonly judgeOn: boolean;
   /** Trials per case, passed to promptfoo as repeat. Default 1. */
@@ -106,8 +106,8 @@ export async function buildClassifierSuite(options: BuildClassifierSuiteOptions)
 }
 
 function modelSpecs(requested: readonly string[] | undefined, config: Config): string[] {
-  const specs = requested ?? (config.models.classifier === undefined ? [] : [config.models.classifier]);
-  if (specs.length === 0) throw new SuiteConfigError('no classifier model: pass providers or set MODEL_CLASSIFIER');
+  const specs = requested ?? (config.models.decision === undefined ? [] : [config.models.decision]);
+  if (specs.length === 0) throw new SuiteConfigError('no classifier model: pass providers or set MODEL_DECISION');
   for (const spec of specs) {
     if (parseSpec(spec) === undefined) throw new SuiteConfigError("each provider must be a 'provider/model' spec");
   }

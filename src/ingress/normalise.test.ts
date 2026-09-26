@@ -66,7 +66,7 @@ function build(input: TriageInput, o: NormaliseOptions = opts()) {
 
 describe('buildTriageRequest: thread file and json', () => {
   test('the thread-file and JSON forms give equal requests, apart from request_id, source.kind and received_at', () => {
-    const doc = { messages: messages(), ids: { form_id: 'F-1' }, entities: ['ssfb'], tier: 'mid' };
+    const doc = { messages: messages(), ids: { account_form_id: 'F-1' }, entities: ['ssfb'], tier: 'mid' };
     const a = build({ kind: 'thread_file', interface: 'cli', requested_by: 'ops@example.test', file: structuredClone(doc) });
     const b = build(
       { kind: 'json', interface: 'cli', body: { ...structuredClone(doc), requested_by: 'ops@example.test' } },
@@ -77,7 +77,7 @@ describe('buildTriageRequest: thread file and json', () => {
     expect(a.request_id).not.toBe(b.request_id);
     const strip = (r: typeof a) => ({ ...r, request_id: '', source: null, received_at: '' });
     expect(strip(b)).toEqual(strip(a));
-    expect(a.hints).toEqual({ entities: ['ssfb'], ids: { form_id: 'F-1' }, tier: 'mid' });
+    expect(a.hints).toEqual({ entities: ['ssfb'], ids: { account_form_id: 'F-1' }, tier: 'mid' });
   });
 
   test('messages are sorted by ts and the earliest becomes the parent when none is marked', () => {
@@ -316,10 +316,10 @@ describe('buildTriageRequest: entity hints', () => {
       kind: 'thread_file',
       interface: 'cli',
       requested_by: 'ops',
-      file: { ...file, entities: ['ssfb'], tier: 'cheap', ids: { form_id: 'F-1', user_id: 'U-1' } },
-      hints: { entities: ['atspl'], tier: 'strong', ids: { form_id: 'F-2' } },
+      file: { ...file, entities: ['ssfb'], tier: 'cheap', ids: { account_form_id: 'F-1', aspora_user_id: 'U-1' } },
+      hints: { entities: ['atspl'], tier: 'strong', ids: { account_form_id: 'F-2' } },
     });
-    expect(r.hints).toEqual({ entities: ['atspl'], tier: 'strong', ids: { form_id: 'F-2', user_id: 'U-1' } });
+    expect(r.hints).toEqual({ entities: ['atspl'], tier: 'strong', ids: { account_form_id: 'F-2', aspora_user_id: 'U-1' } });
   });
 
   test('an unknown id key in a thread file is refused by name', () => {
@@ -335,7 +335,7 @@ describe('buildTriageRequest: copies', () => {
   test('the result shares nothing with caller-mutable input', () => {
     const m = messages();
     const entities = ['ssfb', 'atspl'];
-    const ids = { form_id: 'F-1' };
+    const ids = { account_form_id: 'F-1' };
     const attachments = [{ name: 'a.png', mime: 'image/png', bytes_ref: 'att/1' }];
     const tw = { from: '2026-09-01T00:00:00Z', to: '2026-09-02T00:00:00Z' };
     const r = build({ kind: 'thread_file', interface: 'cli', requested_by: 'ops', file: { messages: m }, attachments, hints: { entities, ids, time_window: tw } });
@@ -345,7 +345,7 @@ describe('buildTriageRequest: copies', () => {
     (m[1] as { text: string }).text = 'changed';
     entities.push('rtl');
     entities[0] = 'rtl';
-    (ids as Record<string, string>).form_id = 'F-9';
+    (ids as Record<string, string>).account_form_id = 'F-9';
     attachments.push({ name: 'b', mime: 'x', bytes_ref: 'y' });
     (attachments[0] as { name: string }).name = 'changed';
     tw.from = '2020-01-01T00:00:00Z';
@@ -358,32 +358,32 @@ describe('buildTriageRequest: copies', () => {
 
 describe('parseIdsFlag', () => {
   test('parses known keys and trims', () => {
-    expect(parseIdsFlag(['form_id=F-1', ' user_id = U-1 ', 'utr=a=b'])).toEqual({ form_id: 'F-1', user_id: 'U-1', utr: 'a=b' });
+    expect(parseIdsFlag(['account_form_id=F-1', ' aspora_user_id = U-1 ', 'country=a=b'])).toEqual({ account_form_id: 'F-1', aspora_user_id: 'U-1', country: 'a=b' });
     expect(parseIdsFlag([])).toEqual({});
   });
 
   test('an unknown key is a usage error naming the key', () => {
-    const err = inputError(() => parseIdsFlag(['form_id=F-1', 'pan=ABCDE1234F']));
+    const err = inputError(() => parseIdsFlag(['account_form_id=F-1', 'pan=ABCDE1234F']));
     expect(err.key).toBe('--ids pan');
     expect(err.message).toContain('pan');
     expect(err.message).not.toContain('ABCDE1234F');
   });
 
   test("a missing '=' is a usage error naming the key", () => {
-    const err = inputError(() => parseIdsFlag(['form_id']));
-    expect(err.key).toBe('--ids form_id');
+    const err = inputError(() => parseIdsFlag(['account_form_id']));
+    expect(err.key).toBe('--ids account_form_id');
     expect(err.reason).toContain("'='");
   });
 
   test("a value-looking entry without '=' is named by position, not echoed", () => {
-    const err = inputError(() => parseIdsFlag(['form_id=F-1', '9876-5432']));
+    const err = inputError(() => parseIdsFlag(['account_form_id=F-1', '9876-5432']));
     expect(err.key).toBe('--ids entry 2');
     expect(err.message).not.toContain('9876');
   });
 
   test('empty values and repeated keys are refused', () => {
-    expect(inputError(() => parseIdsFlag(['form_id='])).reason).toContain('empty');
-    expect(inputError(() => parseIdsFlag(['form_id=1', 'form_id=2'])).reason).toContain('more than once');
+    expect(inputError(() => parseIdsFlag(['account_form_id='])).reason).toContain('empty');
+    expect(inputError(() => parseIdsFlag(['account_form_id=1', 'account_form_id=2'])).reason).toContain('more than once');
   });
 });
 

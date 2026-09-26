@@ -160,7 +160,7 @@ export function buildStartBody(form: NewRunForm, now: number): BuildResult {
   return { ok: true, body };
 }
 
-/** Maps a field named in a 400 body ('messages.0.text', 'ids.utr', 'time_window.from') to its form section. */
+/** Maps a field named in a 400 body ('messages.0.text', 'ids.account_number', 'time_window.from') to its form section. */
 export function formFieldOf(field: string): FormField | undefined {
   const head = field.split('.')[0] ?? '';
   switch (head) {

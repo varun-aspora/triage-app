@@ -8,14 +8,14 @@ request:
     User a56cca56-7830-4bbb-8b5d-f2cb803b852d says the app shows something odd on the home screen
     since yesterday. No screenshot. Not sure if it is the balance or the account list.
 ids:
-  user_id: a56cca56-7830-4bbb-8b5d-f2cb803b852d
+  aspora_user_id: a56cca56-7830-4bbb-8b5d-f2cb803b852d
 id_chain:
   ids:
-    user_id: a56cca56-7830-4bbb-8b5d-f2cb803b852d
-    horus_customer_id: 75535af3-8dd6-4cba-95ec-ea861ace211f
+    aspora_user_id: a56cca56-7830-4bbb-8b5d-f2cb803b852d
+    customer_id: 75535af3-8dd6-4cba-95ec-ea861ace211f
   hops:
-    - from: user_id
-      to: horus_customer_id
+    - from: aspora_user_id
+      to: customer_id
       source: ssfb:harbor.account_forms
       status: resolved
       taken_at: "2026-09-09T08:00:00.000Z"

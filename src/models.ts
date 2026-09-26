@@ -12,7 +12,7 @@
 // Spec rules (D1, D41, D42):
 // - A spec is 'provider/model', split at the first '/'.
 // - anthropic and openai are pi-ai built-ins and always accepted.
-// - openrouter and typesafe are third parties, accepted for MODEL_CLASSIFIER
+// - openrouter and typesafe are third parties, accepted for MODEL_DECISION
 //   only. openrouter takes chat models and TypeSafe decision models
 //   ('openrouter/typesafe/<model>'); typesafe takes 'typesafe/<model>', which
 //   src/decisions/registry.ts routes to TypeSafe directly.
@@ -82,9 +82,12 @@ export function thinkingForTier(tier: Tier, config: Config = activeConfig()): Th
   return tier === 'cheap' ? models.thinkingCheap : tier === 'mid' ? models.thinkingMid : models.thinkingStrong;
 }
 
-/** The classifier model spec. The only slot where openrouter and typesafe are allowed (D41). */
-export function classifierModel(config: Config = activeConfig()): string {
-  return checkSpec('MODEL_CLASSIFIER', config.models.classifier, config, true);
+/**
+ * The decision model spec: the classifier and the ingress id extraction (D69).
+ * The only slot where openrouter and typesafe are allowed (D41).
+ */
+export function decisionModel(config: Config = activeConfig()): string {
+  return checkSpec('MODEL_DECISION', config.models.decision, config, true);
 }
 
 /** The code_walker model spec. Blank MODEL_CODE_WALKER falls back to MODEL_TIER_STRONG. */
@@ -138,7 +141,7 @@ export function registerProviders(config: Config): boolean {
 function ollamaModelIds(config: Config): string[] {
   const m = config.models;
   const ids = new Set<string>();
-  for (const spec of [m.classifier, m.tierCheap, m.tierMid, m.tierStrong, m.codeWalker]) {
+  for (const spec of [m.decision, m.tierCheap, m.tierMid, m.tierStrong, m.codeWalker]) {
     const parsed = spec === undefined ? undefined : parseSpec(spec);
     if (parsed?.provider === OLLAMA) ids.add(parsed.modelId);
   }
@@ -180,11 +183,11 @@ function checkSpec(key: string, spec: string | undefined, config: Config, allowT
   const { provider } = parsed;
   if (provider === OPENROUTER) {
     if (allowThirdParty) return spec;
-    throw ConfigError.of(key, 'may not use openrouter; openrouter is allowed for MODEL_CLASSIFIER only (D41)');
+    throw ConfigError.of(key, 'may not use openrouter; openrouter is allowed for MODEL_DECISION only (D41)');
   }
   if (provider === TYPESAFE) {
     if (!allowThirdParty) {
-      throw ConfigError.of(key, 'may not use typesafe; typesafe is allowed for MODEL_CLASSIFIER only (D41)');
+      throw ConfigError.of(key, 'may not use typesafe; typesafe is allowed for MODEL_DECISION only (D41)');
     }
     if (!isDecisionSpec(spec)) throw ConfigError.of(key, "must be 'typesafe/<model>' with no further '/'");
     return spec;

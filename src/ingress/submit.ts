@@ -8,7 +8,11 @@
 //   2. Pre-flight and, when due, the repo sync (D47), side by side; both are
 //      skipped in mock mode. The run waits for them. Warnings are kept,
 //      never fatal.
-//   3. The ingress identity step. An unreachable database comes back as
+//   3. The ingress identity step: the ids are read from the thread by the
+//      decision model, or by the template labels (D69), and resolved. Its
+//      'identity' event says which path ran, the masked decision error,
+//      the per-field probabilities and the candidate counts, never a value.
+//      An unreachable database comes back as
 //      unreachable hops; any other non-loud failure becomes an empty chain and
 //      a gap. Strict fixture misses, aborts and malformed core results throw.
 //   4. The classifier on the model-facing thread, then the known-pattern
@@ -28,8 +32,9 @@
 //
 // Usage (D59). The usage meter (src/usage/meter.ts) counts the model calls;
 // this module writes them to the store:
-// - intake (seq 0): the classifier call and the prior-cases embedding are
-//   recorded into the run's intake bucket, and a finally around the
+// - intake (seq 0): the id decision call (agent identity), the classifier
+//   call (agent classifier) and the prior-cases embedding are recorded into
+//   the run's intake bucket, and a finally around the
 //   pre-dispatch steps writes them as seq 0, final, on success, failure and
 //   stop alike, then forgets them. answerRun, askRun and resumeRun do not
 //   classify, so they have no intake rows.
@@ -132,12 +137,14 @@ import { loadPatterns, matchPattern, type Pattern } from '../classify/patterns.t
 import { applyTierPolicy, toTierDecision, type TierPolicyContext, type TierPolicyResult } from '../classify/policy.ts';
 import type { Config } from '../config/env.ts';
 import { ConfigError } from '../config/errors.ts';
+import { knownIdFieldsFor } from '../config/known-ids.ts';
 import type { Registry } from '../config/registry.ts';
 import { infraRepoNames, loadRepos } from '../config/repos.ts';
 import { createExecRunner, type ExecRunner } from '../connectors/exec.ts';
 import { errorText, safeErrorText, scrubSecrets, stripAddresses } from '../connectors/error-text.ts';
 import { mockPortFromFixtures } from '../connectors/mock.ts';
 import { ConnectorError } from '../connectors/types.ts';
+import { decisionProviderFor } from '../decisions/registry.ts';
 import { createEmbedder, type EmbedUsage, type Embedder, type FetchLike, HASH_MODEL } from '../embed/index.ts';
 import { createJsonlAuditSink } from '../gate/audit-sink.ts';
 import { checkEgress, redactModelFacing, redactPersisted } from '../gate/redact.ts';
@@ -182,7 +189,7 @@ import {
   type UsageBucket,
   usageVersion,
 } from '../usage/meter.ts';
-import { type IngressIdentity, NO_IDS_GAP, resolveIngressIdentity } from './identity.ts';
+import { type IdentityUsage, type IngressIdentity, NO_IDS_GAP, resolveIngressIdentity } from './identity.ts';
 import { IngressInputError } from './normalise.ts';
 import type { PreparedSubmission } from './prepare.ts';
 import { renderAnswer, renderAsk, renderResume, renderThread, type RenderImages, type ResumeFrom } from './render-thread.ts';
@@ -248,7 +255,12 @@ export type SubmissionDeps = SettleDeps & {
   readonly repoSync?: (input: { readonly interface: Interface; readonly signal: AbortSignal }) => Promise<readonly PreflightWarning[]>;
   readonly identity: (
     request: Pick<TriageRequest, 'request_id' | 'interface' | 'messages' | 'hints'>,
-    opts: { readonly redactionNames: readonly string[]; readonly signal: AbortSignal },
+    opts: {
+      readonly redactionNames: readonly string[];
+      readonly signal: AbortSignal;
+      /** Hears the id decision call, for the run's intake usage (D59). */
+      readonly onUsage?: (u: IdentityUsage) => void;
+    },
   ) => Promise<IngressIdentity>;
   /** onUsage hears the model call, for the run's intake usage (D59). */
   readonly classify: (input: ClassifyInput, signal: AbortSignal, onUsage?: (u: ClassifierUsage) => void) => Promise<Classification>;
@@ -443,9 +455,14 @@ export async function runSubmission(prepared: PreparedSubmission, deps: Submissi
 
     await advance(store, runId, 'identity');
     const identityStarted = Date.now();
-    const identity = await identityStep(request, names, deps, signal);
+    const identity = await identityStep(request, names, deps, signal, identityUsageRecorder(runId));
     warnings.push(...identity.gaps.map((message) => warning('identity', message)));
-    logRunEvent(runId, 'identity', { durationMs: Date.now() - identityStarted, id_chain: identity.id_chain, gaps: identity.gaps });
+    logRunEvent(runId, 'identity', {
+      durationMs: Date.now() - identityStarted,
+      id_chain: identity.id_chain,
+      gaps: identity.gaps,
+      ...(identity.extraction ?? {}),
+    });
 
     const loaded = await loadImages(request.attachments, deps, signal);
     if (loaded.failed > 0) {
@@ -948,6 +965,23 @@ function classifierUsageRecorder(runId: RunId): (u: ClassifierUsage) => void {
     });
 }
 
+/** Records the id decision call into the intake bucket, as agent identity. Its cost is the one the provider reported (D59). */
+function identityUsageRecorder(runId: RunId): (u: IdentityUsage) => void {
+  return (u) =>
+    recordUsage(runId, 'intake', {
+      model: u.model,
+      agent: 'identity',
+      purpose: 'identify',
+      isError: u.failed,
+      input: u.input,
+      output: u.output,
+      cacheRead: 0,
+      cacheWrite: 0,
+      // Preset so the meter does not price a decision spec itself; null is unpriced.
+      usd: u.reportedUsd ?? null,
+    });
+}
+
 /** Logs, counts only, the run's turns that carried no submissionId, and forgets them. */
 function logUnassignedUsage(runId: RunId): void {
   const rows = takeUnassigned(runId);
@@ -1041,9 +1075,10 @@ async function identityStep(
   names: readonly string[],
   deps: Pick<SubmissionDeps, 'identity'>,
   signal: AbortSignal,
+  onUsage?: (u: IdentityUsage) => void,
 ): Promise<IngressIdentity> {
   try {
-    return await deps.identity(request, { redactionNames: names, signal });
+    return await deps.identity(request, { redactionNames: names, signal, ...(onUsage !== undefined ? { onUsage } : {}) });
   } catch (err) {
     if (signal.aborted || LOUD_IDENTITY_ERRORS.has(className(err))) throw err;
     const id_chain: IdChain = { ids: {}, hops: [], basic_state: [] };
@@ -1219,8 +1254,15 @@ export function submissionDeps(options: SubmissionDepsOptions = {}): SubmissionD
     resumePreflight: ({ signal }) => runTunnelPreflight(preflightInput(signal)),
     repoSync: ({ interface: iface, signal }) =>
       syncBeforeRun(iface, { config, runner: options.runner ?? createExecRunner(), signal }, infraReposToSync(config, registry)),
-    identity: (request, { redactionNames, signal }) =>
+    identity: (request, { redactionNames, signal, onUsage }) =>
       resolveIngressIdentity(request, {
+        // Read per run, so a change to the file needs no restart. A bad file throws and the step records it as a gap.
+        knownIdFields: knownIdFieldsFor(config),
+        decision: {
+          model: config.models.decision,
+          provider: (spec) => decisionProviderFor(spec, config),
+          ...(onUsage !== undefined ? { onUsage } : {}),
+        },
         sql,
         mock: mockPortFromFixtures(mock),
         audit,

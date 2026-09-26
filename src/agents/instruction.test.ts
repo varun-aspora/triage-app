@@ -41,7 +41,7 @@ function init(overrides: { hints?: Record<string, unknown>; ids?: Record<string,
       rule_fired: 'rule_4_money_moved',
     },
     id_chain: {
-      ids: overrides.ids ?? { horus_customer_id: 'horus-test-1', account_form_id: 'form-test-1' },
+      ids: overrides.ids ?? { customer_id: 'cust-test-1', account_form_id: 'form-test-1' },
       hops: [],
       basic_state: [],
     },
@@ -127,12 +127,12 @@ describe('methodText', () => {
 
   test('shows known ids with resolved ids winning over hints, in key order', () => {
     const text = methodText(
-      init({ hints: { ids: { customer_id: 'hint-cust', horus_customer_id: 'hint-horus' } }, ids: { horus_customer_id: 'horus-test-1' } }),
+      init({ hints: { ids: { customer_id: 'hint-cust', aspora_user_id: 'hint-user' } }, ids: { aspora_user_id: 'user-test-1' } }),
       { knowledge },
     );
-    expect(text).toContain('- Known ids: horus_customer_id = horus-test-1, customer_id = hint-cust');
-    expect(text).toContain('Ids: horus_customer_id = horus-test-1, customer_id = hint-cust');
-    expect(text).not.toContain('hint-horus');
+    expect(text).toContain('- Known ids: aspora_user_id = user-test-1, customer_id = hint-cust');
+    expect(text).toContain('Ids: aspora_user_id = user-test-1, customer_id = hint-cust');
+    expect(text).not.toContain('hint-user');
   });
 
   test('with no ids, the brief asks for them rather than showing none', () => {

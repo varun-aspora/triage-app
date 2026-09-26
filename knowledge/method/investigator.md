@@ -81,8 +81,13 @@ policy message. Try these in order:
 
 ## Scope: only the run's ids
 
-- Every id-shaped value you pass (UUID, account number, form id, phone, email)
-  must be one of the run's ids. Any other id is refused and the refusal is
+- Every id-shaped value you pass (UUID, account number, phone number, email)
+  must be one of the run's ids. The brief's Ids line names them with the seven
+  id keys: `country`, `phone_number`, `aspora_user_id` (harbor
+  `external_user_ref`), `customer_id` (the SSFB harbor customer id, not the
+  CIF id), `account_form_id` (harbor `form_id`), `account_id` (the rhythm
+  account UUID, not the bank account number) and `account_number` (the bank
+  account number). Any other id is refused and the refusal is
   audited.
 - If you find a new id that matters (for example a second customer or account),
   do not query it. Put it in your findings and your reply, so the parent can

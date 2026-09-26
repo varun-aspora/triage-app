@@ -12,7 +12,8 @@ import { Notice } from '../../components/Notice.tsx';
 import { PageHeader } from '../../components/PageHeader.tsx';
 import { Panel } from '../../components/Panel.tsx';
 import { Segmented } from '../../components/Segmented.tsx';
-import { ENTITY_LABELS, KNOWN_ID_KEYS, TIERS } from '../../lib/constants.ts';
+import { ENTITY_LABELS, TIERS } from '../../lib/constants.ts';
+import { KNOWN_ID_FIELDS, KNOWN_ID_KEYS, knownIdField } from '../../lib/known-ids.ts';
 import {
   buildStartBody,
   type FormField,
@@ -39,6 +40,9 @@ type Errors = Partial<Record<FormField, string>>;
 let rowSeq = 0;
 type KeyedRow = IdRow & { id: number };
 const newRow = (key: KnownIdKey): KeyedRow => ({ id: ++rowSeq, key, value: '' });
+// The key the first row starts on. The form used to start on user_id, which
+// D69 renamed aspora_user_id. The keys offered come from known-ids.json.
+const FIRST_ID_KEY: KnownIdKey = 'aspora_user_id';
 
 export default function NewRunPage() {
   const { session } = useSession();
@@ -53,7 +57,7 @@ export default function NewRunPage() {
   const [entities, setEntities] = useState<Entity[]>([]);
   const [tierMode, setTierMode] = useState<'auto' | 'choose'>('auto');
   const [tier, setTier] = useState<Tier>('mid');
-  const [ids, setIds] = useState<KeyedRow[]>(() => [newRow('user_id')]);
+  const [ids, setIds] = useState<KeyedRow[]>(() => [newRow(FIRST_ID_KEY)]);
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
 
@@ -117,7 +121,7 @@ export default function NewRunPage() {
 
   const addId = () => {
     const used = new Set(ids.map((r) => r.key));
-    setIds([...ids, newRow(KNOWN_ID_KEYS.find((k) => !used.has(k)) ?? 'user_id')]);
+    setIds([...ids, newRow(KNOWN_ID_KEYS.find((k) => !used.has(k)) ?? FIRST_ID_KEY)]);
   };
 
   return (
@@ -261,38 +265,65 @@ export default function NewRunPage() {
                   Known IDs <span className="optional">(optional)</span>
                 </span>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {ids.map((row, i) => (
-                    <div key={row.id} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                      <select
-                        className="field mono"
-                        aria-label="ID type"
-                        style={{ width: 200, flexShrink: 0 }}
-                        value={row.key}
-                        onChange={(e) => setIds(ids.map((r, j) => (j === i ? { ...r, key: e.target.value as KnownIdKey } : r)))}
-                      >
-                        {KNOWN_ID_KEYS.map((k) => (
-                          <option key={k} value={k}>
-                            {k}
-                          </option>
-                        ))}
-                      </select>
-                      <input
-                        className="field mono"
-                        aria-label={`${row.key} value`}
-                        autoComplete="off"
-                        value={row.value}
-                        onChange={(e) => setIds(ids.map((r, j) => (j === i ? { ...r, value: e.target.value } : r)))}
-                      />
-                      <button
-                        type="button"
-                        className="runs-icon-btn"
-                        aria-label={`Remove ${row.key}`}
-                        onClick={() => setIds(ids.filter((_, j) => j !== i))}
-                      >
-                        ×
-                      </button>
-                    </div>
-                  ))}
+                  {ids.map((row, i) => {
+                    const field = knownIdField(row.key);
+                    const setValue = (value: string) => setIds(ids.map((r, j) => (j === i ? { ...r, value } : r)));
+                    return (
+                      <div key={row.id}>
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                          <select
+                            className="field mono"
+                            aria-label="ID type"
+                            style={{ width: 200, flexShrink: 0 }}
+                            value={row.key}
+                            // A value typed for one key rarely fits another, and a
+                            // choice field only takes its own options, so start over.
+                            onChange={(e) =>
+                              setIds(ids.map((r, j) => (j === i ? { ...r, key: e.target.value as KnownIdKey, value: '' } : r)))
+                            }
+                          >
+                            {KNOWN_ID_FIELDS.map((f) => (
+                              <option key={f.key} value={f.key} title={f.description}>
+                                {f.key}
+                              </option>
+                            ))}
+                          </select>
+                          {field.options !== undefined ? (
+                            <select
+                              className="field"
+                              aria-label={`${row.key} value`}
+                              value={row.value}
+                              onChange={(e) => setValue(e.target.value)}
+                            >
+                              <option value="">Not given</option>
+                              {field.options.map((o) => (
+                                <option key={o.value} value={o.value}>
+                                  {o.value} ({o.description})
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              className="field mono"
+                              aria-label={`${row.key} value`}
+                              autoComplete="off"
+                              value={row.value}
+                              onChange={(e) => setValue(e.target.value)}
+                            />
+                          )}
+                          <button
+                            type="button"
+                            className="runs-icon-btn"
+                            aria-label={`Remove ${row.key}`}
+                            onClick={() => setIds(ids.filter((_, j) => j !== i))}
+                          >
+                            ×
+                          </button>
+                        </div>
+                        <p className="hint">{field.description}</p>
+                      </div>
+                    );
+                  })}
                 </div>
                 <button type="button" className="runs-text-btn" style={{ margin: '10px 0 0' }} onClick={addId}>
                   <Icon name="plus" size={14} />

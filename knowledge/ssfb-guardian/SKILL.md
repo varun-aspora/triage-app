@@ -73,16 +73,17 @@ SMS vendor's callback then resolves the sending number and its country.
 
 ## ID fields
 
-guardian has no `user_id` column. The link to the Aspora userId is indirect:
+guardian has no `user_id` column. The link to the Aspora user id
+(`aspora_user_id`) is indirect:
 
 ```
 device_auth_attempts.verification_id
   -> refresh_tokens.verification_id
-  -> refresh_tokens.subject   (the Aspora userId)
+  -> refresh_tokens.subject   (the Aspora user id)
 ```
 
 This path comes from an earlier audit and was not checked against a known
-userId (unverified: no independent check). Cross-check the first result before
+user id (unverified: no independent check). Cross-check the first result before
 you rely on it.
 
 The harbor `account_forms.session_id` also leads into guardian through the
@@ -94,13 +95,13 @@ http_call { service: "guardian", path: "/admin/verification/session/<session_id>
 
 ## Queries
 
-SIM-binding attempts for a userId, joined through `refresh_tokens.subject`:
+SIM-binding attempts for an `aspora_user_id`, joined through `refresh_tokens.subject`:
 
 ```
 sql_select {
   service: "guardian",
   sql: "SELECT daa.* FROM refresh_tokens rt JOIN device_auth_attempts daa ON daa.verification_id = rt.verification_id WHERE rt.subject = $1",
-  params: ["<user_id>"]
+  params: ["<aspora_user_id>"]
 }
 ```
 

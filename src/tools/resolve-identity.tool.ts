@@ -1,5 +1,5 @@
 // resolve_identity: re-runs the deterministic ID chain mid-run when a new id
-// turns up (HLD 02 §1.1, §1.5 and the §2 tool table; LLD 04 §2.2; D22, D26).
+// turns up (HLD 02 §1.1, §1.5 and the §2 tool table; LLD 04 §2.2; D22, D26, D69).
 //
 // Mounted on Triage only. The input is { ids, entity_hint? }: no SQL, path,
 // query, entity or run id. Every read is one of the fixed statements in
@@ -22,11 +22,14 @@
 // id is already in scope, or when a hop produced an id that is in scope (or in
 // a result that already joined). An id that resolves with no such link comes
 // back 'unverified', does not widen scope and has its derived ids withheld.
-// Ids from an unverified hop (guardian device_id) never count as a link and
-// never join.
+//
+// The description of each id key comes from resources/known-ids.json (D69),
+// read when the tool is created, so the model sees the same text the ingress
+// decision questions are built from.
 
 import { defineTool, type ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
+import { knownIdFieldsFor } from '../config/known-ids.ts';
 import type { SqlConnector } from '../connectors/sql/pg-client.ts';
 import { mockPortFromFixtures } from '../connectors/mock.ts';
 import { safeErrorText, stripAddresses } from '../connectors/error-text.ts';
@@ -53,27 +56,23 @@ declare module './_lib/context.ts' {
 
 export const RESOLVE_IDENTITY = IDENTITY_TOOL;
 
-/** The audit target for lines this file writes itself: the first hop's database. */
+/** The audit target for lines this file writes itself: harbor, where most hops run. */
 const FALLBACK_TARGET = 'SSFB_HARBOR_DB_URL';
 
 const ID_MAX_CHARS = 128;
 
 // ------------------------------------------------------------ input schema
 
-const KEY_HINTS: Readonly<Record<KnownIdKey, string>> = Object.freeze({
-  horus_customer_id: 'Horus Customer ID (the harbor customer_id).',
-  customer_id: 'Harbor customer_id.',
-  user_id: 'User id (harbor account_forms.external_user_ref).',
-  old_user_id: 'UserId from the old template; tried as a user id, then as a customer_id.',
-  form_id: 'Workflow form_id (same id as the account form).',
-  account_form_id: 'Account form id / NSTP application id.',
-  alphadesk_user_id: 'Alphadesk user id.',
-  device_id: 'Device id. The guardian join is unverified, so it never widens scope on its own.',
-  account_id: 'Rhythm account id. No hop starts from it.',
-  account_number: 'CBS account number. No hop starts from it.',
-  phone: 'Phone number. No hop starts from it.',
-  utr: 'UTR. No hop starts from it.',
-});
+/**
+ * Each key's description from resources/known-ids.json (the home's, else the
+ * shipped copy, as the ingress identity step reads it). Throws RegistryError
+ * when the file is bad.
+ */
+function keyHints(ctx: Pick<ToolContext, 'config'>): Readonly<Record<KnownIdKey, string>> {
+  const hints = {} as Record<KnownIdKey, string>;
+  for (const field of knownIdFieldsFor(ctx.config)) hints[field.key] = field.description;
+  return Object.freeze(hints);
+}
 
 const IdValueSchema = v.pipe(
   v.string(),
@@ -83,26 +82,30 @@ const IdValueSchema = v.pipe(
   v.regex(/^[A-Za-z0-9+@._:-]+$/, 'an id is letters, digits and + @ . _ : - only'),
 );
 
-function idField(key: KnownIdKey) {
-  return v.optional(v.pipe(IdValueSchema, v.description(KEY_HINTS[key])));
+function idField(hint: string) {
+  return v.optional(v.pipe(IdValueSchema, v.description(hint)));
 }
 
-const idEntries = {} as Record<KnownIdKey, ReturnType<typeof idField>>;
-for (const key of KNOWN_ID_KEYS) idEntries[key] = idField(key);
-
-// Strict: an unknown key inside ids (sql, path, query, ...) is refused.
-const IdsSchema = v.strictObject(idEntries);
-
-export const ResolveIdentityInputSchema = v.object({
-  ids: v.pipe(IdsSchema, v.description('The ids to resolve, by kind. At least one.')),
-  entity_hint: v.optional(
-    v.pipe(
-      v.picklist(ENTITIES),
-      v.description('Which entity you think the ids belong to. Recorded only; the hop table decides what is read.'),
+function inputSchema(hints: Readonly<Record<KnownIdKey, string>>) {
+  const idEntries = {} as Record<KnownIdKey, ReturnType<typeof idField>>;
+  for (const key of KNOWN_ID_KEYS) idEntries[key] = idField(hints[key]);
+  return v.object({
+    // Strict: an unknown key inside ids (sql, path, query, ...) is refused.
+    ids: v.pipe(v.strictObject(idEntries), v.description('The ids to resolve, by kind. At least one.')),
+    entity_hint: v.optional(
+      v.pipe(
+        v.picklist(ENTITIES),
+        v.description('Which entity you think the ids belong to. Recorded only; the hop table decides what is read.'),
+      ),
     ),
-  ),
-});
-export type ResolveIdentityInput = v.InferOutput<typeof ResolveIdentityInputSchema>;
+  });
+}
+
+/** Builds the input schema for this context, with key descriptions from resources/known-ids.json. */
+export function resolveIdentityInputSchema(ctx: Pick<ToolContext, 'config'>) {
+  return inputSchema(keyHints(ctx));
+}
+export type ResolveIdentityInput = v.InferOutput<ReturnType<typeof inputSchema>>;
 
 const description =
   'Resolve ids that surfaced mid-run (for example a form id in a log line) through the fixed ID-chain lookups ' +
@@ -259,9 +262,9 @@ function widen(deps: ToolDeps, m: Merge): IdChain {
 }
 
 function auditTarget(ctx: ToolContext): string {
-  const first = IDENTITY_STATEMENTS.horus_customer_id;
+  const harbor = IDENTITY_STATEMENTS.customer_id;
   try {
-    return ctx.registry.service(first.entity, first.service).db ?? FALLBACK_TARGET;
+    return ctx.registry.service(harbor.entity, harbor.service).db ?? FALLBACK_TARGET;
   } catch {
     return FALLBACK_TARGET;
   }
@@ -297,7 +300,7 @@ async function runResolveIdentity(ctx: ToolContext, flue: RunInput): Promise<Too
           tool: RESOLVE_IDENTITY,
           decision,
           ...(reason !== undefined ? { reason } : {}),
-          service: IDENTITY_STATEMENTS.horus_customer_id.service,
+          service: IDENTITY_STATEMENTS.customer_id.service,
           target,
           transport: mock ? 'mock' : 'real',
           summary,
@@ -396,7 +399,7 @@ function create(ctx: ToolContext): ToolDefinition {
   return defineTool({
     name: RESOLVE_IDENTITY,
     description,
-    input: ResolveIdentityInputSchema,
+    input: resolveIdentityInputSchema(ctx),
     run: async ({ data, signal }): Promise<ToolEnvelope> =>
       runResolveIdentity(ctx, { data, ...(signal !== undefined ? { signal } : {}) }),
   });

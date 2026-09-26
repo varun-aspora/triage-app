@@ -157,7 +157,7 @@ describe('ensureConfiguredModels', () => {
 
   test('does not fetch when every configured model is found', async () => {
     const calls: string[] = [];
-    const config = home({ MODEL_TIER_STRONG: 'anthropic/claude-sonnet-5', MODEL_CLASSIFIER: 'ollama/qwen3:8b' });
+    const config = home({ MODEL_TIER_STRONG: 'anthropic/claude-sonnet-5', MODEL_DECISION: 'ollama/qwen3:8b' });
     expect(await ensureConfiguredModels(config, { fetch: fakeFetch(calls) })).toEqual({ refreshed: [], missing: [] });
     expect(calls).toEqual([]);
   });
@@ -173,7 +173,7 @@ describe('ensureConfiguredModels', () => {
 
   test('ignores providers it cannot refresh', async () => {
     const calls: string[] = [];
-    const config = home({ MODEL_CLASSIFIER: 'openrouter/x/y' });
+    const config = home({ MODEL_DECISION: 'openrouter/x/y' });
     expect(await ensureConfiguredModels(config, { fetch: fakeFetch(calls), lookup: lookupNone })).toEqual({
       refreshed: [],
       missing: [],

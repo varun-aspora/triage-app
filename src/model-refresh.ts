@@ -17,7 +17,7 @@ import { lookupModel, parseSpec, type ModelLookup } from './models.ts';
 export function configuredModels(config: Config): { key: string; spec: string }[] {
   const m = config.models;
   const pairs: [string, string | undefined][] = [
-    ['MODEL_CLASSIFIER', m.classifier],
+    ['MODEL_DECISION', m.decision],
     ['MODEL_TIER_CHEAP', m.tierCheap],
     ['MODEL_TIER_MID', m.tierMid],
     ['MODEL_TIER_STRONG', m.tierStrong],

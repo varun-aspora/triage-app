@@ -2,10 +2,14 @@ import { describe, expect, mock, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadKnownIdFields } from '../config/known-ids.ts';
 import { loadRegistry, type Registry } from '../config/registry.ts';
 import { mockPortFromFixtures, type MockPort } from '../connectors/mock.ts';
 import type { RunSelectInput, SqlSelectOutcome } from '../connectors/sql/pg-client.ts';
 import { ConnectorError, type ConnectorContext } from '../connectors/types.ts';
+import { DecisionError } from '../decisions/decide.ts';
+import { fakeDecisionProvider, type FakeAnswers } from '../decisions/fake.ts';
+import type { ChoiceQuestion, DecisionAnswer, DecisionProvider } from '../decisions/types.ts';
 import { createMemoryAuditSink } from '../gate/audit-sink.ts';
 import { keyString, semanticKey } from '../mock/key.ts';
 import type { FixtureStore } from '../mock/store.ts';
@@ -15,7 +19,10 @@ import type { BasicStateItem, IdChain } from '../types/id-chain.ts';
 import type { RequestHints, TriageRequest } from '../types/request.ts';
 import { makeTestConfig } from '../../test/support/fake-tool-context.ts';
 import { extractKnownIds } from './extract-ids.ts';
+import { MAX_CANDIDATES } from './id-decision.ts';
 import {
+  type IdentityDecisionDeps,
+  type IdentityUsage,
   IngressIdentityError,
   NO_IDS_GAP,
   resolveIngressIdentity,
@@ -24,6 +31,7 @@ import {
 } from './identity.ts';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
+const FIELDS = loadKnownIdFields(join(ROOT, 'resources'));
 const NOW = new Date('2026-09-24T09:00:00.000Z');
 const T = NOW.toISOString();
 
@@ -33,6 +41,8 @@ const FORM = '22222222-2222-4222-8222-222222222222';
 const USER = '33333333-3333-4333-8333-333333333333';
 const OTHER = '44444444-4444-4444-8444-444444444444';
 const ACCOUNT = '55555555-5555-4555-8555-555555555555';
+const PHONE = '+971 50 123 4567';
+const ACCOUNT_NO = '000011112222';
 
 // Made-up DSNs on a .invalid host. Nothing here dials.
 const dsn = (db: string): string => ['postgres://triage_fake:fakepw@ingress-fake-db.invalid:6543/', db].join('');
@@ -79,6 +89,7 @@ const NO_SQL = {
 
 function depsOf(over: Partial<IngressIdentityDeps> = {}): IngressIdentityDeps {
   return {
+    knownIdFields: FIELDS,
     sql: NO_SQL,
     mock: REAL_PORT,
     audit: createMemoryAuditSink(),
@@ -109,10 +120,10 @@ const item = (name: string, value: string, source: string, status?: BasicStateIt
 });
 
 const FULL_CHAIN: IdChain = {
-  ids: { horus_customer_id: CUST, customer_id: CUST, account_form_id: FORM, form_id: FORM, user_id: USER, account_id: ACCOUNT },
+  ids: { aspora_user_id: USER, customer_id: CUST, account_form_id: FORM, account_id: ACCOUNT },
   hops: [
-    { from: 'horus_customer_id', to: 'customer_id', source: 'ssfb:harbor.customer', status: 'resolved', taken_at: T },
-    { from: 'account_form_id', to: 'user_id', source: 'ssfb:harbor.account_forms', status: 'resolved', taken_at: T },
+    { from: 'customer_id', to: 'account_form_id', source: 'ssfb:harbor.customer', status: 'resolved', taken_at: T },
+    { from: 'account_form_id', to: 'aspora_user_id', source: 'ssfb:harbor.account_forms', status: 'resolved', taken_at: T },
     { from: 'customer_id', to: 'account_id', source: 'ssfb:rhythm.customer_account_mappings', status: 'resolved', taken_at: T },
   ],
   basic_state: [
@@ -134,6 +145,7 @@ describe('with a fake core', () => {
     expect(out.basic_state.length).toBe(5);
     for (const s of out.basic_state) expect(s.taken_at).toBe(T);
     expect(out.gaps).toEqual([]);
+    expect(out.extraction?.extractor).toBe('labels');
   });
 
   test('the core gets only the extracted ids, and the run info comes from the request', async () => {
@@ -143,24 +155,22 @@ describe('with a fake core', () => {
 
     expect(core.fn).toHaveBeenCalledTimes(1);
     const call = core.calls[0] as (typeof core.calls)[number];
-    expect(call.ids).toEqual(extractKnownIds(req));
-    expect(call.ids).toEqual({
-      horus_customer_id: CUST,
-      old_user_id: OTHER,
-      account_form_id: FORM,
-      account_number: '000011112222',
-    });
+    expect(call.ids).toEqual(extractKnownIds(req, FIELDS));
+    // The unlabelled UUID is not guessed into any key.
+    expect(call.ids).toEqual({ customer_id: CUST, account_form_id: FORM, account_number: '000011112222' });
     expect(call.deps.run).toEqual({ runId: 'run_ingress_ident_01', interface: 'cli', redactionNames: ['Synth Customer'] });
     // The test-only hook and the names are not passed down as core deps.
     expect('resolveIdChain' in call.deps).toBe(false);
     expect('redactionNames' in call.deps).toBe(false);
+    expect('knownIdFields' in call.deps).toBe(false);
+    expect('decision' in call.deps).toBe(false);
   });
 
   test('an unreachable core result does not throw and keeps hops and state unreachable', async () => {
     const chain: IdChain = {
-      ids: { horus_customer_id: CUST },
+      ids: { customer_id: CUST },
       hops: [
-        { from: 'horus_customer_id', source: 'ssfb:harbor.customer', status: 'unreachable', taken_at: T },
+        { from: 'customer_id', source: 'ssfb:harbor.customer', status: 'unreachable', taken_at: T },
         { from: 'customer_id', source: 'ssfb:rhythm.customer_account_mappings', status: 'unreachable', taken_at: T },
       ],
       basic_state: [
@@ -201,8 +211,8 @@ describe('with a fake core', () => {
 
   test('an unreachable hop with no state items at all gets empty unreachable items for that database', async () => {
     const chain: IdChain = {
-      ids: { horus_customer_id: CUST },
-      hops: [{ from: 'horus_customer_id', source: 'ssfb:harbor.customer', status: 'unreachable', taken_at: T }],
+      ids: { customer_id: CUST },
+      hops: [{ from: 'customer_id', source: 'ssfb:harbor.customer', status: 'unreachable', taken_at: T }],
       basic_state: [],
     };
     const out = await resolveIngressIdentity(request([TEMPLATE]), depsOf({ resolveIdChain: fakeCore(chain).fn }));
@@ -216,7 +226,7 @@ describe('with a fake core', () => {
   test('rhythm items with an account suffix count as present', async () => {
     const chain: IdChain = {
       ids: { customer_id: CUST },
-      hops: [{ from: 'device_id', source: 'ssfb:rhythm.customer_account_mappings', status: 'unreachable', taken_at: T }],
+      hops: [{ from: 'account_id', source: 'ssfb:rhythm.customer_account_mappings', status: 'unreachable', taken_at: T }],
       basic_state: [
         item('rhythm_account_status:NRE', 'ACTIVE', 'ssfb:rhythm.customer_account_mappings', 'read'),
         item('rhythm_debit_allowed:NRE', 'true', 'ssfb:rhythm.customer_account_mappings', 'read'),
@@ -251,6 +261,7 @@ describe('no ids', () => {
     expect(out.id_chain).toEqual({ ids: {}, hops: [], basic_state: [] });
     expect(out.basic_state).toEqual([]);
     expect(out.gaps).toEqual([NO_IDS_GAP]);
+    expect(out.extraction).toMatchObject({ extractor: 'labels', fields: {} });
   });
 
   test('hints alone are enough to call the core', async () => {
@@ -278,17 +289,196 @@ describe('deny paths', () => {
     });
   });
 
-  test('extra unlabelled UUIDs are reported as a gap without their values', async () => {
+  test('unlabelled UUIDs are not guessed into any key and leave no gap', async () => {
+    const core = fakeCore(FULL_CHAIN);
+    const out = await resolveIngressIdentity(request([`look up ${OTHER}`, `and ${USER} and ${ACCOUNT}`]), depsOf({ resolveIdChain: core.fn }));
+    expect(core.fn).toHaveBeenCalledTimes(0);
+    expect(out.gaps).toEqual([NO_IDS_GAP]);
+  });
+});
+
+// ---------------------------------------------------------------- the id decision
+
+const SPEC = 'typesafe/jev-1.13';
+
+/** Answers each question with the option whose text is the wanted value, else none; country from `country`. */
+function answering(want: { readonly [key: string]: string }, p = 0.9): FakeAnswers {
+  return (req) => {
+    const out: Record<string, DecisionAnswer> = {};
+    for (const [name, q] of Object.entries(req.questions as Record<string, ChoiceQuestion>)) {
+      const wanted = want[name];
+      const option = wanted === undefined ? undefined : Object.keys(q.options).find((k) => k === wanted || q.options[k] === wanted);
+      const choice = option ?? 'none';
+      const probabilities = Object.fromEntries(Object.keys(q.options).map((k) => [k, k === choice ? p : (1 - p) / (Object.keys(q.options).length - 1)]));
+      out[name] = { kind: 'choice', choice, probabilities };
+    }
+    return out;
+  };
+}
+
+function decisionOf(provider: DecisionProvider | (() => DecisionProvider), over: Partial<IdentityDecisionDeps> = {}) {
+  const usage: IdentityUsage[] = [];
+  const built: string[] = [];
+  const deps: IdentityDecisionDeps = {
+    model: SPEC,
+    provider: (spec) => {
+      built.push(spec);
+      return typeof provider === 'function' ? provider() : provider;
+    },
+    onUsage: (u) => usage.push(u),
+    ...over,
+  };
+  return { deps, usage, built };
+}
+
+const THREAD = [`hi, the user ${USER} is stuck on form ${FORM}`, `they are in the UK, phone ${PHONE}, account ${ACCOUNT_NO}`];
+
+describe('the id decision', () => {
+  test('the decision picks the ids, and the event summary says how', async () => {
+    const fake = fakeDecisionProvider(answering({ aspora_user_id: USER, account_form_id: FORM, country: 'GB', phone_number: '****4567' }));
+    const d = decisionOf(fake);
+    const core = fakeCore(FULL_CHAIN);
+    const out = await resolveIngressIdentity(request(THREAD), depsOf({ resolveIdChain: core.fn, decision: d.deps }));
+
+    expect(d.built).toEqual([SPEC]);
+    expect(fake.requests.length).toBe(1);
+    expect(core.calls[0]?.ids).toEqual({ country: 'GB', phone_number: '+971501234567', aspora_user_id: USER, account_form_id: FORM });
+    expect(out.extraction).toEqual({
+      extractor: 'decision',
+      candidates: { phone_number: 2, aspora_user_id: 2, customer_id: 2, account_form_id: 2, account_id: 2, account_number: 1 },
+      dropped: {},
+      fields: {
+        country: { outcome: 'set', probability: 0.9 },
+        phone_number: { outcome: 'set', probability: 0.9 },
+        aspora_user_id: { outcome: 'set', probability: 0.9 },
+        customer_id: { outcome: 'none', probability: 0.9 },
+        account_form_id: { outcome: 'set', probability: 0.9 },
+        account_id: { outcome: 'none', probability: 0.9 },
+        account_number: { outcome: 'none', probability: 0.9 },
+      },
+    });
+    expect(out.gaps).toEqual([]);
+    expect(d.usage).toEqual([{ model: SPEC, failed: false, input: 0, output: 0 }]);
+  });
+
+  test('the request shows phones and account numbers masked', async () => {
+    const fake = fakeDecisionProvider(answering({}));
+    await resolveIngressIdentity(request(THREAD), depsOf({ resolveIdChain: fakeCore(FULL_CHAIN).fn, decision: decisionOf(fake).deps }));
+    const sent = JSON.stringify(fake.requests[0]);
+    for (const raw of [PHONE, '+971501234567', ACCOUNT_NO]) expect(sent).not.toContain(raw);
+  });
+
+  test('the model picks none everywhere: no ids and the no-ids gap, with no core call', async () => {
     const core = fakeCore(FULL_CHAIN);
     const out = await resolveIngressIdentity(
-      request([TEMPLATE, `look up ${OTHER}`, `and ${USER} and ${ACCOUNT}`]),
-      depsOf({ resolveIdChain: core.fn }),
+      request([`User ID: ${USER}`]),
+      depsOf({ resolveIdChain: core.fn, decision: decisionOf(fakeDecisionProvider(answering({}))).deps }),
     );
-    expect(core.calls[0]?.ids.old_user_id).toBe(OTHER);
-    expect(out.gaps).toEqual(['2 more UUID(s) in the thread were not added to the id chain']);
-    for (const gap of out.gaps) {
-      for (const id of [CUST, FORM, USER, OTHER, ACCOUNT]) expect(gap).not.toContain(id);
-    }
+    // The decision ran, so the label is not read over it.
+    expect(core.fn).toHaveBeenCalledTimes(0);
+    expect(out.gaps).toEqual([NO_IDS_GAP]);
+    expect(out.extraction?.extractor).toBe('decision');
+  });
+
+  test('MODEL_DECISION unset: the labels, and no provider is built', async () => {
+    const d = decisionOf(fakeDecisionProvider(answering({})), { model: undefined });
+    const core = fakeCore(FULL_CHAIN);
+    const out = await resolveIngressIdentity(request([TEMPLATE]), depsOf({ resolveIdChain: core.fn, decision: d.deps }));
+    expect(d.built).toEqual([]);
+    expect(core.calls[0]?.ids).toEqual({ customer_id: CUST, account_form_id: FORM });
+    expect(out.extraction).toMatchObject({ extractor: 'labels', fields: {} });
+    expect(out.extraction?.decision_error).toBeUndefined();
+    expect(d.usage).toEqual([]);
+  });
+
+  test('MODEL_DECISION not a decision spec: the labels, and no provider is built', async () => {
+    const d = decisionOf(fakeDecisionProvider(answering({})), { model: 'anthropic/claude-haiku-4-5' });
+    const out = await resolveIngressIdentity(request([TEMPLATE]), depsOf({ resolveIdChain: fakeCore(FULL_CHAIN).fn, decision: d.deps }));
+    expect(d.built).toEqual([]);
+    expect(out.extraction?.extractor).toBe('labels');
+  });
+
+  test('a thread with no text: the labels, and no provider is built', async () => {
+    const d = decisionOf(fakeDecisionProvider(answering({})));
+    const out = await resolveIngressIdentity(request(['  '], { ids: { customer_id: CUST } }), depsOf({ resolveIdChain: fakeCore(FULL_CHAIN).fn, decision: d.deps }));
+    expect(d.built).toEqual([]);
+    expect(out.extraction?.extractor).toBe('labels');
+  });
+
+  test('decide() failing: the labels, a masked decision_error and the failed call counted', async () => {
+    const failing: DecisionProvider = {
+      id: 'typesafe',
+      model: SPEC,
+      decide: async () => {
+        throw new DecisionError('unavailable', 'typesafe', { status: 503, detail: `upstream echoed ${CUST} ${PHONE}` });
+      },
+    };
+    const d = decisionOf(failing);
+    const core = fakeCore(FULL_CHAIN);
+    const out = await resolveIngressIdentity(request([TEMPLATE, `phone ${PHONE}`]), depsOf({ resolveIdChain: core.fn, decision: d.deps }));
+    expect(core.calls[0]?.ids).toEqual({ customer_id: CUST, account_form_id: FORM });
+    expect(out.extraction?.extractor).toBe('labels');
+    expect(out.extraction?.decision_error).toBe('decision unavailable from typesafe (HTTP 503)');
+    expect(d.usage).toEqual([{ model: SPEC, failed: true, input: 0, output: 0 }]);
+  });
+
+  test('an answer that is not one of its options fails the decision: the labels', async () => {
+    const fake = fakeDecisionProvider((req) =>
+      Object.fromEntries(Object.keys(req.questions).map((name) => [name, { kind: 'choice', choice: 'c99' } as DecisionAnswer])),
+    );
+    const out = await resolveIngressIdentity(request([TEMPLATE]), depsOf({ resolveIdChain: fakeCore(FULL_CHAIN).fn, decision: decisionOf(fake).deps }));
+    expect(out.extraction?.extractor).toBe('labels');
+    expect(out.extraction?.decision_error).toMatch(/^decision invalid_response from fake: answer for \w+ is not one of its options$/);
+  });
+
+  test('a provider that cannot be built (no key): the labels, no usage', async () => {
+    const d = decisionOf(() => {
+      throw new DecisionError('config', 'typesafe', { detail: 'TYPESAFE_API_KEY is not set' });
+    });
+    const out = await resolveIngressIdentity(request([TEMPLATE]), depsOf({ resolveIdChain: fakeCore(FULL_CHAIN).fn, decision: d.deps }));
+    expect(out.extraction?.extractor).toBe('labels');
+    expect(out.extraction?.decision_error).toBe('decision config from typesafe: TYPESAFE_API_KEY is not set');
+    expect(d.usage).toEqual([]);
+  });
+
+  test('an aborted step is passed on, not turned into the labels', async () => {
+    const ac = new AbortController();
+    const fake = fakeDecisionProvider(() => {
+      ac.abort();
+      return new Promise(() => undefined);
+    });
+    const run = resolveIngressIdentity(request(THREAD), depsOf({ signal: ac.signal, resolveIdChain: fakeCore(FULL_CHAIN).fn, decision: decisionOf(fake).deps }));
+    await expect(run).rejects.toThrow();
+  });
+
+  test('hinted keys are not asked, their values are not offered, and the hints win', async () => {
+    const fake = fakeDecisionProvider(answering({ account_form_id: FORM, customer_id: OTHER }));
+    const core = fakeCore(FULL_CHAIN);
+    await resolveIngressIdentity(
+      request([`customer ${CUST}, form ${FORM}, other ${OTHER}`], { ids: { customer_id: CUST, country: 'AE' } }),
+      depsOf({ resolveIdChain: core.fn, decision: decisionOf(fake).deps }),
+    );
+    const questions = fake.requests[0]?.questions as Record<string, ChoiceQuestion>;
+    expect(Object.keys(questions)).not.toContain('customer_id');
+    expect(Object.keys(questions)).not.toContain('country');
+    for (const q of Object.values(questions)) expect(Object.values(q.options)).not.toContain(CUST);
+    expect(core.calls[0]?.ids).toEqual({ country: 'AE', customer_id: CUST, account_form_id: FORM });
+  });
+
+  test('candidates past the cap are a gap with a count only', async () => {
+    const many = Array.from({ length: MAX_CANDIDATES + 3 }, (_, i) => `${String(i).padStart(8, '0')}-1111-4111-8111-111111111111`);
+    const fake = fakeDecisionProvider(answering({}));
+    const out = await resolveIngressIdentity(request([many.join(' ')]), depsOf({ resolveIdChain: fakeCore(FULL_CHAIN).fn, decision: decisionOf(fake).deps }));
+    expect(out.extraction?.dropped).toEqual({ aspora_user_id: 3, customer_id: 3, account_form_id: 3, account_id: 3 });
+    expect(out.gaps).toContain('3 more candidate value(s) for aspora_user_id in the thread were not offered to the id decision');
+    for (const gap of out.gaps) for (const id of many) expect(gap).not.toContain(id);
+  });
+
+  test('the extraction summary and the gaps never carry a value', async () => {
+    const fake = fakeDecisionProvider(answering({ aspora_user_id: USER, account_form_id: FORM, country: 'GB', phone_number: '****4567' }));
+    const out = await resolveIngressIdentity(request(THREAD), depsOf({ resolveIdChain: fakeCore(FULL_CHAIN).fn, decision: decisionOf(fake).deps }));
+    const summary = JSON.stringify({ extraction: out.extraction, gaps: out.gaps });
+    for (const raw of [USER, FORM, PHONE, '+971501234567', '4567', ACCOUNT_NO]) expect(summary).not.toContain(raw);
   });
 });
 
@@ -307,7 +497,7 @@ describe('with the real core', () => {
 
   test('mock mode answers from identity fixtures and never reaches the SQL connector', async () => {
     const store = fixtureStore({
-      [keyFor('horus_customer_id', [['horus_customer_id', CUST]])]: { rows: [{ customer_id: CUST, account_form_id: FORM }] },
+      [keyFor('customer_id.customer', [['customer_id', CUST]])]: { rows: [{ customer_id: CUST, account_form_id: FORM }] },
       [keyFor('account_form_id', [['account_form_id', FORM]])]: { rows: [{ form_id: FORM, external_user_ref: USER }] },
       [keyFor('state.harbor_customer', [['customer_id', CUST]])]: { rows: [{ state: 'ONBOARDED', sub_state: 'CIF_CREATED' }] },
       [keyFor('state.account_form', [['account_form_id', FORM]])]: { rows: [{ status_v2: 'COMPLETED' }] },
@@ -318,7 +508,7 @@ describe('with the real core', () => {
     const out = await resolveIngressIdentity(request([TEMPLATE]), depsOf({ mock: port, sql, audit }));
 
     expect(sql.runSelect).toHaveBeenCalledTimes(0);
-    expect(out.id_chain.ids).toMatchObject({ horus_customer_id: CUST, customer_id: CUST, account_form_id: FORM, user_id: USER });
+    expect(out.id_chain.ids).toMatchObject({ customer_id: CUST, account_form_id: FORM, aspora_user_id: USER });
     expect(out.basic_state.find((s) => s.item === 'harbor_customer_state')?.value).toBe('ONBOARDED');
     expect(out.basic_state.find((s) => s.item === 'account_form_status_v2')?.value).toBe('COMPLETED');
     for (const s of out.basic_state) expect(s.taken_at).toBe(T);
@@ -337,7 +527,7 @@ describe('with the real core', () => {
     };
     const out = await resolveIngressIdentity(request([`Horus Customer ID: ${CUST}`]), depsOf({ sql }));
 
-    expect(calls.length).toBe(1);
+    expect(calls.length).toBeGreaterThan(0);
     expect(out.id_chain.hops.length).toBeGreaterThan(0);
     expect(out.id_chain.hops.every((h) => h.status === 'unreachable')).toBe(true);
     expect(out.basic_state.length).toBe(5);

@@ -18,7 +18,7 @@ const INJECTED_FORM = '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2bbeef';
 const TS = '2026-09-23T10:00:00.000Z';
 
 const CHAIN: IdChain = {
-  ids: { account_number: CHAIN_ACCOUNT, form_id: CHAIN_FORM, phone: CHAIN_PHONE },
+  ids: { account_number: CHAIN_ACCOUNT, account_form_id: CHAIN_FORM, phone_number: CHAIN_PHONE },
   hops: [],
   basic_state: [],
 };
