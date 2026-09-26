@@ -58,8 +58,8 @@ import { acceptsImages, decisionModel, ollamaProvider, parseSpec, type ModelLook
 import { ClassificationSchema, type Classification } from '../types/classification.ts';
 import type { BasicStateItem, IdChain } from '../types/id-chain.ts';
 import type { ThreadMessage } from '../types/request.ts';
-import { classificationFromAnswers, classifierQuestions } from './decision.ts';
-import { buildClassifierPrompt, buildDecisionState, loadCategories, type CategoryEntry } from './prompt.ts';
+import { classificationFromAnswers, classifierQuestions, issuePaths } from './decision.ts';
+import { buildClassifierPrompt, buildDecisionState, loadCategories, type CategoryEntry, type DecisionStateInput } from './prompt.ts';
 
 /** One screenshot, already read from the attachment store. */
 export type ClassifierImage = {
@@ -143,21 +143,19 @@ export async function classify(input: ClassifyInput, deps: ClassifyDeps): Promis
 
 async function classifyOnce(input: ClassifyInput, deps: ClassifyDeps): Promise<Classification> {
   const spec = decisionModel(deps.config);
-  const provider = parseSpec(spec)?.provider ?? '';
   const categories = deps.categories ?? (await loadCategories(deps.config.paths.knowledgeDir));
-  if (isDecisionSpec(spec)) return classifyByDecision(input, deps, spec, provider, categories);
-  const sendImages = input.images.length > 0 && acceptsImages(spec, deps.imageLookup);
-
-  const prompt = buildClassifierPrompt({
-    categories,
+  const stateInput: DecisionStateInput = {
     thread: input.thread,
     idChain: input.idChain,
     basicState: input.basicState,
-    provider,
+    provider: parseSpec(spec)?.provider ?? '',
     imageCount: input.images.length,
-    imagesAttached: sendImages,
     ...(input.redactionNames === undefined ? {} : { redactionNames: input.redactionNames }),
-  });
+  };
+  const timeoutMs = deps.timeoutMs ?? DEFAULT_CLASSIFIER_TIMEOUT_MS;
+  if (isDecisionSpec(spec)) return classifyByDecision(stateInput, deps, spec, categories, timeoutMs);
+  const sendImages = input.images.length > 0 && acceptsImages(spec, deps.imageLookup);
+  const prompt = buildClassifierPrompt({ ...stateInput, categories, imagesAttached: sendImages });
 
   const content: (TextContent | ImageContent)[] = [{ type: 'text', text: prompt.userText }];
   if (sendImages) {
@@ -169,7 +167,7 @@ async function classifyOnce(input: ClassifyInput, deps: ClassifyDeps): Promise<C
   };
 
   const complete = deps.complete ?? defaultComplete(deps.config);
-  const outcome = await callWithTimeout(complete, spec, context, deps.timeoutMs ?? DEFAULT_CLASSIFIER_TIMEOUT_MS, deps.signal);
+  const outcome = await callWithTimeout(complete, spec, context, timeoutMs, deps.signal);
   if (!outcome.ok) return unknownClassification(outcome.error);
 
   const message = outcome.message;
@@ -194,20 +192,13 @@ async function classifyOnce(input: ClassifyInput, deps: ClassifyDeps): Promise<C
 // ---------------------------------------------------------------- decision path
 
 async function classifyByDecision(
-  input: ClassifyInput,
+  stateInput: DecisionStateInput,
   deps: ClassifyDeps,
   spec: string,
-  provider: string,
   categories: readonly CategoryEntry[],
+  timeoutMs: number,
 ): Promise<Classification> {
-  const { state } = buildDecisionState({
-    thread: input.thread,
-    idChain: input.idChain,
-    basicState: input.basicState,
-    provider,
-    imageCount: input.images.length,
-    ...(input.redactionNames === undefined ? {} : { redactionNames: input.redactionNames }),
-  });
+  const { state } = buildDecisionState(stateInput);
   const questions = classifierQuestions(categories, deps.config.entities);
   const call: DecisionCall = { sent: false, usage: undefined };
   try {
@@ -215,7 +206,7 @@ async function classifyByDecision(
     const result = await decide(
       watched(decider, call),
       { state, questions },
-      { timeoutMs: deps.timeoutMs ?? DEFAULT_CLASSIFIER_TIMEOUT_MS, ...(deps.signal === undefined ? {} : { signal: deps.signal }) },
+      { timeoutMs, ...(deps.signal === undefined ? {} : { signal: deps.signal }) },
     );
     reportUsage(deps, decisionUsage(spec, false, result.usage));
     const outcome = classificationFromAnswers(result.answers);
@@ -311,8 +302,7 @@ export function parseClassification(text: string, imagesSeen: boolean): Classifi
   const result = v.safeParse(ClassificationSchema, picked);
   if (!result.success) {
     // Paths only, never the values, so no thread text lands in the error.
-    const paths = [...new Set(result.issues.map((i) => v.getDotPath(i) ?? '(root)'))];
-    return unknownClassification(`schema-invalid output at ${paths.join(', ')}`);
+    return unknownClassification(`schema-invalid output at ${issuePaths(result.issues)}`);
   }
   return result.output;
 }
@@ -428,40 +418,36 @@ export function defaultComplete(config: Config): CompleteFn {
   return async (spec, context, { signal }) => {
     const parsed = parseSpec(spec);
     if (parsed === undefined) throw new Error('MODEL_DECISION is not a provider/model spec');
-    const provider = providerFor(parsed.provider, parsed.modelId, config);
-    if (provider === undefined) {
+    const served = servedProvider(parsed.provider, parsed.modelId, config);
+    if (served === undefined) {
       throw new Error(`no default completion for provider ${parsed.provider}; pass deps.complete`);
     }
     const models = createModels();
-    models.setProvider(provider);
+    models.setProvider(served.provider);
     const model = models.getModel(parsed.provider, parsed.modelId);
     if (model === undefined) throw new Error(`provider ${parsed.provider} does not list model ${parsed.modelId}`);
-    const apiKey = apiKeyFor(parsed.provider, config);
+    const { apiKey } = served;
     return models.complete(model, context, apiKey === undefined ? { signal } : { signal, apiKey });
   };
 }
 
-function providerFor(id: string, modelId: string, config: Config): Provider | undefined {
+// The pi-ai provider for a served provider id, with its API key from config.
+function servedProvider(
+  id: string,
+  modelId: string,
+  config: Config,
+): { provider: Provider; apiKey: string | undefined } | undefined {
+  const p = config.providers;
   switch (id) {
     case 'anthropic':
-      return anthropicProvider();
+      return { provider: anthropicProvider(), apiKey: p.anthropicApiKey };
     case 'openai':
-      return openaiProvider();
+      return { provider: openaiProvider(), apiKey: p.openaiApiKey };
     case 'openrouter':
-      return openrouterProvider();
+      return { provider: openrouterProvider(), apiKey: p.openrouterApiKey };
     case 'ollama':
-      return config.providers.ollamaBaseUrl === undefined
-        ? undefined
-        : ollamaProvider(config.providers.ollamaBaseUrl, [modelId]);
+      return p.ollamaBaseUrl === undefined ? undefined : { provider: ollamaProvider(p.ollamaBaseUrl, [modelId]), apiKey: undefined };
     default:
       return undefined;
   }
-}
-
-function apiKeyFor(id: string, config: Config): string | undefined {
-  const p = config.providers;
-  if (id === 'anthropic') return p.anthropicApiKey;
-  if (id === 'openai') return p.openaiApiKey;
-  if (id === 'openrouter') return p.openrouterApiKey;
-  return undefined;
 }
