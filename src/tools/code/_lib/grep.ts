@@ -15,9 +15,9 @@
 
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { realpathSync, statSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
-import { hasDotSegment, isWithin, type JailRefused, resolveInRepo } from './jail.ts';
+import { hasDotSegment, isWithin, type JailRefused, relFromRoot, resolveInRepo } from './jail.ts';
 
 export const GREP_LIMITS = Object.freeze({
   maxPatternChars: 200,
@@ -283,7 +283,7 @@ async function* walkFiles(
         try {
           const real = realpathSync(path);
           if (!isWithin(root, real) || real === root) continue;
-          if (hasDotSegment(relative(root, real).split(sep).join('/'))) continue;
+          if (hasDotSegment(relFromRoot(root, real))) continue;
           if (!statSync(real).isFile()) continue;
           yield { rel, path: real };
         } catch {
