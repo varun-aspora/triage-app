@@ -22,7 +22,6 @@ import {
   NonEmptyStringSchema,
   ReportStatusSchema,
   TakenAtSchema,
-  TIERS,
   TierSchema,
   type Tier,
 } from '../types/core.ts';
@@ -150,7 +149,7 @@ export function policyContextFor(c: Pick<EvalCase, 'request' | 'policy'>): TierP
   const capable = new Set<Tier>(c.policy?.image_capable_tiers ?? DEFAULT_IMAGE_CAPABLE_TIERS);
   const ctx: TierPolicyContext = {
     hasImages: hasImages(c),
-    imageCapable: (tier) => TIERS.includes(tier) && capable.has(tier),
+    imageCapable: (tier) => capable.has(tier),
   };
   if (c.policy?.patterns) ctx.patterns = c.policy.patterns;
   return ctx;

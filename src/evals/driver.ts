@@ -184,10 +184,8 @@ let queue: Promise<unknown> = Promise.resolve();
 
 /** Runs one case through runSubmission. Cases run one at a time. */
 export function runCase(caseSpec: EvalCase, options: RunCaseOptions = {}): Promise<CaseResult> {
-  const next = queue.then(
-    () => runOne(caseSpec, options),
-    () => runOne(caseSpec, options),
-  );
+  // queue never rejects, so the next case always starts after this one settles.
+  const next = queue.then(() => runOne(caseSpec, options));
   queue = next.catch(() => undefined);
   return next;
 }

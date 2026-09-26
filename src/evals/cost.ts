@@ -20,14 +20,10 @@ export { CostError, usageCostUsd, type CostModel, type UsageTokens };
  */
 export function parseCapUsd(cap: number | string | null | undefined): number | undefined {
   if (cap === undefined || cap === null) return undefined;
-  if (typeof cap === 'string') {
-    if (cap.trim() === '') return undefined;
-    const n = Number(cap.trim());
-    if (!Number.isFinite(n) || n < 0) throw new CostError('cost cap must be a number >= 0');
-    return n;
-  }
-  if (!Number.isFinite(cap) || cap < 0) throw new CostError('cost cap must be a number >= 0');
-  return cap;
+  if (typeof cap === 'string' && cap.trim() === '') return undefined;
+  const n = Number(cap);
+  if (!Number.isFinite(n) || n < 0) throw new CostError('cost cap must be a number >= 0');
+  return n;
 }
 
 export type ModelSpend = { readonly model: string; readonly calls: number; readonly usd: number };
@@ -38,14 +34,7 @@ export class CostMeter {
 
   /** Adds one call's usage and returns its cost in USD. */
   add(model: CostModel, usage: UsageTokens): number {
-    const usd = usageCostUsd(model, usage);
-    const key = `${model.provider}/${model.id}`;
-    const entry = this.perModel.get(key) ?? { calls: 0, usd: 0 };
-    entry.calls += 1;
-    entry.usd += usd;
-    this.perModel.set(key, entry);
-    this.total += usd;
-    return usd;
+    return this.record(`${model.provider}/${model.id}`, usageCostUsd(model, usage));
   }
 
   /** Adds one call whose provider reported its own USD cost (decision models). */
@@ -53,10 +42,14 @@ export class CostMeter {
     if (typeof usd !== 'number' || !Number.isFinite(usd) || usd < 0) {
       throw new CostError(`model ${model} reported no usable cost`);
     }
-    const entry = this.perModel.get(model) ?? { calls: 0, usd: 0 };
+    return this.record(model, usd);
+  }
+
+  private record(key: string, usd: number): number {
+    const entry = this.perModel.get(key) ?? { calls: 0, usd: 0 };
     entry.calls += 1;
     entry.usd += usd;
-    this.perModel.set(model, entry);
+    this.perModel.set(key, entry);
     this.total += usd;
     return usd;
   }

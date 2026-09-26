@@ -251,15 +251,9 @@ class CaseMap {
   addKnown(idKey: KnownIdKey, value: string): void {
     const kind = kindForId(idKey, value);
     if (kind === undefined) return;
-    if (kind === 'phone') {
-      this.addPhone(value);
-      return;
-    }
-    if (kind === 'uuid') {
-      this.addUuid(value);
-      return;
-    }
-    this.addDigitsOrToken(value, kind);
+    if (kind === 'phone') this.addPhone(value);
+    else if (kind === 'uuid') this.addUuid(value);
+    else this.addDigitsOrToken(value, kind);
   }
 
   private addUuid(raw: string): void {
@@ -273,9 +267,10 @@ class CaseMap {
   private addPhone(raw: string): void {
     const digits = raw.replace(/\D/g, '');
     this.phoneNationals.add(lastDigits(digits));
-    this.add(raw, () => phoneOf(this.key, raw));
+    const pseudo = phoneOf(this.key, raw);
+    this.add(raw, () => pseudo);
     // The same phone written as bare digits, with or without its prefix.
-    const full = phoneOf(this.key, raw).replace(/\D/g, '');
+    const full = pseudo.replace(/\D/g, '');
     this.add(digits, () => full);
     if (raw.startsWith('+')) this.add(`+${digits}`, () => `+${full}`);
     if (digits.length > PHONE_DIGITS) this.add(lastDigits(digits), () => lastDigits(full));
