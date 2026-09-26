@@ -42,13 +42,13 @@ exports[`prompt snapshot for a synthetic thread (pseudonymised data only) 2`] = 
 
 ## Resolved ids
 
-- user_id: 0b7c2a1e-5d4f-4e3a-9b8c-7d6e5f4a3b2c
+- aspora_user_id: 0b7c2a1e-5d4f-4e3a-9b8c-7d6e5f4a3b2c
 - account_number: ****7890
-- phone: ****0123
+- phone_number: ****0123
 
 ## Id resolution hops
 
-- phone -> user_id via ssfb:harbor.users: resolved
+- phone_number -> aspora_user_id via ssfb:harbor.users: resolved
 
 ## Basic state
 

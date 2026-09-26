@@ -698,13 +698,31 @@ describe('ask_requester as a valid end of a response', () => {
     expect(answerChainOf(undefined)).toBeNull();
   });
 
+  test('answerChainOf reads a chain sent before D69, dropping the removed id keys', () => {
+    const at = '2026-09-23T10:00:00.000Z';
+    const old = {
+      ids: { customer_id: 'c-1', old_user_id: 'u-1', device_id: 'd-1' },
+      hops: [
+        { from: 'customer_id', to: 'old_user_id', source: 'ssfb:harbor.account_forms', status: 'resolved', taken_at: at },
+        { from: 'customer_id', to: 'account_id', source: 'ssfb:rhythm.customer_account_mappings', status: 'not_found', taken_at: at },
+      ],
+      basic_state: [],
+    };
+    const attributes = { question_id: 'q1', [INPUT_ANSWER_CHAIN_ATTR]: JSON.stringify(old) };
+    expect(answerChainOf({ kind: 'signal', type: INPUT_ANSWER_SIGNAL, body: 'x', attributes })).toEqual({
+      ids: { customer_id: 'c-1' },
+      hops: [old.hops[1]] as IdChain['hops'],
+      basic_state: [],
+    });
+  });
+
   test('mergeIdChains adds ids (the answer wins) and appends hops and state it does not hold yet', () => {
     const hop = { from: 'customer_id' as const, to: 'account_id' as const, source: 'ssfb:rhythm.customer_account_mappings', status: 'resolved' as const, taken_at: '2026-09-23T10:00:00.000Z' };
     const item = { item: 'harbor_customer_state', value: 'ACTIVE', taken_at: '2026-09-23T10:00:00.000Z', source: 'ssfb:harbor.customer' };
     const base: IdChain = { ids: { customer_id: 'c-1', account_id: 'a-1' }, hops: [hop], basic_state: [item] };
-    const extra: IdChain = { ids: { account_id: 'a-2', form_id: 'f-1' }, hops: [hop, { ...hop, to: 'form_id' }], basic_state: [item, { ...item, item: 'account_form_status_v2', value: 'SIGNED' }] };
+    const extra: IdChain = { ids: { account_id: 'a-2', account_form_id: 'f-1' }, hops: [hop, { ...hop, to: 'account_form_id' }], basic_state: [item, { ...item, item: 'account_form_status_v2', value: 'SIGNED' }] };
     const merged = mergeIdChains(base, extra);
-    expect(merged.ids).toEqual({ customer_id: 'c-1', account_id: 'a-2', form_id: 'f-1' });
+    expect(merged.ids).toEqual({ customer_id: 'c-1', account_id: 'a-2', account_form_id: 'f-1' });
     expect(merged.hops).toHaveLength(2);
     expect(merged.basic_state.map((s) => s.item)).toEqual(['harbor_customer_state', 'account_form_status_v2']);
     // Pure: the inputs are untouched.
@@ -717,14 +735,14 @@ describe('ask_requester as a valid end of a response', () => {
     useTestRuntime(h);
     const runId = nextRunId();
     const data = init({ runId });
-    const saved: IdChain = { ...data.id_chain, ids: { ...data.id_chain.ids, form_id: 'form-saved-1' } };
+    const saved: IdChain = { ...data.id_chain, ids: { ...data.id_chain.ids, account_form_id: 'form-saved-1' } };
     const deps = runDepsFor(runId, data, undefined, saved);
-    expect(deps.idChain().ids.form_id).toBe('form-saved-1');
+    expect(deps.idChain().ids.account_form_id).toBe('form-saved-1');
     // Cached: a later render without the saved chain gets the same deps.
     expect(runDepsFor(runId, data)).toBe(deps);
     settleRun(runId);
     const fresh = runDepsFor(runId, data);
-    expect(fresh.idChain().ids.form_id).toBeUndefined();
+    expect(fresh.idChain().ids.account_form_id).toBeUndefined();
     settleRun(runId);
   });
 });

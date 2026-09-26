@@ -554,6 +554,23 @@ describe('TRIAGE_UI_ENV', () => {
   });
 });
 
+describe('MODEL_DECISION', () => {
+  test('is read into models.decision', () => {
+    expect(fromRecord({ MODEL_DECISION: 'typesafe/jev-1.13' }).models.decision).toBe('typesafe/jev-1.13');
+  });
+
+  test('MODEL_CLASSIFIER still set stops the load, naming the old key and not its value', () => {
+    const err = configError(() => fromRecord({ MODEL_CLASSIFIER: 'openrouter/zz-old-classifier' }));
+    expect(err.keys).toEqual(['MODEL_CLASSIFIER']);
+    expect(err.message).toContain('renamed to MODEL_DECISION');
+    expect(err.message).not.toContain('zz-old-classifier');
+  });
+
+  test('MODEL_CLASSIFIER left blank is not an error', () => {
+    expect(fromRecord({ MODEL_CLASSIFIER: '  ', MODEL_DECISION: 'faux/classifier' }).models.decision).toBe('faux/classifier');
+  });
+});
+
 describe('envFileKeyState', () => {
   // Fake values; they only have to stay out of the result.
   const SECRET = 'postgres://fake-user:fake-pass@db.test/app';

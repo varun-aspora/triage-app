@@ -100,7 +100,10 @@ triage wait <run_id> --timeout 90 --json
   its gaps.
 - If the answer names an id (a customer id, an account number, a form id),
   pass it as well with `--ids key=value`, so the run can verify it before it
-  is used.
+  is used. The keys are `country`, `phone_number`, `aspora_user_id`,
+  `customer_id` (the SSFB customer id, not the CIF id), `account_form_id`,
+  `account_id` (the SSFB account UUID, not the account number) and
+  `account_number`.
 - A run may ask more than once. Each time, ask the user and send the answer.
 
 ### 2b. When the run is blocked on a system

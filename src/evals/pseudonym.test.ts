@@ -149,12 +149,16 @@ describe('pseudonymise', () => {
   });
 
   test('kindForId picks the kind by key and shape', () => {
-    expect(kindForId('user_id', UUID_1)).toBe('uuid');
-    expect(kindForId('phone', PHONE)).toBe('phone');
-    expect(kindForId('form_id', FORM_ID)).toBe('uuid');
-    expect(kindForId('form_id', 'FRM-1')).toBe('form_id');
+    expect(kindForId('aspora_user_id', UUID_1)).toBe('uuid');
+    expect(kindForId('phone_number', PHONE)).toBe('phone');
+    expect(kindForId('account_form_id', FORM_ID)).toBe('uuid');
+    expect(kindForId('account_form_id', 'FRM-1')).toBe('form_id');
     expect(kindForId('account_number', ACCOUNT)).toBe('account_number');
-    expect(kindForId('utr', 'ABCD0123456789')).toBe('token');
+    expect(kindForId('customer_id', 'ABCD0123456789')).toBe('token');
+  });
+
+  test('kindForId keeps country as it is', () => {
+    expect(kindForId('country', 'GB')).toBeUndefined();
   });
 });
 
@@ -175,22 +179,22 @@ function sampleCase(): EvalCase {
           ts: '1.2',
           author: 'cx-agent',
           is_parent: false,
-          text: `Phone +91 12345 67890 (1234567890). A/c${ACCOUNT}. Upper ${UUID_1.toUpperCase()}. UTR ABCD0123456789.`,
+          text: `Phone +91 12345 67890 (1234567890). A/c${ACCOUNT}. Upper ${UUID_1.toUpperCase()}. Customer is in GB.`,
         },
       ],
     },
-    ids: { horus_customer_id: UUID_1, account_form_id: FORM_ID, phone: PHONE },
+    ids: { customer_id: UUID_1, account_form_id: FORM_ID, phone_number: PHONE, country: 'GB' },
     id_chain: {
       ids: {
-        horus_customer_id: UUID_1,
+        customer_id: UUID_1,
         account_form_id: FORM_ID,
-        user_id: UUID_2,
-        phone: PHONE,
+        aspora_user_id: UUID_2,
+        phone_number: PHONE,
         account_number: ACCOUNT,
-        utr: 'ABCD0123456789',
+        country: 'GB',
       },
       hops: [
-        { from: 'horus_customer_id', to: 'user_id', source: 'ssfb:harbor.customer', status: 'resolved', taken_at: '2026-09-01T00:00:00.000Z' },
+        { from: 'customer_id', to: 'aspora_user_id', source: 'ssfb:harbor.customer', status: 'resolved', taken_at: '2026-09-01T00:00:00.000Z' },
       ],
     },
     basic_state: [
@@ -207,35 +211,41 @@ describe('pseudonymiseCase', () => {
   const out = pseudonymiseCase(original, KEY);
   const text = threadTexts(out).join('\n');
   const acct = out.id_chain.ids.account_number as string;
-  const horus = out.id_chain.ids.horus_customer_id as string;
+  const horus = out.id_chain.ids.customer_id as string;
 
   test('no original id survives anywhere in the rewritten fields', () => {
     const json = JSON.stringify({ ...out, provenance: undefined });
-    for (const id of [UUID_1, UUID_2, FORM_ID, ACCOUNT, '1234567890', 'ABCD0123456789', UUID_1.toUpperCase()]) {
+    for (const id of [UUID_1, UUID_2, FORM_ID, ACCOUNT, '1234567890', UUID_1.toUpperCase()]) {
       expect(json).not.toContain(id);
     }
   });
 
   test('maps the same original id to the same pseudonym across thread text, ids, id_chain and basic_state', () => {
-    expect(out.ids.horus_customer_id).toBe(horus);
+    expect(out.ids.customer_id).toBe(horus);
     expect(horus).toBe(pseudonymise(UUID_1, 'uuid', KEY));
     expect(out.ids.account_form_id).toBe(out.id_chain.ids.account_form_id as string);
-    expect(out.ids.phone).toBe(out.id_chain.ids.phone as string);
+    expect(out.ids.phone_number).toBe(out.id_chain.ids.phone_number as string);
     expect(acct).toBe(pseudonymise(ACCOUNT, 'account_number', KEY));
     expect(text).toContain(`Horus Customer ID: ${horus}`);
     expect(text).toContain(`Account ${acct} debited.`);
     expect(text).toContain(`A/c${acct}.`);
     expect(text).toContain(`Upper ${horus.toUpperCase()}.`);
     expect(out.basic_state[0]?.value).toBe(acct);
-    expect(out.basic_state[1]?.value).toBe(`user ${out.id_chain.ids.user_id}`);
+    expect(out.basic_state[1]?.value).toBe(`user ${out.id_chain.ids.aspora_user_id}`);
     expect(out.expected.current_ask).toBe(`Check ${acct}`);
   });
 
   test('a phone in the thread, spaced or bare, agrees with the chain phone', () => {
-    const phone = out.id_chain.ids.phone as string;
+    const phone = out.id_chain.ids.phone_number as string;
     const spaced = pseudonymise('+91 12345 67890', 'phone', KEY);
     expect(spaced.replace(/\D/g, '')).toBe(phone.replace(/\D/g, ''));
     expect(text).toContain(`Phone ${spaced} (${phone.slice(-10)})`);
+  });
+
+  test('country is kept as it is, in the ids and the thread', () => {
+    expect(out.ids.country).toBe('GB');
+    expect(out.id_chain.ids.country).toBe('GB');
+    expect(text).toContain('Customer is in GB.');
   });
 
   test('the rewritten case still passes validateCaseIds and the schema', () => {
@@ -298,10 +308,10 @@ describe('validateCaseIds', () => {
 
   test('fails when an id in ids is not in id_chain with the same value', () => {
     const c = sampleCase();
-    c.ids.user_id = '12121212-3434-4565-8787-909090909090';
+    c.ids.aspora_user_id = '12121212-3434-4565-8787-909090909090';
     const r = validateCaseIds(c);
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.problems.map((p) => p.where)).toEqual(['ids.user_id']);
+    if (!r.ok) expect(r.problems.map((p) => p.where)).toEqual(['ids.aspora_user_id']);
   });
 
   test('fails on a malformed chain id', () => {
@@ -309,8 +319,11 @@ describe('validateCaseIds', () => {
       ['account_form_id', 'FORM-1'],
       ['account_number', '****3333'],
       ['account_number', '12345'],
-      ['phone', '12345'],
-      ['user_id', 'has space'],
+      ['phone_number', '12345'],
+      ['aspora_user_id', 'has space'],
+      ['customer_id', 'cust-1'],
+      ['account_id', 'not-a-uuid'],
+      ['country', 'gb'],
     ] as const) {
       const c = sampleCase();
       delete (c.ids as Record<string, string>)[key];

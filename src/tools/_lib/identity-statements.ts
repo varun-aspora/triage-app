@@ -1,4 +1,4 @@
-// The fixed statements behind the deterministic ID chain (LLD 04 §2.2, D22).
+// The fixed statements behind the deterministic ID chain (LLD 04 §2.2, D22, D69).
 //
 // Every statement is a constant string with $n placeholders. Nothing here is
 // built at run time: no template literals and no concatenation, and a test in
@@ -13,11 +13,11 @@ import type { Entity, KnownIdKey } from '../../types/core.ts';
 
 // ------------------------------------------------------------ hop statements
 
-/** horus_customer_id (and old_user_id tried as a customer_id): the harbor customer row. */
+/** customer_id: the harbor customer row, which names the account form. */
 export const HARBOR_CUSTOMER_BY_ID =
   'SELECT customer_id, account_form_id, (external_reference_id IS NOT NULL) AS cif_exists FROM customer WHERE customer_id = $1 LIMIT 5';
 
-/** alphadesk_user_id, user_id and old_user_id tried as external_user_ref: the user's forms, newest first. */
+/** aspora_user_id (harbor external_user_ref): the user's forms, newest first. */
 export const HARBOR_FORMS_BY_USER =
   'SELECT form_id, external_user_ref FROM account_forms WHERE external_user_ref = $1 AND is_deleted = false ORDER BY created_at DESC LIMIT 20';
 
@@ -29,11 +29,11 @@ export const HARBOR_FORM_BY_ID =
 export const HARBOR_CUSTOMER_BY_FORM =
   'SELECT customer_id, account_form_id FROM customer WHERE account_form_id = $1 ORDER BY created_at DESC LIMIT 5';
 
-/** form_id: the workflow executions on the SSFB copy of workflow-op. */
+/** account_form_id: the workflow executions on the SSFB copy of workflow-op, by reference_id. */
 export const SSFB_WORKFLOW_BY_FORM =
   "SELECT workflow_identifier, status, current_step_identifier FROM workflow_executions WHERE reference_id = $1 AND reference_type = 'FORM' ORDER BY created_at DESC LIMIT 5";
 
-/** form_id: the same read on the RTL copy, tried when the SSFB copy has nothing. */
+/** account_form_id: the same read on the RTL copy, tried when the SSFB copy has nothing. */
 export const RTL_WORKFLOW_BY_FORM =
   "SELECT workflow_identifier, status, current_step_identifier FROM workflow_executions WHERE reference_id = $1 AND reference_type = 'FORM' ORDER BY created_at DESC LIMIT 5";
 
@@ -41,9 +41,13 @@ export const RTL_WORKFLOW_BY_FORM =
 export const RHYTHM_ACCOUNTS_BY_CUSTOMER =
   'SELECT account_id, account_number, account_type, scheme_code FROM customer_account_mappings WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 10';
 
-/** device_id: guardian device auth attempt to refresh token subject. The join is unverified (LLD 04 §2.2). */
-export const GUARDIAN_USER_BY_DEVICE =
-  'SELECT rt.subject FROM device_auth_attempts d JOIN refresh_tokens rt ON rt.verification_id = d.verification_id WHERE d.device_id = $1 ORDER BY rt.created_at DESC LIMIT 5';
+/** account_id (the rhythm UUID): the mapping row, which names the customer. */
+export const RHYTHM_CUSTOMER_BY_ACCOUNT_ID =
+  'SELECT customer_id, account_id, account_number FROM customer_account_mappings WHERE account_id = $1 ORDER BY created_at DESC LIMIT 5';
+
+/** account_number (the bank account number): the mapping row, which names the customer. */
+export const RHYTHM_CUSTOMER_BY_ACCOUNT_NUMBER =
+  'SELECT customer_id, account_id, account_number FROM customer_account_mappings WHERE account_number = $1 ORDER BY created_at DESC LIMIT 5';
 
 // ------------------------------------------------------------ basic state
 
@@ -80,45 +84,37 @@ function statement(s: IdentityStatement): IdentityStatement {
 }
 
 export const IDENTITY_STATEMENTS = Object.freeze({
-  horus_customer_id: statement({
-    hop: 'horus_customer_id',
+  account_id: statement({
+    hop: 'account_id.customer',
+    entity: 'ssfb',
+    service: 'rhythm',
+    table: 'customer_account_mappings',
+    sql: RHYTHM_CUSTOMER_BY_ACCOUNT_ID,
+    params: ['account_id'],
+  }),
+  account_number: statement({
+    hop: 'account_number.customer',
+    entity: 'ssfb',
+    service: 'rhythm',
+    table: 'customer_account_mappings',
+    sql: RHYTHM_CUSTOMER_BY_ACCOUNT_NUMBER,
+    params: ['account_number'],
+  }),
+  customer_id: statement({
+    hop: 'customer_id.customer',
     entity: 'ssfb',
     service: 'harbor',
     table: 'customer',
     sql: HARBOR_CUSTOMER_BY_ID,
-    params: ['horus_customer_id'],
+    params: ['customer_id'],
   }),
-  old_user_id_as_user: statement({
-    hop: 'old_user_id.external_user_ref',
+  aspora_user_id: statement({
+    hop: 'aspora_user_id',
     entity: 'ssfb',
     service: 'harbor',
     table: 'account_forms',
     sql: HARBOR_FORMS_BY_USER,
-    params: ['old_user_id'],
-  }),
-  old_user_id_as_customer: statement({
-    hop: 'old_user_id.customer_id',
-    entity: 'ssfb',
-    service: 'harbor',
-    table: 'customer',
-    sql: HARBOR_CUSTOMER_BY_ID,
-    params: ['old_user_id'],
-  }),
-  alphadesk_user_id: statement({
-    hop: 'alphadesk_user_id',
-    entity: 'ssfb',
-    service: 'harbor',
-    table: 'account_forms',
-    sql: HARBOR_FORMS_BY_USER,
-    params: ['alphadesk_user_id'],
-  }),
-  user_id: statement({
-    hop: 'user_id',
-    entity: 'ssfb',
-    service: 'harbor',
-    table: 'account_forms',
-    sql: HARBOR_FORMS_BY_USER,
-    params: ['user_id'],
+    params: ['aspora_user_id'],
   }),
   account_form_id: statement({
     hop: 'account_form_id',
@@ -136,37 +132,29 @@ export const IDENTITY_STATEMENTS = Object.freeze({
     sql: HARBOR_CUSTOMER_BY_FORM,
     params: ['account_form_id'],
   }),
-  form_id_ssfb: statement({
-    hop: 'form_id.ssfb_workflow',
+  workflow_ssfb: statement({
+    hop: 'account_form_id.ssfb_workflow',
     entity: 'ssfb',
     service: 'workflow',
     table: 'workflow_executions',
     sql: SSFB_WORKFLOW_BY_FORM,
-    params: ['form_id'],
+    params: ['account_form_id'],
   }),
-  form_id_rtl: statement({
-    hop: 'form_id.rtl_workflow',
+  workflow_rtl: statement({
+    hop: 'account_form_id.rtl_workflow',
     entity: 'rtl',
     service: 'workflow',
     table: 'workflow_executions',
     sql: RTL_WORKFLOW_BY_FORM,
-    params: ['form_id'],
+    params: ['account_form_id'],
   }),
-  customer_id: statement({
-    hop: 'customer_id',
+  customer_accounts: statement({
+    hop: 'customer_id.accounts',
     entity: 'ssfb',
     service: 'rhythm',
     table: 'customer_account_mappings',
     sql: RHYTHM_ACCOUNTS_BY_CUSTOMER,
     params: ['customer_id'],
-  }),
-  device_id: statement({
-    hop: 'device_id',
-    entity: 'ssfb',
-    service: 'guardian',
-    table: 'device_auth_attempts',
-    sql: GUARDIAN_USER_BY_DEVICE,
-    params: ['device_id'],
   }),
   state_harbor_customer: statement({
     hop: 'state.harbor_customer',

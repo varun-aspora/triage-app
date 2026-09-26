@@ -108,23 +108,26 @@ type TriageRequest = {
 
 ### 2.2 Identity and basic state (deterministic, before the classifier)
 
-The same code as the `resolve_identity` tool, run in ingress. Hop table (entity fixed = ssfb, parameterised statements, never model SQL):
+The same code as the `resolve_identity` tool, run in ingress. The ids come from the thread first (D69): the seven keys in `resources/known-ids.json`, picked by the decision model on `MODEL_DECISION` from candidates found in the text, or read from template labels when no decision model is set or the call fails. Hop table (parameterised statements, never model SQL), in the order they run:
 
 | Have | Query | Get | Notes |
 |---|---|---|---|
-| `horus_customer_id` (bot field) | `harbor.customer WHERE customer_id = $1` | `account_form_id`, `state`, `sub_state`, `external_reference_id IS NOT NULL` (CIF exists) | "Horus Customer ID" is the harbor `customer_id`, not the userId |
-| old-template `UserId` | try as `external_user_ref` first, then as `customer_id` | whichever resolves | the old field sometimes held a customer_id |
-| `account_form_id` / `nstp_application_id` | `harbor.account_forms WHERE form_id = $1 AND is_deleted = false` | `external_user_ref` (userId), `status_v2` (authoritative), `status`, `session_id` | NSTP Application ID = form_id |
-| `alphadesk_user_id` | `harbor.account_forms WHERE external_user_ref = $1 AND is_deleted = false ORDER BY created_at DESC` | `form_id`s | may not resolve for returning-user device re-binds |
-| `device_id` (auth cases) | `guardian.device_auth_attempts.verification_id → refresh_tokens.verification_id → refresh_tokens.subject` | userId | join documented but marked unverified in the notes; reported as such |
-| `customer_id` | `rhythm.customer_account_mappings WHERE customer_id = $1` | `account_id`, `account_number`, `account_type`, `scheme_code` | `account_id` for admin APIs, `account_number` for logs |
-| `form_id` | `workflow_op.workflow_executions WHERE reference_id = $1 AND reference_type='FORM'` on the SSFB copy; if empty, the RTL copy | `status`, `current_step_identifier`, `workflow_identifier` | the two copies of workflow-op hold different forms |
+| `account_id` (no `customer_id` yet) | `rhythm.customer_account_mappings WHERE account_id = $1` | `customer_id`, `account_number` | newest row |
+| `account_number` (still no `customer_id`) | `rhythm.customer_account_mappings WHERE account_number = $1` | `customer_id`, `account_id` | newest row |
+| `customer_id` | `harbor.customer WHERE customer_id = $1` | `account_form_id`, CIF exists | "Horus Customer ID" in old templates is this id; not the CIF id |
+| `aspora_user_id` | `harbor.account_forms WHERE external_user_ref = $1 AND is_deleted = false ORDER BY created_at DESC` | `account_form_id` | |
+| `account_form_id` | `harbor.account_forms WHERE form_id = $1 AND is_deleted = false` | `aspora_user_id` (`external_user_ref`) | NSTP Application ID = form_id |
+| `account_form_id` (no `customer_id` yet) | `harbor.customer WHERE account_form_id = $1` | `customer_id` | |
+| `account_form_id` | `workflow_op.workflow_executions WHERE reference_id = $1 AND reference_type='FORM'` on the SSFB copy; if empty, the RTL copy | `status`, `current_step_identifier`, `workflow_identifier` | the two copies of workflow-op hold different forms |
+| `customer_id` | `rhythm.customer_account_mappings WHERE customer_id = $1` | `account_id`, `account_number` | `account_id` for admin APIs, `account_number` for logs |
+
+`phone_number` and `country` have no hop; they reach the agent as given.
 
 Basic state read at the same time (three fixed GET/SELECTs): harbor customer `state/sub_state`, `account_forms.status_v2`, rhythm account `status` and debit flag. Each carries `taken_at`. If the SSFB tunnel is down, the step records `id_chain.hops[*].status = 'unreachable'` and continues; the classifier then sees only thread ids and routes up.
 
 ### 2.3 Classifier
 
-One structured-output call on `MODEL_CLASSIFIER` with schema validation, few-shot examples from redacted `refs/` cases, the category table from [00-lay-of-the-land.md](00-lay-of-the-land.md) §5, and now the `IdChain` and basic state as input.
+One structured-output call on `MODEL_DECISION` (named `MODEL_CLASSIFIER` before D69) with schema validation, few-shot examples from redacted `refs/` cases, the category table from [00-lay-of-the-land.md](00-lay-of-the-land.md) §5, and now the `IdChain` and basic state as input.
 
 ```ts
 type Classification = {

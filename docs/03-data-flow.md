@@ -14,7 +14,7 @@ flowchart TD
     C --> J[identity.ts<br/>deterministic ID chain + basic state]
     J -->|parameterised SELECTs, fixed GETs| DB1[(SSFB harbor_db, rhythm_db, workflow_op_db)]
     DB1 --> J --> K[IdChain + basic state, each with taken_at]
-    C --> D[Classifier<br/>MODEL_CLASSIFIER, structured output]
+    C --> D[Classifier<br/>MODEL_DECISION, structured output]
     K --> D
     D --> E[Classification proposed]
     E --> F[Tier policy<br/>ordered deterministic rules + known-pattern index]

@@ -62,7 +62,7 @@ describe('models and metadata', () => {
   test('modelEnv values are the exact faux/<id> specs', () => {
     const fake = createFakeModel();
     expect(fake.modelEnv).toEqual({
-      MODEL_CLASSIFIER: 'faux/classifier',
+      MODEL_DECISION: 'faux/classifier',
       MODEL_TIER_CHEAP: 'faux/cheap',
       MODEL_TIER_MID: 'faux/mid',
       MODEL_TIER_STRONG: 'faux/strong',
@@ -75,7 +75,7 @@ describe('models and metadata', () => {
     const fake = createFakeModel();
     fake.install();
     const config = configFromRecord({ ...fake.modelEnv }, '/triage/home');
-    expect(models.classifierModel(config)).toBe('faux/classifier');
+    expect(models.decisionModel(config)).toBe('faux/classifier');
     expect(models.modelForTier('cheap', config)).toBe('faux/cheap');
     expect(models.modelForTier('mid', config)).toBe('faux/mid');
     expect(models.modelForTier('strong', config)).toBe('faux/strong');

@@ -8,7 +8,7 @@
 // (default export) or built directly by buildClassifierSuite.
 //
 // The model is fixed when the provider is built and passed to classify() in a
-// per-call copy of the config. Nothing reads MODEL_CLASSIFIER from
+// per-call copy of the config. Nothing reads MODEL_DECISION from
 // process.env, so several providers in one promptfoo process do not race.
 //
 // Faux mode (a faux/* model): each call scripts a fresh fake model with the
@@ -203,9 +203,9 @@ export class ClassifierProvider implements ApiProvider {
 
   constructor(options: ClassifierProviderOptions = {}, deps: ClassifierProviderDeps = {}) {
     this.env = deps.config ?? loadConfig();
-    const model = options.config?.model ?? this.env.models.classifier;
+    const model = options.config?.model ?? this.env.models.decision;
     if (model === undefined || parseSpec(model) === undefined) {
-      throw new Error("classifier provider needs a 'provider/model' spec in config.model or MODEL_CLASSIFIER");
+      throw new Error("classifier provider needs a 'provider/model' spec in config.model or MODEL_DECISION");
     }
     this.model = model;
     this.faux = parseSpec(model)?.provider === FAUX_PROVIDER;
@@ -358,13 +358,13 @@ export class ClassifierProvider implements ApiProvider {
 
 export default ClassifierProvider;
 
-/** A config copy whose MODEL_CLASSIFIER is the given spec. The original stays frozen and untouched. */
+/** A config copy whose MODEL_DECISION is the given spec. The original stays frozen and untouched. */
 export function withClassifierModel(config: Config, model: string): Config {
-  return { ...config, models: { ...config.models, classifier: model } };
+  return { ...config, models: { ...config.models, decision: model } };
 }
 
 // A fresh fake per call, scripted with the case's classification. The faux id
-// must be in the runtime registry for classifierModel() to accept the spec;
+// must be in the runtime registry for decisionModel() to accept the spec;
 // it is registered once and only when no other fake is there already.
 function fauxCompletion(classification: unknown): CompleteFn {
   if (!hasProvider(FAUX_PROVIDER)) createFakeModel().install();

@@ -23,12 +23,23 @@ notes.
 
 ## ID chain
 
-The Slack thread's user id is the Aspora internal user id. It is not a CIF and
-not an account number. The chain is:
+A run knows seven ids. Only these names are used in the chain and the brief:
+
+| Id | What it is |
+|---|---|
+| `country` | GB or AE, the country of the customer's account. No hop. |
+| `phone_number` | the customer's phone number, possibly with a +44 or +971 prefix. No hop. |
+| `aspora_user_id` | the user's id in the Aspora app (a UUID). The same value is harbor `account_forms.external_user_ref`. Not a CIF and not an account number. |
+| `customer_id` | the SSFB harbor `customer.customer_id` (a UUID). Not the CIF id. The bot's "Horus Customer ID" is this id. |
+| `account_form_id` | the harbor `account_forms.form_id` (a UUID). Also the NSTP application id and the workflow `reference_id`. |
+| `account_id` | the SSFB rhythm `customer_account_mappings.account_id` (a UUID). Not the bank account number. |
+| `account_number` | the bank account number (digits), as CBS and the rhythm logs hold it. |
+
+The chain is:
 
 ```
-Aspora user id
-  -> harbor.account_forms.external_user_ref   gives form_id, session_id, status_v2
+aspora_user_id
+  -> harbor.account_forms.external_user_ref   gives account_form_id (form_id), session_id, status_v2
   -> harbor.customer.account_form_id          gives customer_id, state, sub_state, CIF present or not
   -> rhythm.customer_account_mappings.customer_id
                                               gives account_id, account_number, account_type
@@ -43,13 +54,18 @@ parameterised statement.
 
 | Have | Query | Get | Notes |
 |---|---|---|---|
-| `horus_customer_id` (bot field) | `harbor.customer WHERE customer_id = $1` | `account_form_id`, `state`, `sub_state`, `external_reference_id IS NOT NULL` (CIF exists) | "Horus Customer ID" is the harbor `customer_id`, not the user id |
-| old-template `UserId` | try as `external_user_ref` first, then as `customer_id` | whichever resolves | the old field sometimes held a customer_id |
-| `account_form_id` / `nstp_application_id` | `harbor.account_forms WHERE form_id = $1 AND is_deleted = false` | `external_user_ref` (user id), `status_v2` (authoritative), `status`, `session_id` | NSTP Application ID is the form_id |
-| `alphadesk_user_id` | `harbor.account_forms WHERE external_user_ref = $1 AND is_deleted = false ORDER BY created_at DESC` | `form_id`s | may not resolve for a returning user's device re-bind |
-| `device_id` (auth cases) | `guardian.device_auth_attempts.verification_id -> refresh_tokens.verification_id -> refresh_tokens.subject` | user id | the join is documented but not checked against a known user; `resolve_identity` reports it as unverified |
+| `account_id` | `rhythm.customer_account_mappings WHERE account_id = $1` | `customer_id` | runs only while no `customer_id` is known |
+| `account_number` | `rhythm.customer_account_mappings WHERE account_number = $1` | `customer_id` | runs only while no `customer_id` is known |
+| `customer_id` | `harbor.customer WHERE customer_id = $1` | `account_form_id`, `external_reference_id IS NOT NULL` (CIF exists) | the harbor `customer_id`, not the CIF id |
+| `aspora_user_id` | `harbor.account_forms WHERE external_user_ref = $1 AND is_deleted = false ORDER BY created_at DESC` | `account_form_id` (the newest form) | may not resolve for a returning user's device re-bind |
+| `account_form_id` | `harbor.account_forms WHERE form_id = $1 AND is_deleted = false` | `aspora_user_id` (`external_user_ref`), `session_id`; `status_v2` (authoritative) comes with the basic state | NSTP Application ID is the form_id |
+| `account_form_id` | `harbor.customer WHERE account_form_id = $1` | `customer_id` | runs only while no `customer_id` is known |
 | `customer_id` | `rhythm.customer_account_mappings WHERE customer_id = $1` | `account_id`, `account_number`, `account_type`, `scheme_code` | `account_id` for admin APIs, `account_number` for logs |
-| `form_id` | `workflow_op.workflow_executions WHERE reference_id = $1 AND reference_type = 'FORM'` on the SSFB copy; if empty, the RTL copy | `status`, `current_step_identifier`, `workflow_identifier` | the two copies of workflow-op hold different forms |
+| `account_form_id` | `workflow_op.workflow_executions WHERE reference_id = $1 AND reference_type = 'FORM'` on the SSFB copy; if empty, the RTL copy | `status`, `current_step_identifier`, `workflow_identifier` | the two copies of workflow-op hold different forms |
+
+`phone_number` and `country` have no hop: they reach you as the thread gave
+them. There is no device hop; for a device or SIM case, go from the user to
+guardian as the ssfb-guardian note says.
 
 Basic state read with the chain: harbor customer `state` and `sub_state`,
 `account_forms.status_v2`, and the rhythm account status and debit flag. Each
@@ -64,8 +80,8 @@ unless the thread names it.
 
 | Id | Where it is used |
 |---|---|
-| user id (`external_user_ref`) | harbor forms; guardian `refresh_tokens.subject` |
-| `form_id` | harbor form tables; `reference_id` in `workflow_executions` and in the v3 RFI tables; the `form_id` log field on harbor |
+| `aspora_user_id` (`external_user_ref`) | harbor forms; guardian `refresh_tokens.subject` |
+| `account_form_id` (`form_id`) | harbor form tables; `reference_id` in `workflow_executions` and in the v3 RFI tables; the `form_id` log field on harbor |
 | `session_id` | guardian's verification session lookup by session |
 | `customer_id` (harbor) | harbor customer tables and admin API; rhythm mappings, limits and beneficiaries; the `x-customer-id` header, which the HTTP tool sets from the chain |
 | `account_id` (rhythm UUID) | rhythm admin APIs and `transfer_transactions` |

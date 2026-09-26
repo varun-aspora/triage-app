@@ -37,8 +37,8 @@ function minimalCase(): Record<string, unknown> {
     taxonomy_version: TAXONOMY_VERSION,
     label_source: 'synthetic',
     request: { text: `User ${UUID_A} cannot log in.` },
-    ids: { user_id: UUID_A },
-    id_chain: { ids: { user_id: UUID_A }, hops: [] },
+    ids: { aspora_user_id: UUID_A },
+    id_chain: { ids: { aspora_user_id: UUID_A }, hops: [] },
     basic_state: [{ item: 'customer.state', value: 'ACTIVE', taken_at: '2026-09-01T00:00:00.000Z', source: 'ssfb:harbor' }],
     expected: { category: 'auth', tier: 'mid' },
     provenance: { origin: 'synthetic' },
@@ -123,7 +123,7 @@ describe('CaseSchema', () => {
 
   test('toIdChain and threadTexts', () => {
     const c = v.parse(CaseSchema, minimalCase());
-    expect(toIdChain(c)).toEqual({ ids: { user_id: UUID_A }, hops: [], basic_state: c.basic_state });
+    expect(toIdChain(c)).toEqual({ ids: { aspora_user_id: UUID_A }, hops: [], basic_state: c.basic_state });
     expect(threadTexts(c)).toEqual([`User ${UUID_A} cannot log in.`]);
   });
 });

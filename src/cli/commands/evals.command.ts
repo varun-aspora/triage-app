@@ -16,7 +16,7 @@
 // switches and PROMPTFOO_CONFIG_DIR (under TRIAGE_DATA_DIR) are set in this
 // process's env only; nothing is written to a .env.
 //
-// The classifier suite runs faux providers by default, whatever MODEL_CLASSIFIER
+// The classifier suite runs faux providers by default, whatever MODEL_DECISION
 // says, and installs the no-io guard before promptfoo loads, so the default run
 // cannot reach a network. --judge needs TRIAGE_EVAL_JUDGE_MODEL and fails
 // before any suite runs when it is blank.

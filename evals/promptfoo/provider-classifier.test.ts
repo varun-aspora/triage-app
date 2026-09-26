@@ -31,7 +31,7 @@ let cases: EvalCase[];
 let categories: CategoryEntry[];
 
 beforeAll(async () => {
-  home = makeTestHome({ overrides: { MODEL_CLASSIFIER: 'faux/classifier' } });
+  home = makeTestHome({ overrides: { MODEL_DECISION: 'faux/classifier' } });
   cases = (await loadCases(CASES_DIR)).map((l) => l.case).filter((c) => c.id.startsWith('syn-'));
   categories = await loadCategories(join(REPO, 'knowledge'));
 });
@@ -157,8 +157,8 @@ describe('faux mode', () => {
 
 describe('model per provider', () => {
   test('the model is passed per call, not read from process.env or the config', async () => {
-    const before = process.env.MODEL_CLASSIFIER;
-    process.env.MODEL_CLASSIFIER = 'faux/strong';
+    const before = process.env.MODEL_DECISION;
+    process.env.MODEL_DECISION = 'faux/strong';
     try {
       const c = byId('syn-money-moved');
       const seenA: string[] = [];
@@ -174,10 +174,10 @@ describe('model per provider', () => {
       expect(outputOf(ra).model).toBe('openai/gpt-5-mini');
       expect(outputOf(rb).model).toBe('anthropic/claude-haiku-4-5');
       expect(ra.metadata?.model).toBe('openai/gpt-5-mini');
-      expect(home.config.models.classifier).toBe('faux/classifier');
+      expect(home.config.models.decision).toBe('faux/classifier');
     } finally {
-      if (before === undefined) delete process.env.MODEL_CLASSIFIER;
-      else process.env.MODEL_CLASSIFIER = before;
+      if (before === undefined) delete process.env.MODEL_DECISION;
+      else process.env.MODEL_DECISION = before;
     }
   });
 
@@ -192,7 +192,7 @@ describe('model per provider', () => {
     }
   });
 
-  test('without config.model the provider uses MODEL_CLASSIFIER from the config', () => {
+  test('without config.model the provider uses MODEL_DECISION from the config', () => {
     const p = new ClassifierProvider({}, { config: home.config });
     expect(p.model).toBe('faux/classifier');
     expect(p.id()).toBe('triage-classifier:faux/classifier');
@@ -200,8 +200,8 @@ describe('model per provider', () => {
 
   test('withClassifierModel leaves the original config alone', () => {
     const copy = withClassifierModel(home.config, 'faux/mid');
-    expect(copy.models.classifier).toBe('faux/mid');
-    expect(home.config.models.classifier).toBe('faux/classifier');
+    expect(copy.models.decision).toBe('faux/mid');
+    expect(home.config.models.decision).toBe('faux/classifier');
   });
 });
 
@@ -248,7 +248,7 @@ describe('cost cap', () => {
   });
 
   test('the default budget reads TRIAGE_EVAL_MAX_COST_USD from the config', async () => {
-    const capped = makeTestHome({ overrides: { MODEL_CLASSIFIER: 'faux/classifier', TRIAGE_EVAL_MAX_COST_USD: '0' } });
+    const capped = makeTestHome({ overrides: { MODEL_DECISION: 'faux/classifier', TRIAGE_EVAL_MAX_COST_USD: '0' } });
     try {
       const p = new ClassifierProvider(
         {},

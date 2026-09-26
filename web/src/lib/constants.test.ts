@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import { CATEGORIES as SRC_CATEGORIES } from '../../../src/types/classification.ts';
 import {
   ENTITIES as SRC_ENTITIES,
-  KNOWN_ID_KEYS as SRC_KNOWN_ID_KEYS,
   REPORT_STATUSES as SRC_REPORT_STATUSES,
   TIERS as SRC_TIERS,
 } from '../../../src/types/core.ts';
@@ -24,7 +23,6 @@ describe('constants match src/', () => {
     expect([...c.CATEGORIES]).toEqual([...SRC_CATEGORIES]);
     expect([...c.TIERS]).toEqual([...SRC_TIERS]);
     expect([...c.ENTITIES]).toEqual([...SRC_ENTITIES]);
-    expect([...c.KNOWN_ID_KEYS]).toEqual([...SRC_KNOWN_ID_KEYS]);
     expect([...c.REPORT_STATUSES]).toEqual([...SRC_REPORT_STATUSES]);
     expect([...c.FEEDBACK_VERDICTS]).toEqual([...SRC_VERDICTS]);
     expect([...c.FINDING_VERDICTS]).toEqual([...SRC_FINDING_VERDICTS]);

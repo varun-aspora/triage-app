@@ -118,11 +118,12 @@ function processNotes(text: string): string[] {
   return rules.flatMap((re) => [...text.matchAll(re)].map((m) => m[0]));
 }
 
-/** Words that may appear in backticks in orchestrator.md: its tools and delegates, plus field names. */
+/** Words that may appear in backticks in orchestrator.md: its tools and delegates, plus field names and id keys. */
 const FIELD_NAMES = new Set<string>([
   ...Object.keys(ReportDraftSchema.entries),
   ...Object.keys(EntityFindingsSchema.entries),
   ...Object.keys(RootCauseSchema.entries),
+  ...KNOWN_ID_KEYS,
   'taken_at',
 ]);
 

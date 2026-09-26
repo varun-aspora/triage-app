@@ -30,7 +30,6 @@ const DSNS = {
   SSFB_HARBOR_DB_URL: dsn('harbor_fake'),
   SSFB_RHYTHM_DB_URL: dsn('rhythm_fake'),
   SSFB_WORKFLOW_DB_URL: dsn('workflow_fake'),
-  SSFB_GUARDIAN_DB_URL: dsn('guardian_fake'),
   RTL_WORKFLOW_DB_URL: dsn('rtl_workflow_fake'),
 };
 const SECRETS = [...Object.values(DSNS), FAKE_PASSWORD, FAKE_HOST, 'triage_fake'];
@@ -102,15 +101,15 @@ function hopOf(result: Awaited<ReturnType<typeof resolveIdChain>>, source: strin
 const rows = (...r: Record<string, unknown>[]): Handler => () => r;
 
 describe('hop table', () => {
-  test('horus_customer_id reads the harbor customer and gives customer_id and account_form_id', async () => {
+  test('customer_id reads the harbor customer and gives account_form_id', async () => {
     const sql = fakeSql(new Map([[S.HARBOR_CUSTOMER_BY_ID, rows({ customer_id: CUST, account_form_id: FORM, cif_exists: true })]]));
     const { deps } = depsOf(sql);
-    const result = await resolveIdChain({ horus_customer_id: CUST }, deps);
+    const result = await resolveIdChain({ customer_id: CUST }, deps);
 
-    expect(result.id_chain.ids).toMatchObject({ horus_customer_id: CUST, customer_id: CUST, account_form_id: FORM, form_id: FORM });
+    expect(result.id_chain.ids).toMatchObject({ customer_id: CUST, account_form_id: FORM });
     expect(result.id_chain.hops[0]).toEqual({
-      from: 'horus_customer_id',
-      to: 'customer_id',
+      from: 'customer_id',
+      to: 'account_form_id',
       source: 'ssfb:harbor.customer',
       status: 'resolved',
       taken_at: NOW.toISOString(),
@@ -124,7 +123,7 @@ describe('hop table', () => {
   test('every statement runs inside the read-only transaction with $n params only', async () => {
     const sql = fakeSql(new Map([[S.HARBOR_CUSTOMER_BY_ID, rows({ customer_id: CUST, account_form_id: FORM })]]));
     const { deps } = depsOf(sql);
-    await resolveIdChain({ horus_customer_id: CUST }, deps);
+    await resolveIdChain({ customer_id: CUST }, deps);
     expect(sql.calls.length).toBeGreaterThan(3);
     for (const { input } of sql.calls) {
       expect(input.plan).toEqual([
@@ -140,7 +139,7 @@ describe('hop table', () => {
     }
   });
 
-  test('account_form_id / nstp_application_id reads the form and gives user_id', async () => {
+  test('account_form_id / nstp_application_id reads the form and gives aspora_user_id', async () => {
     const sql = fakeSql(
       new Map([
         [S.HARBOR_FORM_BY_ID, rows({ form_id: FORM, external_user_ref: USER, session_id: 'sess-1' })],
@@ -150,65 +149,39 @@ describe('hop table', () => {
     const { deps } = depsOf(sql);
     const result = await resolveIdChain({ account_form_id: FORM }, deps);
 
-    expect(result.id_chain.ids).toMatchObject({ account_form_id: FORM, form_id: FORM, user_id: USER, customer_id: CUST });
-    expect(hopOf(result, 'ssfb:harbor.account_forms', 'account_form_id')[0]).toMatchObject({ status: 'resolved', to: 'user_id' });
+    expect(result.id_chain.ids).toMatchObject({ account_form_id: FORM, aspora_user_id: USER, customer_id: CUST });
+    expect(hopOf(result, 'ssfb:harbor.account_forms', 'account_form_id')[0]).toMatchObject({ status: 'resolved', to: 'aspora_user_id' });
     expect(hopOf(result, 'ssfb:harbor.customer', 'account_form_id')[0]).toMatchObject({ status: 'resolved', to: 'customer_id' });
     const formCall = sql.calls.find((c) => c.input.plan[3] === S.HARBOR_FORM_BY_ID);
     expect(formCall?.input.params).toEqual([FORM]);
   });
 
-  test('a form_id alone is read as the account form', async () => {
-    const sql = fakeSql(new Map([[S.HARBOR_FORM_BY_ID, rows({ form_id: FORM, external_user_ref: USER })]]));
-    const { deps } = depsOf(sql);
-    const result = await resolveIdChain({ form_id: FORM }, deps);
-    expect(result.id_chain.ids).toMatchObject({ account_form_id: FORM, user_id: USER });
-    expect(hopOf(result, 'ssfb:harbor.account_forms', 'form_id')[0]?.status).toBe('resolved');
-  });
-
-  test('alphadesk_user_id reads the forms by external_user_ref and takes the newest', async () => {
+  test('aspora_user_id reads the forms by external_user_ref and takes the newest', async () => {
     const sql = fakeSql(
       new Map([[S.HARBOR_FORMS_BY_USER, rows({ form_id: FORM, external_user_ref: USER }, { form_id: OLD_FORM, external_user_ref: USER })]]),
     );
     const { deps } = depsOf(sql);
-    const result = await resolveIdChain({ alphadesk_user_id: USER }, deps);
-    expect(result.id_chain.ids).toMatchObject({ user_id: USER, account_form_id: FORM });
-    expect(hopOf(result, 'ssfb:harbor.account_forms', 'alphadesk_user_id')[0]).toMatchObject({ status: 'resolved', to: 'user_id' });
-    // The forms for that user are not read a second time under user_id.
+    const result = await resolveIdChain({ aspora_user_id: USER }, deps);
+    expect(result.id_chain.ids).toMatchObject({ aspora_user_id: USER, account_form_id: FORM });
+    expect(hopOf(result, 'ssfb:harbor.account_forms', 'aspora_user_id')[0]).toMatchObject({
+      status: 'resolved',
+      to: 'account_form_id',
+    });
+    // The newest form is then read as the account form.
+    const formCall = sql.calls.find((c) => c.input.plan[3] === S.HARBOR_FORM_BY_ID);
+    expect(formCall?.input.params).toEqual([FORM]);
     expect(sql.sqlOf().filter((s) => s === S.HARBOR_FORMS_BY_USER).length).toBe(1);
   });
 
-  test('alphadesk_user_id that does not resolve is not_found', async () => {
+  test('aspora_user_id that does not resolve is not_found and is not tried as a customer_id', async () => {
     const sql = fakeSql();
     const { deps } = depsOf(sql);
-    const result = await resolveIdChain({ alphadesk_user_id: USER }, deps);
-    expect(hopOf(result, 'ssfb:harbor.account_forms', 'alphadesk_user_id')[0]?.status).toBe('not_found');
-    expect(result.id_chain.ids).toEqual({ alphadesk_user_id: USER });
-  });
-
-  test('old_user_id resolves as external_user_ref first and skips the customer_id try', async () => {
-    const sql = fakeSql(new Map([[S.HARBOR_FORMS_BY_USER, rows({ form_id: FORM, external_user_ref: USER })]]));
-    const { deps } = depsOf(sql);
-    const result = await resolveIdChain({ old_user_id: USER }, deps);
-    const old = result.id_chain.hops.filter((h) => h.from === 'old_user_id');
-    expect(old.map((h) => [h.source, h.status])).toEqual([
-      ['ssfb:harbor.account_forms', 'resolved'],
-      ['ssfb:harbor.customer', 'skipped'],
+    const result = await resolveIdChain({ aspora_user_id: USER }, deps);
+    expect(result.id_chain.hops.map((h) => [h.from, h.source, h.status])).toEqual([
+      ['aspora_user_id', 'ssfb:harbor.account_forms', 'not_found'],
     ]);
-    expect(result.id_chain.ids).toMatchObject({ user_id: USER, account_form_id: FORM });
-    expect(sql.calls.some((c) => c.input.plan[3] === S.HARBOR_CUSTOMER_BY_ID)).toBe(false);
-  });
-
-  test('old_user_id falls back to customer_id when external_user_ref finds nothing', async () => {
-    const sql = fakeSql(new Map([[S.HARBOR_CUSTOMER_BY_ID, rows({ customer_id: CUST, account_form_id: FORM })]]));
-    const { deps } = depsOf(sql);
-    const result = await resolveIdChain({ old_user_id: CUST }, deps);
-    const old = result.id_chain.hops.filter((h) => h.from === 'old_user_id');
-    expect(old.map((h) => [h.source, h.status, h.to])).toEqual([
-      ['ssfb:harbor.account_forms', 'not_found', undefined],
-      ['ssfb:harbor.customer', 'resolved', 'customer_id'],
-    ]);
-    expect(result.id_chain.ids).toMatchObject({ customer_id: CUST, account_form_id: FORM });
-    expect(result.id_chain.ids.user_id).toBeUndefined();
+    expect(result.id_chain.ids).toEqual({ aspora_user_id: USER });
+    expect(sql.sqlOf()).toEqual([S.HARBOR_FORMS_BY_USER]);
   });
 
   test('customer_id reads the rhythm account mappings', async () => {
@@ -224,25 +197,125 @@ describe('hop table', () => {
     });
   });
 
-  test('device_id through guardian is reported as unverified', async () => {
-    const sql = fakeSql(new Map([[S.GUARDIAN_USER_BY_DEVICE, rows({ subject: USER })]]));
-    const { deps } = depsOf(sql);
-    const result = await resolveIdChain({ device_id: 'dev-0000-eeee' }, deps);
-    expect(hopOf(result, 'ssfb:guardian.device_auth_attempts')[0]).toMatchObject({ status: 'unverified', to: 'user_id' });
-    expect(result.id_chain.ids.user_id).toBe(USER);
-    // Nothing is chained from an unverified user id.
-    expect(sql.sqlOf()).toEqual([S.GUARDIAN_USER_BY_DEVICE]);
-  });
-
   test('input ids are never overwritten by hop results', async () => {
     const sql = fakeSql(new Map([[S.HARBOR_CUSTOMER_BY_ID, rows({ customer_id: 'other-cust', account_form_id: 'other-form' })]]));
     const { deps } = depsOf(sql);
-    const result = await resolveIdChain({ horus_customer_id: CUST, customer_id: CUST, account_form_id: FORM }, deps);
+    const result = await resolveIdChain({ customer_id: CUST, account_form_id: FORM }, deps);
     expect(result.id_chain.ids).toMatchObject({ customer_id: CUST, account_form_id: FORM });
   });
 });
 
-describe('form_id workflow copies', () => {
+describe('account hops back to the customer', () => {
+  const mapping = rows({ customer_id: CUST, account_id: ACCOUNT, account_number: ACCOUNT_NUMBER });
+
+  test('account_id reads the rhythm mapping first, then the customer hops run with the customer_id it gives', async () => {
+    const sql = fakeSql(
+      new Map([
+        [S.RHYTHM_CUSTOMER_BY_ACCOUNT_ID, mapping],
+        [S.HARBOR_CUSTOMER_BY_ID, rows({ customer_id: CUST, account_form_id: FORM })],
+      ]),
+    );
+    const { deps } = depsOf(sql);
+    const result = await resolveIdChain({ account_id: ACCOUNT }, deps);
+
+    expect(result.id_chain.ids).toMatchObject({ account_id: ACCOUNT, account_number: ACCOUNT_NUMBER, customer_id: CUST, account_form_id: FORM });
+    expect(result.id_chain.hops[0]).toEqual({
+      from: 'account_id',
+      to: 'customer_id',
+      source: 'ssfb:rhythm.customer_account_mappings',
+      status: 'resolved',
+      taken_at: NOW.toISOString(),
+    });
+    expect(sql.sqlOf().slice(0, 2)).toEqual([S.RHYTHM_CUSTOMER_BY_ACCOUNT_ID, S.HARBOR_CUSTOMER_BY_ID]);
+    expect(sql.calls[0]?.input.params).toEqual([ACCOUNT]);
+    expect(sql.calls[1]?.input.params).toEqual([CUST]);
+    // account_number came from the same row, so its own hop does not run.
+    expect(sql.sqlOf()).not.toContain(S.RHYTHM_CUSTOMER_BY_ACCOUNT_NUMBER);
+  });
+
+  test('account_number reads the rhythm mapping and gives customer_id and account_id', async () => {
+    const sql = fakeSql(new Map([[S.RHYTHM_CUSTOMER_BY_ACCOUNT_NUMBER, mapping]]));
+    const { deps } = depsOf(sql);
+    const result = await resolveIdChain({ account_number: ACCOUNT_NUMBER }, deps);
+
+    expect(result.id_chain.ids).toMatchObject({ account_number: ACCOUNT_NUMBER, customer_id: CUST, account_id: ACCOUNT });
+    expect(hopOf(result, 'ssfb:rhythm.customer_account_mappings', 'account_number')[0]).toMatchObject({
+      status: 'resolved',
+      to: 'customer_id',
+    });
+    expect(sql.sqlOf()[0]).toBe(S.RHYTHM_CUSTOMER_BY_ACCOUNT_NUMBER);
+    expect(sql.calls[0]?.input.params).toEqual([ACCOUNT_NUMBER]);
+    expect(sql.sqlOf()).toContain(S.HARBOR_CUSTOMER_BY_ID);
+  });
+
+  test('account_number is tried when account_id finds nothing', async () => {
+    const sql = fakeSql(new Map([[S.RHYTHM_CUSTOMER_BY_ACCOUNT_NUMBER, mapping]]));
+    const { deps } = depsOf(sql);
+    const result = await resolveIdChain({ account_id: ACCOUNT, account_number: ACCOUNT_NUMBER }, deps);
+    expect(result.id_chain.hops.slice(0, 2).map((h) => [h.from, h.status])).toEqual([
+      ['account_id', 'not_found'],
+      ['account_number', 'resolved'],
+    ]);
+    expect(result.id_chain.ids.customer_id).toBe(CUST);
+  });
+
+  test('neither account hop runs when the customer_id is known', async () => {
+    const sql = fakeSql();
+    const { deps } = depsOf(sql);
+    const result = await resolveIdChain({ customer_id: CUST, account_id: ACCOUNT, account_number: ACCOUNT_NUMBER }, deps);
+    expect(sql.sqlOf()).not.toContain(S.RHYTHM_CUSTOMER_BY_ACCOUNT_ID);
+    expect(sql.sqlOf()).not.toContain(S.RHYTHM_CUSTOMER_BY_ACCOUNT_NUMBER);
+    expect(result.id_chain.hops.some((h) => h.from === 'account_id' || h.from === 'account_number')).toBe(false);
+  });
+
+  test('an unreachable rhythm marks the account hop and the customer hops that needed its id', async () => {
+    const down = (): Error => new ConnectorError('unreachable', 'ssfb:rhythm: could not reach SSFB_RHYTHM_DB_URL (ECONNREFUSED)');
+    const sql = fakeSql(new Map<string, Handler>([[S.RHYTHM_CUSTOMER_BY_ACCOUNT_ID, down]]));
+    const { deps } = depsOf(sql);
+    const result = await resolveIdChain({ account_id: ACCOUNT }, deps);
+    expect(result.id_chain.hops.map((h) => [h.from, h.source, h.status])).toEqual([
+      ['account_id', 'ssfb:rhythm.customer_account_mappings', 'unreachable'],
+      ['customer_id', 'ssfb:harbor.customer', 'unreachable'],
+      ['account_form_id', 'ssfb:harbor.account_forms', 'unreachable'],
+      ['account_form_id', 'ssfb:harbor.customer', 'unreachable'],
+      ['account_form_id', 'ssfb:workflow.workflow_executions', 'unreachable'],
+      ['customer_id', 'ssfb:rhythm.customer_account_mappings', 'unreachable'],
+    ]);
+    expect(sql.calls.length).toBe(1);
+    expect(result.errors?.[0]).toMatchObject({ hop: 'account_id.customer', code: 'unreachable' });
+  });
+});
+
+describe('ids with no hop', () => {
+  test('phone_number and country pass through unchanged and run no statement', async () => {
+    const sql = fakeSql();
+    const { deps, audit } = depsOf(sql);
+    const result = await resolveIdChain({ phone_number: '+447700900123', country: 'GB' }, deps);
+    expect(result.id_chain).toEqual({ ids: { phone_number: '+447700900123', country: 'GB' }, hops: [], basic_state: [] });
+    expect(sql.calls.length).toBe(0);
+    expect(audit.lines.length).toBe(0);
+  });
+
+  test('phone_number and country stay in the chain next to ids that resolve', async () => {
+    const sql = fakeSql(new Map([[S.HARBOR_CUSTOMER_BY_ID, rows({ customer_id: CUST, account_form_id: FORM })]]));
+    const { deps } = depsOf(sql);
+    const result = await resolveIdChain({ customer_id: CUST, phone_number: '+971500000001', country: 'AE' }, deps);
+    expect(result.id_chain.ids).toMatchObject({ customer_id: CUST, account_form_id: FORM, phone_number: '+971500000001', country: 'AE' });
+    for (const { input } of sql.calls) expect(input.params).not.toContain('+971500000001');
+  });
+
+  test('keys removed by D69 are dropped and run no statement', async () => {
+    const sql = fakeSql();
+    const { deps } = depsOf(sql);
+    for (const key of ['horus_customer_id', 'user_id', 'old_user_id', 'form_id', 'alphadesk_user_id', 'device_id', 'phone', 'utr']) {
+      const result = await resolveIdChain({ [key]: CUST } as Partial<KnownIds>, deps);
+      expect(result.id_chain.ids, key).toEqual({});
+    }
+    expect(sql.calls.length).toBe(0);
+  });
+});
+
+describe('account_form_id workflow copies', () => {
   test('falls back from the SSFB workflow copy to the RTL copy when the first is empty', async () => {
     const sql = fakeSql(
       new Map<string, Handler>([
@@ -250,7 +323,7 @@ describe('form_id workflow copies', () => {
       ]),
     );
     const { deps } = depsOf(sql);
-    const result = await resolveIdChain({ form_id: FORM }, deps);
+    const result = await resolveIdChain({ account_form_id: FORM }, deps);
 
     const wf = result.id_chain.hops.filter((h) => h.source.endsWith('workflow.workflow_executions'));
     expect(wf.map((h) => [h.source, h.status])).toEqual([
@@ -271,7 +344,7 @@ describe('form_id workflow copies', () => {
       new Map([[S.SSFB_WORKFLOW_BY_FORM, rows({ workflow_identifier: 'wf-ssfb', status: 'DONE', current_step_identifier: 'end' })]]),
     );
     const { deps } = depsOf(sql);
-    const result = await resolveIdChain({ form_id: FORM }, deps);
+    const result = await resolveIdChain({ account_form_id: FORM }, deps);
     expect(hopOf(result, 'rtl:workflow.workflow_executions')[0]?.status).toBe('skipped');
     expect(sql.calls.some((c) => c.input.entity === 'rtl')).toBe(false);
     expect(result.basic_state.find((i) => i.item === 'workflow_status')?.source).toBe('ssfb:workflow.workflow_executions');
@@ -280,7 +353,7 @@ describe('form_id workflow copies', () => {
   test('the RTL copy is skipped when rtl is not enabled', async () => {
     const sql = fakeSql();
     const { deps } = depsOf(sql, { entities: registryOf({ TRIAGE_ENTITIES: 'ssfb' }) });
-    const result = await resolveIdChain({ form_id: FORM }, deps);
+    const result = await resolveIdChain({ account_form_id: FORM }, deps);
     expect(hopOf(result, 'rtl:workflow.workflow_executions')[0]?.status).toBe('skipped');
     expect(sql.calls.some((c) => c.input.entity === 'rtl')).toBe(false);
   });
@@ -300,21 +373,21 @@ describe('unreachable databases', () => {
       ]),
     );
     const { deps, audit } = depsOf(sql);
-    const result = await resolveIdChain({ horus_customer_id: CUST }, deps);
+    const result = await resolveIdChain({ aspora_user_id: USER }, deps);
 
     const statuses = result.id_chain.hops.map((h) => [h.from, h.source, h.status]);
     expect(statuses).toEqual([
-      ['horus_customer_id', 'ssfb:harbor.customer', 'unreachable'],
+      ['aspora_user_id', 'ssfb:harbor.account_forms', 'unreachable'],
       ['account_form_id', 'ssfb:harbor.account_forms', 'unreachable'],
       ['account_form_id', 'ssfb:harbor.customer', 'unreachable'],
-      ['form_id', 'ssfb:workflow.workflow_executions', 'unreachable'],
+      ['account_form_id', 'ssfb:workflow.workflow_executions', 'unreachable'],
       ['customer_id', 'ssfb:rhythm.customer_account_mappings', 'unreachable'],
     ]);
     // Harbor was tried once; nothing else could run.
     expect(sql.calls.length).toBe(1);
     expect(audit.lines.length).toBe(1);
     expect(audit.lines[0]).toMatchObject({ exit: 'unreachable', target: 'SSFB_HARBOR_DB_URL' });
-    expect(result.id_chain.ids).toEqual({ horus_customer_id: CUST });
+    expect(result.id_chain.ids).toEqual({ aspora_user_id: USER });
     // The basic state that needed the missing ids is unreachable too.
     expect(result.basic_state.map((i) => [i.item, i.status])).toEqual([
       ['harbor_customer_state', 'unreachable'],
@@ -328,12 +401,13 @@ describe('unreachable databases', () => {
   test('a down harbor still lets hops on other databases run with ids from the thread', async () => {
     const sql = fakeSql(
       new Map<string, Handler>([
-        [S.HARBOR_FORM_BY_ID, () => new ConnectorError('timeout', 'ssfb:harbor: timed out')],
+        [S.HARBOR_CUSTOMER_BY_ID, () => new ConnectorError('timeout', 'ssfb:harbor: timed out')],
         [S.RHYTHM_ACCOUNTS_BY_CUSTOMER, rows({ account_id: ACCOUNT, account_number: ACCOUNT_NUMBER })],
       ]),
     );
     const { deps } = depsOf(sql);
-    const result = await resolveIdChain({ form_id: FORM, customer_id: CUST }, deps);
+    const result = await resolveIdChain({ account_form_id: FORM, customer_id: CUST }, deps);
+    expect(hopOf(result, 'ssfb:harbor.customer')[0]?.status).toBe('unreachable');
     expect(hopOf(result, 'ssfb:harbor.account_forms')[0]?.status).toBe('unreachable');
     expect(hopOf(result, 'ssfb:rhythm.customer_account_mappings')[0]?.status).toBe('resolved');
     expect(hopOf(result, 'ssfb:workflow.workflow_executions')[0]?.status).toBe('not_found');
@@ -345,7 +419,7 @@ describe('unreachable databases', () => {
   test('a blank DSN in real mode is not_configured: hop unreachable, audited, no connector call', async () => {
     const sql = fakeSql();
     const { deps, audit } = depsOf(sql, { entities: registryOf({ SSFB_HARBOR_DB_URL: '' }) });
-    const result = await resolveIdChain({ horus_customer_id: CUST }, deps);
+    const result = await resolveIdChain({ aspora_user_id: USER }, deps);
     expect(result.id_chain.hops[0]?.status).toBe('unreachable');
     expect(sql.calls.length).toBe(0);
     expect(audit.lines[0]).toMatchObject({ exit: 'not_configured', target: 'SSFB_HARBOR_DB_URL', transport: 'real' });
@@ -354,7 +428,7 @@ describe('unreachable databases', () => {
   test('a non-connector error still throws', async () => {
     const sql = fakeSql(new Map<string, Handler>([[S.HARBOR_CUSTOMER_BY_ID, () => new TypeError('bug')]]));
     const { deps } = depsOf(sql);
-    await expect(resolveIdChain({ horus_customer_id: CUST }, deps)).rejects.toThrow(TypeError);
+    await expect(resolveIdChain({ customer_id: CUST }, deps)).rejects.toThrow(TypeError);
   });
 
   test('an aborted signal throws before any statement runs', async () => {
@@ -362,14 +436,14 @@ describe('unreachable databases', () => {
     const ac = new AbortController();
     ac.abort();
     const { deps } = depsOf(sql, { signal: ac.signal });
-    await expect(resolveIdChain({ horus_customer_id: CUST }, deps)).rejects.toThrow();
+    await expect(resolveIdChain({ customer_id: CUST }, deps)).rejects.toThrow();
     expect(sql.calls.length).toBe(0);
   });
 
   test('invalid ids are refused with field names only', async () => {
     const sql = fakeSql();
     const { deps } = depsOf(sql);
-    const bad = { horus_customer_id: 42 } as unknown as Partial<KnownIds>;
+    const bad = { customer_id: 42 } as unknown as Partial<KnownIds>;
     await expect(resolveIdChain(bad, deps)).rejects.toThrow(IdentityCoreError);
     expect(sql.calls.length).toBe(0);
   });
@@ -399,7 +473,7 @@ describe('basic state', () => {
   test('runs the three fixed reads and every item carries taken_at and source', async () => {
     const sql = fullSql();
     const { deps } = depsOf(sql);
-    const result = await resolveIdChain({ horus_customer_id: CUST }, deps);
+    const result = await resolveIdChain({ customer_id: CUST }, deps);
 
     const byItem = Object.fromEntries(result.basic_state.map((i) => [i.item, i]));
     expect(byItem.harbor_customer_state).toMatchObject({ value: 'ONBOARDED', source: 'ssfb:harbor.customer', status: 'read' });
@@ -458,13 +532,13 @@ describe('mock mode', () => {
 
   test('answers from resolve_identity fixtures and never calls the SQL connector', async () => {
     const { store, reads } = fixtureStore({
-      [keyFor('horus_customer_id', [['horus_customer_id', CUST]])]: { rows: [{ customer_id: CUST, account_form_id: FORM }] },
+      [keyFor('customer_id.customer', [['customer_id', CUST]])]: { rows: [{ customer_id: CUST, account_form_id: FORM }] },
       [keyFor('state.harbor_customer', [['customer_id', CUST]])]: { rows: [{ state: 'ONBOARDED', sub_state: 'X' }] },
     });
     const port = mockPortFromFixtures({ settings: { mockMode: true, strict: false, record: false }, store });
     const sql = fakeSql();
     const { deps, audit } = depsOf(sql, { mock: port, entities: registryOf({ SSFB_HARBOR_DB_URL: '' }) });
-    const result = await resolveIdChain({ horus_customer_id: CUST }, deps);
+    const result = await resolveIdChain({ customer_id: CUST }, deps);
 
     expect(sql.runSelect).toHaveBeenCalledTimes(0);
     expect(result.id_chain.ids).toMatchObject({ customer_id: CUST, account_form_id: FORM });
@@ -486,22 +560,22 @@ describe('mock mode', () => {
     const { deps } = depsOf(sql, { mock: port });
     let caught: unknown;
     try {
-      await resolveIdChain({ horus_customer_id: CUST }, deps);
+      await resolveIdChain({ customer_id: CUST }, deps);
     } catch (err) {
       caught = err;
     }
     expect(caught).toBeInstanceOf(ConnectorError);
     expect((caught as ConnectorError).code).toBe('strict_miss');
     expect((caught as Error).message).toContain('resolve_identity');
-    expect((caught as Error).message).toContain(keyFor('horus_customer_id', [['horus_customer_id', CUST]]));
+    expect((caught as Error).message).toContain(keyFor('customer_id.customer', [['customer_id', CUST]]));
     expect(sql.runSelect).toHaveBeenCalledTimes(0);
   });
 
   test('a fixture without a rows array is a loud error naming the hop', async () => {
-    const { store } = fixtureStore({ [keyFor('horus_customer_id', [['horus_customer_id', CUST]])]: [{ customer_id: CUST }] });
+    const { store } = fixtureStore({ [keyFor('customer_id.customer', [['customer_id', CUST]])]: [{ customer_id: CUST }] });
     const port = mockPortFromFixtures({ settings: { mockMode: true, strict: true, record: false }, store });
     const { deps } = depsOf(fakeSql(), { mock: port });
-    await expect(resolveIdChain({ horus_customer_id: CUST }, deps)).rejects.toThrow('hop horus_customer_id');
+    await expect(resolveIdChain({ customer_id: CUST }, deps)).rejects.toThrow('hop customer_id.customer');
   });
 });
 
@@ -514,7 +588,7 @@ describe('audit lines', () => {
       ]),
     );
     const { deps, audit } = depsOf(sql);
-    await resolveIdChain({ horus_customer_id: CUST }, deps);
+    await resolveIdChain({ customer_id: CUST }, deps);
 
     expect(audit.lines.length).toBe(sql.calls.length);
     const envFor: Record<string, string> = {
@@ -550,7 +624,7 @@ describe('audit lines', () => {
     });
     const connector = createSqlConnector({ registry, config, pgFactory: pg.factory, roleCache: new RoleCheckCache(), retry: NO_RETRY });
     const { deps, audit } = depsOf(connector, { entities: registry });
-    const result = await resolveIdChain({ horus_customer_id: CUST, device_id: 'dev-1' }, deps);
+    const result = await resolveIdChain({ customer_id: CUST, account_form_id: FORM }, deps);
 
     expect(result.id_chain.hops[0]?.status).toBe('resolved');
     expect(result.basic_state.find((i) => i.item === 'rhythm_account_status')?.status).toBe('unreachable');
@@ -561,7 +635,7 @@ describe('audit lines', () => {
     const text = [...audit.lines.map((l) => serializeAuditLine(l)), JSON.stringify(result)].join('\n');
     for (const s of SECRETS) expect(text).not.toContain(s);
     expect(new Set(audit.lines.map((l) => l.target))).toEqual(
-      new Set(['SSFB_HARBOR_DB_URL', 'SSFB_WORKFLOW_DB_URL', 'SSFB_RHYTHM_DB_URL', 'SSFB_GUARDIAN_DB_URL', 'RTL_WORKFLOW_DB_URL']),
+      new Set(['SSFB_HARBOR_DB_URL', 'SSFB_WORKFLOW_DB_URL', 'SSFB_RHYTHM_DB_URL', 'RTL_WORKFLOW_DB_URL']),
     );
   });
 });
@@ -591,7 +665,7 @@ describe('static checks', () => {
 
   test('every exported statement is a constant SELECT with $n placeholders only', () => {
     const sqlConstants = Object.entries(statements).filter(([, value]) => typeof value === 'string') as [string, string][];
-    expect(sqlConstants.length).toBe(11);
+    expect(sqlConstants.length).toBe(12);
     for (const [name, sql] of sqlConstants) {
       expect(sql, name).toMatch(/^SELECT /);
       expect(sql, name).toContain('$1');

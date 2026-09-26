@@ -1,0 +1,63 @@
+{
+  "$comment": "The only identifiers a run knows (D69). Ingress builds the id decision questions, their options and the label fallback from this file; nothing per field is hardcoded. `key` order must match KNOWN_ID_KEYS in src/types/core.ts (a test checks it). `pattern` finds candidate values in the thread (JavaScript regex source, flags gi); `normalise` is applied to a candidate before it is offered and stored. A field with `options` is a choice over those options instead, matched through their aliases. `labels` are the template labels the fallback reads as `<label>: <value>`, longest match first.",
+  "fields": [
+    {
+      "key": "country",
+      "description": "The country of the customer's account.",
+      "question": "Which country does the message say the customer is in? Pick none if it does not say.",
+      "options": {
+        "GB": { "description": "United Kingdom", "aliases": ["GB", "UK", "United Kingdom", "Great Britain", "Britain", "England"] },
+        "AE": { "description": "United Arab Emirates", "aliases": ["AE", "UAE", "United Arab Emirates", "Emirates", "Dubai", "Abu Dhabi"] }
+      },
+      "labels": ["country", "region", "market"]
+    },
+    {
+      "key": "phone_number",
+      "description": "The customer's phone number. It may carry a country prefix such as +44 or +971.",
+      "question": "Which value in the message is the customer's phone number? Pick none if the message gives no phone number.",
+      "pattern": "(?<![\\w+])\\+?\\(?\\d[\\d ()-]{7,16}\\d(?![\\w])",
+      "normalise": "phone",
+      "labels": ["phone number", "phone no", "phone", "mobile number", "mobile no", "mobile", "contact number"]
+    },
+    {
+      "key": "aspora_user_id",
+      "description": "The user's id in the Aspora app (a UUID). The same value is harbor account_forms.external_user_ref.",
+      "question": "Which value in the message is the user's Aspora user id? Pick none if the message does not give one.",
+      "pattern": "(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])",
+      "normalise": "none",
+      "labels": ["aspora user id", "aspora userid", "aspora user", "alphadesk user id", "user id", "userid"]
+    },
+    {
+      "key": "customer_id",
+      "description": "The SSFB customer_id (a UUID, harbor customer.customer_id). Not the CIF id.",
+      "question": "Which value in the message is the SSFB customer id? It is not the CIF id. Pick none if the message does not give one.",
+      "pattern": "(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])",
+      "normalise": "none",
+      "labels": ["horus customer id", "ssfb customer id", "customer id"]
+    },
+    {
+      "key": "account_form_id",
+      "description": "The SSFB account form id (a UUID, harbor account_forms.form_id; also the NSTP application id and the workflow reference id).",
+      "question": "Which value in the message is the account form id (also called form id or NSTP application id)? Pick none if the message does not give one.",
+      "pattern": "(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])",
+      "normalise": "none",
+      "labels": ["nstp application id", "account form id", "form id"]
+    },
+    {
+      "key": "account_id",
+      "description": "The SSFB account_id (a UUID, rhythm customer_account_mappings.account_id). Not the bank account number.",
+      "question": "Which value in the message is the SSFB account id? It is a UUID, not the bank account number. Pick none if the message does not give one.",
+      "pattern": "(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])",
+      "normalise": "none",
+      "labels": ["ssfb account id", "account id"]
+    },
+    {
+      "key": "account_number",
+      "description": "The bank account number (digits only).",
+      "question": "Which value in the message is the bank account number? Pick none if the message does not give one.",
+      "pattern": "(?<!\\d)\\d{9,18}(?!\\d)",
+      "normalise": "none",
+      "labels": ["bank account number", "account number", "account no", "a/c number", "a/c no"]
+    }
+  ]
+}

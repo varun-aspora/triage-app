@@ -271,8 +271,8 @@ describe('request-args', () => {
   });
 
   test('--ids parses known key=value pairs and refuses the rest', () => {
-    const input = parse({ text: TEXT, ids: ['customer_id=CUST-0001', 'user_id = USR-9'] });
-    expect(input.hints?.ids).toEqual({ customer_id: 'CUST-0001', user_id: 'USR-9' });
+    const input = parse({ text: TEXT, ids: ['customer_id=CUST-0001', 'aspora_user_id = USR-9'] });
+    expect(input.hints?.ids).toEqual({ customer_id: 'CUST-0001', aspora_user_id: 'USR-9' });
     expect(() => parse({ text: TEXT, ids: ['customer_id'] })).toThrow("is missing '='");
     expect(() => parse({ text: TEXT, ids: ['shoe_size=9'] })).toThrow('is not a known id key');
     expect(() => parse({ text: TEXT, ids: ['customer_id='] })).toThrow('has an empty value');

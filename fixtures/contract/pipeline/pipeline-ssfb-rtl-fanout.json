@@ -7,15 +7,15 @@
       "kind": "resolve_identity",
       "entity": "global",
       "key": {
-        "hop": "horus_customer_id",
+        "hop": "customer_id.customer",
         "ids": [
           [
-            "horus_customer_id",
+            "customer_id",
             "3a5c7e9b-2d4f-4a6c-8e0b-5d7f9b1c3e5a"
           ]
         ]
       },
-      "key_string": "{\"hop\":\"horus_customer_id\",\"ids\":[[\"horus_customer_id\",\"3a5c7e9b-2d4f-4a6c-8e0b-5d7f9b1c3e5a\"]]}",
+      "key_string": "{\"hop\":\"customer_id.customer\",\"ids\":[[\"customer_id\",\"3a5c7e9b-2d4f-4a6c-8e0b-5d7f9b1c3e5a\"]]}",
       "result": {
         "rows": [
           {
@@ -63,15 +63,15 @@
       "kind": "resolve_identity",
       "entity": "global",
       "key": {
-        "hop": "form_id.ssfb_workflow",
+        "hop": "account_form_id.ssfb_workflow",
         "ids": [
           [
-            "form_id",
+            "account_form_id",
             "6d8f0b2c-4e6a-4c8e-9a1d-8f0b2d4e6a8c"
           ]
         ]
       },
-      "key_string": "{\"hop\":\"form_id.ssfb_workflow\",\"ids\":[[\"form_id\",\"6d8f0b2c-4e6a-4c8e-9a1d-8f0b2d4e6a8c\"]]}",
+      "key_string": "{\"hop\":\"account_form_id.ssfb_workflow\",\"ids\":[[\"account_form_id\",\"6d8f0b2c-4e6a-4c8e-9a1d-8f0b2d4e6a8c\"]]}",
       "result": {
         "rows": []
       },
@@ -85,15 +85,15 @@
       "kind": "resolve_identity",
       "entity": "global",
       "key": {
-        "hop": "form_id.rtl_workflow",
+        "hop": "account_form_id.rtl_workflow",
         "ids": [
           [
-            "form_id",
+            "account_form_id",
             "6d8f0b2c-4e6a-4c8e-9a1d-8f0b2d4e6a8c"
           ]
         ]
       },
-      "key_string": "{\"hop\":\"form_id.rtl_workflow\",\"ids\":[[\"form_id\",\"6d8f0b2c-4e6a-4c8e-9a1d-8f0b2d4e6a8c\"]]}",
+      "key_string": "{\"hop\":\"account_form_id.rtl_workflow\",\"ids\":[[\"account_form_id\",\"6d8f0b2c-4e6a-4c8e-9a1d-8f0b2d4e6a8c\"]]}",
       "result": {
         "rows": [
           {
@@ -113,7 +113,7 @@
       "kind": "resolve_identity",
       "entity": "global",
       "key": {
-        "hop": "customer_id",
+        "hop": "customer_id.accounts",
         "ids": [
           [
             "customer_id",
@@ -121,7 +121,7 @@
           ]
         ]
       },
-      "key_string": "{\"hop\":\"customer_id\",\"ids\":[[\"customer_id\",\"3a5c7e9b-2d4f-4a6c-8e0b-5d7f9b1c3e5a\"]]}",
+      "key_string": "{\"hop\":\"customer_id.accounts\",\"ids\":[[\"customer_id\",\"3a5c7e9b-2d4f-4a6c-8e0b-5d7f9b1c3e5a\"]]}",
       "result": {
         "rows": [
           {

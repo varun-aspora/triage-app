@@ -17,14 +17,14 @@ request:
       mime: image/png
       bytes_ref: attachments/screenshot-1.png
 ids:
-  horus_customer_id: 01559281-c86e-41ee-a977-49f24db33bdd
+  customer_id: 01559281-c86e-41ee-a977-49f24db33bdd
 id_chain:
   ids:
-    horus_customer_id: 01559281-c86e-41ee-a977-49f24db33bdd
-    user_id: 0f2a5d7f-01fe-4474-8bc5-a26c8845ae46
+    customer_id: 01559281-c86e-41ee-a977-49f24db33bdd
+    aspora_user_id: 0f2a5d7f-01fe-4474-8bc5-a26c8845ae46
   hops:
-    - from: horus_customer_id
-      to: user_id
+    - from: customer_id
+      to: aspora_user_id
       source: ssfb:harbor.customer
       status: resolved
       taken_at: "2026-09-12T07:30:00.000Z"

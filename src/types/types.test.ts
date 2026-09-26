@@ -58,10 +58,10 @@ const classification = () => ({
 const tierDecision = () => ({ proposed: classification(), tier_final: 'mid', rule_fired: 'rule_4_money_moved' });
 
 const idChain = () => ({
-  ids: { horus_customer_id: 'horus-test-1', account_form_id: 'form-test-1', user_id: 'user-test-1' },
+  ids: { customer_id: 'cust-test-1', account_form_id: 'form-test-1', aspora_user_id: 'user-test-1' },
   hops: [
-    { from: 'horus_customer_id', to: 'account_form_id', source: 'ssfb:harbor.customer', status: 'resolved', taken_at: T },
-    { from: 'form_id', source: 'ssfb:workflow_op', status: 'unreachable', taken_at: T },
+    { from: 'customer_id', to: 'account_form_id', source: 'ssfb:harbor.customer', status: 'resolved', taken_at: T },
+    { from: 'account_form_id', source: 'ssfb:workflow_op', status: 'unreachable', taken_at: T },
   ],
   basic_state: [{ item: 'account_forms.status_v2', value: 'APPROVED', taken_at: T, source: 'ssfb:harbor' }],
 });
@@ -184,10 +184,22 @@ describe('core', () => {
     expect(parses(InterfaceSchema, 'email')).toBe(false);
   });
 
-  test('KnownIds has old_user_id and account_form_id', () => {
-    expect(KNOWN_ID_KEYS).toContain('old_user_id');
-    expect(KNOWN_ID_KEYS).toContain('account_form_id');
+  test('KnownIds has the seven D69 keys', () => {
+    expect([...KNOWN_ID_KEYS]).toEqual([
+      'country',
+      'phone_number',
+      'aspora_user_id',
+      'customer_id',
+      'account_form_id',
+      'account_id',
+      'account_number',
+    ]);
     expect(Object.keys(KnownIdsSchema.entries).sort()).toEqual([...KNOWN_ID_KEYS].sort());
+  });
+
+  test('ids under a removed key are dropped, not refused', () => {
+    const parsed = v.parse(KnownIdsSchema, { customer_id: 'cust-test-1', horus_customer_id: 'horus-test-1', utr: 'UTR-test-1' });
+    expect(parsed).toEqual({ customer_id: 'cust-test-1' });
   });
 
   test('TakenAt must be an ISO timestamp', () => {
@@ -306,6 +318,35 @@ describe('IdChain', () => {
   test('hop without taken_at is rejected', () => {
     const bad = idChain();
     bad.hops = [without(bad.hops[0]!, 'taken_at') as (typeof bad.hops)[number]];
+    expect(parses(IdChainSchema, bad)).toBe(false);
+  });
+
+  // A chain as a run stored before D69 holds it.
+  const oldChain = () => ({
+    ids: { horus_customer_id: 'horus-test-1', user_id: 'user-test-1', account_form_id: 'form-test-1', phone: '+440000000000' },
+    hops: [
+      { from: 'horus_customer_id', to: 'user_id', source: 'ssfb:harbor.customer', status: 'resolved', taken_at: T },
+      { from: 'account_form_id', source: 'ssfb:workflow_op', status: 'resolved', taken_at: T },
+      { from: 'user_id', to: 'old_user_id', source: 'ssfb:harbor.account_forms', status: 'not_found', taken_at: T },
+      { from: 'device_id', source: 'ssfb:guardian', status: 'skipped', taken_at: T },
+    ],
+    basic_state: [],
+  });
+
+  test('a chain stored before D69 parses, dropping removed keys and their hops', () => {
+    const parsed = v.parse(IdChainSchema, oldChain());
+    expect(parsed.ids).toEqual({ account_form_id: 'form-test-1' });
+    expect(parsed.hops).toEqual([{ from: 'account_form_id', source: 'ssfb:workflow_op', status: 'resolved', taken_at: T }]);
+  });
+
+  test('a report stored before D69 parses', () => {
+    expect(parses(ReportSchema, { ...report(), id_chain: oldChain() })).toBe(true);
+    expect(parses(TriageInitSchema, { ...triageInit(), id_chain: oldChain() })).toBe(true);
+  });
+
+  test('a hop naming a key that never existed is still rejected', () => {
+    const bad = idChain();
+    bad.hops[0] = { ...bad.hops[0]!, from: 'made_up_id' };
     expect(parses(IdChainSchema, bad)).toBe(false);
   });
 });

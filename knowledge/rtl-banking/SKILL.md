@@ -54,7 +54,7 @@ state. If the service runs without a database configured, the survey module
 is silently disabled and every `/banking/v1/survey/*` route is missing.
 
 ```
-sql_select { service: 'banking', sql: "SELECT * FROM survey_responses WHERE user_id = $1", params: ['<user_id>'] }
+sql_select { service: 'banking', sql: "SELECT * FROM survey_responses WHERE user_id = $1", params: ['<aspora_user_id>'] }
 ```
 
 The `survey_responses` user column name is not documented (unverified: the

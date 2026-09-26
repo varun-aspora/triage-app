@@ -397,7 +397,7 @@ describe('target_env holds only an env var name', () => {
 describe('shared plumbing', () => {
   test('fixture entity comes from the key, else global', () => {
     expect(fixtureEntityOf({ entity: 'ssfb' })).toBe('ssfb');
-    expect(fixtureEntityOf({ ids: { user_id: 'u-1' } })).toBe('global');
+    expect(fixtureEntityOf({ ids: { aspora_user_id: 'u-1' } })).toBe('global');
     expect(fixtureEntityOf({ entity: 'nope' })).toBe('global');
   });
 

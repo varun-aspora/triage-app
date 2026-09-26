@@ -1,11 +1,12 @@
 // Checks for the SSFB overview, harbor and rhythm notes (T12.4): front-matter,
-// the survey 05 contradictions resolved one way, the ID chain matching LLD
-// §2.2, tool calls with known names, known inputs and placeholder ids, and a
+// the survey 05 contradictions resolved one way, the ID chain matching the
+// D69 hops, tool calls with known names, known inputs and placeholder ids, and a
 // '## Known issues' heading for the pattern index (T12.8) to cite.
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { KNOWN_ID_KEYS } from '../../src/types/core.ts';
 import {
   KNOWLEDGE_DIR,
   KNOWN_TOOLS,
@@ -224,24 +225,35 @@ function hopTable(text: string): Hop[] {
 }
 
 describe('ID chain', () => {
-  const lld = readFileSync(join(REPO_ROOT, 'docs', '04-lld-multi-entity-request.md'), 'utf8');
-  const lldHops = hopTable(section(lld, '### 2.2 Identity and basic state (deterministic, before the classifier)'));
+  // The hops of D69, in the order resolve_identity tries them
+  // (src/tools/_lib/identity-core.ts). docs/04 §2.2 still shows the hops
+  // from before D69, so the overview is checked against this list instead.
+  const d69Hops: Omit<Hop, 'query'>[] = [
+    { have: 'account_id', tables: ['rhythm.customer_account_mappings'] },
+    { have: 'account_number', tables: ['rhythm.customer_account_mappings'] },
+    { have: 'customer_id', tables: ['harbor.customer'] },
+    { have: 'aspora_user_id', tables: ['harbor.account_forms'] },
+    { have: 'account_form_id', tables: ['harbor.account_forms'] },
+    { have: 'account_form_id', tables: ['harbor.customer'] },
+    { have: 'customer_id', tables: ['rhythm.customer_account_mappings'] },
+    { have: 'account_form_id', tables: ['workflow_op.workflow_executions'] },
+  ];
   const ourHops = hopTable(section(TEXT['ssfb-overview'], '## ID chain'));
 
-  test('the LLD hop table was found', () => {
-    expect(lldHops.length).toBeGreaterThanOrEqual(7);
+  test('the overview has the D69 hops, in the same order, over the same tables', () => {
+    expect(ourHops.map((h) => ({ have: h.have, tables: h.tables }))).toEqual(d69Hops);
   });
 
-  test('the overview has the same hops, in the same order, over the same tables', () => {
-    expect(ourHops.map((h) => h.have)).toEqual(lldHops.map((h) => h.have));
-    expect(ourHops.map((h) => h.tables)).toEqual(lldHops.map((h) => h.tables));
+  test('every hop starts from a known id key', () => {
+    for (const h of ourHops) expect(KNOWN_ID_KEYS as readonly string[]).toContain(h.have);
   });
 
-  test('the fallback orders match', () => {
-    const userId = ourHops.find((h) => h.have === 'UserId')!;
-    expect(userId.query.indexOf('external_user_ref')).toBeLessThan(userId.query.indexOf('customer_id'));
-    const formId = ourHops.find((h) => h.have === 'form_id')!;
-    expect(formId.query).toMatch(/SSFB copy; if empty, the RTL copy/);
+  test('the fallbacks are stated', () => {
+    for (const key of ['account_id', 'account_number']) {
+      expect(ourHops.find((h) => h.have === key)!.query).toContain(`WHERE ${key} = $1`);
+    }
+    const workflow = ourHops.find((h) => h.tables.includes('workflow_op.workflow_executions'))!;
+    expect(workflow.query).toMatch(/SSFB copy; if empty, the RTL copy/);
   });
 
   test('the chain uses the singular customer table', () => {

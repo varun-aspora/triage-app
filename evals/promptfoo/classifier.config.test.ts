@@ -59,7 +59,7 @@ afterAll(() => {
 
 function config(overrides: Record<string, string> = {}) {
   const home = makeTestHome({
-    overrides: { MODEL_CLASSIFIER: 'faux/classifier', TRIAGE_KNOWLEDGE_DIR: KNOWLEDGE, ...overrides },
+    overrides: { MODEL_DECISION: 'faux/classifier', TRIAGE_KNOWLEDGE_DIR: KNOWLEDGE, ...overrides },
   });
   homes.push(home);
   return home.config;
@@ -160,7 +160,7 @@ describe('buildClassifierSuite', () => {
     expect(suite.testSuite.providers).toEqual([...suite.providers]);
   });
 
-  test('the default provider is MODEL_CLASSIFIER from the config', async () => {
+  test('the default provider is MODEL_DECISION from the config', async () => {
     const suite = await build();
     expect(suite.providers.map((p) => p.model)).toEqual(['faux/classifier']);
   });

@@ -44,6 +44,20 @@ describe('sample report', () => {
   test.each([...REPORT_STATUSES])('status %s is accepted', (status) => {
     expect(parses(ReportSchema, { ...sample(), status })).toBe(true);
   });
+
+  test('a report stored before D69 parses, without the removed id keys', () => {
+    const old = sample();
+    const { customer_id, account_form_id, aspora_user_id } = old.id_chain.ids;
+    old.id_chain.ids = { horus_customer_id: customer_id, form_id: account_form_id, user_id: aspora_user_id };
+    old.id_chain.hops = [
+      { ...old.id_chain.hops[0], from: 'horus_customer_id', to: 'form_id' },
+      { ...old.id_chain.hops[1], from: 'form_id', to: 'user_id' },
+    ];
+    const result = v.safeParse(ReportSchema, old);
+    if (!result.success) throw new Error(JSON.stringify(v.flatten(result.issues)));
+    expect(result.output.id_chain.ids).toEqual({});
+    expect(result.output.id_chain.hops).toEqual([]);
+  });
 });
 
 describe('fixture hygiene', () => {

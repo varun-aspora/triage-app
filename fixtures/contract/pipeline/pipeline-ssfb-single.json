@@ -7,15 +7,15 @@
       "kind": "resolve_identity",
       "entity": "global",
       "key": {
-        "hop": "horus_customer_id",
+        "hop": "customer_id.customer",
         "ids": [
           [
-            "horus_customer_id",
+            "customer_id",
             "5e1a7c2b-8d4f-4b6a-9c3e-2f7d1a0b4c5e"
           ]
         ]
       },
-      "key_string": "{\"hop\":\"horus_customer_id\",\"ids\":[[\"horus_customer_id\",\"5e1a7c2b-8d4f-4b6a-9c3e-2f7d1a0b4c5e\"]]}",
+      "key_string": "{\"hop\":\"customer_id.customer\",\"ids\":[[\"customer_id\",\"5e1a7c2b-8d4f-4b6a-9c3e-2f7d1a0b4c5e\"]]}",
       "result": {
         "rows": [
           {
@@ -63,15 +63,15 @@
       "kind": "resolve_identity",
       "entity": "global",
       "key": {
-        "hop": "form_id.ssfb_workflow",
+        "hop": "account_form_id.ssfb_workflow",
         "ids": [
           [
-            "form_id",
+            "account_form_id",
             "9b3d5f7a-1c2e-4a6b-8d0f-3e5a7c9b1d2f"
           ]
         ]
       },
-      "key_string": "{\"hop\":\"form_id.ssfb_workflow\",\"ids\":[[\"form_id\",\"9b3d5f7a-1c2e-4a6b-8d0f-3e5a7c9b1d2f\"]]}",
+      "key_string": "{\"hop\":\"account_form_id.ssfb_workflow\",\"ids\":[[\"account_form_id\",\"9b3d5f7a-1c2e-4a6b-8d0f-3e5a7c9b1d2f\"]]}",
       "result": {
         "rows": [
           {
@@ -91,7 +91,7 @@
       "kind": "resolve_identity",
       "entity": "global",
       "key": {
-        "hop": "customer_id",
+        "hop": "customer_id.accounts",
         "ids": [
           [
             "customer_id",
@@ -99,7 +99,7 @@
           ]
         ]
       },
-      "key_string": "{\"hop\":\"customer_id\",\"ids\":[[\"customer_id\",\"5e1a7c2b-8d4f-4b6a-9c3e-2f7d1a0b4c5e\"]]}",
+      "key_string": "{\"hop\":\"customer_id.accounts\",\"ids\":[[\"customer_id\",\"5e1a7c2b-8d4f-4b6a-9c3e-2f7d1a0b4c5e\"]]}",
       "result": {
         "rows": [
           {

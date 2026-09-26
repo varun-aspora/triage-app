@@ -21,10 +21,10 @@ ids:
 id_chain:
   ids:
     account_form_id: f81d36e8-9320-4c35-a534-c1e5d39dab58
-    alphadesk_user_id: eb220f5d-5c28-4b4d-b73a-cdb9ced42f4d
+    aspora_user_id: eb220f5d-5c28-4b4d-b73a-cdb9ced42f4d
   hops:
     - from: account_form_id
-      to: alphadesk_user_id
+      to: aspora_user_id
       source: ssfb:harbor.account_forms
       status: resolved
       taken_at: "2026-09-11T11:00:00.000Z"

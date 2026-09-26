@@ -34,6 +34,18 @@ Report with `finish_report`. You do not read any entity's systems yourself.
 
 ## Identity
 
+- A run knows seven ids, and the chain and the briefs use only these names:
+  - `country`: GB or AE, the country of the customer's account.
+  - `phone_number`: the customer's phone number, possibly with a +44 or +971
+    prefix.
+  - `aspora_user_id`: the user's id in the Aspora app (a UUID); the same value
+    is harbor account_forms.external_user_ref.
+  - `customer_id`: the SSFB harbor customer id (a UUID). Not the CIF id.
+  - `account_form_id`: the harbor account form id (a UUID); also the NSTP
+    application id and the workflow reference id.
+  - `account_id`: the SSFB rhythm account id (a UUID). Not the bank account
+    number.
+  - `account_number`: the bank account number.
 - Your input carries the id chain that ingress already resolved. Brief
   delegates only with ids from that chain.
 - When a new id appears (in the thread, or in a delegate's answer), run

@@ -258,7 +258,7 @@ describe('POST /triage schema', () => {
 describe('POST /triage accept', () => {
   test('messages -> 202 {run_id}, then runSubmission runs in the background', async () => {
     const h = harness();
-    const res = await post(h.app, '/triage', { messages: MESSAGES, requested_by: 'ops@example.com', tier: 'mid', ids: { user_id: 'u-1' } });
+    const res = await post(h.app, '/triage', { messages: MESSAGES, requested_by: 'ops@example.com', tier: 'mid', ids: { aspora_user_id: 'u-1' } });
     expect(res.status).toBe(202);
     expect(await res.json()).toEqual({ run_id: RUN_A });
     expect(h.prepared).toEqual([
@@ -266,7 +266,7 @@ describe('POST /triage accept', () => {
         interface: 'http',
         requested_by: 'ops@example.com',
         kind: 'json',
-        body: { messages: MESSAGES, requested_by: 'ops@example.com', tier: 'mid', ids: { user_id: 'u-1' } },
+        body: { messages: MESSAGES, requested_by: 'ops@example.com', tier: 'mid', ids: { aspora_user_id: 'u-1' } },
       },
     ]);
     await tick();
@@ -598,7 +598,7 @@ describe('GET /triage/:run_id request (D66)', () => {
         { ts: AT, author: 'ops-lead', text: 'any update?', is_parent: false },
       ],
       attachments: [{ name: 'shot.png', mime: 'image/png', bytes_ref: 'a1' }],
-      hints: { ids: { user_id: 'u-test-1' }, entities: ['ssfb'], tier: 'mid' },
+      hints: { ids: { aspora_user_id: 'u-test-1' }, entities: ['ssfb'], tier: 'mid' },
       window: { from: AT, to: AT },
       received_at: AT,
     });
@@ -611,7 +611,7 @@ describe('GET /triage/:run_id request (D66)', () => {
         { author: 'ops-bot', text: 'transfer stuck for ****3210', is_parent: true },
         { author: 'ops-lead', text: 'any update?', is_parent: false, at: AT },
       ],
-      hints: { ids: { user_id: 'u-test-1' }, entities: ['ssfb'], tier: 'mid' },
+      hints: { ids: { aspora_user_id: 'u-test-1' }, entities: ['ssfb'], tier: 'mid' },
       attachments: 1,
     });
   });

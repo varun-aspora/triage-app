@@ -34,7 +34,7 @@ function cfg(record: Record<string, string>): Config {
 }
 
 const BASE = {
-  MODEL_CLASSIFIER: 'anthropic/claude-haiku-4-5',
+  MODEL_DECISION: 'anthropic/claude-haiku-4-5',
   MODEL_TIER_CHEAP: 'anthropic/claude-haiku-4-5',
   MODEL_TIER_MID: 'anthropic/claude-sonnet-4-6',
   MODEL_TIER_STRONG: 'openai/gpt-5.5',
@@ -110,21 +110,21 @@ describe('tier mapping', () => {
 
   test('classifier accepts anthropic, openai, openrouter and configured ollama', () => {
     for (const spec of ['anthropic/claude-haiku-4-5', 'openai/gpt-5-mini', 'openrouter/moonshotai/kimi-k2.6']) {
-      expect(models.classifierModel(cfg({ ...BASE, MODEL_CLASSIFIER: spec }))).toBe(spec);
+      expect(models.decisionModel(cfg({ ...BASE, MODEL_DECISION: spec }))).toBe(spec);
     }
-    const c = cfg({ ...BASE, MODEL_CLASSIFIER: 'ollama/qwen3:8b', OLLAMA_BASE_URL: 'http://localhost:11434/v1' });
-    expect(models.classifierModel(c)).toBe('ollama/qwen3:8b');
+    const c = cfg({ ...BASE, MODEL_DECISION: 'ollama/qwen3:8b', OLLAMA_BASE_URL: 'http://localhost:11434/v1' });
+    expect(models.decisionModel(c)).toBe('ollama/qwen3:8b');
   });
 
   test('classifier accepts typesafe decision specs, direct and through openrouter', () => {
     for (const spec of ['typesafe/jev-1.13', 'openrouter/typesafe/jev-1.13']) {
-      expect(models.classifierModel(cfg({ ...BASE, MODEL_CLASSIFIER: spec }))).toBe(spec);
+      expect(models.decisionModel(cfg({ ...BASE, MODEL_DECISION: spec }))).toBe(spec);
     }
   });
 
   test('a typesafe spec with more than one model part is refused for the classifier', () => {
-    const err = configError(() => models.classifierModel(cfg({ ...BASE, MODEL_CLASSIFIER: `typesafe/${SEED}/x` })));
-    expect(err.keys).toEqual(['MODEL_CLASSIFIER']);
+    const err = configError(() => models.decisionModel(cfg({ ...BASE, MODEL_DECISION: `typesafe/${SEED}/x` })));
+    expect(err.keys).toEqual(['MODEL_DECISION']);
     expect(err.message).toContain('typesafe/<model>');
     expect(err.message).not.toContain(SEED);
   });
@@ -151,7 +151,7 @@ describe('refused specs', () => {
       const err = configError(() => call(cfg({ ...BASE, [key]: `typesafe/${SEED}` })));
       expect(err.keys).toEqual([key]);
       expect(err.message).toContain(key);
-      expect(err.message).toContain('typesafe is allowed for MODEL_CLASSIFIER only');
+      expect(err.message).toContain('typesafe is allowed for MODEL_DECISION only');
       expect(err.message).not.toContain(SEED);
     });
 
@@ -183,13 +183,13 @@ describe('refused specs', () => {
   });
 
   test('an unknown provider is refused for the classifier too', () => {
-    const err = configError(() => models.classifierModel(cfg({ ...BASE, MODEL_CLASSIFIER: `unregistered-t061/${SEED}` })));
-    expect(err.keys).toEqual(['MODEL_CLASSIFIER']);
+    const err = configError(() => models.decisionModel(cfg({ ...BASE, MODEL_DECISION: `unregistered-t061/${SEED}` })));
+    expect(err.keys).toEqual(['MODEL_DECISION']);
   });
 
   test('an unset tier or classifier key is refused by name', () => {
     expect(configError(() => models.modelForTier('strong', cfg({}))).keys).toEqual(['MODEL_TIER_STRONG']);
-    expect(configError(() => models.classifierModel(cfg({}))).keys).toEqual(['MODEL_CLASSIFIER']);
+    expect(configError(() => models.decisionModel(cfg({}))).keys).toEqual(['MODEL_DECISION']);
   });
 
   test('ollama with blank OLLAMA_BASE_URL fails with a named reason', () => {
@@ -255,7 +255,7 @@ describe('registered providers', () => {
     const spy = spySetProvider();
     const c = cfg({
       ...BASE,
-      MODEL_CLASSIFIER: 'ollama/qwen3:8b',
+      MODEL_DECISION: 'ollama/qwen3:8b',
       MODEL_TIER_CHEAP: 'ollama/llama3.1:8b',
       OLLAMA_BASE_URL: 'http://localhost:11434/v1',
     });
@@ -302,7 +302,7 @@ describe('no network', () => {
       models.acceptsImages(models.modelForTier(t, c));
       models.thinkingForTier(t, c);
     }
-    models.acceptsImages(models.classifierModel(c));
+    models.acceptsImages(models.decisionModel(c));
     models.acceptsImages(models.codeWalkerModel(c));
     expect(fetchSpy).not.toHaveBeenCalled();
   });

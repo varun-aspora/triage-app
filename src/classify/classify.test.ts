@@ -80,11 +80,11 @@ const THREAD: ThreadMessage[] = [
 ];
 
 const ID_CHAIN: IdChain = {
-  ids: { user_id: '0b7c2a1e-5d4f-4e3a-9b8c-7d6e5f4a3b2c', account_number: ACCOUNT, phone: PHONE },
+  ids: { aspora_user_id: '0b7c2a1e-5d4f-4e3a-9b8c-7d6e5f4a3b2c', account_number: ACCOUNT, phone_number: PHONE },
   hops: [
     {
-      from: 'phone',
-      to: 'user_id',
+      from: 'phone_number',
+      to: 'aspora_user_id',
       source: 'ssfb:harbor.users',
       status: 'resolved',
       taken_at: '2026-09-23T10:00:00.000Z',
@@ -249,10 +249,10 @@ describe('failure paths return unknown and never throw', () => {
     expectUnknown(await pending, /^aborted by caller$/);
   });
 
-  test('MODEL_CLASSIFIER unset is recorded, not thrown', async () => {
+  test('MODEL_DECISION unset is recorded, not thrown', async () => {
     const cfg = configFromRecord({ TRIAGE_KNOWLEDGE_DIR: KNOWLEDGE_DIR }, '/triage/home');
     const result = await classify(INPUT, { config: cfg, complete: async () => text(JSON.stringify(VALID)), categories: CATS });
-    expectUnknown(result, /MODEL_CLASSIFIER/);
+    expectUnknown(result, /MODEL_DECISION/);
   });
 
   test('a missing categories file is recorded, not thrown', async () => {
@@ -302,7 +302,7 @@ describe('onUsage', () => {
     return { seen, onUsage: (u: ClassifierUsage) => void seen.push(u) };
   }
 
-  test('called once with the faux message usage and the MODEL_CLASSIFIER spec', async () => {
+  test('called once with the faux message usage and the MODEL_DECISION spec', async () => {
     fake.script([text(JSON.stringify(VALID))]);
     const { messages, complete } = recordingComplete();
     const { seen, onUsage } = usageSink();
@@ -437,7 +437,7 @@ describe('images', () => {
       return text(JSON.stringify(VALID));
     };
     fake.script([answer]);
-    const cfg = config({ MODEL_CLASSIFIER: 'faux/strong' });
+    const cfg = config({ MODEL_DECISION: 'faux/strong' });
     const result = await classify(
       { ...INPUT, images: [IMAGE, IMAGE] },
       { config: cfg, complete: completeWith(fake.provider), categories: CATS },
@@ -449,14 +449,14 @@ describe('images', () => {
 
   test('image-capable model without images: images_seen is false', async () => {
     fake.script([text(JSON.stringify(VALID))]);
-    const cfg = config({ MODEL_CLASSIFIER: 'faux/strong' });
+    const cfg = config({ MODEL_DECISION: 'faux/strong' });
     const result = await classify(INPUT, { config: cfg, complete: completeWith(fake.provider), categories: CATS });
     expect(result.images_seen).toBe(false);
   });
 
   test('image-capable model that fails: images_seen is false', async () => {
     fake.script([text('not json')]);
-    const cfg = config({ MODEL_CLASSIFIER: 'faux/strong' });
+    const cfg = config({ MODEL_DECISION: 'faux/strong' });
     const result = await classify(
       { ...INPUT, images: [IMAGE] },
       { config: cfg, complete: completeWith(fake.provider), categories: CATS },
@@ -472,7 +472,7 @@ describe('redaction of the prompt', () => {
 
   test('openrouter classifier: the persisted profile masks phones, account numbers, emails and names', async () => {
     const { seen, complete } = capturing(JSON.stringify(VALID));
-    const cfg = config({ MODEL_CLASSIFIER: 'openrouter/vendor/some-model' });
+    const cfg = config({ MODEL_DECISION: 'openrouter/vendor/some-model' });
     const result = await classify(
       { ...INPUT, redactionNames: [NAME] },
       { config: cfg, complete, categories: CATS, imageLookup: textOnly },
@@ -483,7 +483,7 @@ describe('redaction of the prompt', () => {
     // Masked values keep their last four digits only.
     expect(sent).toContain('****7890');
     // UUIDs stay, the investigation searches with them.
-    expect(sent).toContain(ID_CHAIN.ids.user_id as string);
+    expect(sent).toContain(ID_CHAIN.ids.aspora_user_id as string);
   });
 
   test('other providers get the model-facing profile: ids stay, email local part is masked', async () => {
@@ -520,7 +520,7 @@ describe('redaction of the prompt', () => {
       OPENROUTER_API_KEY: 'sk-or-fake-4c1d',
       TRIAGE_ENV_LABEL: 'env-label-b7e0',
     };
-    const cfg = config({ ...envValues, MODEL_CLASSIFIER: 'openrouter/vendor/some-model' });
+    const cfg = config({ ...envValues, MODEL_DECISION: 'openrouter/vendor/some-model' });
     const { seen, complete } = capturing(JSON.stringify(VALID));
     // A caller that passes prior cases by mistake: the extra field is ignored.
     const withPrior = { ...INPUT, prior_cases: [{ run_id: 'PRIOR-RUN-MARKER', category: 'card', subcategory: 'prior-subcat-marker' }] };

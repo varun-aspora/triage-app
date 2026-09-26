@@ -14,7 +14,7 @@
 // start({ providers: [fake.provider] }), but that replaces the whole default
 // set, which clashes with the rule that start() is called without providers
 // (HLD §7, P1 "driver lifecycle"). Call install() before modelForTier() or
-// classifierModel() read a faux/* spec, since they check the registry.
+// decisionModel() read a faux/* spec, since they check the registry.
 //
 // One queue. faux has a single response queue per provider. Every model
 // call in the process draws from it in call order: the root agent's turns,
@@ -59,7 +59,7 @@ export const FAKE_MODEL_ERROR_PREFIX = 'fake model:';
 
 /** The model env keys the helper overrides, each set to a 'faux/<id>' spec. */
 export type FakeModelEnv = {
-  readonly MODEL_CLASSIFIER: string;
+  readonly MODEL_DECISION: string;
   readonly MODEL_TIER_CHEAP: string;
   readonly MODEL_TIER_MID: string;
   readonly MODEL_TIER_STRONG: string;
@@ -113,7 +113,7 @@ const MODEL_DEFINITIONS: readonly FauxModelDefinition[] = [
 const spec = (id: FakeModelId): string => `${FAKE_PROVIDER_ID}/${id}`;
 
 const MODEL_ENV: FakeModelEnv = Object.freeze({
-  MODEL_CLASSIFIER: spec('classifier'),
+  MODEL_DECISION: spec('classifier'),
   MODEL_TIER_CHEAP: spec('cheap'),
   MODEL_TIER_MID: spec('mid'),
   MODEL_TIER_STRONG: spec('strong'),

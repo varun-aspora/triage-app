@@ -115,7 +115,10 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'TRIAGE_SQL_RETRY_MAX_DELAY_MS', type: 'int', group: 'sql', default: '5000', min: 0, max: 600_000 },
 
   // Models. Specs are parsed by src/models.ts; blank MODEL_CODE_WALKER falls back to the strong tier there.
-  { name: 'MODEL_CLASSIFIER', type: 'string', group: 'models', example: 'openrouter/typesafe/jev-1.13' },
+  // The decision model used for classification and id extraction (D69). The id extraction needs a
+  // decision model spec (typesafe/... or openrouter/typesafe/...); any other model makes it read the
+  // template labels. It was called MODEL_CLASSIFIER; RENAMED_KEYS makes an old .env fail to load.
+  { name: 'MODEL_DECISION', type: 'string', group: 'models', example: 'openrouter/typesafe/jev-1.13' },
   { name: 'MODEL_TIER_CHEAP', type: 'string', group: 'models', example: 'openai/gpt-6-luna' },
   { name: 'MODEL_TIER_MID', type: 'string', group: 'models', example: 'openai/gpt-6-sol' },
   { name: 'MODEL_TIER_STRONG', type: 'string', group: 'models', example: 'openai/gpt-6-sol' },
@@ -181,6 +184,9 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'TRIAGE_REPOS_SYNC_INTERVAL', type: 'duration', group: 'repos', default: '24h' },
   { name: 'TRIAGE_REPOS_SYNC_INTERFACES', type: 'csv', group: 'repos', default: 'cli,http,claude-code,slack' },
 ];
+
+/** Keys that were renamed: old name -> new name. A .env that still sets the old name does not load. */
+export const RENAMED_KEYS: ReadonlyMap<string, string> = new Map([['MODEL_CLASSIFIER', 'MODEL_DECISION']]);
 
 export const KEY_BY_NAME: ReadonlyMap<string, KeySpec> = new Map(KEYS.map((k) => [k.name, k]));
 

@@ -18,10 +18,10 @@ function chain(ids: IdChain['ids'], hops: IdChain['hops'] = []): IdChain {
 }
 
 const runChain = chain(
-  { customer_id: RUN_CUSTOMER, form_id: RUN_FORM, account_number: RUN_ACCOUNT, phone: RUN_PHONE },
+  { customer_id: RUN_CUSTOMER, account_form_id: RUN_FORM, account_number: RUN_ACCOUNT, phone_number: RUN_PHONE },
   [
-    { from: 'phone', to: 'customer_id', source: 'ssfb:harbor.customers', status: 'resolved', taken_at: TAKEN_AT },
-    { from: 'customer_id', to: 'form_id', source: 'ssfb:harbor.account_forms', status: 'unverified', taken_at: TAKEN_AT },
+    { from: 'account_number', to: 'customer_id', source: 'ssfb:rhythm.customer_account_mappings', status: 'resolved', taken_at: TAKEN_AT },
+    { from: 'customer_id', to: 'account_form_id', source: 'ssfb:harbor.customer', status: 'unverified', taken_at: TAKEN_AT },
   ],
 );
 const set = createScopeSet(runChain);
@@ -81,11 +81,18 @@ describe('createScopeSet', () => {
     expect(checkScope({ tool: 'sql_select', params: { sql: 'select 1', params: [RUN_CUSTOMER] }, scopeSet: upper }).ok).toBe(
       true,
     );
-    const withCc = createScopeSet(chain({ phone: '+919000012345' }));
+    const withCc = createScopeSet(chain({ phone_number: '+919000012345' }));
     expect(checkScope({ tool: 'cbs_call', params: { path: '/x', body: { mobile: RUN_PHONE } }, scopeSet: withCc }).ok).toBe(true);
     expect(checkScope({ tool: 'cbs_call', params: { path: '/x', body: { mobile: '919000012345' } }, scopeSet: withCc }).ok).toBe(
       true,
     );
+  });
+
+  test('a bare-digit phone_number also matches its last 10 digits; the same digits under another key do not', () => {
+    const phone = createScopeSet(chain({ phone_number: '919000012345' }));
+    expect(checkScope({ tool: 'cbs_call', params: { path: '/x', body: { mobile: RUN_PHONE } }, scopeSet: phone }).ok).toBe(true);
+    const account = createScopeSet(chain({ account_number: '919000012345' }));
+    expect(checkScope({ tool: 'cbs_call', params: { path: '/x', body: { mobile: RUN_PHONE } }, scopeSet: account }).ok).toBe(false);
   });
 });
 
@@ -99,7 +106,7 @@ describe('checkScope allows ids in the chain', () => {
     expect(result).toEqual({ ok: true });
   });
 
-  test('form_id in an http path segment', () => {
+  test('account_form_id in an http path segment', () => {
     const result = checkScope({
       tool: 'http_call',
       params: { service: 'harbor', path: `/v1/forms/${RUN_FORM}/status`, query: { verbose: 'true' } },

@@ -100,7 +100,7 @@ describe('a question for the requester', () => {
     // ingress verified. The phase is the pipeline's, so the agent leaves it.
     await b.store.resolveInputRequest(id, 'q1', redactPersisted({ status: 'answered', resolved_at: AT, resolved_by: 'ops@example.test' }));
     await b.store.setPhase(id, 'dispatched', { worker_pid: 4242 });
-    const chain = { ids: { customer_id: 'cust-contract-1', form_id: 'form-contract-9' }, hops: [], basic_state: [] };
+    const chain = { ids: { customer_id: 'cust-contract-1', account_form_id: 'form-contract-9' }, hops: [], basic_state: [] };
     const answer: DeliveredMessageInput = {
       kind: 'signal',
       type: INPUT_ANSWER_SIGNAL,

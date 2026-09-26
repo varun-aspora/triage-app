@@ -2,7 +2,7 @@
 // the HTTP API, the CLI and the web console.
 //
 // One UsageRow is one submission x model x agent x purpose. seq 0 holds the
-// intake calls (classifier, prior-cases embedding); seq 1.. are the run's
+// intake calls (id decision, classifier, prior-cases embedding); seq 1.. are the run's
 // submissions. usd is priced when the row is captured, so a later catalog
 // refresh does not change what was stored; null means no price is known.
 //
@@ -12,7 +12,9 @@
 // numbers instead.
 import * as v from 'valibot';
 
-export const USAGE_PURPOSES = ['agent', 'compaction', 'classify', 'embed'] as const;
+// 'identify' is the id decision of the ingress identity step (D69). The store
+// keeps purpose as plain text, so a new purpose needs no migration.
+export const USAGE_PURPOSES = ['agent', 'compaction', 'classify', 'identify', 'embed'] as const;
 export const UsagePurposeSchema = v.picklist(USAGE_PURPOSES);
 export type UsagePurpose = v.InferOutput<typeof UsagePurposeSchema>;
 
@@ -20,7 +22,7 @@ export type UsagePurpose = v.InferOutput<typeof UsagePurposeSchema>;
 export const USAGE_MODEL_PATTERN = /^[a-z][a-z0-9_-]{0,31}\/[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/;
 export const UsageModelSchema = v.pipe(v.string(), v.regex(USAGE_MODEL_PATTERN));
 
-/** 'triage' (root), 'synthesis', 'classifier', 'embedder', or a delegate name. */
+/** 'triage' (root), 'synthesis', 'identity', 'classifier', 'embedder', or a delegate name. */
 export const USAGE_AGENT_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 export const UsageAgentSchema = v.pipe(v.string(), v.regex(USAGE_AGENT_PATTERN));
 

@@ -99,10 +99,10 @@ describe('renderAnswer', () => {
       skip: false,
       answer: 'yes',
       by: 'ops',
-      ids: { form_id: 'f-1', customer_id: 'c-1' },
+      ids: { account_form_id: 'f-1', customer_id: 'c-1' },
       gaps: ['identity lookup unreachable: ssfb:harbor'],
     });
-    expect(text).toContain('Ids they gave, resolved by the identity step and in scope: customer_id = c-1, form_id = f-1.');
+    expect(text).toContain('Ids they gave, resolved by the identity step and in scope: customer_id = c-1, account_form_id = f-1.');
     expect(text).toContain('Identity lookups: identity lookup unreachable: ssfb:harbor.');
     expect(text).toContain(`${'x'.repeat(120)}…`);
     expect(text).not.toContain('x'.repeat(121));

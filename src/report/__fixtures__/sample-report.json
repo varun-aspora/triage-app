@@ -22,21 +22,21 @@
   },
   "id_chain": {
     "ids": {
-      "horus_customer_id": "4b2f0c1e-7a3d-4e9b-9c10-5d6e7f8a9b01",
-      "form_id": "8c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e02",
-      "user_id": "a0b1c2d3-e4f5-4a6b-8c7d-8e9f0a1b2c03"
+      "customer_id": "4b2f0c1e-7a3d-4e9b-9c10-5d6e7f8a9b01",
+      "account_form_id": "8c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e02",
+      "aspora_user_id": "a0b1c2d3-e4f5-4a6b-8c7d-8e9f0a1b2c03"
     },
     "hops": [
       {
-        "from": "horus_customer_id",
-        "to": "form_id",
+        "from": "customer_id",
+        "to": "account_form_id",
         "source": "ssfb:harbor.account_forms",
         "status": "resolved",
         "taken_at": "2026-09-20T10:01:00.000Z"
       },
       {
-        "from": "form_id",
-        "to": "user_id",
+        "from": "account_form_id",
+        "to": "aspora_user_id",
         "source": "ssfb:harbor.account_forms",
         "status": "resolved",
         "taken_at": "2026-09-20T10:01:05.000Z"

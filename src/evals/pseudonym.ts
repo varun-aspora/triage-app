@@ -17,6 +17,8 @@
 //   token   -> each digit, lowercase and uppercase letter replaced in class
 //   email   -> token local part at example.com
 // A form id is a UUID when it looks like one and a token otherwise.
+// country is not an identifier (it is GB or AE, a choice from
+// resources/known-ids.json) and is never pseudonymised.
 //
 // The key never leaves this module and no function logs values.
 import { createHmac } from 'node:crypto';
@@ -206,11 +208,18 @@ export function pseudonymise(value: string, kind: PseudonymKind, key: PseudonymK
   }
 }
 
-/** The kind a known id is pseudonymised as, from its key and shape. */
-export function kindForId(idKey: KnownIdKey, value: string): PseudonymKind {
+/** Known id keys whose value is kept as it is: a choice, not an identifier. */
+const KEPT_KEYS: ReadonlySet<KnownIdKey> = new Set(['country']);
+
+/**
+ * The kind a known id is pseudonymised as, from its key and shape, or
+ * undefined for a key that is kept as it is (country).
+ */
+export function kindForId(idKey: KnownIdKey, value: string): PseudonymKind | undefined {
+  if (KEPT_KEYS.has(idKey)) return undefined;
   if (UUID_FULL.test(value)) return 'uuid';
-  if (idKey === 'phone') return 'phone';
-  if (idKey === 'form_id' || idKey === 'account_form_id') return 'form_id';
+  if (idKey === 'phone_number') return 'phone';
+  if (idKey === 'account_form_id') return 'form_id';
   if (DIGITS_FULL.test(value)) return 'account_number';
   return 'token';
 }
@@ -241,6 +250,7 @@ class CaseMap {
 
   addKnown(idKey: KnownIdKey, value: string): void {
     const kind = kindForId(idKey, value);
+    if (kind === undefined) return;
     if (kind === 'phone') {
       this.addPhone(value);
       return;
@@ -353,7 +363,7 @@ export function pseudonymiseCase(c: EvalCase, key: PseudonymKey): EvalCase {
   for (const ids of [c.ids, c.id_chain.ids]) {
     for (const [k, x] of Object.entries(ids)) if (typeof x === 'string') known.push([k as KnownIdKey, x]);
   }
-  known.sort((a, b) => Number(b[0] === 'phone') - Number(a[0] === 'phone'));
+  known.sort((a, b) => Number(b[0] === 'phone_number') - Number(a[0] === 'phone_number'));
   for (const [k, x] of known) map.addKnown(k, x);
   eachString(data, (s) => map.addFound(s));
 
@@ -380,12 +390,18 @@ const MASK_RE = /\*{4}\d{0,4}/;
 function wellFormed(idKey: KnownIdKey, value: string): boolean {
   if (value.includes('*')) return false;
   switch (idKey) {
-    case 'form_id':
+    // The option keys live in resources/known-ids.json; this is only their
+    // shape, as the loader checks it, so no country is named here.
+    case 'country':
+      return /^[A-Z0-9_]{1,32}$/.test(value);
+    case 'aspora_user_id':
+    case 'customer_id':
     case 'account_form_id':
+    case 'account_id':
       return UUID_FULL.test(value);
     case 'account_number':
       return /^\d{9,}$/.test(value);
-    case 'phone': {
+    case 'phone_number': {
       const n = value.replace(/\D/g, '').length;
       return PHONE_FULL.test(value) && (value.startsWith('+') ? n >= 10 && n <= 15 : n === PHONE_DIGITS);
     }

@@ -33,8 +33,8 @@ const SAME: readonly AnyCase[] = [
   },
   {
     kind: 'resolve_identity',
-    a: { ids: { user_id: 'u-1', form_id: 'f-2' } },
-    b: { ids: [['form_id', 'f-2 '], ['user_id', 'u-1'], ['form_id', 'f-2'], ['phone', '']] },
+    a: { ids: { aspora_user_id: 'u-1', account_form_id: 'f-2' } },
+    b: { ids: [['account_form_id', 'f-2 '], ['aspora_user_id', 'u-1'], ['account_form_id', 'f-2'], ['phone_number', '']] },
   },
   {
     kind: 'get_account_statement',
@@ -152,10 +152,10 @@ describe('semanticKey differences', () => {
       keyHash(semanticKey('logs_search', { ...logsBase, mode: 'count' }))],
     ['logs group_by', () => keyHash(semanticKey('logs_search', logsBase)), () =>
       keyHash(semanticKey('logs_search', { ...logsBase, mode: 'count', group_by: 'level' }))],
-    ['identity value', () => keyHash(semanticKey('resolve_identity', { ids: { user_id: 'u-1' } })), () =>
-      keyHash(semanticKey('resolve_identity', { ids: { user_id: 'u-2' } }))],
-    ['identity hop', () => keyHash(semanticKey('resolve_identity', { ids: { user_id: 'u-1' } })), () =>
-      keyHash(semanticKey('resolve_identity', { hop: 'harbor_customer', ids: { user_id: 'u-1' } }))],
+    ['identity value', () => keyHash(semanticKey('resolve_identity', { ids: { aspora_user_id: 'u-1' } })), () =>
+      keyHash(semanticKey('resolve_identity', { ids: { aspora_user_id: 'u-2' } }))],
+    ['identity hop', () => keyHash(semanticKey('resolve_identity', { ids: { aspora_user_id: 'u-1' } })), () =>
+      keyHash(semanticKey('resolve_identity', { hop: 'customer_id.customer', ids: { aspora_user_id: 'u-1' } }))],
     ['statement page', () => keyHash(semanticKey('get_account_statement', { entity: 'ssfb', account_id: 'A-1' })), () =>
       keyHash(semanticKey('get_account_statement', { entity: 'ssfb', account_id: 'A-1', page: 1 }))],
     ['reversals customer', () =>

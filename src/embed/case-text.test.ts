@@ -12,8 +12,8 @@ const FORM_UUID = '8a2b4c6d-1e3f-4a5b-8c7d-9e0f1a2b3c4d';
 const HOP_SOURCE = 'ssfb:harbor.account_forms';
 
 const idChain = {
-  ids: { customer_id: CUSTOMER_UUID, form_id: FORM_UUID },
-  hops: [{ from: 'customer_id', to: 'form_id', source: HOP_SOURCE, status: 'resolved', taken_at: '2026-09-01T10:00:00.000Z' }],
+  ids: { customer_id: CUSTOMER_UUID, account_form_id: FORM_UUID },
+  hops: [{ from: 'customer_id', to: 'account_form_id', source: HOP_SOURCE, status: 'resolved', taken_at: '2026-09-01T10:00:00.000Z' }],
   basic_state: [{ item: 'form_status', value: 'PENDING_KYC', taken_at: '2026-09-01T10:00:00.000Z', source: HOP_SOURCE }],
 } as const;
 
@@ -53,7 +53,7 @@ describe('caseCardText', () => {
     expect(lines).toContain('root_cause: the payout is waiting on the partner bank');
     expect(lines).toContain('status: root_cause_confirmed');
     expect(lines).toContain('matched_pattern_id: payout-bank-wait');
-    for (const value of [CUSTOMER_UUID, FORM_UUID, HOP_SOURCE, 'PENDING_KYC', 'form_status', 'customer_id', 'form_id']) {
+    for (const value of [CUSTOMER_UUID, FORM_UUID, HOP_SOURCE, 'PENDING_KYC', 'form_status', 'customer_id', 'account_form_id']) {
       expect(text.value).not.toContain(value);
     }
   });

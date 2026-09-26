@@ -104,9 +104,9 @@ describe('formatSlackReport', () => {
 
   test('ids render inline as code', () => {
     const report = sample();
-    report.cx_answer.reply_text = `Form ${report.id_chain.ids.form_id} is waiting.`;
+    report.cx_answer.reply_text = `Form ${report.id_chain.ids.account_form_id} is waiting.`;
     const text = formatSlackReport(report, REVIEWER);
-    expect(text).toContain(`> Form \`${report.id_chain.ids.form_id}\` is waiting.`);
+    expect(text).toContain(`> Form \`${report.id_chain.ids.account_form_id}\` is waiting.`);
   });
 
   test('suggested_fix command text never appears', () => {

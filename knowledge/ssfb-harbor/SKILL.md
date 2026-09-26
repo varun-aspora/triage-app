@@ -81,7 +81,7 @@ Form, status and session for a user:
 ```
 sql_select({ service: "harbor",
   sql: "SELECT form_id, status_v2, status, session_id, created_at FROM account_forms WHERE external_user_ref = $1 AND is_deleted = false ORDER BY created_at DESC",
-  params: ["<user_id>"] })
+  params: ["<aspora_user_id>"] })
 ```
 
 Customer state and whether a CIF exists:

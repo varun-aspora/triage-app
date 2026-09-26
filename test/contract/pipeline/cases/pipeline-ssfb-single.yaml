@@ -18,21 +18,19 @@ request:
       is_parent: false
       text: Customer asks whether the account can be used and when the balance will show.
 ids:
-  horus_customer_id: 5e1a7c2b-8d4f-4b6a-9c3e-2f7d1a0b4c5e
+  customer_id: 5e1a7c2b-8d4f-4b6a-9c3e-2f7d1a0b4c5e
 id_chain:
   ids:
-    horus_customer_id: 5e1a7c2b-8d4f-4b6a-9c3e-2f7d1a0b4c5e
     customer_id: 5e1a7c2b-8d4f-4b6a-9c3e-2f7d1a0b4c5e
     account_form_id: 9b3d5f7a-1c2e-4a6b-8d0f-3e5a7c9b1d2f
-    user_id: 2c4e6a8b-0d1f-4e3a-9b5c-7d9f1b3d5e7a
-    form_id: 9b3d5f7a-1c2e-4a6b-8d0f-3e5a7c9b1d2f
+    aspora_user_id: 2c4e6a8b-0d1f-4e3a-9b5c-7d9f1b3d5e7a
     account_id: 7f1b3d5e-9a2c-4e6b-8d0a-4c6e8a0b2d4f
     account_number: "730021904418263"
   hops:
-    - { from: horus_customer_id, to: customer_id, source: "ssfb:harbor.customer", status: resolved, taken_at: "2026-09-24T00:00:00.000Z" }
-    - { from: account_form_id, to: user_id, source: "ssfb:harbor.account_forms", status: resolved, taken_at: "2026-09-24T00:00:00.000Z" }
-    - { from: form_id, source: "ssfb:workflow.workflow_executions", status: resolved, taken_at: "2026-09-24T00:00:00.000Z" }
-    - { from: form_id, source: "rtl:workflow.workflow_executions", status: skipped, taken_at: "2026-09-24T00:00:00.000Z" }
+    - { from: customer_id, to: account_form_id, source: "ssfb:harbor.customer", status: resolved, taken_at: "2026-09-24T00:00:00.000Z" }
+    - { from: account_form_id, to: aspora_user_id, source: "ssfb:harbor.account_forms", status: resolved, taken_at: "2026-09-24T00:00:00.000Z" }
+    - { from: account_form_id, source: "ssfb:workflow.workflow_executions", status: resolved, taken_at: "2026-09-24T00:00:00.000Z" }
+    - { from: account_form_id, source: "rtl:workflow.workflow_executions", status: skipped, taken_at: "2026-09-24T00:00:00.000Z" }
     - { from: customer_id, to: account_id, source: "ssfb:rhythm.customer_account_mappings", status: resolved, taken_at: "2026-09-24T00:00:00.000Z" }
 basic_state:
   - { item: workflow_identifier, value: ssfb_onboarding_v3, taken_at: "2026-09-24T00:00:00.000Z", source: "ssfb:workflow.workflow_executions", status: read }

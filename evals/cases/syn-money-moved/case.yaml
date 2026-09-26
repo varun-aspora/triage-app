@@ -14,27 +14,21 @@ request:
     - ts: "1788775500.000200"
       author: cx-agent
       is_parent: false
-      text: Customer shared UTR 695988287795. Debited two days ago. Can someone check where it is stuck?
+      text: Customer has the UTR from the bank SMS. Debited two days ago. Can someone check where it is stuck?
 ids:
-  horus_customer_id: e9c25d35-3c60-4d72-b29a-a864de0072c4
+  customer_id: e9c25d35-3c60-4d72-b29a-a864de0072c4
   account_number: "939904632237335"
-  utr: "695988287795"
 id_chain:
   ids:
-    horus_customer_id: e9c25d35-3c60-4d72-b29a-a864de0072c4
-    user_id: 5b25e092-7cc7-4fdd-a415-56b886c61845
+    customer_id: e9c25d35-3c60-4d72-b29a-a864de0072c4
+    aspora_user_id: 5b25e092-7cc7-4fdd-a415-56b886c61845
     account_number: "939904632237335"
-    utr: "695988287795"
   hops:
-    - from: horus_customer_id
-      to: user_id
+    - from: customer_id
+      to: aspora_user_id
       source: ssfb:harbor.customer
       status: resolved
       taken_at: "2026-09-08T10:05:00.000Z"
-    - from: utr
-      source: ssfb:rhythm.transfers
-      status: resolved
-      taken_at: "2026-09-08T10:05:01.000Z"
 basic_state:
   - item: transfer.status
     value: DEBITED

@@ -68,9 +68,10 @@ customer), so it is an SSFB action, not an ATSPL one.
 ## When to brief investigate_atspl
 
 - A welcome letter or debit card was not delivered, or the overseas
-  communication address is not active after KYC. Send ids
-  `external_ref_id = <customer_id>` and `address_id = <address_id>` if known,
-  with services `package`. Ask for the delivery rows, the vendor events in
+  communication address is not active after KYC. Send
+  `customer_id = <customer_id>` (package `external_ref_id` holds the same
+  value) with services `package`, and name the harbor address id in the
+  question if the thread gives one. Ask for the delivery rows, the vendor events in
   their exact text, and how many other customers hit the same failure in the
   window.
 - Staff cannot action a KYC review, RFI or change request in the ops console.

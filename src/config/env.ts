@@ -18,6 +18,7 @@ import {
   HOME_KEY,
   KEY_BY_NAME,
   PROVIDER_KEYS,
+  RENAMED_KEYS,
   THINKING_LEVELS,
   isTableKey,
   type KeySpec,
@@ -79,7 +80,7 @@ export type Config = {
     readonly retry: { readonly attempts: number; readonly delayMs: number; readonly maxDelayMs: number };
   };
   readonly models: {
-    readonly classifier?: string;
+    readonly decision?: string;
     readonly tierCheap?: string;
     readonly tierMid?: string;
     readonly tierStrong?: string;
@@ -226,7 +227,7 @@ export function configFromRecord(
       },
     },
     models: {
-      classifier: r.str('MODEL_CLASSIFIER'),
+      decision: r.str('MODEL_DECISION'),
       tierCheap: r.str('MODEL_TIER_CHEAP'),
       tierMid: r.str('MODEL_TIER_MID'),
       tierStrong: r.str('MODEL_TIER_STRONG'),
@@ -287,6 +288,10 @@ export function configFromRecord(
   // 0 is off; a short interval would write to the store every turn.
   if (config.runs.usageFlushMs > 0 && config.runs.usageFlushMs < MIN_USAGE_FLUSH_MS) {
     r.problem('TRIAGE_USAGE_FLUSH_MS', `must be 0 (off) or at least ${MIN_USAGE_FLUSH_MS}`);
+  }
+  // A renamed key that is still set would be ignored without a word, so it stops the load.
+  for (const [old, now] of RENAMED_KEYS) {
+    if ((rec[old]?.trim() ?? '') !== '') r.problem(old, `was renamed to ${now}; rename it in the .env`);
   }
   if (config.mock.enabled && config.mock.record) {
     r.problem('TRIAGE_RECORD_FIXTURES', 'requires TRIAGE_MOCK_MODE=false');

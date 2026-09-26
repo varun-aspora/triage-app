@@ -27,7 +27,7 @@ afterAll(() => {
 });
 
 function config(overrides: Record<string, string> = {}): Config {
-  return configFromRecord({ MODEL_CLASSIFIER: 'typesafe/jev-1.13', TYPESAFE_API_KEY: 'fake-ts-key', ...overrides }, '/triage/home');
+  return configFromRecord({ MODEL_DECISION: 'typesafe/jev-1.13', TYPESAFE_API_KEY: 'fake-ts-key', ...overrides }, '/triage/home');
 }
 
 // ---------------------------------------------------------------- synthetic data (pseudonymised)
@@ -61,7 +61,7 @@ const THREAD: ThreadMessage[] = [
   { ts: '1', author: 'ops-agent-1', text: `Customer ${NAME} (${EMAIL}, ${PHONE}) says the welcome letter never arrived.`, is_parent: true },
   { ts: '2', author: 'ops-agent-2', text: `Account ${ACCOUNT}, opened last week.`, is_parent: false },
 ];
-const ID_CHAIN: IdChain = { ids: { user_id: '0b7c2a1e-5d4f-4e3a-9b8c-7d6e5f4a3b2c', account_number: ACCOUNT }, hops: [], basic_state: [] };
+const ID_CHAIN: IdChain = { ids: { aspora_user_id: '0b7c2a1e-5d4f-4e3a-9b8c-7d6e5f4a3b2c', account_number: ACCOUNT }, hops: [], basic_state: [] };
 const INPUT = { thread: THREAD, idChain: ID_CHAIN, basicState: [], images: [] };
 
 const yes = (p: number): DecisionAnswer => ({ kind: 'yes_no', yes: p });
@@ -119,7 +119,7 @@ describe('spec routing', () => {
 
   test('openrouter/typesafe/<model> goes through OpenRouter', async () => {
     const sent = stubFetch();
-    const cfg = config({ MODEL_CLASSIFIER: 'openrouter/typesafe/jev-1.13', OPENROUTER_API_KEY: 'fake-or-key' });
+    const cfg = config({ MODEL_DECISION: 'openrouter/typesafe/jev-1.13', OPENROUTER_API_KEY: 'fake-or-key' });
     const result = await classify(INPUT, { config: cfg, categories: CATS, complete: noComplete });
     expect(result.classifier_error).toBeUndefined();
     expect(sent).toEqual([{ url: 'https://openrouter.ai/api/v1/systemone', model: 'typesafe/jev-1.13' }]);
@@ -129,7 +129,7 @@ describe('spec routing', () => {
     const direct = await classify(INPUT, { config: config({ TYPESAFE_API_KEY: '' }), categories: CATS, complete: noComplete });
     expect(direct.classifier_error).toContain('TYPESAFE_API_KEY is not set');
     const routed = await classify(INPUT, {
-      config: config({ MODEL_CLASSIFIER: 'openrouter/typesafe/jev-1.13', TYPESAFE_API_KEY: '' }),
+      config: config({ MODEL_DECISION: 'openrouter/typesafe/jev-1.13', TYPESAFE_API_KEY: '' }),
       categories: CATS,
       complete: noComplete,
     });
@@ -143,7 +143,7 @@ describe('spec routing', () => {
       called += 1;
       throw new Error('synthetic completion failure');
     };
-    const cfg = config({ MODEL_CLASSIFIER: 'openrouter/vendor/some-model', OPENROUTER_API_KEY: 'fake-or-key' });
+    const cfg = config({ MODEL_DECISION: 'openrouter/vendor/some-model', OPENROUTER_API_KEY: 'fake-or-key' });
     await classify(INPUT, { config: cfg, categories: CATS, complete, decisions, imageLookup: () => ({ input: ['text'] }) });
     expect(called).toBe(1);
     expect(decisions.requests).toHaveLength(0);
@@ -305,7 +305,7 @@ describe('onUsage on the decision path', () => {
     };
   }
 
-  test('tokens and the reported cost, under the MODEL_CLASSIFIER spec', async () => {
+  test('tokens and the reported cost, under the MODEL_DECISION spec', async () => {
     const { seen, onUsage } = usageSink();
     const decisions = withUsage({ inputTokens: 465, outputTokens: 81, costUsd: 1.953e-5 });
     const result = await classify(INPUT, { config: config(), categories: CATS, decisions, onUsage });
@@ -317,7 +317,7 @@ describe('onUsage on the decision path', () => {
 
   test('the openrouter route keeps its own spec', async () => {
     const { seen, onUsage } = usageSink();
-    const cfg = config({ MODEL_CLASSIFIER: 'openrouter/typesafe/jev-1.13', OPENROUTER_API_KEY: 'fake-or-key' });
+    const cfg = config({ MODEL_DECISION: 'openrouter/typesafe/jev-1.13', OPENROUTER_API_KEY: 'fake-or-key' });
     await classify(INPUT, { config: cfg, categories: CATS, decisions: withUsage({ inputTokens: 1, outputTokens: 1 }), onUsage });
     expect(seen[0]?.model).toBe('openrouter/typesafe/jev-1.13');
   });
@@ -414,12 +414,12 @@ describe('redaction of the state', () => {
   for (const spec of ['typesafe/jev-1.13', 'openrouter/typesafe/jev-1.13']) {
     test(`${spec}: the persisted profile masks phones, account numbers, emails and names`, async () => {
       const decisions = fakeDecisionProvider(() => GOOD);
-      const cfg = config({ MODEL_CLASSIFIER: spec, OPENROUTER_API_KEY: 'fake-or-key' });
+      const cfg = config({ MODEL_DECISION: spec, OPENROUTER_API_KEY: 'fake-or-key' });
       await classify({ ...INPUT, redactionNames: [NAME] }, { config: cfg, categories: CATS, decisions });
       const sent = JSON.stringify(decisions.requests[0]);
       for (const secret of [PHONE, '7700 900123', ACCOUNT, EMAIL, NAME]) expect(sent).not.toContain(secret);
       expect(sent).toContain('****7890');
-      expect(sent).toContain(ID_CHAIN.ids.user_id as string);
+      expect(sent).toContain(ID_CHAIN.ids.aspora_user_id as string);
     });
   }
 });
