@@ -30,6 +30,7 @@ export const PIPELINE_EVENT_TYPES = [
   'resume_preflight',
   'resume',
   'feedback',
+  'feedback_trace_failed',
   'usage_flush_failed',
   'usage_write_failed',
   'usage_missing',
@@ -37,6 +38,7 @@ export const PIPELINE_EVENT_TYPES = [
   'usage_unmapped',
   'steer_failed',
   'flue_id_write_failed',
+  'trace_span_write_failed',
   'settle_listener_failed',
   'server_shutdown',
 ] as const;

@@ -144,6 +144,11 @@ export function setRunRedactionNames(runId: string, names: readonly string[]): v
   state().names.set(runId, [...names]);
 }
 
+/** The ingress names set for the run, or none. Other stored copies of the run (Braintrust, D82) mask the same names. */
+export function runRedactionNames(runId: string): readonly string[] {
+  return state().names.get(runId) ?? [];
+}
+
 /** Writes one pipeline line for the run. A no-op until the log is installed. */
 export function logRunEvent(runId: string, type: string, data: unknown = {}): void {
   const s = state();
