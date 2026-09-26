@@ -80,6 +80,7 @@ import type { PhaseDetail, RunPhase, RunRecord, RunStore } from '../runstore/typ
 import { RunIdSchema, type RunId } from '../types/core.ts';
 import type { UsageRow } from '../types/usage.ts';
 import { dropSubmission, snapshotSubmission } from '../usage/meter.ts';
+import { readQuietly } from './stalled.ts';
 import { className, embedAfterSettle, embedderFor, failureReason, type EmbedRunFn } from './submit.ts';
 
 /** How long the listener waits after a settle before it reads the run, so the normal path writes first. */
@@ -324,9 +325,7 @@ export async function handleSettle(store: RunStore, settle: SettleEvent, options
   const { runId, submissionId } = settle;
   const run = await store.getRun(runId);
   if (run === null) return { kind: 'unknown_run' };
-  const seq =
-    run.submissions.find((sub) => sub.flue_submission_id === submissionId)?.seq ??
-    (options.runsDir !== undefined ? await seqFromLog(options.runsDir, runId, submissionId) : undefined);
+  const seq = await seqOf(run, runId, submissionId, options.runsDir);
 
   let action: SettleAction;
   const target = targetPhase(settle.outcome, run.phase);
@@ -399,19 +398,11 @@ export async function handleRunning(store: RunStore, event: RunningEvent, option
   const { runId, submissionId } = event;
   const run = await store.getRun(runId);
   if (run === null) return { kind: 'unknown_run' };
-  const seq =
-    run.submissions.find((sub) => sub.flue_submission_id === submissionId)?.seq ??
-    (options.runsDir !== undefined ? await seqFromLog(options.runsDir, runId, submissionId) : undefined);
+  const seq = await seqOf(run, runId, submissionId, options.runsDir);
   const sub = seq === undefined ? undefined : run.submissions.find((x) => x.seq === seq);
   if (sub === undefined || sub.kind !== 'steer') return { kind: 'not_steer' };
   // Flue emits submission_running for a claimed head only; a lease that says it joined is never acted on.
-  let joinedInto: string | undefined;
-  try {
-    joinedInto = (await options.lease(submissionId))?.joinedInto;
-  } catch {
-    joinedInto = undefined;
-  }
-  if (joinedInto !== undefined) return { kind: 'joined' };
+  if ((await readQuietly(options.lease, submissionId))?.joinedInto !== undefined) return { kind: 'joined' };
   if (!STEER_RUNNING_FROM.includes(run.phase)) return { kind: 'left', phase: run.phase, why: 'phase' };
   if (movedOn(run, sub.seq, undefined)) return { kind: 'left', phase: run.phase, why: 'moved_on' };
   const written = await store.setPhaseIf(runId, STEER_RUNNING_FROM, 'investigating', {});
@@ -430,8 +421,15 @@ function reasonOf(settle: SettleEvent): string {
 
 /** The phase the settle moves the run to, or null when the run's phase is not one the settle may change. */
 function targetPhase(outcome: SettleEvent['outcome'], phase: RunPhase): 'completed' | 'failed' | null {
-  if (outcome === 'completed') return phase === 'investigating' ? 'completed' : null;
-  return phase === 'dispatched' || phase === 'investigating' ? 'failed' : null;
+  const target = outcome === 'completed' ? 'completed' : 'failed';
+  return FROM_PHASES[target].includes(phase) ? target : null;
+}
+
+/** The seq of the run's submission with this Flue id: the stored id, else the run's 'dispatch' lines. */
+async function seqOf(run: RunRecord, runId: RunId, submissionId: string, runsDir: string | undefined): Promise<number | undefined> {
+  const stored = run.submissions.find((sub) => sub.flue_submission_id === submissionId)?.seq;
+  if (stored !== undefined || runsDir === undefined) return stored;
+  return seqFromLog(runsDir, runId, submissionId);
 }
 
 /**

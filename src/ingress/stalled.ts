@@ -242,7 +242,8 @@ export async function currentLease(subject: StalledSubject, read: SubmissionLeas
   return { flueSubmissionId: headId, lease: head };
 }
 
-async function readQuietly(read: SubmissionLeaseReader, flueId: string): Promise<SubmissionLease | null> {
+/** A lease read that never throws: a failed read is null. */
+export async function readQuietly(read: SubmissionLeaseReader, flueId: string): Promise<SubmissionLease | null> {
   try {
     return await read(flueId);
   } catch {

@@ -1129,7 +1129,7 @@ async function dispatchAndSettle(
     if (joined !== true) logUnassignedUsage(runId);
     logRunEvent(runId, 'settled', {
       submission_seq: seq,
-      submission_id: receipt.submissionId,
+      submission_id: submissionId,
       status,
       ...(joined !== undefined ? { joined } : {}),
       ...(error !== undefined ? { error } : {}),
@@ -1141,7 +1141,7 @@ async function dispatchAndSettle(
       run_id: runId,
       status,
       submission_seq: seq,
-      submission_id: receipt.submissionId,
+      submission_id: submissionId,
       ...(replyText !== undefined ? { reply_text: replyText } : {}),
       ...(error !== undefined ? { error } : {}),
       ...(inputRequest !== undefined ? { input_request: inputRequest } : {}),
