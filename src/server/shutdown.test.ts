@@ -7,7 +7,7 @@ import { EVENTS_FILE, installRunEventLog, logRunEvent, uninstallRunEventLog } fr
 import { summariseEvent } from '../runlog/summary.ts';
 import type { ServerConfig } from './boot.ts';
 import { runServer } from './main.ts';
-import { flushBeforeExit, noteShutdown } from './shutdown.ts';
+import { flushBeforeExit, flushTracesBeforeExit, noteShutdown } from './shutdown.ts';
 
 const RUN_A = '01J8ZQ7XK3PSEDRMNABCDEFGH1';
 const RUN_B = '01J8ZQ7XK3PSEDRMNABCDEFGH2';
@@ -89,5 +89,42 @@ describe('noteShutdown', () => {
     noteShutdown('SIGTERM', { activeRuns: () => [{ runId: RUN_A, attempt: 1 }], write: boom, flush: boom });
     await server.stop();
     expect(steps).toEqual(['listener.close', 'runtime.stop', 'timers.stop']);
+  });
+});
+
+describe('flushTracesBeforeExit (D82)', () => {
+  test('waits for the trace flush', async () => {
+    let flushed = false;
+    await flushTracesBeforeExit(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      flushed = true;
+    });
+    expect(flushed).toBe(true);
+  });
+
+  test('a flush that throws or rejects does not reject', async () => {
+    await expect(flushTracesBeforeExit(() => Promise.reject(new Error('boom')))).resolves.toBeUndefined();
+    await expect(
+      flushTracesBeforeExit(() => {
+        throw new Error('boom');
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  test('with tracing off the default flush returns at once', async () => {
+    const started = Date.now();
+    await flushTracesBeforeExit();
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  test('the server shim flushes the event log, then the traces, before process.exit', () => {
+    const shim = readFileSync(new URL('../../bin/triage-server.mjs', import.meta.url), 'utf8');
+    const exit = /async function exit\(exitCode\) \{([\s\S]*?)\n\}/.exec(shim)?.[1] ?? '';
+    const log = exit.indexOf('flushBeforeExit()');
+    const traces = exit.indexOf('await flushTracesBeforeExit()');
+    const quit = exit.indexOf('process.exit(exitCode)');
+    expect(log).toBeGreaterThanOrEqual(0);
+    expect(traces).toBeGreaterThan(log);
+    expect(quit).toBeGreaterThan(traces);
   });
 });

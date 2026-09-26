@@ -10,6 +10,7 @@ import {
   flushRunEventLogSync,
   installRunEventLog,
   logRunEvent,
+  runRedactionNames,
   setRunRedactionNames,
   uninstallRunEventLog,
 } from './event-log.ts';
@@ -111,6 +112,14 @@ describe('run event log', () => {
       .map((l) => l.data.request.input.systemPrompt ?? 'unchanged');
     // A settled submission forgets the prompt, so the next one writes it again.
     expect(inputs).toEqual(['prompt A', 'unchanged', 'prompt A', 'prompt A']);
+  });
+
+  test('runRedactionNames returns the names set for the run, even before install, and none otherwise', () => {
+    expect(runRedactionNames(RUN)).toEqual([]);
+    setRunRedactionNames(RUN, ['Asha Verma']);
+    setRunRedactionNames('01J8ZQ7XK3PSEDRMNABCDEFGH2', []);
+    expect(runRedactionNames(RUN)).toEqual(['Asha Verma']);
+    expect(runRedactionNames('01J8ZQ7XK3PSEDRMNABCDEFGH2')).toEqual([]);
   });
 
   test('nothing is written before the log is installed', async () => {

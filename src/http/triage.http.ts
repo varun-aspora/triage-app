@@ -28,6 +28,7 @@ export function productionDeps(): TriageRouteDeps {
     store: rt.runStore,
     home: rt.config.home,
     allowSlackPost: rt.config.http.allowSlackPost,
+    tracing: rt.config.tracing,
     // Built per request: the normalise options carry the request's clock.
     prepare: (input) => prepareRequest(input, prepareDeps(rt.config, rt.registry)),
     submit: (prepared) => runSubmission(prepared, submission),

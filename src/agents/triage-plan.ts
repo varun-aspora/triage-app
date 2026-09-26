@@ -497,6 +497,7 @@ export function lazyRunStore(config: Pick<Config, 'db'>, load: () => Promise<Run
     resolveBlock: async (...a) => (await store()).resolveBlock(...a),
     putEvidence: async (...a) => (await store()).putEvidence(...a),
     setSubmissionFlueId: async (...a) => (await store()).setSubmissionFlueId(...a),
+    setSubmissionTraceSpanId: async (...a) => (await store()).setSubmissionTraceSpanId(...a),
     putReport: async (...a) => (await store()).putReport(...a),
     putFeedback: async (...a) => (await store()).putFeedback(...a),
     claimIdempotencyKey: async (...a) => (await store()).claimIdempotencyKey(...a),

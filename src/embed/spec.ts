@@ -61,6 +61,19 @@ export type ClientOptions = {
    * A throwing callback is ignored: metering must not fail an embedding.
    */
   readonly onUsage?: (u: EmbedUsage) => void;
+  /**
+   * Records the call as a trace span for this run (D82). Set only by the
+   * traced callers, the prior-cases lookup and embedRun after a settle;
+   * runs reembed and doctor leave it unset, so their calls are never traced.
+   */
+  readonly trace?: EmbedTrace;
+};
+
+/** What an embedding call's trace span is tagged with. */
+export type EmbedTrace = {
+  readonly runId: string;
+  /** Who asked, as an id-like label ('prior_cases', 'embed_run'). */
+  readonly purpose?: string;
 };
 
 /** A client's answer: the vectors, and the input tokens the provider reported (null when it reported none). */

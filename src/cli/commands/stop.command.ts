@@ -78,6 +78,7 @@ export function createStopCommand(options: StopCommandOptions = {}): CliCommand 
       const deps: StopDeps = {
         store: await makeStore(config),
         home: config.home,
+        tracing: config.tracing,
         abort,
         ...(options.now !== undefined ? { now: options.now } : {}),
       };

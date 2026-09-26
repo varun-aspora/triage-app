@@ -8,7 +8,8 @@
 //   evidence/<entity|code>.json    latest findings, as written
 //   evidence/<key>.v<n>.json       every version, so older ones are kept
 //   submissions/<seq>/submission.json, report.json, report.md
-//                                  (submission.json gains flue_submission_id after the dispatch, D71)
+//                                  (submission.json gains flue_submission_id after the dispatch, D71,
+//                                  and trace_span_id once tracing captures the root span, D82)
 //   report.json, report.md         the latest submission's report
 //   feedback.jsonl                 one entry per line, append-only
 //   feedback.md                    the caller's rendering, or a short default
@@ -59,6 +60,7 @@ import {
   assertPhaseList,
   assertQuestionId,
   assertRunId,
+  assertTraceSpanId,
   BlockNotOpenError,
   BlockOpenError,
   byUsageKey,
@@ -436,6 +438,20 @@ class FolderRunStore implements RunStore {
       const meta = parseRecord(SubmissionMetaSchema, raw, 'submission.json');
       // meta.json is left alone, so updated_at does not move.
       await writeFileAtomic(path, json({ ...meta, flue_submission_id: flueId }));
+    });
+  }
+
+  async setSubmissionTraceSpanId(runId: RunId, seq: number, traceSpanId: string): Promise<void> {
+    const n = positiveInt(seq, 'submission id');
+    const spanId = assertTraceSpanId(traceSpanId);
+    await serial(this.#lock(runId), async () => {
+      await this.#requireRun(runId);
+      const path = join(this.#dir(runId), 'submissions', String(n), 'submission.json');
+      const raw = await readJson(path, 'submission.json');
+      if (raw === undefined) throw new RunStoreError(`submission ${n} not found`);
+      const meta = parseRecord(SubmissionMetaSchema, raw, 'submission.json');
+      // meta.json is left alone, so updated_at does not move.
+      await writeFileAtomic(path, json({ ...meta, trace_span_id: spanId }));
     });
   }
 

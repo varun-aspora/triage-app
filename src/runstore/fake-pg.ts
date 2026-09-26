@@ -80,6 +80,8 @@ type State = {
   migrated: boolean;
   /** 0002_submission_flue_id.sql has run: triage.submissions has flue_submission_id (D71). */
   flueIdColumn: boolean;
+  /** 0003_submission_trace_span.sql has run: triage.submissions has trace_span_id (D82). */
+  traceSpanColumn: boolean;
   versions: string[];
   runs: Map<string, RunRow>;
   submissions: {
@@ -93,6 +95,7 @@ type State = {
     block_id: string | null;
     note: string | null;
     flue_submission_id: string | null;
+    trace_span_id: string | null;
   }[];
   evidence: { run_id: string; key: string; version: number; findings: unknown; created_at: Date }[];
   reports: { run_id: string; seq: number; report: unknown; report_md: string; created_at: Date }[];
@@ -116,6 +119,7 @@ function emptyState(migrated: boolean): State {
   return {
     migrated,
     flueIdColumn: migrated,
+    traceSpanColumn: migrated,
     versions: [],
     runs: new Map(),
     submissions: [],
@@ -449,6 +453,7 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
       block_id: strOrNull(p[7], 'block_id'),
       note: strOrNull(p[8], 'note'),
       flue_submission_id: null,
+      trace_span_id: null,
     });
     return [];
   },
@@ -459,6 +464,15 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
     const row = db.submissions.find((s) => s.run_id === id && s.seq === seq);
     if (!row) return [];
     row.flue_submission_id = str(p[2], 'flue_submission_id');
+    return [{ seq }];
+  },
+  setSubmissionTraceSpanId(p, db) {
+    if (!db.traceSpanColumn) throw missingColumn('trace_span_id');
+    const id = str(p[0], 'run_id');
+    const seq = int(p[1], 'seq');
+    const row = db.submissions.find((s) => s.run_id === id && s.seq === seq);
+    if (!row) return [];
+    row.trace_span_id = str(p[2], 'trace_span_id');
     return [{ seq }];
   },
   nextEvidenceVersion(p, db) {
@@ -577,6 +591,7 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
   },
   submissions(p, db) {
     if (!db.flueIdColumn) throw missingColumn('s.flue_submission_id');
+    if (!db.traceSpanColumn) throw missingColumn('s.trace_span_id');
     const id = str(p[0], 'run_id');
     return db.submissions
       .filter((s) => s.run_id === id)
@@ -593,6 +608,7 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
           note: s.note,
           created_at: s.created_at,
           flue_submission_id: s.flue_submission_id,
+          trace_span_id: s.trace_span_id,
           report: r?.report ?? null,
           report_md: r?.report_md ?? null,
         });
@@ -897,6 +913,15 @@ function migratorHandler(text: string): Handler | undefined {
       return [];
     };
   }
+  // 0003_submission_trace_span.sql (D82).
+  if (text.includes('ALTER TABLE triage.submissions ADD COLUMN trace_span_id text;')) {
+    return (_p, db) => {
+      if (!db.migrated) throw missingRelation('triage.submissions');
+      if (db.traceSpanColumn) throw new FakePgError('42701', 'column "trace_span_id" of relation "submissions" already exists');
+      db.traceSpanColumn = true;
+      return [];
+    };
+  }
   return undefined;
 }
 
@@ -1073,6 +1098,6 @@ export function createFakePg(options: FakePgOptions = {}): FakePg {
     embeddingTables() {
       return Object.fromEntries([...db.emb].map(([name, t]) => [name, t.dims]));
     },
-    isMigrated: () => db.migrated && db.flueIdColumn,
+    isMigrated: () => db.migrated && db.flueIdColumn && db.traceSpanColumn,
   };
 }

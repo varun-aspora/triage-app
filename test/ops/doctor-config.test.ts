@@ -428,6 +428,37 @@ describe('models check', () => {
 
 // ------------------------------------------------------------------ embedding
 
+describe('tracing check (D82)', () => {
+  const ON = { TRIAGE_BRAINTRUST_ENABLED: 'true', BRAINTRUST_API_KEY: 'seeded-braintrust-key-q7z' };
+
+  test('off by default', async () => {
+    const report = await doctor({ config: makeHome().config });
+    expect(rows(report, 'tracing')).toEqual([
+      { id: 'tracing', status: 'disabled', key_names: ['TRIAGE_BRAINTRUST_ENABLED'], message: 'tracing off: TRIAGE_BRAINTRUST_ENABLED is false' },
+    ]);
+  });
+
+  test('on: the project name and content mode, never the key', async () => {
+    const report = await doctor({ config: makeHome({ overrides: { ...ON, BRAINTRUST_PROJECT_NAME: 'triage-app-dev' } }).config });
+    const r = rowFor(report, 'tracing', 'TRIAGE_BRAINTRUST_ENABLED');
+    expect(r.status).toBe('ok');
+    expect(r.message).toBe('tracing on: project triage-app-dev, content metadata');
+    expect(r.key_names).toEqual(['TRIAGE_BRAINTRUST_ENABLED', 'BRAINTRUST_API_KEY', 'BRAINTRUST_PROJECT_NAME', 'TRIAGE_BRAINTRUST_CONTENT']);
+    expect(renderDoctorTable(report) + JSON.stringify(report)).not.toContain('seeded-braintrust-key-q7z');
+  });
+
+  test('redacted content and an app URL: the URL is named, not printed', async () => {
+    const url = 'https://seeded-braintrust-host-q7z.invalid';
+    const config = makeHome({ overrides: { ...ON, TRIAGE_BRAINTRUST_CONTENT: 'redacted', BRAINTRUST_APP_URL: url } }).config;
+    const report = await doctor({ config });
+    const r = rowFor(report, 'tracing', 'BRAINTRUST_APP_URL');
+    expect(r.message).toBe('tracing on: project triage-app, content redacted, data plane from BRAINTRUST_APP_URL');
+    const out = renderDoctorTable(report) + JSON.stringify(report);
+    expect(out).not.toContain('seeded-braintrust-host-q7z');
+    expect(out).not.toContain('seeded-braintrust-key-q7z');
+  });
+});
+
 describe('embedding check', () => {
   const embedding = async (overrides: Record<string, string>, embedder?: Embedder) => {
     const { config } = makeHome({ overrides });
@@ -565,7 +596,7 @@ describe('no io and stable order', () => {
       expect(a.checks.map((c) => `${c.id}:${c.entity ?? ''}:${c.key_names.join(',')}`)).toEqual(
         b.checks.map((c) => `${c.id}:${c.entity ?? ''}:${c.key_names.join(',')}`),
       );
-      expect([...new Set(a.checks.map((c) => c.id))]).toEqual(['sandbox', 'models', 'embedding', 'fixtures', 'env', 'rules']);
+      expect([...new Set(a.checks.map((c) => c.id))]).toEqual(['sandbox', 'models', 'embedding', 'tracing', 'fixtures', 'env', 'rules']);
       expect(a.checks.some((c) => c.message.startsWith('threw'))).toBe(false);
     } finally {
       globalThis.fetch = original;

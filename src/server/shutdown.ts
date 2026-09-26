@@ -14,9 +14,16 @@
 // flushBeforeExit writes what stop() queued after that (the aborted
 // submissions' Flue events) just before the process exits.
 //
-// Neither throws: a failure to log must not hold up the shutdown.
+// flushTracesBeforeExit then waits, for a few seconds at most, for the
+// Braintrust spans still queued (D82), including the ones stop() closed.
+// process.exit() skips Braintrust's own beforeExit flush, so without it the
+// last spans of a killed run are lost. It returns at once when tracing is
+// off.
+//
+// None of them throws: a failure to log must not hold up the shutdown.
 
 import { activeRuns, flushRunEventLogSync, logRunEvent, type ActiveRun } from '../runlog/event-log.ts';
+import { flushBraintrust } from '../tracing/braintrust.ts';
 
 export type NoteShutdownDeps = {
   /** Defaults to activeRuns() from the event log. */
@@ -62,6 +69,15 @@ export function noteShutdown(signal: string, deps: NoteShutdownDeps = {}): numbe
 export function flushBeforeExit(flush: () => void = flushRunEventLogSync): void {
   try {
     flush();
+  } catch {
+    // Exiting anyway.
+  }
+}
+
+/** Waits for the queued Braintrust spans, bounded by flushBraintrust's timeout. Never rejects. */
+export async function flushTracesBeforeExit(flush: () => Promise<unknown> = flushBraintrust): Promise<void> {
+  try {
+    await flush();
   } catch {
     // Exiting anyway.
   }

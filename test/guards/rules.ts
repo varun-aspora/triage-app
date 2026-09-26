@@ -284,6 +284,15 @@ export const SOURCE_RULES: readonly SourceRule[] = [
   ),
   flueLocalRule,
   forbid('no-agent-router', [/\bcreateAgentRouter\b/], 'there is no createAgentRouter mount (D25)'),
+  // Any string literal naming the package or a subpath, so static, side-effect,
+  // dynamic, require, type and re-export imports are all caught. Test files
+  // are outside the src scan and may import it for the SDK's test logger.
+  forbid(
+    'braintrust-in-tracing-only',
+    [/(['"`])braintrust(?:\/[^'"`\n]*)?\1/],
+    'only src/tracing/braintrust.ts imports braintrust (D82); call its helpers instead',
+    (p) => p === 'src/tracing/braintrust.ts',
+  ),
   forbid('no-shell-true', [/\bshell\s*:\s*true\b/, /['"]shell['"]\s*:\s*true\b/], 'child processes never run through a shell'),
   {
     ...forbid(

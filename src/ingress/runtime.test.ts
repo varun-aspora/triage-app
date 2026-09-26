@@ -1,18 +1,38 @@
-// bootRuntime starts Flue once per process, and the source rules around it:
-// the HTTP side never imports it, and nothing in src/ingress reads the deploy
-// mode or the display label.
+// bootRuntime starts Flue once per process, installs tracing when the config
+// turns it on, and the source rules around it: the HTTP side never imports
+// it, and nothing in src/ingress reads the deploy mode or the display label.
 import { afterEach, describe, expect, test } from 'bun:test';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { StartOptions } from '@flue/runtime/node';
 import { Triage } from '../agents/triage.agent.ts';
-import { bootRuntime, resetRuntimeForTests } from './runtime.ts';
+import type { Config } from '../config/env.ts';
+import type { RunRecord, RunStore } from '../runstore/types.ts';
+import type { InstallOptions, TraceRoot } from '../tracing/braintrust.ts';
+import { makeTestHome, type TestHome } from '../../test/support/home.ts';
+import { bootRuntime, resetRuntimeForTests, traceRootRecorder } from './runtime.ts';
 
 const SRC = fileURLToPath(new URL('..', import.meta.url));
 const REPO = join(SRC, '..');
 
-afterEach(() => resetRuntimeForTests());
+const homes: TestHome[] = [];
+const savedHome = process.env.TRIAGE_HOME;
+
+afterEach(() => {
+  resetRuntimeForTests();
+  for (const h of homes.splice(0)) h.cleanup();
+  if (savedHome === undefined) delete process.env.TRIAGE_HOME;
+  else process.env.TRIAGE_HOME = savedHome;
+});
+
+/** A test home with tracing on (a fake key; nothing here reaches Braintrust), set as TRIAGE_HOME. */
+function tracingHome(): TestHome {
+  const home = makeTestHome({ overrides: { TRIAGE_BRAINTRUST_ENABLED: 'true', BRAINTRUST_API_KEY: 'fake-braintrust-key-0001' } });
+  homes.push(home);
+  process.env.TRIAGE_HOME = home.home;
+  return home;
+}
 
 type FakeFlue = { stop(): Promise<void>; [Symbol.asyncDispose](): Promise<void> };
 
@@ -80,6 +100,127 @@ describe('bootRuntime', () => {
     await bootRuntime(opts);
     await bootRuntime(opts);
     expect(order).toEqual(['models', 'start']);
+  });
+});
+
+describe('bootRuntime tracing (D82)', () => {
+  function recordingInstall(order: string[], seen: { config?: Config; options?: InstallOptions }[]) {
+    return async (config: Pick<Config, 'tracing'>, options?: InstallOptions): Promise<void> => {
+      order.push('tracing');
+      seen.push({ config: config as Config, ...(options !== undefined ? { options } : {}) });
+    };
+  }
+
+  test('installs tracing with the loaded config and a root span recorder, before start()', async () => {
+    tracingHome();
+    const order: string[] = [];
+    const seen: { config?: Config; options?: InstallOptions }[] = [];
+    await bootRuntime({
+      start: async (o) => (order.push('start'), fakeStart([])(o)),
+      db: () => DB,
+      eventLog: false,
+      usageMeter: false,
+      settleListener: false,
+      ensureModels: async () => {},
+      installTracing: recordingInstall(order, seen),
+    });
+    expect(order).toEqual(['tracing', 'start']);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.config?.tracing).toMatchObject({ enabled: true, projectName: 'triage-app', content: 'metadata' });
+    expect(typeof seen[0]?.options?.onRootSpan).toBe('function');
+  });
+
+  test('braintrust: false leaves tracing off', async () => {
+    tracingHome();
+    const order: string[] = [];
+    await bootRuntime({
+      start: fakeStart([]),
+      db: () => DB,
+      eventLog: false,
+      usageMeter: false,
+      settleListener: false,
+      ensureModels: async () => {},
+      braintrust: false,
+      installTracing: recordingInstall(order, []),
+    });
+    expect(order).toEqual([]);
+  });
+
+  test('a config that does not load leaves tracing off and still starts', async () => {
+    delete process.env.TRIAGE_HOME;
+    const order: string[] = [];
+    const calls: StartOptions[] = [];
+    await bootRuntime({
+      start: fakeStart(calls),
+      db: () => DB,
+      eventLog: false,
+      usageMeter: false,
+      settleListener: false,
+      ensureModels: async () => {},
+      installTracing: recordingInstall(order, []),
+    });
+    expect(order).toEqual([]);
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe('traceRootRecorder', () => {
+  const RUN = '01J8ZQ7XK3PSEDRMNABCDEFGH1';
+  // A ULID-style Flue submission id with a long digit run: matched as stored, never redacted.
+  const ROOT: TraceRoot = { runId: RUN, flueSubmissionId: 'sub_01M3EN7034701234ABCDEFGH', spanId: '0123456789abcdef', rootSpanId: 'f'.repeat(32) };
+
+  type Write = { runId: string; seq: number; spanId: string };
+
+  /** getRun returns each listed submission set in turn, the last one from then on. */
+  function fakeStore(views: (readonly { seq: number; flue_submission_id?: string }[] | null | Error)[]) {
+    const writes: Write[] = [];
+    let reads = 0;
+    const store = {
+      getRun: async () => {
+        const view = views[Math.min(reads++, views.length - 1)];
+        if (view instanceof Error) throw view;
+        return view === null ? null : ({ submissions: view } as unknown as RunRecord);
+      },
+      setSubmissionTraceSpanId: async (runId: string, seq: number, spanId: string) => void writes.push({ runId, seq, spanId }),
+    } as unknown as RunStore;
+    return { store, writes, reads: () => reads };
+  }
+
+  test('writes the span id to the submission with that Flue id', async () => {
+    const f = fakeStore([[{ seq: 1, flue_submission_id: 'sub_other' }, { seq: 2, flue_submission_id: ROOT.flueSubmissionId }]]);
+    await traceRootRecorder(() => f.store, { retryMs: [] })(ROOT);
+    expect(f.writes).toEqual([{ runId: RUN, seq: 2, spanId: ROOT.spanId }]);
+  });
+
+  test('retries while ingress has not written the Flue id yet', async () => {
+    const f = fakeStore([[{ seq: 1 }], [{ seq: 1 }], [{ seq: 1, flue_submission_id: ROOT.flueSubmissionId }]]);
+    await traceRootRecorder(() => f.store, { retryMs: [0, 0, 0] })(ROOT);
+    expect(f.reads()).toBe(3);
+    expect(f.writes).toEqual([{ runId: RUN, seq: 1, spanId: ROOT.spanId }]);
+  });
+
+  test('gives up after the retries, and on a run that is gone, without writing', async () => {
+    const never = fakeStore([[{ seq: 1 }]]);
+    await traceRootRecorder(() => never.store, { retryMs: [0, 0] })(ROOT);
+    expect(never.reads()).toBe(3);
+    expect(never.writes).toEqual([]);
+
+    const gone = fakeStore([null]);
+    await traceRootRecorder(() => gone.store, { retryMs: [0, 0] })(ROOT);
+    expect(gone.reads()).toBe(1);
+    expect(gone.writes).toEqual([]);
+  });
+
+  test('never rejects: a store error, a store that cannot be built, or a bad run id', async () => {
+    const failing = fakeStore([new Error('connection lost')]);
+    await expect(traceRootRecorder(() => failing.store, { retryMs: [] })(ROOT)).resolves.toBeUndefined();
+    const unbuilt = () => {
+      throw new Error('no config');
+    };
+    await expect(traceRootRecorder(unbuilt, { retryMs: [] })(ROOT)).resolves.toBeUndefined();
+    const ok = fakeStore([[{ seq: 1, flue_submission_id: ROOT.flueSubmissionId }]]);
+    await traceRootRecorder(() => ok.store, { retryMs: [] })({ ...ROOT, runId: '../etc' });
+    expect(ok.reads()).toBe(0);
   });
 });
 

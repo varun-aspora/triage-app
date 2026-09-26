@@ -1,4 +1,5 @@
-import { describe, expect, mock, test } from 'bun:test';
+import { afterEach, describe, expect, mock, test } from 'bun:test';
+import * as bt from 'braintrust';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +14,7 @@ import type { ChoiceQuestion, DecisionAnswer, DecisionProvider } from '../decisi
 import { createMemoryAuditSink } from '../gate/audit-sink.ts';
 import { keyString, semanticKey } from '../mock/key.ts';
 import type { FixtureStore } from '../mock/store.ts';
+import { installBraintrust, uninstallBraintrust } from '../tracing/braintrust.ts';
 import type { IdChainResult, IdentityCoreDeps } from '../tools/_lib/identity-core.ts';
 import type { KnownIds } from '../types/core.ts';
 import type { BasicStateItem, IdChain } from '../types/id-chain.ts';
@@ -549,5 +551,33 @@ describe('static checks', () => {
     expect(src).not.toContain('.sql');
     expect(src).not.toMatch(/from '\.\.\/connectors\//);
     expect(src).not.toContain('runSelect');
+  });
+});
+
+// Braintrust's in-memory background logger: nothing leaves the process.
+describe('the id decision trace span (D82)', () => {
+  const T = bt._exportsForTestingOnly;
+
+  afterEach(async () => {
+    await uninstallBraintrust();
+    T.clearTestBackgroundLogger();
+    T.simulateLogoutForTests();
+  });
+
+  test('carries the run id and purpose, and no ingress name in redacted mode', async () => {
+    await T.simulateLoginForTests();
+    const memory = T.useTestBackgroundLogger();
+    await installBraintrust(
+      { tracing: { enabled: true, apiKey: 'test-braintrust-key', projectName: 'triage-app', content: 'redacted' } },
+      { load: async () => bt, instrument: () => async () => undefined, names: () => [], projectId: 'test-project-id' },
+    );
+    const d = decisionOf(fakeDecisionProvider(answering({ aspora_user_id: USER })));
+    const thread = [`Priya Testname says user ${USER} cannot log in`];
+    await resolveIngressIdentity(request(thread), depsOf({ resolveIdChain: fakeCore(FULL_CHAIN).fn, decision: d.deps, redactionNames: ['Priya Testname'] }));
+    const rows = (await memory.drain()) as Record<string, any>[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.metadata).toMatchObject({ run_id: 'run_ingress_ident_01', purpose: 'identity' });
+    expect(JSON.stringify(rows[0]?.input)).not.toContain('Priya');
+    expect(JSON.stringify(rows[0]?.input)).toContain('cannot log in');
   });
 });

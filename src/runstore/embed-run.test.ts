@@ -7,7 +7,15 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { caseCardText, requestText } from '../embed/case-text.ts';
-import { EmbeddingError, HASH_MODEL, createEmbedder, type Embedder, type EmbedConfig, type EmbedUsage } from '../embed/index.ts';
+import {
+  EmbeddingError,
+  HASH_MODEL,
+  createEmbedder,
+  type ClientOptions,
+  type Embedder,
+  type EmbedConfig,
+  type EmbedUsage,
+} from '../embed/index.ts';
 import { checkEgress, redactPersisted, type Persisted } from '../gate/redact.ts';
 import {
   RUN_A,
@@ -309,6 +317,41 @@ describe('embedRun usage (D59)', () => {
     const r = await embedRun(store, embedder, RUN_A, { onUsage: (u) => seen.push(u) });
     expect(r.gaps).toHaveLength(1);
     expect(seen).toEqual([{ model: 'ollama/nomic-embed-text', inputTokens: 0, failed: true }]);
+  });
+});
+
+describe('embedRun tracing (D82)', () => {
+  // Records the options each embed call got; the span itself is tested in src/embed/embed.test.ts.
+  function optionsEmbedder(): { embedder: Embedder; seen: (ClientOptions | undefined)[] } {
+    const seen: (ClientOptions | undefined)[] = [];
+    const embedder: Embedder = {
+      model: 'ollama/nomic-embed-text',
+      embed: async (texts, opts) => {
+        seen.push(opts);
+        return texts.map(() => [1, 0, 0]);
+      },
+    };
+    return { embedder, seen };
+  }
+
+  test('traced asks embed() to trace the call for the run', async () => {
+    const store = folderStore();
+    await seedRun(store, RUN_A);
+    const { embedder, seen } = optionsEmbedder();
+    const r = await embedRun(store, embedder, RUN_A, { traced: true });
+    expect(r.written).toHaveLength(2);
+    expect(seen.map((o) => o?.trace)).toEqual([{ runId: RUN_A, purpose: 'embed_run' }]);
+  });
+
+  test('without traced, and from reembed, the embed call carries no trace option', async () => {
+    const store = folderStore();
+    await seedRun(store, RUN_A);
+    await seedRun(store, RUN_B);
+    const { embedder, seen } = optionsEmbedder();
+    await embedRun(store, embedder, RUN_A);
+    await reembed(store, embedder);
+    expect(seen).toHaveLength(3);
+    expect(seen.every((o) => o?.trace === undefined)).toBe(true);
   });
 });
 

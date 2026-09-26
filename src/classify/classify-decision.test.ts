@@ -1,7 +1,9 @@
-import { afterAll, afterEach, describe, expect, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import * as bt from 'braintrust';
 import * as v from 'valibot';
 
 import { configFromRecord, type Config } from '../config/env.ts';
+import { installBraintrust, uninstallBraintrust } from '../tracing/braintrust.ts';
 import { DecisionError } from '../decisions/decide.ts';
 import { fakeDecisionProvider } from '../decisions/fake.ts';
 import type { DecisionAnswer, DecisionProvider, DecisionRequest, DecisionResult } from '../decisions/types.ts';
@@ -422,4 +424,53 @@ describe('redaction of the state', () => {
       expect(sent).toContain(ID_CHAIN.ids.aspora_user_id as string);
     });
   }
+});
+
+// ---------------------------------------------------------------- tracing (D82)
+
+// decide() records the span; this checks the classifier tags it. Braintrust's
+// in-memory background logger: nothing leaves the process.
+describe('tracing the decision call', () => {
+  const T = bt._exportsForTestingOnly;
+  // A run id with a 6+ digit run, which the persisted profile would mask.
+  const RUN = '01M3EN7034701234ABCDEFGHJK';
+  type Row = Record<string, any>;
+  let memory: ReturnType<typeof T.useTestBackgroundLogger>;
+
+  beforeAll(async () => {
+    await T.simulateLoginForTests();
+  });
+  beforeEach(() => {
+    memory = T.useTestBackgroundLogger();
+  });
+  afterEach(async () => {
+    await uninstallBraintrust();
+    T.clearTestBackgroundLogger();
+  });
+  afterAll(() => {
+    T.simulateLogoutForTests();
+  });
+
+  const run = () =>
+    classify(
+      { ...INPUT, runId: RUN },
+      { config: config(), categories: CATS, decisions: fakeDecisionProvider(() => GOOD, { id: 'typesafe', model: 'typesafe/jev-1.13' }), complete: noComplete },
+    );
+
+  test('off records nothing; on gives the same classification and one span tagged with the run', async () => {
+    const off = await run();
+    expect(await memory.drain()).toEqual([]);
+    await installBraintrust(
+      { tracing: { enabled: true, apiKey: 'test-braintrust-key', projectName: 'triage-app', content: 'metadata' } },
+      { load: async () => bt, instrument: () => async () => undefined, names: () => [NAME], projectId: 'test-project-id' },
+    );
+    expect(await run()).toEqual(off);
+    const all = (await memory.drain()) as Row[];
+    expect(all).toHaveLength(1);
+    const row = all[0] as Row;
+    expect(row.span_attributes).toMatchObject({ name: 'decision:typesafe/jev-1.13', type: 'llm' });
+    expect(row.metadata).toMatchObject({ run_id: RUN, purpose: 'classify', provider: 'typesafe', model: 'typesafe/jev-1.13' });
+    const json = JSON.stringify(row);
+    for (const marker of [NAME, EMAIL, ACCOUNT, 'welcome letter']) expect(json).not.toContain(marker);
+  });
 });

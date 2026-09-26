@@ -26,6 +26,8 @@ export type EmbedRunOptions = {
   readonly force?: boolean;
   /** Passed to embed(): what the embedding call used (D59). Not called when nothing needed embedding. */
   readonly onUsage?: (u: EmbedUsage) => void;
+  /** Records the embedding call as a trace span for runId (D82). Set after a settle only; reembed never sets it. */
+  readonly traced?: boolean;
 };
 
 export type EmbedRunResult = {
@@ -88,6 +90,7 @@ export async function embedRun(
     vectors = await embedder.embed(pending.map((p) => p.text), {
       ...(options.signal !== undefined ? { signal: options.signal } : {}),
       ...(options.onUsage !== undefined ? { onUsage: options.onUsage } : {}),
+      ...(options.traced === true ? { trace: { runId, purpose: 'embed_run' } } : {}),
     });
   } catch (err) {
     return result({ unchanged, empty, gaps: [`embeddings failed: ${label(err)}`] });

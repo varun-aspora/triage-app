@@ -139,6 +139,7 @@ function fakeStore(): RunStore & { calls: string[] } {
     putEvidence: record('putEvidence'),
     putReport: record('putReport'),
     setSubmissionFlueId: record('setSubmissionFlueId'),
+    setSubmissionTraceSpanId: record('setSubmissionTraceSpanId'),
     putFeedback: record('putFeedback'),
     claimIdempotencyKey: record('claimIdempotencyKey'),
     clearExpiredIdempotencyKeys: record('clearExpiredIdempotencyKeys'),

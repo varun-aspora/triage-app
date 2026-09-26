@@ -12,6 +12,16 @@
 //
 // The question builders (choice, yesNo, score) keep option keys as literal
 // types, so result.answers.x.choice is typed to x's option keys.
+//
+// Tracing (D82): each call that reaches the provider is recorded with
+// traceModelCall as an llm span 'decision:<provider.model>', tagged with
+// options.trace (run id, purpose). trace.names are the ingress names the
+// span masks in 'redacted' content mode. The span covers the time limit and the
+// answer checks, so a timeout or an invalid answer shows as its error. Cost
+// is the provider-reported one: decision models are in no pricing catalog
+// (src/usage/price.ts prices them as null). With tracing off it is a plain
+// call.
+import { traceModelCall, type ModelCallRecord } from '../tracing/braintrust.ts';
 import type {
   ChoiceQuestion,
   DecisionAnswer,
@@ -95,6 +105,17 @@ export type DecideOptions = {
   /** Overall limit for the call, retries included. Default DEFAULT_DECISION_TIMEOUT_MS. */
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  /** Tags the call's trace span (D82). Read only when tracing is on. */
+  readonly trace?: DecisionTrace;
+};
+
+export type DecisionTrace = {
+  /** The run the call is for, when there is one. */
+  readonly runId?: string;
+  /** Who asked, as an id-like label ('classify', 'identity'). */
+  readonly purpose?: string;
+  /** The ingress names, masked in the span in 'redacted' content mode. */
+  readonly names?: readonly string[];
 };
 
 export async function decide<const Q extends DecisionQuestions>(
@@ -103,10 +124,46 @@ export async function decide<const Q extends DecisionQuestions>(
   options: DecideOptions = {},
 ): Promise<DecisionResult<Q>> {
   checkQuestions(provider.id, request.questions);
+  // Checked here, not only in withLimit, so a call that is never sent has no span.
+  if (options.signal?.aborted) throw new DecisionError('aborted', provider.id);
   const timeoutMs = options.timeoutMs ?? DEFAULT_DECISION_TIMEOUT_MS;
-  const result = await withLimit(provider, request, timeoutMs, options.signal);
-  checkAnswers(provider.id, request.questions, result);
+  const result = await traceModelCall(
+    'decision',
+    traceMeta(provider, request, options.trace),
+    async () => {
+      const answered = await withLimit(provider, request, timeoutMs, options.signal);
+      checkAnswers(provider.id, request.questions, answered);
+      return answered;
+    },
+    traceRecord,
+  );
   return result as DecisionResult<Q>;
+}
+
+// The state is content and goes out under the content mode. The questions
+// are fixed per caller, so only their count is sent.
+function traceMeta(provider: DecisionProvider, request: DecisionRequest, trace: DecisionTrace | undefined) {
+  return {
+    model: provider.model,
+    input: request.state,
+    metadata: {
+      provider: provider.id,
+      questions: Object.keys(request.questions).length,
+      ...(trace?.purpose !== undefined ? { purpose: trace.purpose } : {}),
+    },
+    ...(trace?.runId !== undefined ? { runId: trace.runId } : {}),
+    ...(trace?.names !== undefined ? { names: trace.names } : {}),
+  };
+}
+
+function traceRecord(result: DecisionResult): ModelCallRecord {
+  const cost = result.usage.costUsd;
+  return {
+    output: result.answers,
+    usage: { input: result.usage.inputTokens, output: result.usage.outputTokens },
+    costUsd: typeof cost === 'number' && Number.isFinite(cost) && cost >= 0 ? cost : null,
+    responseModel: result.model,
+  };
 }
 
 // Races the provider against the limit and the caller's signal, so a provider

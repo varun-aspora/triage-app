@@ -9,10 +9,16 @@
 //   text can be embedded.
 // - opts.onUsage hears once per call what it used (D59): the MODEL_EMBEDDING
 //   spec, the provider's input tokens and whether it failed.
+// - opts.trace (D82) records the call as an llm span 'embed:<model>' tagged
+//   with the run id, when tracing is on. Tracing is opt-in per call, not
+//   per embedder: the prior-cases lookup and embedRun after a settle set it,
+//   runs reembed and doctor do not. The pricer (src/usage/price.ts) is loaded
+//   only then, so an embedder alone never pulls in models.ts.
 
 import { ConfigError } from '../config/errors.ts';
 import type { Config } from '../config/env.ts';
 import { isPersisted, type Persisted } from '../gate/redact.ts';
+import { braintrustStatus, traceModelCall, type ModelCallRecord } from '../tracing/braintrust.ts';
 import { HASH_MODEL, createHashClient } from './hash.ts';
 import { createOllamaClient } from './ollama.ts';
 import { createOpenAiClient } from './openai.ts';
@@ -22,6 +28,7 @@ import {
   type ClientOptions,
   type EmbedClient,
   type EmbedResult,
+  type EmbedTrace,
   type EmbedUsage,
   type FetchLike,
 } from './spec.ts';
@@ -30,6 +37,7 @@ export {
   EmbeddingError,
   parseEmbeddingSpec,
   type ClientOptions,
+  type EmbedTrace,
   type EmbedUsage,
   type EmbeddingSpec,
   type FetchLike,
@@ -96,12 +104,14 @@ function wrap(model: string, usageModel: string, client: EmbedClient): Embedder 
           // A broken sink must not fail the embedding.
         }
       };
-      let result: EmbedResult;
-      try {
-        result = await client(
+      const send = (): Promise<EmbedResult> =>
+        client(
           texts.map((t) => t.value),
           opts.signal ? { signal: opts.signal } : {},
         );
+      let result: EmbedResult;
+      try {
+        result = opts.trace === undefined || texts.length === 0 ? await send() : await traced(model, texts, opts.trace, send);
       } catch (err) {
         report({ inputTokens: 0, failed: true });
         throw err;
@@ -114,4 +124,58 @@ function wrap(model: string, usageModel: string, client: EmbedClient): Embedder 
       return result.vectors;
     },
   });
+}
+
+type Price = typeof import('../usage/price.ts').priceUsage;
+
+let pricer: Promise<Price | null> | undefined;
+
+// price.ts imports models.ts (pi-ai and the provider registration), so it is
+// loaded on the first traced call, not with this module.
+function loadPricer(): Promise<Price | null> {
+  pricer ??= import('../usage/price.ts').then(
+    (m) => m.priceUsage,
+    () => null,
+  );
+  return pricer;
+}
+
+// The texts are already persisted-profile text; they still go out under the
+// content mode. The vectors never do, only their count and size.
+async function traced(
+  model: string,
+  texts: readonly Persisted<string>[],
+  trace: EmbedTrace,
+  send: () => Promise<EmbedResult>,
+): Promise<EmbedResult> {
+  if (!braintrustStatus().on) return send();
+  const price = await loadPricer();
+  return traceModelCall(
+    'embed',
+    {
+      runId: trace.runId,
+      model,
+      input: texts.map((t) => t.value),
+      metadata: { texts: texts.length, ...(trace.purpose === undefined ? {} : { purpose: trace.purpose }) },
+    },
+    send,
+    (result) => embedRecord(model, result, price),
+  );
+}
+
+function embedRecord(model: string, result: EmbedResult, price: Price | null): ModelCallRecord {
+  const tokens = result.inputTokens;
+  let costUsd: number | null = null;
+  if (tokens !== null && price !== null) {
+    try {
+      costUsd = price(model, { input: tokens, output: 0, cacheRead: 0, cacheWrite: 0 }, 'embed');
+    } catch {
+      // An unpriceable record leaves the cost off the span.
+    }
+  }
+  return {
+    output: { vectors: result.vectors.length, dimensions: result.vectors[0]?.length ?? 0 },
+    ...(tokens === null ? {} : { usage: { input: tokens } }),
+    costUsd,
+  };
 }

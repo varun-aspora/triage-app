@@ -24,6 +24,7 @@ import {
   RunStoppedError,
   RunStoreError,
   RunStoreRedactionError,
+  latestTraceSpanId,
   type ClassificationRecord,
   type EmbeddingInput,
   type EmbeddingKind,
@@ -730,6 +731,64 @@ export const runStoreContract: readonly ContractCase[] = [
     },
   },
   {
+    name: 'setSubmissionTraceSpanId records the trace span on one submission and leaves updated_at alone (D82)',
+    async run(store, clock) {
+      await newRun(store, RUN_A);
+      const s1 = await store.addSubmission(RUN_A, p({ kind: 'initial' as const }));
+      const s2 = await store.addSubmission(RUN_A, p({ kind: 'steer' as const, note: 'check the payout too' }));
+      const s3 = await store.addSubmission(RUN_A, p({ kind: 'ask' as const, question: 'and the refund?' }));
+      const before = (await store.getRun(RUN_A))?.updated_at;
+      let run = await store.getRun(RUN_A);
+      assert.ok(run);
+      assert.equal(run.submissions[0]?.trace_span_id, undefined);
+      assert.equal(latestTraceSpanId(run), undefined);
+
+      clock.advance(5_000);
+      // Digit runs the persisted profile would mask; the value is kept as sent.
+      const rowId = '1234567890123456';
+      const slug = 'AwEAAAAAAAAAAAAAAAAAAAAB0123456789+/abc==';
+      await store.setSubmissionTraceSpanId(RUN_A, s1, rowId);
+      await store.setSubmissionTraceSpanId(RUN_A, s3, slug);
+      await store.setSubmissionFlueId(RUN_A, s1, 'sub_one');
+      run = await store.getRun(RUN_A);
+      assert.ok(run);
+      assert.equal(run.updated_at, before);
+      assert.equal(run.submissions[0]?.trace_span_id, rowId);
+      assert.equal(run.submissions[0]?.flue_submission_id, 'sub_one');
+      assert.equal(run.submissions[1]?.trace_span_id, undefined);
+      assert.equal(run.submissions[1]?.note, 'check the payout too');
+      assert.equal(run.submissions[2]?.trace_span_id, slug);
+      assert.equal(run.submissions[2]?.question, 'and the refund?');
+      assert.equal(latestTraceSpanId(run), slug);
+
+      // A second call replaces the value and touches no other field.
+      const uuid = '0f8e2d4c-1234-5678-9abc-def012345678';
+      await store.setSubmissionTraceSpanId(RUN_A, s3, uuid);
+      run = await store.getRun(RUN_A);
+      assert.ok(run);
+      assert.equal(run.submissions[2]?.trace_span_id, uuid);
+      assert.equal(run.submissions[2]?.kind, 'ask');
+      assert.equal(run.submissions[2]?.report, null);
+      assert.equal(latestTraceSpanId(run), uuid);
+
+      // A later submission without a span is skipped: the latest one that has one is read.
+      await store.addSubmission(RUN_A, p({ kind: 'steer' as const, note: 'one more thing' }));
+      run = await store.getRun(RUN_A);
+      assert.ok(run);
+      assert.equal(latestTraceSpanId(run), uuid);
+
+      const storeError = (err: unknown) => err instanceof RunStoreError && !(err instanceof RunNotFoundError);
+      await assert.rejects(() => store.setSubmissionTraceSpanId(RUN_A, 9, rowId), storeError);
+      await assert.rejects(() => store.setSubmissionTraceSpanId(RUN_A, 0, rowId), storeError);
+      await assert.rejects(() => store.setSubmissionTraceSpanId(RUN_A, s2, 'not a span'), storeError);
+      await assert.rejects(() => store.setSubmissionTraceSpanId(RUN_A, s2, 'someone@example.com'), storeError);
+      await assert.rejects(() => store.setSubmissionTraceSpanId(RUN_A, s2, ''), storeError);
+      await assert.rejects(() => store.setSubmissionTraceSpanId(RUN_A, s2, 'a'.repeat(1025)), storeError);
+      await assert.rejects(() => store.setSubmissionTraceSpanId(RUN_B, 1, rowId), (err: unknown) => err instanceof RunNotFoundError);
+      assert.equal((await store.getRun(RUN_A))?.submissions[1]?.trace_span_id, undefined);
+    },
+  },
+  {
     name: 'putClassification stores the decision and id chain',
     async run(store) {
       await newRun(store, RUN_A);
@@ -983,6 +1042,8 @@ export const runStoreContract: readonly ContractCase[] = [
         await store.putEmbedding(id, p(sampleEmbedding('case', 'openai/y', [0, 1, 0])));
         await store.putUsage(id, 0, [sampleUsageRow({ agent: 'classifier', purpose: 'classify' })], true);
         await store.putUsage(id, seq, [sampleUsageRow()], false);
+        await store.setSubmissionFlueId(id, seq, 'sub_fill');
+        await store.setSubmissionTraceSpanId(id, seq, 'span-fill');
         return seq;
       };
       await fill(RUN_A);
@@ -1019,6 +1080,11 @@ export const runStoreContract: readonly ContractCase[] = [
       );
       // The evidence versions start again from 1.
       assert.equal(await store.putEvidence(RUN_A, 'ssfb', p(sampleFindings('again'))), 1);
+      // A new submission 1 does not inherit the old one's Flue id or trace span (D71, D82).
+      assert.equal(await store.addSubmission(RUN_A, p({ kind: 'initial' as const })), 1);
+      const fresh = (await store.getRun(RUN_A))?.submissions[0];
+      assert.equal(fresh?.flue_submission_id, undefined);
+      assert.equal(fresh?.trace_span_id, undefined);
 
       assert.deepEqual(await store.getRun(RUN_B), kept);
     },
@@ -1041,6 +1107,7 @@ export const runStoreContract: readonly ContractCase[] = [
       await assert.rejects(() => store.putClassification(RUN_A, p(sampleClassification())), notFound);
       await assert.rejects(() => store.setPhase(RUN_A, 'failed'), notFound);
       await assert.rejects(() => store.setSubmissionFlueId(RUN_A, seq, 'sub_x'), notFound);
+      await assert.rejects(() => store.setSubmissionTraceSpanId(RUN_A, seq, 'span-x'), notFound);
 
       assert.equal(await store.getRun(RUN_A), null);
       assert.deepEqual(await store.findSimilar({ vector: [1, 0], model: 'ollama/x' }), []);

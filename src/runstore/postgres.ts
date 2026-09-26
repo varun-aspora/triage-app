@@ -59,6 +59,7 @@ import {
   assertPhaseList,
   assertQuestionId,
   assertRunId,
+  assertTraceSpanId,
   BlockNotOpenError,
   BlockOpenError,
   cancelledBlockResolution,
@@ -256,6 +257,10 @@ VALUES ($1, $2, $3, $4::text, $5::timestamptz, $6::text, $7::text, $8::text, $9:
   setSubmissionFlueId: `UPDATE triage.submissions SET flue_submission_id = $3::text
 WHERE run_id = $1 AND seq = $2
 RETURNING seq`,
+  // D82: the tracing root span of the submission. The run's updated_at is left alone.
+  setSubmissionTraceSpanId: `UPDATE triage.submissions SET trace_span_id = $3::text
+WHERE run_id = $1 AND seq = $2
+RETURNING seq`,
 
   nextEvidenceVersion:
     'SELECT COALESCE(MAX(version), 0) + 1 AS version FROM triage.evidence WHERE run_id = $1 AND key = $2',
@@ -287,7 +292,7 @@ FROM triage.runs WHERE run_id = $1`,
   latestEvidence: `SELECT DISTINCT ON (key) key, version, findings FROM triage.evidence
 WHERE run_id = $1 ORDER BY key, version DESC`,
   submissions: `SELECT s.seq, s.kind, s.question, s.question_id, s.answer, s.block_id, s.note, s.created_at, s.flue_submission_id,
-  r.report, r.report_md
+  s.trace_span_id, r.report, r.report_md
 FROM triage.submissions s LEFT JOIN triage.reports r ON r.run_id = s.run_id AND r.seq = s.seq
 WHERE s.run_id = $1 ORDER BY s.seq`,
   feedback: 'SELECT body FROM triage.feedback WHERE run_id = $1 ORDER BY id',
@@ -704,6 +709,16 @@ class PostgresRunStore implements RunStore {
     throw new RunStoreError(`submission ${n} not found`);
   }
 
+  async setSubmissionTraceSpanId(runId: RunId, seq: number, traceSpanId: string): Promise<void> {
+    const id = assertRunId(runId);
+    const n = positiveInt(seq, 'submission id');
+    const spanId = assertTraceSpanId(traceSpanId);
+    const rows = await this.#runner.query(SQL.setSubmissionTraceSpanId, [id, n, spanId]);
+    if (rows.length > 0) return;
+    await this.#requireRun(this.#runner.query, SQL.runExists, id);
+    throw new RunStoreError(`submission ${n} not found`);
+  }
+
   async putReport(runId: RunId, submissionId: number, report: Persisted<Report>, md: Persisted<string>): Promise<void> {
     const id = assertRunId(runId);
     const seq = positiveInt(submissionId, 'submission id');
@@ -934,6 +949,7 @@ class PostgresRunStore implements RunStore {
       const blockId = optText(row.block_id);
       const note = optText(row.note);
       const flueId = optText(row.flue_submission_id);
+      const spanId = optText(row.trace_span_id);
       const report = isNull(row.report) ? null : (fromJson(row.report, 'report') as Report);
       return {
         kind: parseRecord(SubmissionInputSchema.entries.kind, row.kind, 'submission kind'),
@@ -945,6 +961,7 @@ class PostgresRunStore implements RunStore {
         seq: toInt(row.seq, 'submission seq'),
         created_at: toIso(row.created_at, 'submission time'),
         ...(flueId !== undefined ? { flue_submission_id: assertFlueSubmissionId(flueId) } : {}),
+        ...(spanId !== undefined ? { trace_span_id: assertTraceSpanId(spanId) } : {}),
         report,
         report_md: report === null ? null : (optText(row.report_md) ?? null),
       };

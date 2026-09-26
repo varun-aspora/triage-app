@@ -25,6 +25,17 @@
 // counts every model turn of the runs this process drives. It needs no
 // config; usageMeter: false leaves it off (tests).
 //
+// Then it installs Braintrust tracing (src/tracing/braintrust.ts, D82) when
+// the config turns it on (TRIAGE_BRAINTRUST_ENABLED), before start(). The
+// tripwire is installed when triageRuntime() first builds the runtime,
+// normally after this, so Braintrust's interceptor is the outer one and a
+// tripwire denial is recorded on the tool span. Each submission's root span
+// id is written to the run store (setSubmissionTraceSpanId) for feedback
+// scores; that write is best effort and never fails the run. submit.ts
+// writes it as well, from the dispatch receipt, without a store lookup; the
+// recorder here also covers a retried attempt and runs submit.ts did not
+// dispatch. braintrust: false leaves tracing off (tests).
+//
 // Last, it installs the settle listener (src/ingress/settle-listener.ts,
 // D70), which moves a run's phase when Flue settles its submission in a
 // process where nobody awaits read(), as after a restart. It reads and
@@ -38,12 +49,16 @@
 import type { Agent } from '@flue/runtime';
 import type { PersistenceAdapter } from '@flue/runtime/adapter';
 import { type Flue, start as flueStart, type StartOptions } from '@flue/runtime/node';
+import * as v from 'valibot';
 import { triageRuntime } from '../agents/triage-plan.ts';
 import { Triage } from '../agents/triage.agent.ts';
 import { loadConfig, type Config } from '../config/env.ts';
 import { ConfigError } from '../config/errors.ts';
 import { describeEnsure, ensureConfiguredModels } from '../model-refresh.ts';
-import { installRunEventLog } from '../runlog/event-log.ts';
+import { installRunEventLog, logRunEvent } from '../runlog/event-log.ts';
+import type { RunStore } from '../runstore/types.ts';
+import { installBraintrust, type TraceRoot } from '../tracing/braintrust.ts';
+import { RunIdSchema } from '../types/core.ts';
 import { installUsageMeter } from '../usage/meter.ts';
 import { installSettleListener } from './settle-listener.ts';
 
@@ -62,6 +77,10 @@ export type BootOptions = {
   readonly usageMeter?: boolean;
   /** Installs the settle listener. Default true; false leaves it off. */
   readonly settleListener?: boolean;
+  /** Installs Braintrust tracing when the config turns it on (D82). Default true; false leaves it off. */
+  readonly braintrust?: boolean;
+  /** Defaults to installBraintrust from src/tracing/braintrust.ts. Tests pass a stand-in. */
+  readonly installTracing?: typeof installBraintrust;
 };
 
 let booted: Promise<Flue> | undefined;
@@ -82,12 +101,64 @@ async function startOnce(options: BootOptions): Promise<Flue> {
   const runsDir = options.eventLog === false ? undefined : (options.eventLog?.runsDir ?? configIfLoads()?.paths.runsDir);
   if (runsDir !== undefined) installRunEventLog({ runsDir });
   if (options.usageMeter !== false) installUsageMeter();
+  if (options.braintrust !== false) {
+    const config = configIfLoads();
+    // Never rejects; tracing off in the config makes it a no-op.
+    if (config !== undefined) {
+      await (options.installTracing ?? installBraintrust)(config, { onRootSpan: traceRootRecorder(() => triageRuntime().runStore) });
+    }
+  }
   if (options.settleListener !== false) {
     installSettleListener({ store: () => triageRuntime().runStore, ...(runsDir !== undefined ? { runsDir } : {}) });
   }
   const db = options.db !== undefined ? await options.db() : (await import('../db.ts')).default;
   const start = options.start ?? flueStart;
   return start({ agents: options.agents ?? [Triage], db });
+}
+
+export type TraceRootRecorderOptions = {
+  /** Waits before each retry when the submission is not in the store yet. Default 250 ms, 1 s, 4 s. */
+  readonly retryMs?: readonly number[];
+};
+
+const TRACE_ROOT_RETRY_MS: readonly number[] = [250, 1000, 4000];
+
+/**
+ * Writes a captured root span id to its submission's row in the run store.
+ * The submission is found by its Flue submission id. The root can be
+ * captured before ingress has written that id (submit.ts writes it once the
+ * dispatch receipt is back), so a miss is retried a few times. submit.ts
+ * also writes the root itself once the receipt is back, so a store write
+ * slower than these retries does not leave the column empty. Best effort:
+ * the returned promise never rejects, and a failure or a submission that
+ * never shows up leaves the column empty.
+ */
+export function traceRootRecorder(store: () => RunStore, options: TraceRootRecorderOptions = {}): (root: TraceRoot) => Promise<void> {
+  const retries = options.retryMs ?? TRACE_ROOT_RETRY_MS;
+  return async (root) => {
+    try {
+      if (!v.is(RunIdSchema, root.runId)) return;
+      for (let attempt = 0; attempt <= retries.length; attempt++) {
+        if (attempt > 0) await sleep(retries[attempt - 1] ?? 0);
+        const run = await store().getRun(root.runId);
+        if (run === null) return;
+        const seq = run.submissions.find((s) => s.flue_submission_id === root.flueSubmissionId)?.seq;
+        if (seq === undefined) continue;
+        await store().setSubmissionTraceSpanId(root.runId, seq, root.spanId);
+        return;
+      }
+    } catch (err) {
+      // Feedback for this submission then goes without scores, unless submit.ts's own write lands.
+      logRunEvent(root.runId, 'trace_span_write_failed', { flue_submission_id: root.flueSubmissionId, error: err instanceof Error ? err.name : typeof err });
+    }
+  };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 }
 
 // A config that does not load is left to start() and doctor to report.

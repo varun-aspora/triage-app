@@ -181,6 +181,18 @@ export type SubmissionInput = v.InferOutput<typeof SubmissionInputSchema>;
 export const FLUE_SUBMISSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 export const FlueSubmissionIdSchema = v.pipe(v.string(), v.regex(FLUE_SUBMISSION_ID_PATTERN));
 
+/**
+ * The tracing root span of a submission (D82): TraceRoot.spanId from
+ * src/tracing/braintrust.ts, the root span's Braintrust row id, which is
+ * what feedback scores are sent to. The store checks only a loose shape and
+ * treats the value as opaque; logRunFeedback accepts only the row id shape
+ * (TRACE_SPAN_ID_PATTERN there), so any other value stored here means
+ * feedback for the run is sent without scores. Checked by shape, not by the
+ * persisted profile, which would mask digit runs in a hex id.
+ */
+export const STORED_TRACE_SPAN_ID_PATTERN = /^[A-Za-z0-9_+/=.:-]{1,1024}$/;
+export const TraceSpanIdSchema = v.pipe(v.string(), v.regex(STORED_TRACE_SPAN_ID_PATTERN));
+
 export const SubmissionMetaSchema = v.object({
   ...SubmissionInputSchema.entries,
   seq: v.pipe(v.number(), v.integer(), v.minValue(1)),
@@ -191,6 +203,12 @@ export const SubmissionMetaSchema = v.object({
    * detection reads the submission's lease with it.
    */
   flue_submission_id: v.optional(FlueSubmissionIdSchema),
+  /**
+   * The tracing root span of this submission (D82), set once src/tracing/
+   * captures it. Absent while tracing is off, before the capture, on a steer
+   * Flue joined into a running response, and on runs from before D82.
+   */
+  trace_span_id: v.optional(TraceSpanIdSchema),
 });
 export type SubmissionMeta = v.InferOutput<typeof SubmissionMetaSchema>;
 
@@ -442,6 +460,13 @@ export interface RunStore {
    * RunStoreError for an unknown submission or an id that is not Flue's shape.
    */
   setSubmissionFlueId(runId: RunId, seq: number, flueSubmissionId: string): Promise<void>;
+  /**
+   * Records the tracing root span of one submission (D82). A second call
+   * replaces it. Does not change the run's updated_at. Throws
+   * RunNotFoundError for an unknown run, and RunStoreError for an unknown
+   * submission or a value that is not STORED_TRACE_SPAN_ID_PATTERN's shape.
+   */
+  setSubmissionTraceSpanId(runId: RunId, seq: number, traceSpanId: string): Promise<void>;
   /** Stores the report of one submission. The run's report is the latest submission's. */
   putReport(runId: RunId, submissionId: number, report: Persisted<Report>, md: Persisted<string>): Promise<void>;
   /** Appends a feedback entry. Nothing is overwritten; the last entry wins. */
@@ -644,6 +669,25 @@ export function assertPhaseList(phases: readonly RunPhase[]): RunPhase[] {
 export function assertFlueSubmissionId(id: string): string {
   if (!v.is(FlueSubmissionIdSchema, id)) throw new RunStoreError('invalid flue submission id');
   return id;
+}
+
+export function assertTraceSpanId(id: string): string {
+  if (!v.is(TraceSpanIdSchema, id)) throw new RunStoreError('invalid trace span id');
+  return id;
+}
+
+/**
+ * The trace span that feedback on the run goes to (D82): that of the latest
+ * submission that has one. A later submission without one (tracing off then,
+ * the capture not yet written, or a steer Flue joined into the running
+ * response) is skipped. Undefined when no submission has one.
+ */
+export function latestTraceSpanId(run: { readonly submissions: readonly Pick<Submission, 'seq' | 'trace_span_id'>[] }): string | undefined {
+  let latest: Pick<Submission, 'seq' | 'trace_span_id'> | undefined;
+  for (const s of run.submissions) {
+    if (s.trace_span_id !== undefined && (latest === undefined || s.seq > latest.seq)) latest = s;
+  }
+  return latest?.trace_span_id;
 }
 
 export function assertBlockId(blockId: string): string {

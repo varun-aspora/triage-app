@@ -20,7 +20,8 @@ export type KeyGroup =
   | 'slack'
   | 'sandbox'
   | 'code'
-  | 'repos';
+  | 'repos'
+  | 'tracing';
 
 export type KeySpec = {
   readonly name: string;
@@ -49,6 +50,8 @@ export const HOME_KEY = 'TRIAGE_HOME';
 /** Read only through deployModeForPreflight (D32). A source guard allows this string here and in preflight only. */
 export const DEPLOY_MODE_KEY = 'TRIAGE_DEPLOY_MODE';
 
+/** What a Braintrust span may carry: metadata only, or content after redactPersisted. */
+export const TRACING_CONTENT_MODES = ['metadata', 'redacted'] as const;
 export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 
 /** Provider credentials copied into process.env for pi-ai by applyProviderEnv. */
@@ -153,6 +156,13 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'TRIAGE_UI_ENV', type: 'enum', group: 'http', default: 'non-production', values: ['production', 'non-production'] },
   // Read only by web/vite.config.ts: the port `bun run dev:web` listens on.
   { name: 'TRIAGE_UI_DEV_PORT', type: 'int', group: 'http', default: '5173', min: 1, max: 65535 },
+
+  // Tracing (Braintrust)
+  { name: 'TRIAGE_BRAINTRUST_ENABLED', type: 'bool', group: 'tracing', default: 'false' },
+  { name: 'BRAINTRUST_API_KEY', type: 'string', group: 'tracing', secret: true },
+  { name: 'BRAINTRUST_PROJECT_NAME', type: 'string', group: 'tracing', default: 'triage-app' },
+  { name: 'TRIAGE_BRAINTRUST_CONTENT', type: 'enum', group: 'tracing', default: 'metadata', values: TRACING_CONTENT_MODES },
+  { name: 'BRAINTRUST_APP_URL', type: 'string', group: 'tracing' },
 
   // Slack
   { name: 'SLACK_BOT_TOKEN', type: 'string', group: 'slack', secret: true },
