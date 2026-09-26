@@ -78,6 +78,8 @@ type UsageRow = {
 
 type State = {
   migrated: boolean;
+  /** 0002_submission_flue_id.sql has run: triage.submissions has flue_submission_id (D71). */
+  flueIdColumn: boolean;
   versions: string[];
   runs: Map<string, RunRow>;
   submissions: {
@@ -90,6 +92,7 @@ type State = {
     answer: string | null;
     block_id: string | null;
     note: string | null;
+    flue_submission_id: string | null;
   }[];
   evidence: { run_id: string; key: string; version: number; findings: unknown; created_at: Date }[];
   reports: { run_id: string; seq: number; report: unknown; report_md: string; created_at: Date }[];
@@ -112,6 +115,7 @@ type State = {
 function emptyState(migrated: boolean): State {
   return {
     migrated,
+    flueIdColumn: migrated,
     versions: [],
     runs: new Map(),
     submissions: [],
@@ -140,6 +144,7 @@ export class FakePgError extends Error {
 
 const unique = (what: string) => new FakePgError('23505', `duplicate key value violates unique constraint on ${what}`);
 const missingRelation = (name: string) => new FakePgError('42P01', `relation "${name}" does not exist`);
+const missingColumn = (name: string) => new FakePgError('42703', `column "${name}" does not exist`);
 
 // ------------------------------------------------------------------ parameters
 
@@ -226,6 +231,15 @@ function int4(p: Param | undefined, label: string): number {
   const n = int(p, label);
   if (n < -2_147_483_648 || n > 2_147_483_647) throw new FakePgError('22003', `${label}: integer out of range`);
   return n;
+}
+
+/** jsonb_array_elements_text($n::jsonb): a JSON array of text. */
+function textArray(p: Param | undefined, label: string): string[] {
+  const value = jsonb(p, label);
+  if (!Array.isArray(value) || !value.every((x) => typeof x === 'string')) {
+    throw new FakePgError('22023', `${label}: expected a JSON array of text`);
+  }
+  return value;
 }
 
 function bool(p: Param | undefined, label: string): boolean {
@@ -329,7 +343,17 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
     if (row.phase === str(p[6], 'stopped') && bool(p[5], 'resume') !== true) return [];
     row.phase = str(p[1], 'phase');
     row.phase_reason = strOrNull(p[2], 'phase_reason');
-    row.worker_pid = intOrNull(p[3], 'worker_pid') ?? row.worker_pid;
+    row.worker_pid = bool(p[7], 'pid_given') ? intOrNull(p[3], 'worker_pid') : row.worker_pid;
+    row.updated_at = ts(p[4], 'updated_at');
+    return [{ run_id: row.run_id }];
+  },
+  setPhaseIf(p, db) {
+    const row = runRow(db, str(p[0], 'run_id'));
+    if (!row) return [];
+    if (!textArray(p[5], 'from_phases').includes(row.phase)) return [];
+    row.phase = str(p[1], 'phase');
+    row.phase_reason = strOrNull(p[2], 'phase_reason');
+    row.worker_pid = bool(p[6], 'pid_given') ? intOrNull(p[3], 'worker_pid') : row.worker_pid;
     row.updated_at = ts(p[4], 'updated_at');
     return [{ run_id: row.run_id }];
   },
@@ -424,8 +448,18 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
       answer: strOrNull(p[6], 'answer'),
       block_id: strOrNull(p[7], 'block_id'),
       note: strOrNull(p[8], 'note'),
+      flue_submission_id: null,
     });
     return [];
+  },
+  setSubmissionFlueId(p, db) {
+    if (!db.flueIdColumn) throw missingColumn('flue_submission_id');
+    const id = str(p[0], 'run_id');
+    const seq = int(p[1], 'seq');
+    const row = db.submissions.find((s) => s.run_id === id && s.seq === seq);
+    if (!row) return [];
+    row.flue_submission_id = str(p[2], 'flue_submission_id');
+    return [{ seq }];
   },
   nextEvidenceVersion(p, db) {
     const id = str(p[0], 'run_id');
@@ -542,6 +576,7 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
       .map((e) => clone({ key: e.key, version: e.version, findings: e.findings }));
   },
   submissions(p, db) {
+    if (!db.flueIdColumn) throw missingColumn('s.flue_submission_id');
     const id = str(p[0], 'run_id');
     return db.submissions
       .filter((s) => s.run_id === id)
@@ -557,6 +592,7 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
           block_id: s.block_id,
           note: s.note,
           created_at: s.created_at,
+          flue_submission_id: s.flue_submission_id,
           report: r?.report ?? null,
           report_md: r?.report_md ?? null,
         });
@@ -570,10 +606,13 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
       .map((f) => clone({ body: f.body }));
   },
   listRuns(p, db) {
+    if (!db.flueIdColumn) throw missingColumn('s.flue_submission_id');
     const since = tsOrNull(p[0], 'since');
     const phase = strOrNull(p[1], 'phase');
     const category = strOrNull(p[2], 'category');
     const limit = intOrNull(p[3], 'limit');
+    const working = textArray(p[4], 'working_phases');
+    const steerKind = str(p[5], 'steer_kind');
     const rows = [...db.runs.values()]
       .filter((r) => since === null || r.created_at.getTime() >= since.getTime())
       .filter((r) => phase === null || r.phase === phase)
@@ -605,6 +644,7 @@ const storeHandlers: Record<keyof typeof SQL, Handler> = {
               ),
         // EXISTS gives a boolean.
         usd_unpriced: usage.some((u) => u.usd === null),
+        ...stalledInputs(db, r, working, steerKind),
       };
     });
   },
@@ -848,7 +888,29 @@ function migratorHandler(text: string): Handler | undefined {
       return [];
     };
   }
+  // 0002_submission_flue_id.sql (D71).
+  if (text.includes('ALTER TABLE triage.submissions ADD COLUMN flue_submission_id text;')) {
+    return (_p, db) => {
+      if (!db.migrated) throw missingRelation('triage.submissions');
+      if (db.flueIdColumn) throw new FakePgError('42701', 'column "flue_submission_id" of relation "submissions" already exists');
+      db.flueIdColumn = true;
+      return [];
+    };
+  }
   return undefined;
+}
+
+/** The lateral join of listRuns (D71): the stalled check's inputs on a row in a working phase, nulls on any other. */
+function stalledInputs(db: State, r: RunRow, working: readonly string[], steerKind: string): Record<string, unknown> {
+  if (!working.includes(r.phase)) return { flue_submission_id: null, steer_flue_submission_id: null, worker_pid: null };
+  const subs = db.submissions.filter((s) => s.run_id === r.run_id).sort((a, b) => b.seq - a.seq);
+  const head = subs.find((s) => s.kind !== steerKind);
+  const steer = subs.find((s) => s.kind === steerKind && s.flue_submission_id !== null && s.seq > (head?.seq ?? 0));
+  return {
+    flue_submission_id: head?.flue_submission_id ?? null,
+    steer_flue_submission_id: steer?.flue_submission_id ?? null,
+    worker_pid: r.worker_pid,
+  };
 }
 
 // ------------------------------------------------------------------ the fake
@@ -1011,6 +1073,6 @@ export function createFakePg(options: FakePgOptions = {}): FakePg {
     embeddingTables() {
       return Object.fromEntries([...db.emb].map(([name, t]) => [name, t.dims]));
     },
-    isMigrated: () => db.migrated,
+    isMigrated: () => db.migrated && db.flueIdColumn,
   };
 }

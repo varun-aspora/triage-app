@@ -9,8 +9,12 @@
 //
 // The whole file is read on each call. That is fine at v1 sizes; a long run
 // writes a few MB.
+//
+// lastRunEventAt reads only the end of the file: the time of the last
+// complete line, for stalled detection (D71). It reads TAIL_BYTES from the
+// end and widens the window only when one line is longer than that.
 
-import { readFile } from 'node:fs/promises';
+import { open, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import * as v from 'valibot';
 import { RunIdSchema } from '../types/core.ts';
@@ -72,4 +76,53 @@ function parseLine(line: string): RunEventLine | null {
   } catch {
     return null;
   }
+}
+
+/** How much of the end of events.jsonl lastRunEventAt reads first. Most lines are far shorter. */
+export const TAIL_BYTES = 16 * 1024;
+
+/**
+ * The ts of the run's last complete event line, in epoch ms. Null when the
+ * run has no log yet or no complete line. A line that does not parse is
+ * skipped for the one before it.
+ */
+export async function lastRunEventAt(runsDir: string, runId: string): Promise<number | null> {
+  if (!v.is(RunIdSchema, runId)) throw new Error('run_id is not a run id');
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(join(runsDir, runId, EVENTS_FILE), 'r');
+  } catch (err) {
+    if ((err as { code?: unknown } | null)?.code === 'ENOENT') return null;
+    throw err;
+  }
+  try {
+    const { size } = await handle.stat();
+    for (let window = TAIL_BYTES; ; window *= 4) {
+      const start = Math.max(0, size - window);
+      const bytes = Buffer.alloc(size - start);
+      await handle.read(bytes, 0, bytes.length, start);
+      const at = lastLineTime(bytes.toString('utf8'), start === 0);
+      if (at !== undefined || start === 0) return at ?? null;
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * The ts of the last complete line in a chunk of the file. The chunk's first
+ * line counts only when the chunk starts the file; otherwise it may be the
+ * tail of a longer line. Undefined when no line in the chunk can be read.
+ */
+function lastLineTime(text: string, fromFileStart: boolean): number | undefined {
+  // Only lines that end in a newline are complete.
+  const lines = text.split('\n');
+  lines.pop();
+  const first = fromFileStart ? 0 : 1;
+  for (let i = lines.length - 1; i >= first; i--) {
+    const line = parseLine(lines[i] ?? '');
+    const at = line === null ? Number.NaN : Date.parse(line.ts);
+    if (Number.isFinite(at)) return at;
+  }
+  return undefined;
 }

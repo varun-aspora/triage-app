@@ -85,6 +85,15 @@ describe('usage on the command shapes', () => {
     expect(v.is(WaitOutputSchema, { run_id: RUN_ID, status: 'completed', usage: { recorded: true } })).toBe(false);
   });
 
+  test('status takes a strict stalled with a known reason (D71)', () => {
+    const running = { ...status, status: 'running', phase: 'investigating' };
+    expect(v.is(StatusOutputSchema, { ...running, stalled: { reason: 'no_owner', since: '2026-09-26T10:00:00.000Z' } })).toBe(true);
+    expect(v.is(StatusOutputSchema, { ...running, stalled: { reason: 'no_progress', since: '2026-09-26T10:00:00.000Z' } })).toBe(true);
+    expect(v.is(StatusOutputSchema, { ...running, stalled: { reason: 'dead', since: '2026-09-26T10:00:00.000Z' } })).toBe(false);
+    expect(v.is(StatusOutputSchema, { ...running, stalled: { reason: 'no_owner', since: 'yesterday' } })).toBe(false);
+    expect(v.is(StatusOutputSchema, { ...running, stalled: { reason: 'no_owner', since: '2026-09-26T10:00:00.000Z', pid: 1 } })).toBe(false);
+  });
+
   test('usage --json always carries the view', () => {
     expect(v.is(UsageOutputSchema, { run_id: RUN_ID, status: 'completed', usage: none })).toBe(true);
     expect(v.is(UsageOutputSchema, { run_id: RUN_ID, status: 'running', usage: partial })).toBe(true);

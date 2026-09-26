@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,7 +16,9 @@ import { RunUsageViewSchema, type RunUsageView, type SubmissionUsage } from '../
 import { IngressInputError } from '../normalise.ts';
 import { prepareRequest, type PrepareDeps, type PrepareInput, type PreparedSubmission } from '../prepare.ts';
 import { SlackFetchError, type SlackThread, type SlackThreadRef } from '../slack.ts';
-import { RESUME_HINTS, RunNotResumableError, type AgentHandle, type Dispatcher, type ResumeInput, type SettleDeps } from '../submit.ts';
+import { RESUME_HINTS, RunNotResumableError, STALLED_STOP_HOLD_MS, type AgentHandle, type Dispatcher, type ResumeInput, type SettleDeps } from '../submit.ts';
+import { flushRunEventLog, installRunEventLog, uninstallRunEventLog } from '../../runlog/event-log.ts';
+import { readRunEvents } from '../../runlog/read.ts';
 import {
   createTriageRoutes,
   IDEMPOTENCY_TTL_MS,
@@ -27,6 +29,7 @@ import {
   startAsk,
   startResume,
   type AskStart,
+  type ResumeStart,
   type TriageRouteDeps,
 } from './routes.ts';
 import { MAX_IDEMPOTENCY_KEY_LENGTH } from './schemas.ts';
@@ -104,6 +107,13 @@ function fakeStore(runs: Record<string, RunRecord> = {}, summaries: RunSummary[]
     },
     async setPhase(_runId: string, phase: string) {
       calls.push(`setPhase:${phase}`);
+    },
+    async setPhaseIf(_runId: string, _from: readonly string[], phase: string) {
+      calls.push(`setPhaseIf:${phase}`);
+      return true;
+    },
+    async setSubmissionFlueId() {
+      calls.push('setSubmissionFlueId');
     },
   };
   return new Proxy(impl, {
@@ -782,6 +792,63 @@ describe('GET /triage/:run_id usage (D59)', () => {
 
 // ------------------------------------------------------------------ GET /triage
 
+describe('GET /triage stalled (D71)', () => {
+  const T = '2026-09-24T10:00:00.000Z';
+  const summary = (run_id: string, over: Partial<RunSummary> = {}): RunSummary => ({
+    run_id,
+    created_at: T,
+    updated_at: T,
+    phase: 'investigating',
+    submissions: 1,
+    ...over,
+  });
+
+  test('a working row gets stalled; no row carries the flue ids or the worker pid', async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), 'triage-routes-list-stalled-'));
+    try {
+      const quiet = '2026-09-24T00:00:00.000Z';
+      mkdirSync(join(runsDir, RUN_B), { recursive: true });
+      writeFileSync(join(runsDir, RUN_B, 'events.jsonl'), `${JSON.stringify({ ts: quiet, source: 'pipeline', type: 'phase', data: {} })}\n`);
+      const checked: number[] = [];
+      const h = harness({
+        runsDir,
+        stalledAfterMs: 60_000,
+        isAlive: (pid) => {
+          checked.push(pid);
+          return false;
+        },
+        summaries: [
+          summary(RUN_A, { worker_pid: 4242, flue_submission_id: 'sub_a' }),
+          summary(RUN_B, { phase: 'dispatched' }),
+          // A finished row never reads anything, and carries no inputs from a store anyway.
+          summary(RUN_C, { phase: 'completed', worker_pid: 777 }),
+        ],
+      });
+      const json = (await (await h.app.request('/triage')).json()) as { runs: Record<string, unknown>[] };
+      expect(json.runs.map((r) => r.stalled)).toEqual([
+        // No lease can be read in this process, so the dead pid counts.
+        { reason: 'no_owner', since: T },
+        { reason: 'no_progress', since: quiet },
+        undefined,
+      ]);
+      for (const r of json.runs) {
+        expect(Object.keys(r)).not.toContain('flue_submission_id');
+        expect(Object.keys(r)).not.toContain('steer_flue_submission_id');
+        expect(Object.keys(r)).not.toContain('worker_pid');
+      }
+      expect(checked).toEqual([4242]);
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+
+  test('a working row that is not stalled has no stalled field', async () => {
+    const h = harness({ summaries: [summary(RUN_A)] });
+    const json = (await (await h.app.request('/triage')).json()) as { runs: Record<string, unknown>[] };
+    expect(json.runs).toEqual([summary(RUN_A)]);
+  });
+});
+
 describe('GET /triage', () => {
   const T1 = '2026-09-24T10:00:00.000Z';
   const T2 = '2026-09-24T09:00:00.000Z';
@@ -1231,6 +1298,74 @@ describe('GET /triage/:run_id on a blocked run', () => {
   });
 });
 
+describe('GET /triage/:run_id stalled (D71)', () => {
+  const STALLED = { reason: 'no_owner' as const, since: '2026-09-24T00:01:00.000Z' };
+
+  test('runView adds stalled when given, next to usage and outside the redaction, and keeps status running', () => {
+    const view = runView(record(RUN_A, 'investigating'), undefined, STALLED);
+    expect(view.stalled).toEqual(STALLED);
+    expect(view.status).toBe('running');
+    expect(view.phase).toBe('investigating');
+    expect('stalled' in runView(record(RUN_A, 'investigating'))).toBe(false);
+    expect('stalled' in runView(record(RUN_A, 'investigating'), undefined, null)).toBe(false);
+  });
+
+  test('the route passes the run to deps.stalled and answers what it returns', async () => {
+    const seen: string[] = [];
+    const h = harness({
+      runs: { [RUN_A]: record(RUN_A, 'investigating') },
+      stalled: async (run) => {
+        seen.push(run.run_id);
+        return STALLED;
+      },
+    });
+    const json = (await (await h.app.request(`/triage/${RUN_A}`)).json()) as Record<string, unknown>;
+    expect(seen).toEqual([RUN_A]);
+    expect(json.stalled).toEqual(STALLED);
+    expect(json.status).toBe('running');
+  });
+
+  test('a stalled check that fails leaves stalled out', async () => {
+    const h = harness({
+      runs: { [RUN_A]: record(RUN_A, 'investigating') },
+      stalled: async () => {
+        throw new Error('lease read failed');
+      },
+    });
+    const res = await h.app.request(`/triage/${RUN_A}`);
+    expect(res.status).toBe(200);
+    expect('stalled' in ((await res.json()) as Record<string, unknown>)).toBe(false);
+  });
+
+  test('by default a dead worker pid shows no_owner, and a quiet events.jsonl no_progress', async () => {
+    const pidRun: RunRecord = { ...record(RUN_A, 'investigating'), worker_pid: 4242 };
+    let json = (await (await harness({ runs: { [RUN_A]: pidRun }, isAlive: () => false }).app.request(`/triage/${RUN_A}`)).json()) as Record<
+      string,
+      unknown
+    >;
+    expect((json.stalled as { reason: string }).reason).toBe('no_owner');
+
+    const runsDir = mkdtempSync(join(tmpdir(), 'triage-routes-stalled-'));
+    try {
+      const quiet = '2026-09-24T00:00:00.000Z';
+      mkdirSync(join(runsDir, RUN_B), { recursive: true });
+      writeFileSync(join(runsDir, RUN_B, 'events.jsonl'), `${JSON.stringify({ ts: quiet, source: 'pipeline', type: 'phase', data: {} })}\n`);
+      const h = harness({ runs: { [RUN_B]: record(RUN_B, 'investigating') }, runsDir, stalledAfterMs: 60_000 });
+      json = (await (await h.app.request(`/triage/${RUN_B}`)).json()) as Record<string, unknown>;
+      expect(json.stalled).toEqual({ reason: 'no_progress', since: quiet });
+      expect(json.status).toBe('running');
+
+      // A finished run is never stalled, whatever its log says.
+      writeFileSync(join(runsDir, RUN_B, 'events.jsonl'), `${JSON.stringify({ ts: quiet, source: 'pipeline', type: 'phase', data: {} })}\n`);
+      const done = harness({ runs: { [RUN_B]: record(RUN_B, 'completed') }, runsDir, stalledAfterMs: 60_000 });
+      json = (await (await done.app.request(`/triage/${RUN_B}`)).json()) as Record<string, unknown>;
+      expect('stalled' in json).toBe(false);
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('POST /triage/:run_id/resume', () => {
   const body = { requested_by: 'ops@example.com', note: 'harbor is back' };
 
@@ -1238,7 +1373,7 @@ describe('POST /triage/:run_id/resume', () => {
     const h = harness({ runs: { [RUN_A]: blockedRecord(RUN_A) } });
     const res = await post(h.app, `/triage/${RUN_A}/resume`, body);
     expect(res.status).toBe(202);
-    expect(await res.json()).toEqual({ run_id: RUN_A, submission_id: 'sub-3' });
+    expect(await res.json()).toEqual({ run_id: RUN_A, submission_id: 'sub-3', mode: 'resume' });
     expect(h.resumes).toEqual([[RUN_A, { by: 'ops@example.com', note: 'harbor is back' }]]);
   });
 
@@ -1260,8 +1395,8 @@ describe('POST /triage/:run_id/resume', () => {
   });
 
   test.each([
-    ['created', record(RUN_A, 'created'), RESUME_HINTS.running],
-    ['investigating', record(RUN_A, 'investigating'), RESUME_HINTS.running],
+    ['created', record(RUN_A, 'created'), RESUME_HINTS.starting],
+    ['investigating with no submission', record(RUN_A, 'investigating'), RESUME_HINTS.starting],
     ['waiting on a question', record(RUN_A, 'needs_input'), RESUME_HINTS.needs_input],
     ['completed', { ...record(RUN_A, 'completed'), submissions: [INITIAL] }, RESUME_HINTS.completed],
     ['failed before dispatch', record(RUN_A, 'failed'), RESUME_HINTS.never_started],
@@ -1334,7 +1469,14 @@ describe('POST /triage/:run_id/resume', () => {
     });
     const res = await post(h.app, `/triage/${RUN_A}/resume`, body);
     expect(res.status).toBe(202);
-    expect(await res.json()).toEqual({ run_id: RUN_A, submission_id: 'sub-9' });
+    expect(await res.json()).toEqual({ run_id: RUN_A, submission_id: 'sub-9', mode: 'resume' });
+
+    const steered = harness({
+      runs: { [RUN_A]: { ...record(RUN_A, 'investigating'), submissions: [INITIAL] } },
+      resume: () => ({ dispatched: new Promise(() => undefined), settled: Promise.resolve({ submission_id: 'sub-9', mode: 'steer' }) }),
+    });
+    const r = await post(steered.app, `/triage/${RUN_A}/resume`, body);
+    expect(await r.json()).toEqual({ run_id: RUN_A, submission_id: 'sub-9', mode: 'steer' });
   });
 
   test('a later failure of the resume is reported as resume, never thrown into the response', async () => {
@@ -1354,6 +1496,279 @@ describe('POST /triage/:run_id/resume', () => {
     await tick();
     await tick();
     expect(seen).toEqual([`resume:${RUN_A}`]);
+  });
+});
+
+describe('POST /triage/:run_id/resume on a working run (D72)', () => {
+  const working = (): RunRecord => ({ ...record(RUN_A, 'investigating'), submissions: [INITIAL] });
+  const STALLED = { reason: 'no_owner' as const, since: AT };
+
+  test('with a message -> 202 with the mode resumeRun chose', async () => {
+    const h = harness({
+      runs: { [RUN_A]: working() },
+      resume: (runId, input): ResumeStart => {
+        h.resumes.push([runId, input]);
+        return { dispatched: Promise.resolve('sub-4'), mode: Promise.resolve('steer'), settled: new Promise(() => undefined) };
+      },
+      // A stalled check that fails counts as not stalled: the message is a steer.
+      stalled: async () => {
+        throw new Error('no lease to read');
+      },
+    });
+    const res = await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops', note: 'the payout went out at 10:02' });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ run_id: RUN_A, submission_id: 'sub-4', mode: 'steer' });
+    expect(h.resumes).toEqual([[RUN_A, { by: 'ops', note: 'the payout went out at 10:02' }]]);
+  });
+
+  test('stalled: 202 {submission_id: null, mode: resume} at once, before the stop and the dispatch; a later failure is reported', async () => {
+    let fail!: (err: unknown) => void;
+    const seen: string[] = [];
+    const h = harness({
+      runs: { [RUN_A]: working() },
+      stalled: async () => STALLED,
+      resume: (runId, input): ResumeStart => {
+        h.resumes.push([runId, input]);
+        return {
+          // The stop, the abort and the wait are still running.
+          dispatched: new Promise(() => undefined),
+          mode: Promise.resolve('resume'),
+          settled: new Promise((_, reject) => (fail = reject)),
+        };
+      },
+      onBackgroundError: (runId, what, err) => seen.push(`${what}:${runId}:${(err as Error).message}`),
+    });
+    const res = await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops', note: 'the worker died' });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ run_id: RUN_A, submission_id: null, mode: 'resume' });
+    expect(h.resumes).toEqual([[RUN_A, { by: 'ops', note: 'the worker died' }]]);
+    fail(new Error('abort failed'));
+    await tick();
+    await tick();
+    expect(seen).toEqual([`resume:${RUN_A}:abort failed`]);
+  });
+
+  test('stalled, but resumeRun steers it after all: the answer waits for the steer and gives its id', async () => {
+    const h = harness({
+      runs: { [RUN_A]: working() },
+      stalled: async () => STALLED,
+      resume: (): ResumeStart => ({ dispatched: tick().then(() => 'sub-6'), mode: Promise.resolve('steer'), settled: new Promise(() => undefined) }),
+    });
+    const res = await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops', note: 'look' });
+    expect(await res.json()).toEqual({ run_id: RUN_A, submission_id: 'sub-6', mode: 'steer' });
+  });
+
+  test('stalled: a refusal before resumeRun chose (the tunnel) is still 409, and not reported as a background failure', async () => {
+    const seen: string[] = [];
+    const h = harness({
+      runs: { [RUN_A]: working() },
+      stalled: async () => STALLED,
+      resume: (): ResumeStart => ({
+        dispatched: new Promise(() => undefined),
+        mode: new Promise(() => undefined),
+        settled: Promise.reject(new RunNotResumableError(RUN_A, 'investigating', 'SSFB DB tunnel did not start; triage tunnel up')),
+      }),
+      onBackgroundError: (runId, what) => seen.push(`${what}:${runId}`),
+    });
+    const res = await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops' });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'run is not resumable', phase: 'investigating', hint: 'SSFB DB tunnel did not start; triage tunnel up' });
+    await tick();
+    expect(seen).toEqual([]);
+  });
+
+  test('a run another process stopped as stalled a moment ago is 409 in_progress; one left over past the hold is resumed', async () => {
+    const long = new Date(Date.now() - 10 * STALLED_STOP_HOLD_MS).toISOString();
+    const initial = { ...INITIAL, created_at: long };
+    const runs = { [RUN_A]: { ...working(), submissions: [initial], phase: 'stopped' as const, phase_reason: 'stalled', updated_at: new Date().toISOString() } };
+    const h = harness({ runs });
+    const res = await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops', note: 'again' });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'run is not resumable', phase: 'stopped', hint: RESUME_HINTS.in_progress });
+    expect(h.resumes).toHaveLength(0);
+
+    // The process that stopped it died: once the hold has passed the stop is left over.
+    runs[RUN_A] = { ...runs[RUN_A]!, updated_at: new Date(Date.now() - STALLED_STOP_HOLD_MS - 1000).toISOString() };
+    const later = await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops', note: 'again' });
+    expect(later.status).toBe(202);
+    expect(h.resumes).toHaveLength(1);
+  });
+
+  test('a stalled resume that fails after its stop and before its dispatch leaves the run failed, with the reason and a phase line', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'triage-stalled-fail-'));
+    const runsDir = join(root, 'runs');
+    installRunEventLog({ runsDir, observe: () => () => undefined });
+    try {
+      const folder = createFolderRunStore({ runsDir, dataDir: join(root, 'data') });
+      await folder.createRun(RUN_A, redactPersisted(sampleRequest(RUN_A)));
+      await folder.addSubmission(RUN_A, redactPersisted({ kind: 'initial' as const }));
+      await folder.setPhase(RUN_A, 'investigating');
+      // The resume's own submission cannot be written, once: it fails after the stop, before the dispatch.
+      let broken = true;
+      const store = new Proxy(folder, {
+        get(target, prop) {
+          if (prop === 'addSubmission' && broken) {
+            broken = false;
+            return async () => Promise.reject(new Error('store went away'));
+          }
+          const value = Reflect.get(target, prop, target) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const dispatcher: Dispatcher = {
+        init() {
+          return {
+            dispatch: async () => ({ submissionId: 'sub-9', acceptedAt: AT }),
+            read: () => new Promise<AgentReply>(() => undefined),
+            abort: async () => undefined,
+          } as unknown as AgentHandle;
+        },
+      };
+      const settle: SettleDeps = {
+        config: { mock: { enabled: true }, runs: { priorCases: false }, budgets: { runTimeoutMs: 60_000, runMaxAttempts: 1 } },
+        store,
+        dispatcher,
+        agent: {} as Agent,
+        embedder: null,
+        stalled: async () => STALLED,
+        lease: async () => null,
+        stopPollMs: 0,
+      };
+      let reported!: () => void;
+      const failed = new Promise<void>((resolve) => (reported = resolve));
+      const seen: string[] = [];
+      const h = harness({
+        store,
+        stalled: async () => STALLED,
+        resume: (runId, input) => startResume(runId, input, settle),
+        onBackgroundError: (runId, what, err) => {
+          seen.push(`${what}:${runId}:${(err as Error).message}`);
+          reported();
+        },
+      });
+      const res = await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops', note: 'the worker died' });
+      expect(res.status).toBe(202);
+      await failed;
+      expect(seen).toEqual([`resume:${RUN_A}:store went away`]);
+      const run = await folder.getRun(RUN_A);
+      expect([run?.phase, run?.phase_reason]).toEqual(['failed', 'Error: store went away']);
+      // Failed, it takes a resume again at once.
+      expect((await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops' })).status).toBe(202);
+
+      await flushRunEventLog();
+      const { events } = await readRunEvents(runsDir, RUN_A);
+      const pipeline = events.filter((e) => e.source === 'pipeline').map((e) => [e.type, e.data]);
+      expect(pipeline).toContainEqual(['phase', { phase: 'failed', reason: 'Error: store went away' }]);
+    } finally {
+      await flushRunEventLog();
+      uninstallRunEventLog();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('one resume at a time per run: a second one while the first has not dispatched is 409 in_progress', async () => {
+    let dispatch!: (id: string) => void;
+    let calls = 0;
+    const runs = { [RUN_A]: working(), [RUN_B]: { ...record(RUN_B, 'investigating'), submissions: [INITIAL] } };
+    const h = harness({
+      runs,
+      stalled: async () => STALLED,
+      resume: (runId, input): ResumeStart => {
+        calls += 1;
+        h.resumes.push([runId, input]);
+        if (runId === RUN_B) return { dispatched: Promise.resolve('sub-b'), mode: Promise.resolve('resume'), settled: new Promise(() => undefined) };
+        return { dispatched: new Promise((resolve) => (dispatch = resolve)), mode: Promise.resolve('resume'), settled: new Promise(() => undefined) };
+      },
+    });
+    const first = await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops' });
+    expect(first.status).toBe(202);
+    // The run shows stopped while the resume waits for the old submission; a second press must not resume it again.
+    runs[RUN_A] = { ...working(), phase: 'stopped', phase_reason: 'stalled' };
+    const second = await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops', note: 'again' });
+    expect(second.status).toBe(409);
+    expect(await second.json()).toEqual({ error: 'run is not resumable', phase: 'stopped', hint: RESUME_HINTS.in_progress });
+    // Another run is not held up.
+    expect((await post(h.app, `/triage/${RUN_B}/resume`, { requested_by: 'ops' })).status).toBe(202);
+    expect(calls).toBe(2);
+
+    // Once the first resume dispatched, the run takes a resume again.
+    dispatch('sub-a');
+    await tick();
+    runs[RUN_A] = working();
+    const third = await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops', note: 'look' });
+    expect(third.status).toBe(202);
+    expect(calls).toBe(3);
+  });
+
+  test('the guard covers any resume: a blocked run whose resume has not dispatched yet refuses a second one', async () => {
+    let dispatch!: (id: string) => void;
+    const h = harness({
+      runs: { [RUN_A]: blockedRecord(RUN_A) },
+      resume: (): ResumeStart => ({ dispatched: new Promise((resolve) => (dispatch = resolve)), settled: new Promise(() => undefined) }),
+    });
+    const first = post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops' });
+    await tick();
+    const second = await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops' });
+    expect(second.status).toBe(409);
+    expect(((await second.json()) as { hint: string }).hint).toBe(RESUME_HINTS.in_progress);
+    dispatch('sub-3');
+    expect((await first).status).toBe(202);
+  });
+
+  test('a resume that fails before its dispatch frees the run for the next one', async () => {
+    let n = 0;
+    const h = harness({
+      runs: { [RUN_A]: blockedRecord(RUN_A) },
+      resume: (): ResumeStart => {
+        n += 1;
+        return n === 1
+          ? { dispatched: new Promise(() => undefined), settled: Promise.reject(new Error('dispatch failed')) }
+          : { dispatched: Promise.resolve('sub-3'), settled: new Promise(() => undefined) };
+      },
+    });
+    const errorSpy = spyOn(console, 'error').mockImplementation(() => undefined);
+    const failed = await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops' });
+    errorSpy.mockRestore();
+    expect(failed.status).toBe(500);
+    expect((await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops' })).status).toBe(202);
+  });
+
+  test('no message: 409 with the steer hint unless the run stalled, then 202 resume', async () => {
+    const quiet = harness({ runs: { [RUN_A]: working() }, stalled: async () => null });
+    const refused = await post(quiet.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops' });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({ error: 'run is not resumable', phase: 'investigating', hint: RESUME_HINTS.running });
+    expect(quiet.resumes).toHaveLength(0);
+
+    const seen: RunRecord[] = [];
+    const h = harness({
+      runs: { [RUN_A]: working() },
+      stalled: async (run) => {
+        seen.push(run);
+        return STALLED;
+      },
+      resume: (runId, input): ResumeStart => {
+        h.resumes.push([runId, input]);
+        return { dispatched: Promise.resolve('sub-5'), mode: Promise.resolve('resume'), settled: new Promise(() => undefined) };
+      },
+    });
+    const res = await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops' });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ run_id: RUN_A, submission_id: null, mode: 'resume' });
+    expect(seen.map((r) => r.run_id)).toEqual([RUN_A]);
+  });
+
+  test('a waiting or completed run stays 409 with its own hint, with or without a message', async () => {
+    for (const [run, hint] of [
+      [record(RUN_A, 'needs_input'), RESUME_HINTS.needs_input],
+      [{ ...record(RUN_A, 'completed'), submissions: [INITIAL] }, RESUME_HINTS.completed],
+    ] as const) {
+      const h = harness({ runs: { [RUN_A]: run } });
+      const res = await post(h.app, `/triage/${RUN_A}/resume`, { requested_by: 'ops', note: 'look at the bank reply' });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'run is not resumable', phase: run.phase, hint });
+      expect(h.resumes).toHaveLength(0);
+    }
   });
 });
 
@@ -1394,6 +1809,7 @@ describe('startResume', () => {
       };
       const started = startResume(RUN_A as RunId, { by: 'ops-reviewer', note: 'harbor is back' }, deps);
       expect(await started.dispatched).toBe('sub-8');
+      expect(await started.mode).toBe('resume');
       expect(inits).toEqual([{ id: RUN_A }]);
       expect(messages).toHaveLength(1);
       expect(messages[0]).toMatchObject({ kind: 'signal', type: BLOCK_RESUME_SIGNAL });
@@ -1415,6 +1831,55 @@ describe('startResume', () => {
       const result = (await started.settled) as { status: string; submission_id: string; submission_seq: number };
       expect(result).toMatchObject({ status: 'completed', submission_id: 'sub-8', submission_seq: 2 });
       expect((await store.getRun(RUN_A))?.phase).toBe('completed');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('startResume on a working run (D72)', () => {
+  test('mode resolves steer before the dispatch, and the steer is sent as its own submission', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'triage-steer-'));
+    try {
+      const store = createFolderRunStore({ runsDir: join(root, 'runs'), dataDir: join(root, 'data') });
+      await store.createRun(RUN_A, redactPersisted(sampleRequest(RUN_A)));
+      await store.addSubmission(RUN_A, redactPersisted({ kind: 'initial' as const }));
+      await store.setPhase(RUN_A, 'investigating');
+
+      const order: string[] = [];
+      const dispatcher: Dispatcher = {
+        init() {
+          return {
+            dispatch: async () => {
+              order.push('dispatch');
+              return { submissionId: 'sub-9', acceptedAt: AT };
+            },
+            read: () => new Promise<AgentReply>(() => undefined),
+            abort: async () => undefined,
+          } as unknown as AgentHandle;
+        },
+      };
+      const deps: SettleDeps = {
+        config: { mock: { enabled: true }, runs: { priorCases: false }, budgets: { runTimeoutMs: 60_000, runMaxAttempts: 1 } },
+        store,
+        dispatcher,
+        agent: {} as Agent,
+        embedder: null,
+        now: () => new Date(AT),
+        stalled: async () => null,
+        onResumeMode: (m) => order.push(`mode:${m}`),
+      };
+      const started = startResume(RUN_A as RunId, { by: 'ops', note: 'the payout went out' }, deps);
+      expect(await started.dispatched).toBe('sub-9');
+      expect(await started.mode).toBe('steer');
+      // The caller's own listener still hears it, before the dispatch.
+      expect(order).toEqual(['mode:steer', 'dispatch']);
+      const run = await store.getRun(RUN_A);
+      expect(run?.phase).toBe('investigating');
+      expect(run?.submissions.map((s) => [s.seq, s.kind, s.note])).toEqual([
+        [1, 'initial', undefined],
+        [2, 'steer', 'the payout went out'],
+      ]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

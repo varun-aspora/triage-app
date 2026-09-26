@@ -55,6 +55,7 @@ import {
   type ResolvedBlock,
 } from '../types/block.ts';
 import type { TriageRequest } from '../types/request.ts';
+import { StalledSchema } from '../types/stalled.ts';
 
 export type { Persisted } from '../gate/redact.ts';
 
@@ -90,12 +91,23 @@ export function isTerminalPhase(phase: RunPhase): boolean {
   return TERMINAL_PHASES.includes(phase);
 }
 
+/**
+ * The phases in which a process should be working on the run: the ones
+ * stalled detection checks (D71). listRuns returns the stalled check's
+ * inputs for these rows only.
+ */
+export const WORKING_PHASES: readonly RunPhase[] = ['dispatched', 'investigating'];
+
 /** Optional detail recorded with a phase change. */
 export type PhaseDetail = {
   /** Why the run failed, for example the error class name. Scanned before write. */
   readonly reason?: string;
-  /** The detached worker's pid, so status can tell a stalled run. */
-  readonly worker_pid?: number;
+  /**
+   * The detached worker's pid, so status can tell a stalled run. Left out,
+   * the recorded pid is kept; null clears it (a dispatch from a process that
+   * is not a worker, D71).
+   */
+  readonly worker_pid?: number | null;
   /**
    * A stopped run stays stopped: setPhase leaves it alone unless resume is
    * set. Only a new follow-up submission sets it.
@@ -142,7 +154,9 @@ export type EvidenceRecord = {
   readonly findings: Findings;
 };
 
-export const SUBMISSION_KINDS = ['initial', 'ask', 'answer', 'resume'] as const;
+// 'steer' (D72): a note sent while the run is still working. Flue joins it
+// into the live response at the next turn boundary, so it settles with it.
+export const SUBMISSION_KINDS = ['initial', 'ask', 'answer', 'resume', 'steer'] as const;
 export const SubmissionInputSchema = v.object({
   kind: v.picklist(SUBMISSION_KINDS),
   // The follow-up question of a `triage ask`, persisted profile.
@@ -153,15 +167,30 @@ export const SubmissionInputSchema = v.object({
   answer: v.optional(v.string()),
   // A 'resume' submission (D55): the block it closes, when the run was
   // blocked, and the note from the person who resumed (persisted profile).
+  // A 'steer' submission (D72) carries the note only.
   block_id: v.optional(BlockIdSchema),
   note: v.optional(v.string()),
 });
 export type SubmissionInput = v.InferOutput<typeof SubmissionInputSchema>;
 
+/**
+ * Flue's submission id from the dispatch receipt: 'sub_' and a ULID, or
+ * 'sub_ik_' and hex for a keyed dispatch. Checked by shape, not by the
+ * persisted profile, which would mask the digit runs a ULID can hold.
+ */
+export const FLUE_SUBMISSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+export const FlueSubmissionIdSchema = v.pipe(v.string(), v.regex(FLUE_SUBMISSION_ID_PATTERN));
+
 export const SubmissionMetaSchema = v.object({
   ...SubmissionInputSchema.entries,
   seq: v.pipe(v.number(), v.integer(), v.minValue(1)),
   created_at: TakenAtSchema,
+  /**
+   * Flue's id for this submission (D71), set once the dispatch receipt
+   * arrives. Absent before that and on runs from before D71. Stalled
+   * detection reads the submission's lease with it.
+   */
+  flue_submission_id: v.optional(FlueSubmissionIdSchema),
 });
 export type SubmissionMeta = v.InferOutput<typeof SubmissionMetaSchema>;
 
@@ -323,6 +352,18 @@ export const RunSummarySchema = v.object({
   tokens_total: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0))),
   /** Set when usd_total leaves out at least one row that has no price. */
   usd_partial: v.optional(v.literal(true)),
+  /**
+   * The stalled check's inputs (D71), on a dispatched or investigating row
+   * only. GET /triage reads them and leaves them out of its answer.
+   * flue_submission_id is the Flue id of the latest submission that is not
+   * a steer; steer_flue_submission_id that of the latest steer after it
+   * that has one; worker_pid the run's recorded worker pid.
+   */
+  flue_submission_id: v.optional(FlueSubmissionIdSchema),
+  steer_flue_submission_id: v.optional(FlueSubmissionIdSchema),
+  worker_pid: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1))),
+  /** Set by GET /triage while the run is stalled (D71). A store never sets it. */
+  stalled: v.optional(StalledSchema),
 });
 export type RunSummary = v.InferOutput<typeof RunSummarySchema>;
 
@@ -349,6 +390,15 @@ export interface RunStore {
    * run is stopped and detail.resume is not set.
    */
   setPhase(runId: RunId, phase: RunPhase, detail?: PhaseDetail): Promise<boolean>;
+  /**
+   * Compare-and-set: moves the run to the phase only when its current phase
+   * is one of fromPhases, in one atomic step. Returns whether it wrote. The
+   * reason and worker pid are written as setPhase writes them. detail.resume
+   * is not read: fromPhases alone decides, so a stopped run is overwritten
+   * only when 'stopped' is listed. Throws RunNotFoundError for an unknown
+   * run, and RunStoreError for an empty or unknown phase list.
+   */
+  setPhaseIf(runId: RunId, fromPhases: readonly RunPhase[], phase: RunPhase, detail?: PhaseDetail): Promise<boolean>;
   /**
    * Opens a question for the requester and moves the run to phase
    * needs_input, clearing the phase reason. Throws InputRequestOpenError
@@ -385,6 +435,13 @@ export interface RunStore {
   putClassification(runId: RunId, record: Persisted<ClassificationRecord>): Promise<void>;
   /** Stores a new version of the findings for the key and returns it (1, 2, ...). */
   putEvidence(runId: RunId, key: EvidenceKey, findings: Persisted<Findings>): Promise<number>;
+  /**
+   * Records Flue's submission id on one submission, from its dispatch
+   * receipt (D71). A second call replaces the id. Does not change the run's
+   * updated_at. Throws RunNotFoundError for an unknown run, and
+   * RunStoreError for an unknown submission or an id that is not Flue's shape.
+   */
+  setSubmissionFlueId(runId: RunId, seq: number, flueSubmissionId: string): Promise<void>;
   /** Stores the report of one submission. The run's report is the latest submission's. */
   putReport(runId: RunId, submissionId: number, report: Persisted<Report>, md: Persisted<string>): Promise<void>;
   /** Appends a feedback entry. Nothing is overwritten; the last entry wins. */
@@ -558,6 +615,20 @@ export function checkUsage(seq: number, rows: readonly UsageRow[], final: boolea
 export function assertQuestionId(questionId: string): string {
   if (!v.is(QuestionIdSchema, questionId)) throw new RunStoreError('invalid question id');
   return questionId;
+}
+
+/** A setPhaseIf phase list: at least one phase, each a known one. Duplicates are dropped. */
+export function assertPhaseList(phases: readonly RunPhase[]): RunPhase[] {
+  if (!Array.isArray(phases) || phases.length === 0) throw new RunStoreError('invalid phase list');
+  for (const phase of phases) {
+    if (!v.is(RunPhaseSchema, phase)) throw new RunStoreError('invalid phase list');
+  }
+  return [...new Set(phases)];
+}
+
+export function assertFlueSubmissionId(id: string): string {
+  if (!v.is(FlueSubmissionIdSchema, id)) throw new RunStoreError('invalid flue submission id');
+  return id;
 }
 
 export function assertBlockId(blockId: string): string {

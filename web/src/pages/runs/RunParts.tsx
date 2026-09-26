@@ -9,7 +9,6 @@ import { Panel } from '../../components/Panel.tsx';
 import { Segmented } from '../../components/Segmented.tsx';
 import { StatusTag } from '../../components/StatusTag.tsx';
 import { EVIDENCE_LADDER_STEPS } from '../../lib/constants.ts';
-import { runStatusTone } from '../../lib/status.ts';
 import { formatDateTime, formatDuration, formatTokens, shortRunId } from '../../lib/format.ts';
 import { downloadText } from './browser.ts';
 import {
@@ -17,6 +16,7 @@ import {
   formatCalls,
   formatCost,
   formatTokenSplit,
+  headerStatus,
   isLongText,
   permalinkHref,
   reportStatusLook,
@@ -62,12 +62,14 @@ export function Tags({ items }: { items: readonly string[] }) {
 
 // ------------------------------------------------------------------ header
 
-export function RunHeader({ run, extraMeta }: { run: RunDetail; extraMeta?: ReactNode }) {
+/** resuming: a stalled run's resume is in flight (D72), so the tag reads resuming whatever the phase is meanwhile. */
+export function RunHeader({ run, extraMeta, resuming = false }: { run: RunDetail; extraMeta?: ReactNode; resuming?: boolean }) {
   const report = run.report;
   const href = permalinkHref(run.permalink);
   const version = reportVersionLabel(run.submissions);
   const tier = report?.classification.tier_final ?? run.classification?.tier_final;
   const category = report?.classification.proposed.category ?? run.classification?.proposed.category;
+  const status = headerStatus(run, resuming);
 
   const actions =
     report !== undefined ? (
@@ -97,7 +99,7 @@ export function RunHeader({ run, extraMeta }: { run: RunDetail; extraMeta?: Reac
       actions={actions}
     >
       <div className="runs-tags">
-        <StatusTag look={runStatusTone(run.status)}>{run.status === 'running' ? run.phase : run.status}</StatusTag>
+        <StatusTag look={status.look}>{status.text}</StatusTag>
         {category !== undefined && <StatusTag tone="neutral">{category}</StatusTag>}
         {tier !== undefined && <StatusTag tone="neutral">{tier}</StatusTag>}
         {report !== undefined && <StatusTag look={reportStatusLook(report.status)}>{report.status}</StatusTag>}

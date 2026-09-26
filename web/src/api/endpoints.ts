@@ -69,7 +69,11 @@ export function askRun(runId: string, body: AskBody): Promise<AskResponse> {
   return request('POST', `/triage/${seg(runId)}/ask`, { body });
 }
 
-/** Sends a blocked, failed or stopped run on (D55). 409 with a hint when the run cannot be resumed. */
+/**
+ * Sends a blocked, failed or stopped run on (D55). A run still investigating
+ * takes the note as a steer, and a stalled one is stopped and resumed (D72);
+ * the response's mode says which. 409 with a hint when the run cannot be resumed.
+ */
 export function resumeRun(runId: string, body: ResumeBody): Promise<ResumeResponse> {
   return request('POST', `/triage/${seg(runId)}/resume`, { body });
 }

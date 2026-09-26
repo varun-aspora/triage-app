@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { TriageRequest } from '../types/request.ts';
-import { renderAnswer, renderAsk, renderResume, renderThread } from './render-thread.ts';
+import { renderAnswer, renderAsk, renderResume, renderSteer, renderThread } from './render-thread.ts';
 
 const PAN = '4111111111111111';
 const ACCOUNT = '918020012345678';
@@ -166,3 +166,35 @@ describe('renderResume', () => {
   });
 });
 
+describe('renderResume of a stalled run (D72)', () => {
+  const none = { by: 'ops', at: AT, note: '' };
+
+  test('says the run stalled and was stopped, with the reason when known, and ends like a stopped run', () => {
+    const owner = renderResume({ kind: 'stopped', stalled: { reason: 'no_owner' } }, { by: 'ops', at: AT, note: 'the worker died' });
+    expect(owner).toContain('This run stalled before it finished (no process was working on it), so it was stopped.');
+    expect(owner).toContain(`ops resumed it at ${AT}.`);
+    expect(owner).toContain('Message from ops:\nthe worker died');
+    expect(owner).toContain('call finish_report with the report');
+    expect(owner).not.toContain('was stopped before it finished');
+
+    expect(renderResume({ kind: 'stopped', stalled: { reason: 'no_progress' } }, none)).toContain(
+      'This run stalled before it finished (it made no progress for a while), so it was stopped.',
+    );
+    expect(renderResume({ kind: 'stopped', stalled: {} }, none)).toContain('This run stalled before it finished, so it was stopped.');
+    expect(renderResume({ kind: 'stopped' }, none)).toContain('This run was stopped before it finished.');
+  });
+});
+
+describe('renderSteer (D72)', () => {
+  test('the note, who added it and when, and nothing else', () => {
+    const text = renderSteer({ by: 'ops-reviewer', at: AT, note: '  the payout went out at 10:02\nlook at the bank reply  ' });
+    expect(text).toBe(`Note from ops-reviewer, added at ${AT} while this run is working:\nthe payout went out at 10:02\nlook at the bank reply`);
+  });
+
+  test('model-facing profile: a PAN and the email local part are masked, the account number is kept', () => {
+    const text = renderSteer({ by: 'ops.reviewer@example.com', at: AT, note: `card ${PAN} is the test card; check ${ACCOUNT}` });
+    expect(text).not.toContain(PAN);
+    expect(text).not.toContain('ops.reviewer@');
+    expect(text).toContain(ACCOUNT);
+  });
+});

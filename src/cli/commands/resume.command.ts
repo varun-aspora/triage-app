@@ -2,9 +2,15 @@
 //
 // Sends a blocked run on once the system it waited for answers again (D55),
 // through a detached worker that calls resumeRun, and prints
-// {run_id, submission_id}. submission_id is the run store seq the resume
-// gets. Follow it with `triage wait <run_id>`. A run that failed after it was
-// dispatched, or was stopped, is resumed the same way.
+// {run_id, submission_id, mode}. submission_id is the run store seq the
+// resume gets. Follow it with `triage wait <run_id>`. A run that failed after
+// it was dispatched, or was stopped, is resumed the same way.
+//
+// A run that is still working (dispatched or investigating) is taken too
+// (D72): the message is sent to it as a steer, which joins the live response
+// (mode steer). When the run has stalled, the worker stops it (reason
+// 'stalled', no verdict) and resumes it with the message (mode resume). A
+// working run that is not stalled needs a message.
 //
 // The message is for the model and the record: what was fixed, and
 // anything new the run should take into account.
@@ -12,7 +18,8 @@
 // Refused, with nothing started (exit 1, the same rules and hints as
 // resumeRun):
 //   - an unknown run;
-//   - a run that is still going, in any phase before it settled;
+//   - a run that has not reached its investigation yet;
+//   - a working run that is not stalled, with no message;
 //   - a run waiting on a question: that is answered with `triage input`;
 //   - a completed run: that takes a follow-up with `triage ask`;
 //   - a run that failed before it started an investigation: it has no
@@ -24,23 +31,27 @@
 // this command leaves the phase alone (unlike `triage ask`, which marks the
 // run dispatched at once). Instead it waits until the worker has taken the
 // run over: the block closed, the resume submission added or the phase moved
-// on. So a `triage wait` right after this does not see the block, the
-// failure or the stop the run is being resumed from. If the worker exits
-// before that, or gives up before it sent the run on, this exits 1 and says
-// so. If the worker is still starting after the takeover timeout, this
-// returns anyway: the run is on its way.
+// on; for a working run, the steer or resume submission added, or the run
+// stopped as stalled. So a `triage wait` right after this does not see the
+// block, the failure or the stop the run is being resumed from. If the
+// worker exits before that, or gives up before it sent the run on, this
+// exits 1 and says so. If the worker is still starting after the takeover
+// timeout, this returns anyway: the run is on its way, and mode is the one
+// the stalled check here predicts.
 //
 // Before the worker starts, this repeats the tunnel part of pre-flight (D56):
 // in local mode the SSFB tunnel may have died while the run was parked, so
 // `triage resume` brings it back, and refuses here, with the reason and the
 // fix, when it does not come up (exit 1, nothing started). The worker makes
 // the same check; this one is for the person's eyes, since the worker's
-// output is not shown.
+// output is not shown. A steer skips it: the run is working, so its path is up.
 import type { Config } from '../../config/env.ts';
 import { loadRegistry, RegistryError, type Registry } from '../../config/registry.ts';
 import { createExecRunner } from '../../connectors/exec.ts';
 import { spawnWorker } from '../../ingress/detach.ts';
-import { resumeReadinessRefusal, resumeRefusal } from '../../ingress/submit.ts';
+import { STALLABLE_PHASES } from '../../ingress/stalled.ts';
+import { type ResumeMode, resumeReadinessRefusal, resumeRefusal, STALLED_STOP_REASON } from '../../ingress/submit.ts';
+import type { SubmissionLeases } from '../../db.ts';
 import { netTcpConnect } from '../../ops/doctor/probes.ts';
 import { runTunnelPreflight, type PreflightResult } from '../../ops/preflight.ts';
 import type { RunRecord } from '../../runstore/types.ts';
@@ -50,7 +61,16 @@ import { requestedByOf, reportInputError, UsageError } from '../lib/request-args
 import { EXIT, printError, printHuman } from '../output.ts';
 import type { CliCommand } from '../types.ts';
 import type { SpawnFn } from './start.command.ts';
-import { checkRunIdArg, defaultOpenStore, pidAlive, printNotFound, type OpenStore, type PidChecker } from './status.command.ts';
+import {
+  checkRunIdArg,
+  defaultOpenLeases,
+  defaultOpenStore,
+  pidAlive,
+  printNotFound,
+  statusStalled,
+  type OpenStore,
+  type PidChecker,
+} from './status.command.ts';
 
 /** How often the store is read while the worker takes the run over. */
 export const TAKEOVER_POLL_MS = 250;
@@ -68,6 +88,8 @@ export type ResumeCommandOptions = {
   readonly defaultRequestedBy?: () => string | undefined;
   /** The resume pre-flight (the SSFB tunnel, D56). Defaults to runTunnelPreflight with the real runner and probe. */
   readonly readiness?: (config: Config, isTty: boolean) => Promise<Pick<PreflightResult, 'warnings'>>;
+  /** Flue lease reads for the stalled check of a working run (D71, D72). Defaults to openSubmissionLeases from src/db.ts. */
+  readonly openLeases?: (config: Config) => Promise<SubmissionLeases>;
 };
 
 const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -84,11 +106,29 @@ async function defaultReadiness(config: Config, isTty: boolean): Promise<Pick<Pr
   return runTunnelPreflight({ config, registry, runner: createExecRunner(), tcpProbe: netTcpConnect, isTty });
 }
 
-type TakeoverView = Pick<RunRecord, 'phase' | 'submissions' | 'block'>;
+type TakeoverView = Pick<RunRecord, 'phase' | 'phase_reason' | 'submissions' | 'block'>;
 
-/** True once resumeRun in the worker has written: the block closed, the resume submission added or the phase moved. */
+/**
+ * True once resumeRun in the worker has written: the block closed, the resume
+ * submission added or the phase moved. A working run keeps its phase while it
+ * is steered (D72), so for it the sign is the new submission, or the stop of
+ * a stalled run.
+ */
 export function takenOver(before: TakeoverView, now: TakeoverView): boolean {
-  return now.submissions.length > before.submissions.length || now.phase !== before.phase || (before.block !== null && now.block === null);
+  const added = now.submissions.length > before.submissions.length;
+  if (STALLABLE_PHASES.includes(before.phase)) return added || stoppedAsStalled(now);
+  return added || now.phase !== before.phase || (before.block !== null && now.block === null);
+}
+
+function stoppedAsStalled(run: Pick<RunRecord, 'phase' | 'phase_reason'>): boolean {
+  return run.phase === 'stopped' && run.phase_reason === STALLED_STOP_REASON;
+}
+
+/** What the worker did, from the submission it added; before that, the predicted mode. */
+export function takenMode(before: Pick<RunRecord, 'submissions'>, now: Pick<RunRecord, 'submissions'>, predicted: ResumeMode): ResumeMode {
+  const added = now.submissions.slice(before.submissions.length);
+  if (added.length === 0) return predicted;
+  return added.some((sub) => sub.kind === 'steer') ? 'steer' : 'resume';
 }
 
 type Takeover =
@@ -106,9 +146,10 @@ export function createResumeCommand(options: ResumeCommandOptions = {}): CliComm
   const pollMs = options.pollMs ?? TAKEOVER_POLL_MS;
   const takeoverMs = options.takeoverMs ?? TAKEOVER_TIMEOUT_MS;
   const readiness = options.readiness ?? defaultReadiness;
+  const openLeases = options.openLeases ?? defaultOpenLeases;
   return {
     path: ['resume'],
-    summary: 'send a run on after the system it was blocked on answers again (also a run that failed or was stopped)',
+    summary: 'send a run on after the system it was blocked on answers again (also a run that failed or was stopped, or a message to a working run)',
     configure(cmd) {
       cmd
         .argument('<run_id>', 'the run to send on')
@@ -139,19 +180,26 @@ export function createResumeCommand(options: ResumeCommandOptions = {}): CliComm
       const store = await openStore(config);
       const before = await store.getRun(runId);
       if (before === null) return printNotFound(io, json, runId);
-      const refusal = resumeRefusal(before);
+      // A working run is steered, or stopped and resumed when it stalled
+      // (D72). The worker decides; this check is for the refusal and the
+      // tunnel check, and for the mode printed when the worker is slow.
+      const working = STALLABLE_PHASES.includes(before.phase);
+      const stalled = working ? await statusStalled(before, config, isAlive, openLeases, now) : null;
+      const refusal = resumeRefusal(before, { ...(note !== undefined ? { note } : {}), stalled });
       if (refusal !== null) {
         printError(io, json, 'ERROR', refusal.message);
         return EXIT.ERROR;
       }
+      const predicted: ResumeMode = working && stalled === null ? 'steer' : 'resume';
       // The network path first (D56): brings the SSFB tunnel back in local
       // mode, and refuses with the fix when it does not come up.
-      const notReady = resumeReadinessRefusal(before, await readiness(config, io.isTTY));
-      if (notReady !== null) {
-        printError(io, json, 'ERROR', notReady.message);
-        return EXIT.ERROR;
+      if (predicted === 'resume') {
+        const notReady = resumeReadinessRefusal(before, await readiness(config, io.isTTY));
+        if (notReady !== null) {
+          printError(io, json, 'ERROR', notReady.message);
+          return EXIT.ERROR;
+        }
       }
-      const submissionId = before.submissions.length + 1;
 
       let pid: number;
       try {
@@ -195,11 +243,22 @@ export function createResumeCommand(options: ResumeCommandOptions = {}): CliComm
         return EXIT.ERROR;
       }
 
-      if (json) emitJson(io, ResumeOutputSchema, { run_id: runId, submission_id: submissionId });
-      else printHuman(io, [`resumed run ${runId} (submission ${submissionId})`, `follow it with: triage wait ${runId}`]);
+      const taken = outcome.kind === 'taken' ? outcome.run : null;
+      const mode = taken !== null ? takenMode(before, taken, predicted) : predicted;
+      const submissionId = taken?.submissions[before.submissions.length]?.seq ?? before.submissions.length + 1;
+      const wasStalled = working && (stalled !== null || (taken !== null && stoppedAsStalled(taken)));
+      if (json) emitJson(io, ResumeOutputSchema, { run_id: runId, submission_id: submissionId, mode });
+      else printHuman(io, [resumedLine(runId, submissionId, mode, wasStalled), `follow it with: triage wait ${runId}`]);
       return EXIT.OK;
     },
   };
+}
+
+/** The first human line: a steer, the resume of a stalled run, or a resume. */
+function resumedLine(runId: string, submissionId: number, mode: ResumeMode, stalled: boolean): string {
+  if (mode === 'steer') return `sent the message to run ${runId} while it works (submission ${submissionId})`;
+  if (stalled) return `run ${runId} had stalled: stopped it and resumed it (submission ${submissionId})`;
+  return `resumed run ${runId} (submission ${submissionId})`;
 }
 
 function describePhase(run: Pick<RunRecord, 'phase' | 'phase_reason'>): string {

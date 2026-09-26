@@ -18,32 +18,52 @@
 // run moved on since `triage resume` checked it) leaves the run as that other
 // process has it.
 //
+// A resume of a working run (D72) is a steer, or, when the run stalled, a
+// stop and a resume; resumeRun tells which after its stalled check. So for a
+// working run the pid is not written up front: a pid write before the check
+// would make a stalled run look owned, and a steer's pid would replace the
+// pid of the process that works on the run. The pid goes with the resume's
+// dispatched phase instead (deps.workerPid), and a steer writes none. A
+// failure is recorded only over a phase this worker owns, with the store's
+// compare-and-set: the phase it resumed from, or the stop it wrote for a
+// stalled run. A steer that throws leaves the working run as it is.
+//
+// Every payload passes deps.workerPid, so each submission's dispatched phase
+// records this pid. A dispatch without one (the HTTP server) clears it, so the
+// pid on a run is always that of the process that dispatched its latest
+// submission (D71).
+//
 // The command path is ['worker'] because command paths must be plain
 // kebab-case words; configure() renames it to __worker and hides it from help.
 import type { Command } from 'commander';
 import type { Config } from '../../config/env.ts';
 import { redactPersisted } from '../../gate/redact.ts';
 import { WORKER_COMMAND } from '../../ingress/detach.ts';
+import { STALLABLE_PHASES } from '../../ingress/stalled.ts';
 import {
   answerRun,
   askRun,
   failureReason,
+  type ResumeMode,
   resumeRefusal,
   resumeRun,
   RunNotResumableError,
   runSubmission,
+  STALLED_STOP_REASON,
   submissionDeps,
   type SubmissionDeps,
   type SubmissionResult,
 } from '../../ingress/submit.ts';
 import { decodePayload, WorkerPayloadError, type WorkerPayload } from '../../ingress/worker-payload.ts';
-import { RunStoppedError, type RunStore } from '../../runstore/types.ts';
+import { RunStoppedError, type RunPhase, type RunStore } from '../../runstore/types.ts';
 import { EXIT, printError } from '../output.ts';
 import type { CliCommand } from '../types.ts';
 import { defaultOpenStore, type OpenStore } from './status.command.ts';
 
+type WorkerStoreMethods = 'getRun' | 'createRun' | 'setPhase' | 'setPhaseIf';
+
 export type WorkerCommandOptions = {
-  readonly openStore?: OpenStore<'getRun' | 'createRun' | 'setPhase'>;
+  readonly openStore?: OpenStore<WorkerStoreMethods>;
   /** Starts the Flue runtime. Defaults to bootRuntime(). */
   readonly boot?: () => Promise<unknown>;
   /** Builds the submission deps once the runtime is up. Defaults to submissionDeps(). */
@@ -67,7 +87,7 @@ function hide(cmd: Command): void {
 }
 
 export function createWorkerCommand(options: WorkerCommandOptions = {}): CliCommand {
-  const openStore: OpenStore<'getRun' | 'createRun' | 'setPhase'> = options.openStore ?? defaultOpenStore;
+  const openStore: OpenStore<WorkerStoreMethods> = options.openStore ?? defaultOpenStore;
   const boot = options.boot ?? lazyBoot;
   const depsOf = options.deps ?? (() => submissionDeps({ isTty: false }));
   const submit = options.runSubmission ?? runSubmission;
@@ -102,16 +122,31 @@ export function createWorkerCommand(options: WorkerCommandOptions = {}): CliComm
       const config = ctx.config();
       const store = await openStore(config);
       const runId = payload.run_id;
-      const recorded = await recordPid(store, payload, pidOf());
-      if (recorded !== true) {
+      const pid = pidOf();
+      const recorded = await recordPid(store, payload, pid);
+      if (typeof recorded === 'string') {
         printError(io, json, 'ERROR', recorded);
         return EXIT.ERROR;
       }
 
+      let mode: ResumeMode | undefined;
       let result: SubmissionResult;
       try {
         await boot();
-        const deps = depsOf(config);
+        const built = depsOf(config);
+        // Every dispatch this worker makes records its pid (D71: a dispatch without one clears the pid).
+        const deps: SubmissionDeps = {
+          ...built,
+          workerPid: pid,
+          ...(payload.kind === 'resume'
+            ? {
+                onResumeMode: (m: ResumeMode) => {
+                  mode = m;
+                  built.onResumeMode?.(m);
+                },
+              }
+            : {}),
+        };
         if (payload.kind === 'submit') {
           result = await submit({ run_id: runId, request: payload.request, redaction_names: payload.redaction_names ?? [] }, deps);
         } else if (payload.kind === 'ask') {
@@ -141,12 +176,16 @@ export function createWorkerCommand(options: WorkerCommandOptions = {}): CliComm
           printError(io, json, 'ERROR', err.message);
           return EXIT.ERROR;
         }
-        // A resume is the one write allowed past a stop, so a resume that
-        // could not start leaves the stopped run failed, where the next
-        // `triage wait` shows it.
-        await store
-          .setPhase(runId, 'failed', { reason: failureReason(err), ...(payload.kind === 'resume' ? { resume: true } : {}) })
-          .catch(() => undefined);
+        if (payload.kind === 'resume') {
+          // A resume that could not start leaves the run failed, where the
+          // next `triage wait` shows it, but only over a phase this worker
+          // owns: the one it resumed from, or its own stop of a stalled run.
+          // A steer, or a working run the worker never took, stays as it is.
+          const owned = resumeOwned(recorded.from, mode);
+          if (owned.length > 0) await store.setPhaseIf(runId, owned, 'failed', { reason: failureReason(err) }).catch(() => undefined);
+        } else {
+          await store.setPhase(runId, 'failed', { reason: failureReason(err) }).catch(() => undefined);
+        }
         printError(io, json, 'ERROR', `run ${runId} failed: ${failureReason(err)}`);
         return EXIT.ERROR;
       }
@@ -157,17 +196,17 @@ export function createWorkerCommand(options: WorkerCommandOptions = {}): CliComm
   };
 }
 
+/** What recordPid found: the phase the run was in when the worker took it. */
+type Recorded = { readonly from: RunPhase };
+
 /**
  * Records the worker pid on the run. A submit payload creates the run when
  * `triage start` did not (a no-op otherwise) and is refused when the run has
- * already moved past 'created'. The other payloads need an existing run.
- * Returns true, or the reason it refused.
+ * already moved past 'created'. The other payloads need an existing run. A
+ * resume of a working run writes nothing here (see the header). Returns the
+ * phase the run was in, or the reason it refused.
  */
-async function recordPid(
-  store: Pick<RunStore, 'getRun' | 'createRun' | 'setPhase'>,
-  payload: WorkerPayload,
-  pid: number,
-): Promise<true | string> {
+async function recordPid(store: Pick<RunStore, WorkerStoreMethods>, payload: WorkerPayload, pid: number): Promise<Recorded | string> {
   const runId = payload.run_id;
   if (payload.kind === 'submit') {
     await store.createRun(runId, redactPersisted(payload.request, { names: [...(payload.redaction_names ?? [])] }));
@@ -175,30 +214,47 @@ async function recordPid(
     if (run === null) return `run not found: ${runId}`;
     if (run.phase !== 'created') return `run ${runId} has already started (phase ${run.phase})`;
     await store.setPhase(runId, 'created', { worker_pid: pid });
-    return true;
+    return { from: 'created' };
   }
   const run = await store.getRun(runId);
   if (run === null) return `run not found: ${runId}`;
   if (payload.kind === 'resume') {
     // resumeRun decides from the stored phase whether the run can go on
-    // (blocked, or failed or stopped after it was dispatched), so the phase
-    // and its reason are kept here and dispatchAndSettle moves them on. A
-    // run that is not resumable any more (another resume got there first)
-    // is refused before its pid is overwritten.
+    // (blocked, failed or stopped after it was dispatched, or working), so
+    // the phase and its reason are kept here and dispatchAndSettle moves them
+    // on. A run that is not resumable any more (another resume got there
+    // first) is refused before its pid is overwritten.
     const refusal = resumeRefusal(run);
     if (refusal !== null) return refusal.message;
-    await store.setPhase(runId, run.phase, {
+    // A working run: resumeRun's stalled check comes first (D72).
+    if (STALLABLE_PHASES.includes(run.phase)) return { from: run.phase };
+    // A run stopped as stalled keeps its updated_at, which dates the stop
+    // (stalledStopInFlight): a pid write here would make this resume look
+    // like another one's stop in flight. The pid goes with the dispatch.
+    if (run.phase === 'stopped' && run.phase_reason === STALLED_STOP_REASON) return { from: run.phase };
+    // The pid only, on the phase as it was read: a run that moved meanwhile
+    // keeps its phase, and resumeRun judges it from there.
+    await store.setPhaseIf(runId, [run.phase], run.phase, {
       worker_pid: pid,
-      resume: true,
       ...(run.phase_reason !== undefined ? { reason: run.phase_reason } : {}),
     });
-    return true;
+    return { from: run.phase };
   }
   // `triage ask` and `triage input` write the same phase and pid once the
   // spawn returns, so the order of the two writes does not matter. A
   // follow-up resumes a stopped run.
   await store.setPhase(runId, 'dispatched', { worker_pid: pid, ...(payload.kind === 'ask' ? { resume: true } : {}) });
-  return true;
+  return { from: run.phase };
+}
+
+/**
+ * The phases a failed resume may overwrite with failed: the one it resumed a
+ * parked, failed or stopped run from, or, for a working run, the stop it
+ * wrote itself when the run had stalled. A steer owns no phase.
+ */
+function resumeOwned(from: RunPhase, mode: ResumeMode | undefined): readonly RunPhase[] {
+  if (!STALLABLE_PHASES.includes(from)) return [from];
+  return mode === 'resume' ? ['stopped'] : [];
 }
 
 export const command: CliCommand = createWorkerCommand();

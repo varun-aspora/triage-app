@@ -1,7 +1,8 @@
 // The text of the first message the Triage orchestrator receives, of a
-// `triage ask` follow-up, of the answer to a question the run asked, and of
-// the signal that sends a blocked, failed or stopped run on again
-// (LLD 04 §2.4, D24, P6 §4.3, D55).
+// `triage ask` follow-up, of the answer to a question the run asked, of the
+// signal that sends a blocked, failed or stopped run on again, and of the
+// note a person adds while the run is still working
+// (LLD 04 §2.4, D24, P6 §4.3, D55, D72).
 //
 // All of them are built from the in-memory request and then passed through
 // the model-facing redaction profile as a whole: PAN, card numbers,
@@ -14,6 +15,7 @@ import type { BlockRecord } from '../types/block.ts';
 import { KNOWN_ID_KEYS, type KnownIds } from '../types/core.ts';
 import type { InputRequest } from '../types/input-request.ts';
 import type { TriageRequest } from '../types/request.ts';
+import type { StalledReason } from '../types/stalled.ts';
 
 /** What happened to the request's screenshots on the way to the dispatch. */
 export type RenderImages = {
@@ -105,8 +107,11 @@ export type ResumeFrom =
   | { readonly kind: 'blocked'; readonly block: Pick<BlockRecord, 'block_id' | 'systems' | 'reason'> }
   /** Failed after it was dispatched; the reason is the stored phase reason (class name and masked error text, D67). */
   | { readonly kind: 'failed'; readonly reason?: string }
-  /** Stopped by a person. */
-  | { readonly kind: 'stopped' };
+  /**
+   * Stopped by a person, or by the resume itself because the run had stalled
+   * (D72); stalled is set then, with the reason when it is known.
+   */
+  | { readonly kind: 'stopped'; readonly stalled?: { readonly reason?: StalledReason } };
 
 export type ResumeRender = {
   /** Who resumed the run. */
@@ -127,6 +132,8 @@ export function renderResume(from: ResumeFrom, r: ResumeRender): string {
     lines.push(`This run was blocked (${from.block.block_id}) because ${listed(from.block.systems)} did not answer: ${oneLine(from.block.reason)}`);
   } else if (from.kind === 'failed') {
     lines.push(`This run failed${from.reason !== undefined ? ` (${from.reason})` : ''} before it finished.`);
+  } else if (from.stalled !== undefined) {
+    lines.push(`This run stalled before it finished${stalledWhy(from.stalled.reason)}, so it was stopped.`);
   } else {
     lines.push('This run was stopped before it finished.');
   }
@@ -148,6 +155,33 @@ export function renderResume(from: ResumeFrom, r: ResumeRender): string {
     );
   }
   return redactModelFacing(lines.join('\n'));
+}
+
+function stalledWhy(reason: StalledReason | undefined): string {
+  if (reason === 'no_owner') return ' (no process was working on it)';
+  if (reason === 'no_progress') return ' (it made no progress for a while)';
+  return '';
+}
+
+export type SteerRender = {
+  /** Who added the note. */
+  readonly by: string;
+  /** When, ISO 8601. */
+  readonly at: string;
+  /** The person's note. Not empty; may span lines. */
+  readonly note: string;
+};
+
+/**
+ * The note a person adds while the run is still working (D72), model-facing
+ * profile. It is sent as a user message, like a follow-up, so the model reads
+ * it as that person speaking. Flue joins it into the live response at the
+ * next turn boundary, after the turn's tool calls and before the next model
+ * call. It carries the note, who sent it and when, and no instructions of
+ * its own: the run goes on as it was, with the note in front of the model.
+ */
+export function renderSteer(s: SteerRender): string {
+  return redactModelFacing([`Note from ${s.by}, added at ${s.at} while this run is working:`, s.note.trim()].join('\n'));
 }
 
 // "a", "a and b", "a, b and c".

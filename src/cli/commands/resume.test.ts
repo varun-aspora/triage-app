@@ -21,7 +21,7 @@ import { buildProgram, runCli } from '../index.ts';
 import { ResumeOutputSchema } from '../lib/output-schemas.ts';
 import { EXIT } from '../output.ts';
 import type { CliCommand, CliContext } from '../types.ts';
-import { createResumeCommand, takenOver, type ResumeCommandOptions } from './resume.command.ts';
+import { createResumeCommand, takenMode, takenOver, type ResumeCommandOptions } from './resume.command.ts';
 
 // All values below are synthetic.
 const RUN_ID = '01J8ZQ7XK3PSEUDRESUMEAAAAA';
@@ -94,9 +94,18 @@ function jsonLine(out: string): unknown {
   return JSON.parse(lines[0] as string);
 }
 
-/** The command with a worker that is always alive and a sleep that does nothing, unless a test says otherwise. */
+/** No Flue database: every lease is unknown. */
+const noLeases: NonNullable<ResumeCommandOptions['openLeases']> = async () => ({ lease: async () => null, close: async () => undefined });
+
+/** The command with a worker that is always alive, a sleep that does nothing and no Flue leases, unless a test says otherwise. */
 function resumeCmd(o: ResumeCommandOptions = {}): CliCommand {
-  return createResumeCommand({ isAlive: () => true, defaultRequestedBy: () => 'ops-reviewer', sleep: async () => undefined, ...o });
+  return createResumeCommand({
+    isAlive: () => true,
+    defaultRequestedBy: () => 'ops-reviewer',
+    sleep: async () => undefined,
+    openLeases: noLeases,
+    ...o,
+  });
 }
 
 type Seed = {
@@ -211,7 +220,7 @@ describe('triage resume', () => {
     expect(r.err).toBe('');
     const doc = jsonLine(r.out);
     expect(v.is(ResumeOutputSchema, doc)).toBe(true);
-    expect(doc).toEqual({ run_id: RUN_ID, submission_id: 2 });
+    expect(doc).toEqual({ run_id: RUN_ID, submission_id: 2, mode: 'resume' });
     expect(spy.calls).toEqual([{ kind: 'resume', run_id: RUN_ID, by: 'ops-reviewer', note: 'harbor is back' }]);
     expect(sleeps).toEqual([10]);
     const run = await store.getRun(RUN_ID);
@@ -268,7 +277,7 @@ describe('triage resume', () => {
     });
     const r2 = await cli(cmd2, ['resume', RUN_ID, '--json'], h2);
     expect(r2.code).toBe(EXIT.OK);
-    expect(jsonLine(r2.out)).toEqual({ run_id: RUN_ID, submission_id: 2 });
+    expect(jsonLine(r2.out)).toEqual({ run_id: RUN_ID, submission_id: 2, mode: 'resume' });
     expect(spy2.calls).toHaveLength(1);
   });
 
@@ -280,12 +289,16 @@ describe('triage resume', () => {
     expect(unknown.err).toContain('run not found');
 
     const cases: { readonly seed: Seed; readonly hint: string }[] = [
+      // Working and not stalled, with no message to steer with (D72).
       { seed: { phase: 'investigating', pid: 1111 }, hint: RESUME_HINTS.running },
       { seed: { phase: 'dispatched' }, hint: RESUME_HINTS.running },
+      { seed: { phase: 'classifying', submissions: 0 }, hint: RESUME_HINTS.starting },
       { seed: { phase: 'investigating', question: true }, hint: RESUME_HINTS.needs_input },
       { seed: { phase: 'completed' }, hint: RESUME_HINTS.completed },
       { seed: { phase: 'failed', submissions: 0, reason: 'WorkerSpawnError' }, hint: RESUME_HINTS.never_started },
       { seed: { phase: 'stopped', submissions: 0, reason: 'cancelled' }, hint: RESUME_HINTS.never_started },
+      // Another resume, in another process, stopped it as stalled a moment ago and is sending it on (D72).
+      { seed: { phase: 'stopped', reason: 'stalled' }, hint: RESUME_HINTS.in_progress },
     ];
     for (const { seed: s, hint } of cases) {
       const h = home();
@@ -298,6 +311,25 @@ describe('triage resume', () => {
       expect(e.error.message).toContain(hint);
     }
     expect(spy.calls).toHaveLength(0);
+  });
+
+  test('a run left stopped as stalled by a resume that added its submission and then died is resumed', async () => {
+    const h = home();
+    const store = await seed(h, { phase: 'stopped', reason: 'stalled' });
+    await new Promise((r) => setTimeout(r, 5));
+    await store.addSubmission(RUN_ID, redactPersisted({ kind: 'resume' as const }));
+    const spy = spawnSpy(6464);
+    const cmd = resumeCmd({
+      spawn: spy.spawn,
+      sleep: async () => {
+        await store.addSubmission(RUN_ID, redactPersisted({ kind: 'resume' as const }));
+        await store.setPhase(RUN_ID, 'dispatched', { worker_pid: 6464, resume: true });
+      },
+    });
+    const r = await cli(cmd, ['resume', RUN_ID, '--json'], h);
+    expect(r.code).toBe(EXIT.OK);
+    expect(jsonLine(r.out)).toEqual({ run_id: RUN_ID, submission_id: 3, mode: 'resume' });
+    expect(spy.calls).toHaveLength(1);
   });
 
   test('brings the SSFB tunnel back first and refuses, with the fix, when it does not come up; nothing starts', async () => {
@@ -416,8 +448,90 @@ describe('triage resume', () => {
     const slow = resumeCmd({ spawn: spy.spawn, now: c.now, sleep: (ms) => c.sleep(ms), pollMs: 250, takeoverMs: 1000 });
     const t = await cli(slow, ['resume', RUN_ID, '--json'], h);
     expect(t.code).toBe(EXIT.OK);
-    expect(jsonLine(t.out)).toEqual({ run_id: RUN_ID, submission_id: 2 });
+    expect(jsonLine(t.out)).toEqual({ run_id: RUN_ID, submission_id: 2, mode: 'resume' });
     expect(c.sleeps.reduce((a, b) => a + b, 0)).toBe(1000);
+  });
+});
+
+describe('triage resume on a working run (D72)', () => {
+  test('not stalled, with a message: a steer; the tunnel check is skipped and mode steer is printed', async () => {
+    const h = home();
+    const store = await seed(h, { phase: 'investigating', pid: 1111 });
+    const spy = spawnSpy(5252);
+    let checked = 0;
+    const cmd = resumeCmd({
+      spawn: spy.spawn,
+      readiness: async () => {
+        checked += 1;
+        return { warnings: [] };
+      },
+      // The worker's resumeRun adds the steer; the phase stays as it is.
+      sleep: async () => {
+        await store.addSubmission(RUN_ID, redactPersisted({ kind: 'steer' as const, note: 'the payout went out' }));
+      },
+    });
+    const r = await cli(cmd, ['resume', RUN_ID, 'the payout went out', '--json'], h);
+    expect(r.code).toBe(EXIT.OK);
+    const doc = jsonLine(r.out);
+    expect(v.is(ResumeOutputSchema, doc)).toBe(true);
+    expect(doc).toEqual({ run_id: RUN_ID, submission_id: 2, mode: 'steer' });
+    expect(spy.calls).toEqual([{ kind: 'resume', run_id: RUN_ID, by: 'ops-reviewer', note: 'the payout went out' }]);
+    expect(checked).toBe(0);
+
+    const h2 = home();
+    const store2 = await seed(h2, { phase: 'investigating', pid: 1111 });
+    const human = await cli(
+      resumeCmd({
+        spawn: spawnSpy(5353).spawn,
+        sleep: async () => {
+          await store2.addSubmission(RUN_ID, redactPersisted({ kind: 'steer' as const, note: 'look' }));
+        },
+      }),
+      ['resume', RUN_ID, 'look'],
+      h2,
+    );
+    expect(human.code).toBe(EXIT.OK);
+    expect(human.out).toContain(`sent the message to run ${RUN_ID} while it works (submission 2)`);
+    expect(human.out).toContain(`follow it with: triage wait ${RUN_ID}`);
+  });
+
+  test('stalled (its worker is gone): no message needed; the stop as stalled is the takeover and mode is resume', async () => {
+    const h = home();
+    const store = await seed(h, { phase: 'investigating', pid: 1111 });
+    const spy = spawnSpy(6363);
+    let checked = 0;
+    const cmd = resumeCmd({
+      spawn: spy.spawn,
+      // The run's worker (1111) is dead; the new one is alive.
+      isAlive: (pid) => pid !== 1111,
+      readiness: async () => {
+        checked += 1;
+        return { warnings: [] };
+      },
+      sleep: async () => {
+        await store.markStopped(
+          RUN_ID,
+          'stalled',
+          redactPersisted({ status: 'cancelled' as const, resolved_at: AT, resolved_by: 'ops-reviewer' }),
+        );
+      },
+    });
+    const r = await cli(cmd, ['resume', RUN_ID], h);
+    expect(r.code).toBe(EXIT.OK);
+    expect(r.out).toContain(`run ${RUN_ID} had stalled: stopped it and resumed it (submission 2)`);
+    expect(spy.calls).toEqual([{ kind: 'resume', run_id: RUN_ID, by: 'ops-reviewer' }]);
+    // A resume, so the tunnel is checked first.
+    expect(checked).toBe(1);
+  });
+
+  test('a slow worker: the mode the stalled check predicts', async () => {
+    const h = home();
+    await seed(h, { phase: 'investigating', pid: 1111 });
+    const c = clock();
+    const cmd = resumeCmd({ spawn: spawnSpy(7474).spawn, now: c.now, sleep: (ms) => c.sleep(ms), pollMs: 250, takeoverMs: 500 });
+    const r = await cli(cmd, ['resume', RUN_ID, 'look', '--json'], h);
+    expect(r.code).toBe(EXIT.OK);
+    expect(jsonLine(r.out)).toEqual({ run_id: RUN_ID, submission_id: 2, mode: 'steer' });
   });
 });
 
@@ -431,5 +545,24 @@ describe('takenOver', () => {
     const failed = record('failed', { submissions: [initial] });
     expect(takenOver(failed, record('failed', { submissions: [initial] }))).toBe(false);
     expect(takenOver(failed, record('dispatched', { submissions: [initial] }))).toBe(true);
+  });
+
+  test('a working run: the new submission, or the stop as stalled; a phase write alone is not a takeover (D72)', () => {
+    const before = record('investigating', { submissions: [initial] });
+    expect(takenOver(before, record('investigating', { submissions: [initial] }))).toBe(false);
+    expect(takenOver(before, record('completed', { submissions: [initial] }))).toBe(false);
+    expect(takenOver(before, record('stopped', { phase_reason: 'cancelled', submissions: [initial] }))).toBe(false);
+    expect(takenOver(before, record('stopped', { phase_reason: 'stalled', submissions: [initial] }))).toBe(true);
+    expect(takenOver(before, record('investigating', { submissions: [initial, { ...initial, kind: 'steer', seq: 2 }] }))).toBe(true);
+  });
+});
+
+describe('takenMode', () => {
+  test('steer when the worker added a steer, resume for any other submission, else the prediction', () => {
+    const before = record('investigating', { submissions: [initial] });
+    expect(takenMode(before, record('investigating', { submissions: [initial, { ...initial, kind: 'steer', seq: 2 }] }), 'resume')).toBe('steer');
+    expect(takenMode(before, record('dispatched', { submissions: [initial, { ...initial, kind: 'resume', seq: 2 }] }), 'steer')).toBe('resume');
+    expect(takenMode(before, record('stopped', { submissions: [initial] }), 'resume')).toBe('resume');
+    expect(takenMode(before, before, 'steer')).toBe('steer');
   });
 });

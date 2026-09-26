@@ -9,6 +9,8 @@ import {
   parseListQuery,
   statusOfPhase,
   storeQuery,
+  listedRun,
+  withStalled,
   type ListQuery,
 } from './run-list.ts';
 
@@ -196,5 +198,50 @@ describe('filterRuns', () => {
 
   test('the limit cuts the page', () => {
     expect(filterRuns(rows, parsed({ limit: '1' })).runs).toHaveLength(1);
+  });
+});
+
+describe('withStalled (D71)', () => {
+  const STALLED = { reason: 'no_owner' as const, since: T2 };
+
+  test('loads working rows only, side by side, and strips the stalled inputs from every row', async () => {
+    const rows = [
+      row('run_a', T1, { phase: 'investigating', flue_submission_id: 'sub_a', worker_pid: 42 }),
+      row('run_b', T1, { phase: 'dispatched', steer_flue_submission_id: 'sub_s' }),
+      row('run_c', T2, { phase: 'completed' }),
+      row('run_d', T2, { phase: 'needs_input' }),
+    ];
+    const loaded: string[] = [];
+    let inFlight = 0;
+    let most = 0;
+    const page = await withStalled({ runs: rows, next_cursor: 'next' }, async (r) => {
+      loaded.push(r.run_id);
+      inFlight++;
+      most = Math.max(most, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight--;
+      return r.run_id === 'run_a' ? STALLED : null;
+    });
+    expect(loaded).toEqual(['run_a', 'run_b']);
+    expect(most).toBe(2);
+    expect(page.next_cursor).toBe('next');
+    expect(page.runs).toEqual([
+      row('run_a', T1, { phase: 'investigating', stalled: STALLED }),
+      row('run_b', T1, { phase: 'dispatched' }),
+      row('run_c', T2, { phase: 'completed' }),
+      row('run_d', T2, { phase: 'needs_input' }),
+    ]);
+  });
+
+  test('a load that throws leaves stalled out of that row', async () => {
+    const page = await withStalled({ runs: [row('run_a', T1, { phase: 'investigating' })], next_cursor: null }, async () => {
+      throw new Error('lease read failed');
+    });
+    expect(page.runs).toEqual([row('run_a', T1, { phase: 'investigating' })]);
+  });
+
+  test('listedRun drops a stalled value a store row carried', () => {
+    expect(listedRun(row('run_a', T1, { stalled: STALLED }))).toEqual(row('run_a', T1));
+    expect(listedRun(row('run_a', T1), STALLED)).toEqual(row('run_a', T1, { stalled: STALLED }));
   });
 });

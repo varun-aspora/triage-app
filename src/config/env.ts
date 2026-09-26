@@ -68,6 +68,8 @@ export type Config = {
     readonly maxBytesPerRun: number;
     readonly runTimeoutMs: number;
     readonly runMaxAttempts: number;
+    /** D71: a running run with no event for this long shows as stalled. */
+    readonly stalledAfterMs: number;
     readonly httpTimeoutMs: number;
     readonly defaultLookbackDays: number;
   };
@@ -212,6 +214,7 @@ export function configFromRecord(
       maxBytesPerRun: r.requiredInt('TRIAGE_MAX_BYTES_PER_RUN'),
       runTimeoutMs: r.requiredInt('TRIAGE_RUN_TIMEOUT_MS'),
       runMaxAttempts: r.requiredInt('TRIAGE_RUN_MAX_ATTEMPTS'),
+      stalledAfterMs: r.requiredInt('TRIAGE_STALLED_AFTER_MS'),
       httpTimeoutMs: r.requiredInt('TRIAGE_HTTP_TIMEOUT_MS'),
       defaultLookbackDays: r.requiredInt('TRIAGE_DEFAULT_LOOKBACK_DAYS'),
     },

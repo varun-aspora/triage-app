@@ -4,7 +4,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -145,6 +145,47 @@ describe('createPersistence', () => {
     await runner.close();
     await adapter.close?.();
     expect(factory.ended()).toBe(1);
+  });
+});
+
+describe('submission leases (D71)', () => {
+  test('the adapter hands its submission store over on connect and takes it back on close', async () => {
+    const { submissionStoreConnected } = await import('./db/submission-lease.ts');
+    const adapter = db.createPersistence({ home, db: { provider: 'sqlite', url: ':memory:', retry: NO_RETRY } });
+    expect(await db.submissionLease('sub_unknown')).toBeNull();
+    await adapter.migrate?.();
+    await adapter.connect();
+    expect(submissionStoreConnected()).toBe(true);
+    expect(await db.submissionLease('sub_unknown')).toBeNull();
+    await adapter.close?.();
+    expect(submissionStoreConnected()).toBe(false);
+  });
+
+  test('openSubmissionLeases on a sqlite file that does not exist creates nothing and reads null', async () => {
+    const url = './.data/never-created.sqlite';
+    const leases = await db.openSubmissionLeases({ home, db: { provider: 'sqlite', url, retry: NO_RETRY } });
+    expect(await leases.lease('sub_unknown')).toBeNull();
+    await leases.close();
+    expect(existsSync(join(home, url))).toBe(false);
+  });
+
+  test('openSubmissionLeases reads an existing sqlite file that was never migrated as null', async () => {
+    const url = './.data/empty.sqlite';
+    mkdirSync(join(home, '.data'), { recursive: true });
+    writeFileSync(join(home, url), '');
+    const leases = await db.openSubmissionLeases({ home, db: { provider: 'sqlite', url, retry: NO_RETRY } });
+    expect(await leases.lease('sub_unknown')).toBeNull();
+    await leases.close();
+  });
+
+  test('openSubmissionLeases on postgres runs on the shared pool and leaves it open', async () => {
+    const factory = recordingFactory();
+    const config = { home, db: { provider: 'postgres' as const, url: FAKE_DSN, retry: NO_RETRY } };
+    const leases = await db.openSubmissionLeases(config, { poolFactory: factory.fn });
+    await leases.close();
+    expect(factory.ended()).toBe(0);
+    const { getSharedPgRunner } = await import('./db/pg.ts');
+    await getSharedPgRunner(config, { poolFactory: factory.fn }).close();
   });
 });
 

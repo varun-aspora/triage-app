@@ -2,13 +2,20 @@
 //
 // The store filters by since, phase and category and orders newest first
 // (created_at desc, run_id desc). Status, feedback and the paging cursor are
-// applied here, over the rows the store returned. Pure: no I/O.
+// applied here, over the rows the store returned. All of that is pure: no I/O.
+//
+// withStalled (D71) then adds stalled to the page's dispatched and
+// investigating rows, through the loader the route passes (loadStalledSubject
+// over the row: one lease read, two when the row has a later steer, and one
+// events.jsonl tail read per row, run side by side). Every row leaves without
+// the stalled check's inputs (flue ids and worker pid), which stay internal.
 //
 // Errors name the query parameter only, never the value sent.
 
 import * as v from 'valibot';
 import { CATEGORIES, type Category } from '../../types/classification.ts';
 import { RunIdSchema, TakenAtSchema, type RunId } from '../../types/core.ts';
+import type { Stalled } from '../../types/stalled.ts';
 import {
   FEEDBACK_VERDICTS,
   isTerminalPhase,
@@ -17,6 +24,7 @@ import {
   type RunPhase,
   type RunQuery,
   type RunSummary,
+  WORKING_PHASES,
 } from '../../runstore/types.ts';
 
 export const RUN_STATUSES = ['running', 'blocked', 'completed', 'failed', 'stopped'] as const;
@@ -188,4 +196,29 @@ function isAfter(row: Pick<RunSummary, 'created_at' | 'run_id'>, cursor: RunCurs
   const c = Date.parse(cursor.created_at);
   if (t !== c) return t < c;
   return row.run_id.localeCompare(cursor.run_id) < 0;
+}
+
+/** A run list row as GET /triage answers it: no stalled-check inputs, stalled while the run is stalled. */
+export type ListedRun = Omit<RunSummary, 'flue_submission_id' | 'steer_flue_submission_id' | 'worker_pid'>;
+
+/** One row without the stalled check's inputs, with stalled when given. */
+export function listedRun(row: RunSummary, stalled: Stalled | null = null): ListedRun {
+  const { flue_submission_id: _flue, steer_flue_submission_id: _steer, worker_pid: _pid, stalled: _old, ...rest } = row;
+  return stalled !== null ? { ...rest, stalled } : rest;
+}
+
+/**
+ * The page with stalled on each dispatched or investigating row, read with
+ * load concurrently. Other rows are never loaded. A load that throws leaves
+ * stalled out of that row.
+ */
+export async function withStalled(page: RunPage, load: (row: RunSummary) => Promise<Stalled | null>): Promise<RunPage> {
+  const runs = await Promise.all(
+    page.runs.map(async (row) => {
+      if (!WORKING_PHASES.includes(row.phase)) return listedRun(row);
+      const stalled = await load(row).catch(() => null);
+      return listedRun(row, stalled);
+    }),
+  );
+  return { runs, next_cursor: page.next_cursor };
 }

@@ -37,5 +37,8 @@ export function productionDeps(): TriageRouteDeps {
     runsDir: rt.config.paths.runsDir,
     // The same check `triage status` uses, so a dead detached worker shows as incomplete, not live.
     isAlive: pidAlive,
+    // D71: the run view, the run list and the resume pre-check use the same wait as resumeRun.
+    stalledAfterMs: rt.config.budgets.stalledAfterMs,
+    ...(submission.stalled !== undefined ? { stalled: submission.stalled } : {}),
   };
 }

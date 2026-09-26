@@ -28,6 +28,8 @@ import { readRunEvents } from '../runlog/read.ts';
 import { sampleBlock, sampleInputRequest } from '../runstore/contract.ts';
 import type { Attachment } from '../types/request.ts';
 import type { UsageRow } from '../types/usage.ts';
+import type { Stalled } from '../types/stalled.ts';
+import type { RunPhase, RunRecord } from '../runstore/types.ts';
 import { priceUsage } from '../usage/price.ts';
 import {
   installUsageMeter,
@@ -38,6 +40,7 @@ import {
   type UsageEvent,
 } from '../usage/meter.ts';
 import type { IngressIdentity } from './identity.ts';
+import { loadStalled } from './stalled.ts';
 import { buildTriageRequest, IngressInputError, type TriageInput } from './normalise.ts';
 import { prepareDeps, prepareRequest, type PreparedSubmission } from './prepare.ts';
 import {
@@ -54,7 +57,11 @@ import {
   SubmissionInputError,
   RESUME_HINTS,
   ResumeNotReadyError,
+  resumeRefusal,
   resumeRun,
+  type ResumeMode,
+  STALLED_STOP_REASON,
+  STALLED_STOP_HOLD_MS,
   RunNotResumableError,
   type SettleDeps,
   DEFAULT_USAGE_FLUSH_MS,
@@ -139,7 +146,8 @@ function recordingStore(events: string[]): { store: RunStore; calls: Call[]; inn
       if (typeof value !== 'function') return value;
       return (...args: unknown[]) => {
         calls.push({ method: String(prop), args });
-        events.push(prop === 'setPhase' ? `phase:${String(args[1])}` : String(prop));
+        // A compare-and-set shows as the phase it asks for, like setPhase.
+        events.push(prop === 'setPhase' ? `phase:${String(args[1])}` : prop === 'setPhaseIf' ? `phase:${String(args[2])}` : String(prop));
         return (value as (...a: unknown[]) => unknown).apply(target, args);
       };
     },
@@ -159,6 +167,8 @@ type FakeFlue = {
   readonly inits: { agent: Agent; options: InitOptions }[];
   readonly dispatches: { message: unknown; initialData?: unknown; keys: string[] }[];
   readonly reads: number[];
+  /** What each read was addressed to: a receipt's submissionId, or a bare id. */
+  readonly readTargets: string[];
   aborts: number;
 };
 
@@ -172,6 +182,7 @@ function fakeFlue(
     inits: [],
     dispatches: [],
     reads: [],
+    readTargets: [],
     aborts: 0,
     dispatcher: {
       init(agent, options) {
@@ -185,12 +196,14 @@ function fakeFlue(
             await onDispatch?.();
             return { submissionId: `sub-${flue.dispatches.length}`, acceptedAt: NOW.toISOString(), uid: 'uid-1' };
           },
-          async read(_target, opts) {
+          async read(target, opts) {
             events.push('read');
             flue.reads.push(1);
+            flue.readTargets.push(typeof target === 'string' ? target : target.submissionId);
             return read(opts?.signal);
           },
           async abort() {
+            events.push('abort');
             flue.aborts += 1;
           },
         };
@@ -892,6 +905,30 @@ describe('needs_input and answerRun', () => {
     expect(run?.report).toBeNull();
   });
 
+  test('a tool that parks the run before the investigating write keeps its phase: investigating is written only from dispatched', async () => {
+    // ask_requester ran before the dispatch receipt came back.
+    const h = harness({
+      stopPollMs: 5,
+      onDispatch: async (store) => {
+        await store.putInputRequest(RUN_ID, redactPersisted(question()));
+      },
+      read: async () => {
+        // Long enough for a stop poll or two: a parked run must not look stopped.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return { text: 'waiting', submissionId: 'sub-1', data: {} };
+      },
+    });
+    const result = await runSubmission(prepared(), h.deps);
+    expect(result.status).toBe('needs_input');
+    const write = h.calls.find((c) => c.method === 'setPhaseIf' && c.args[2] === 'investigating');
+    expect(write?.args[1]).toEqual(['dispatched']);
+    expect(h.calls.some((c) => c.method === 'setPhase' && c.args[1] === 'investigating')).toBe(false);
+    expect(h.flue.aborts).toBe(0);
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('needs_input');
+    expect(run?.input_request?.question_id).toBe('q1');
+  });
+
   test('answerRun closes the question, records an answer submission and resumes the run with a signal', async () => {
     const h = harness();
     await parked(h);
@@ -1315,12 +1352,13 @@ describe('blocked and resumeRun', () => {
     };
 
     await h.store.createRun(RUN_ID, redactPersisted(prepared().request));
-    expect(await refusal()).toMatchObject({ runId: RUN_ID, phase: 'created', hint: RESUME_HINTS.running });
+    expect(await refusal()).toMatchObject({ runId: RUN_ID, phase: 'created', hint: RESUME_HINTS.starting });
     // Failed before dispatch: no conversation to continue.
     await h.store.setPhase(RUN_ID, 'failed', { reason: 'FixtureMissError' });
     expect(await refusal()).toMatchObject({ phase: 'failed', hint: RESUME_HINTS.never_started });
     await h.store.addSubmission(RUN_ID, redactPersisted({ kind: 'initial' as const }));
     await h.store.setPhase(RUN_ID, 'investigating');
+    // Working and not stalled: steered, but only with a message (D72).
     expect(await refusal()).toMatchObject({ phase: 'investigating', hint: RESUME_HINTS.running });
     await h.store.putInputRequest(RUN_ID, redactPersisted(sampleInputRequest('q1')));
     expect(await refusal()).toMatchObject({ phase: 'needs_input', hint: RESUME_HINTS.needs_input });
@@ -1370,6 +1408,670 @@ describe('blocked and resumeRun', () => {
       expect(pipeline).toContainEqual(['resume', { kind: 'resume', from: 'blocked', block_id: 'b1', by: 'ops', note: 'harbor is back' }]);
       const settled = events.filter((e) => e.type === 'settled').map((e) => (e.data as { status: string }).status);
       expect(settled).toEqual(['blocked', 'completed']);
+    } finally {
+      await flushRunEventLog();
+      uninstallRunEventLog();
+    }
+  });
+});
+
+// ------------------------------------------------------------------ resume of a working run (D72)
+
+describe('resumeRefusal', () => {
+  const STALLED: Stalled = { reason: 'no_owner', since: '2026-09-24T09:00:00.000Z' };
+  const sub = { kind: 'initial' as const, seq: 1, created_at: NOW.toISOString(), report: null, report_md: null };
+  const run = (phase: RunPhase, submissions = 1): Pick<RunRecord, 'run_id' | 'phase' | 'submissions'> => ({
+    run_id: RUN_ID,
+    phase,
+    submissions: Array.from({ length: submissions }, (_, i) => ({ ...sub, seq: i + 1 })),
+  });
+  const hint = (r: ReturnType<typeof resumeRefusal>): string | null => r?.hint ?? null;
+
+  test.each([
+    // phase, submissions, steer check, hint (null: resumable)
+    ['blocked', 1, undefined, null],
+    ['failed', 1, undefined, null],
+    ['stopped', 1, undefined, null],
+    ['failed', 0, undefined, RESUME_HINTS.never_started],
+    ['stopped', 0, undefined, RESUME_HINTS.never_started],
+    ['dispatched', 1, undefined, null],
+    ['investigating', 1, undefined, null],
+    ['investigating', 1, { note: 'the payout went out', stalled: null }, null],
+    ['investigating', 1, { stalled: STALLED }, null],
+    ['dispatched', 1, { note: '  ', stalled: null }, RESUME_HINTS.running],
+    ['investigating', 1, { stalled: null }, RESUME_HINTS.running],
+    ['investigating', 0, undefined, RESUME_HINTS.starting],
+    ['created', 0, undefined, RESUME_HINTS.starting],
+    ['preflight', 0, undefined, RESUME_HINTS.starting],
+    ['identity', 0, undefined, RESUME_HINTS.starting],
+    ['classifying', 0, undefined, RESUME_HINTS.starting],
+    ['needs_input', 1, { note: 'x', stalled: null }, RESUME_HINTS.needs_input],
+    ['completed', 1, { note: 'x', stalled: null }, RESUME_HINTS.completed],
+  ] as const)('%s with %d submission(s) and %j -> %s', (phase, n, steer, expected) => {
+    expect(hint(resumeRefusal(run(phase, n), steer))).toBe(expected);
+  });
+
+  test('a run stopped as stalled is in progress while its resume goes on, and resumable once that stop is left over', () => {
+    const stoppedAt = NOW.getTime();
+    // The run's only submission was created at NOW, not after the stop.
+    const stop = (extra: Partial<RunRecord> = {}) => ({
+      ...run('stopped'),
+      phase_reason: STALLED_STOP_REASON,
+      updated_at: NOW.toISOString(),
+      ...extra,
+    });
+    // Another resume's stop, in flight: in any process, with or without the steer check.
+    expect(hint(resumeRefusal(stop(), undefined, stoppedAt + 1000))).toBe(RESUME_HINTS.in_progress);
+    expect(hint(resumeRefusal(stop(), { note: 'look', stalled: null }, stoppedAt + STALLED_STOP_HOLD_MS - 1))).toBe(RESUME_HINTS.in_progress);
+    // Stamped a little ahead of this clock (another host): still recent.
+    expect(hint(resumeRefusal(stop(), undefined, stoppedAt - 500))).toBe(RESUME_HINTS.in_progress);
+    // Left over: the hold has passed (the resume's process died) ...
+    expect(hint(resumeRefusal(stop(), undefined, stoppedAt + STALLED_STOP_HOLD_MS))).toBeNull();
+    // ... or the resume added its submission after the stop, then failed.
+    const resumed = stop({
+      submissions: [...run('stopped').submissions, { ...sub, seq: 2, kind: 'resume', created_at: new Date(stoppedAt + 5).toISOString() }],
+    });
+    expect(hint(resumeRefusal(resumed, undefined, stoppedAt + 1000))).toBeNull();
+    // A resume that failed after its stop wrote failed, and a person's stop is not a resume's.
+    expect(hint(resumeRefusal({ ...stop(), phase: 'failed' }, undefined, stoppedAt + 1000))).toBeNull();
+    expect(hint(resumeRefusal(stop({ phase_reason: 'cancelled' }), undefined, stoppedAt + 1000))).toBeNull();
+  });
+});
+
+describe('resumeRun on a working run (D72)', () => {
+  const STALLED: Stalled = { reason: 'no_owner', since: '2026-09-24T09:00:00.000Z' };
+  const cancel = () => redactPersisted({ status: 'cancelled' as const, resolved_at: NOW.toISOString(), resolved_by: 'ops' });
+
+  /** A stored run that is investigating its first submission, whose Flue id is sub_host. */
+  async function working(h: Harness, phase: RunPhase = 'investigating'): Promise<void> {
+    await h.store.createRun(RUN_ID, redactPersisted(prepared().request, { names: [NAME] }));
+    await h.store.addSubmission(RUN_ID, redactPersisted({ kind: 'initial' as const }));
+    await h.store.setSubmissionFlueId(RUN_ID, 1, 'sub_host');
+    await h.store.setPhase(RUN_ID, phase);
+    // Only what the resume does is looked at.
+    h.events.length = 0;
+    h.calls.length = 0;
+  }
+
+  function withModes(deps: SettleDeps, extra: Partial<SettleDeps> = {}): { deps: SettleDeps; modes: ResumeMode[] } {
+    const modes: ResumeMode[] = [];
+    return { deps: { ...deps, now: () => NOW, onResumeMode: (m) => modes.push(m), ...extra }, modes };
+  }
+
+  function signalOf(h: Harness, i = 0): { kind: string; type?: string; body: string } {
+    return h.flue.dispatches[i]!.message as { kind: string; type?: string; body: string };
+  }
+
+  const notStalled = async (): Promise<Stalled | null> => null;
+  const stalled = async (): Promise<Stalled | null> => STALLED;
+  /** A lease that says the steer ran as its own response. */
+  const ownResponse = async () => ({ status: 'settled' as const, leaseExpiresAt: 0, settledAt: NOW.getTime() });
+  /** A lease that says the steer joined the host's response. */
+  const joinedLease = async () => ({ status: 'settled' as const, leaseExpiresAt: 0, joinedInto: 'sub_host', settledAt: NOW.getTime() });
+
+  test('not stalled: a steer submission with the note, a user message on the same instance, and no phase or pid written', async () => {
+    const h = harness();
+    await working(h);
+    // A worker's pid is never written by a steer: another process works on the run.
+    const { deps, modes } = withModes(h.deps, { stalled: notStalled, workerPid: 4242 });
+    const result = await resumeRun(RUN_ID, { by: 'ops-reviewer', note: '  the payout went out at 10:02  ' }, deps);
+
+    expect(modes).toEqual(['steer']);
+    expect(result).toMatchObject({ run_id: RUN_ID, status: 'completed', submission_seq: 2, mode: 'steer', joined: true });
+    expect(h.flue.inits.map((i) => i.options)).toEqual([{ id: RUN_ID }]);
+    expect(h.flue.dispatches[0]?.keys).toEqual(['message']);
+    const msg = signalOf(h);
+    // A user message, like a follow-up: the model reads it as the person speaking.
+    expect(msg).toEqual({
+      kind: 'user',
+      body: `Note from ops-reviewer, added at ${NOW.toISOString()} while this run is working:\nthe payout went out at 10:02`,
+    });
+    // The host's settle owns the phase, the usage and the embedding.
+    expect(h.events.filter((e) => e.startsWith('phase:'))).toEqual([]);
+    expect(h.events).not.toContain('embedRun');
+    expect(h.events).not.toContain('putUsage');
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('investigating');
+    expect(run?.worker_pid).toBeUndefined();
+    expect(run?.submissions.map((s) => [s.seq, s.kind, s.note, s.flue_submission_id])).toEqual([
+      [1, 'initial', undefined, 'sub_host'],
+      [2, 'steer', 'the payout went out at 10:02', 'sub-1'],
+    ]);
+  });
+
+  test('a dispatched run is steered too; the note is persisted-profile in the store and model-facing in the signal', async () => {
+    const h = harness();
+    await working(h, 'dispatched');
+    const { deps } = withModes(h.deps, { stalled: notStalled });
+    await resumeRun(RUN_ID, { by: 'ops', note: `call ${PHONE}; card ${PAN} is the test card` }, deps);
+    const body = signalOf(h).body;
+    expect(body).toContain(PHONE);
+    expect(body).not.toContain(PAN);
+    const note = (await h.store.getRun(RUN_ID))?.submissions[1]?.note;
+    expect(note).not.toContain(PHONE);
+    expect(note).not.toContain(PAN);
+  });
+
+  test('a joined steer reports the parked state or the stop the host left, and writes nothing', async () => {
+    let h!: Harness;
+    h = harness({
+      read: async () => {
+        // The host's response ended on ask_requester.
+        await h.store.putInputRequest(RUN_ID, redactPersisted(sampleInputRequest('q1')));
+        return { text: 'asked', submissionId: 'sub-1', data: {} };
+      },
+    });
+    await working(h);
+    const parked = await resumeRun(RUN_ID, { by: 'ops', note: 'look at the bank reply' }, withModes(h.deps, { stalled: notStalled, lease: joinedLease }).deps);
+    expect(parked).toMatchObject({ status: 'needs_input', joined: true, mode: 'steer' });
+    expect(parked.input_request?.question_id).toBe('q1');
+    expect(h.events.filter((e) => e.startsWith('phase:'))).toEqual([]);
+
+    let g!: Harness;
+    g = harness({
+      stopPollMs: 0,
+      read: async () => {
+        // A stop landed; the host's read failed as aborted.
+        await g.store.markStopped(RUN_ID, 'cancelled', cancel());
+        throw new AgentRunError({ outcome: 'aborted', submissionId: 'sub-1' });
+      },
+    });
+    await working(g);
+    const stopped = await resumeRun(RUN_ID, { by: 'ops', note: 'look at the bank reply' }, withModes(g.deps, { stalled: notStalled, lease: joinedLease }).deps);
+    expect(stopped).toMatchObject({ status: 'stopped', joined: true });
+    expect(stopped.error).toBeUndefined();
+    expect((await g.store.getRun(RUN_ID))?.phase).toBe('stopped');
+  });
+
+  test('a steer that ran as its own response (the host settled first) settles like a follow-up', async () => {
+    const h = harness();
+    await working(h);
+    const { deps } = withModes(h.deps, { stalled: notStalled, lease: ownResponse });
+    const result = await resumeRun(RUN_ID, { by: 'ops', note: 'look at the bank reply' }, deps);
+    expect(result).toMatchObject({ status: 'completed', submission_seq: 2, mode: 'steer', joined: false });
+    expect(h.events.filter((e) => e.startsWith('phase:'))).toEqual(['phase:completed']);
+    expect(h.events.filter((e) => e === 'embedRun')).toHaveLength(1);
+    expect((await h.store.getRun(RUN_ID))?.phase).toBe('completed');
+  });
+
+  test("a steer's own response settles with a compare-and-set: from the host's completed, or the listener's investigating", async () => {
+    for (const phase of ['completed', 'investigating'] as const) {
+      const h = harness();
+      await working(h);
+      let wrote = false;
+      const read = h.deps.dispatcher;
+      const deps = withModes(h.deps, {
+        stalled: notStalled,
+        lease: ownResponse,
+        dispatcher: {
+          init: (agent, options) => {
+            const handle = read.init(agent, options);
+            return {
+              ...handle,
+              read: async (target, opts) => {
+                // The host settled while the steer was queued; the listener may have moved the run on.
+                if (!wrote) await h.store.setPhase(RUN_ID, phase);
+                wrote = true;
+                return handle.read(target, opts);
+              },
+            };
+          },
+        },
+      }).deps;
+      const result = await resumeRun(RUN_ID, { by: 'ops', note: 'look at the bank reply' }, deps);
+      expect(result).toMatchObject({ status: 'completed', joined: false });
+      const write = h.calls.find((c) => c.method === 'setPhaseIf' && c.args[2] === 'completed');
+      expect(write?.args[1]).toEqual(['investigating', 'completed', 'failed']);
+      expect(h.events.filter((e) => e === 'embedRun')).toHaveLength(1);
+      expect((await h.store.getRun(RUN_ID))?.phase).toBe('completed');
+    }
+  });
+
+  test("a steer's own response leaves the phase to a later follow-up, a question and a stop", async () => {
+    const cases: { name: string; setUp: (h: Harness) => Promise<void>; status: string; phase: RunPhase }[] = [
+      {
+        name: 'a later follow-up',
+        setUp: async (h) => {
+          await h.store.addSubmission(RUN_ID, redactPersisted({ kind: 'ask' as const, question: 'and the refund?' }));
+          await h.store.setPhase(RUN_ID, 'investigating');
+        },
+        status: 'completed',
+        phase: 'investigating',
+      },
+      {
+        name: 'a question',
+        setUp: async (h) => {
+          await h.store.putInputRequest(RUN_ID, redactPersisted(sampleInputRequest('q1')));
+        },
+        status: 'failed',
+        phase: 'needs_input',
+      },
+      {
+        name: 'a stop',
+        setUp: async (h) => {
+          await h.store.markStopped(RUN_ID, 'cancelled', cancel());
+        },
+        status: 'stopped',
+        phase: 'stopped',
+      },
+    ];
+    for (const c of cases) {
+      let h!: Harness;
+      h = harness({
+        stopPollMs: 0,
+        read: async () => {
+          await c.setUp(h);
+          if (c.status === 'completed') return { text: 'done', submissionId: 'sub-1', data: {} };
+          throw new AgentRunError({ outcome: 'failed', submissionId: 'sub-1' });
+        },
+      });
+      await working(h);
+      const result = await resumeRun(RUN_ID, { by: 'ops', note: 'look' }, withModes(h.deps, { stalled: notStalled, lease: ownResponse }).deps);
+      expect([c.name, result.status, result.joined]).toEqual([c.name, c.status, false]);
+      expect([c.name, (await h.store.getRun(RUN_ID))?.phase]).toEqual([c.name, c.phase]);
+      expect([c.name, h.events.filter((e) => e === 'embedRun')]).toEqual([c.name, []]);
+    }
+  });
+
+  test('without a lease, the usage meter tells a steer that ran its own response', async () => {
+    installUsageMeter({ observe: () => () => undefined });
+    try {
+      let h!: Harness;
+      h = harness({
+        read: async () => {
+          recordUsage(RUN_ID, { submissionId: 'sub-1' }, { model: 'faux/cheap', agent: 'triage', purpose: 'agent', isError: false, input: 10, output: 5, cacheRead: 0, cacheWrite: 0 });
+          return { text: 'done', submissionId: 'sub-1', data: {} };
+        },
+      });
+      await working(h);
+      const result = await resumeRun(RUN_ID, { by: 'ops', note: 'look at the bank reply' }, withModes(h.deps, { stalled: notStalled, lease: async () => null }).deps);
+      expect(result.joined).toBe(false);
+      expect((await h.store.getRun(RUN_ID))?.usage.find((u) => u.seq === 2)?.final).toBe(true);
+    } finally {
+      resetUsageMeterForTests();
+    }
+  });
+
+  test('no message and not stalled: refused with the steer hint, nothing written or dispatched', async () => {
+    const h = harness();
+    await working(h);
+    const { deps, modes } = withModes(h.deps, { stalled: notStalled });
+    const err = await resumeRun(RUN_ID, { by: 'ops', note: '   ' }, deps).catch((x: unknown) => x);
+    expect(err).toBeInstanceOf(RunNotResumableError);
+    expect(err).toMatchObject({ phase: 'investigating', hint: RESUME_HINTS.running });
+    expect(modes).toEqual([]);
+    expect(h.flue.dispatches).toHaveLength(0);
+    expect((await h.store.getRun(RUN_ID))?.submissions).toHaveLength(1);
+  });
+
+  test("a steer's read that times out does not abort the instance, whose host response goes on", async () => {
+    const h = harness({
+      readTimeoutMs: 20,
+      read: (signal) => new Promise((_, reject) => signal?.addEventListener('abort', () => reject(signal.reason), { once: true })),
+    });
+    await working(h);
+    const result = await resumeRun(RUN_ID, { by: 'ops', note: 'look' }, withModes(h.deps, { stalled: notStalled }).deps);
+    expect(result).toMatchObject({ status: 'failed', error: expect.stringContaining('SubmissionReadTimeoutError'), joined: true });
+    expect(h.flue.aborts).toBe(0);
+    expect((await h.store.getRun(RUN_ID))?.phase).toBe('investigating');
+  });
+
+  test('a steer that cannot be dispatched leaves the working run as it is', async () => {
+    const h = harness({ dispatchError: new Error('queue closed') });
+    await working(h);
+    await expect(resumeRun(RUN_ID, { by: 'ops', note: 'look' }, withModes(h.deps, { stalled: notStalled }).deps)).rejects.toThrow('queue closed');
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('investigating');
+    expect(run?.phase_reason).toBeUndefined();
+  });
+
+  test('a run that settled while the stalled signal was read is resumed or refused from its new phase', async () => {
+    const h = harness();
+    await working(h);
+    const settleTo = (phase: RunPhase) => async (): Promise<Stalled | null> => {
+      await h.store.setPhase(RUN_ID, phase, phase === 'failed' ? { reason: 'AgentRunError' } : {});
+      return null;
+    };
+    const { deps: completed } = withModes(h.deps, { stalled: settleTo('completed') });
+    const err = await resumeRun(RUN_ID, { by: 'ops', note: 'look' }, completed).catch((x: unknown) => x);
+    expect(err).toMatchObject({ phase: 'completed', hint: RESUME_HINTS.completed });
+    expect(h.flue.dispatches).toHaveLength(0);
+
+    await h.store.setPhase(RUN_ID, 'investigating');
+    const { deps: failed, modes } = withModes(h.deps, { stalled: settleTo('failed') });
+    const result = await resumeRun(RUN_ID, { by: 'ops', note: 'look' }, failed);
+    expect(modes).toEqual(['resume']);
+    expect(result).toMatchObject({ status: 'completed', mode: 'resume' });
+    expect(signalOf(h).type).toBe(BLOCK_RESUME_SIGNAL);
+    expect(signalOf(h).body).toContain('This run failed (AgentRunError) before it finished.');
+  });
+
+  test('stalled: stopped as stalled with no verdict, aborted, the old submission awaited, then resumed with the note', async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), 'triage-submit-stall-'));
+    dirs.push(runsDir);
+    installRunEventLog({ runsDir, observe: () => () => undefined });
+    try {
+      const h = harness({ stopPollMs: 0 });
+      await working(h);
+      // The worker that resumes it (CLI) records its pid with the resume's dispatched phase.
+      const { deps, modes } = withModes(h.deps, { stalled, workerPid: 5151 });
+      const result = await resumeRun(RUN_ID, { by: 'ops', note: 'the worker died' }, deps);
+
+      expect(modes).toEqual(['resume']);
+      expect(result).toMatchObject({ status: 'completed', submission_seq: 2, mode: 'resume' });
+      expect(result.joined).toBeUndefined();
+      // Stop, abort and wait for the old submission, then the resume's dispatch and read.
+      expect(h.events.filter((e) => ['phase:stopped', 'abort', 'read', 'addSubmission', 'dispatch'].includes(e))).toEqual([
+        'phase:stopped',
+        'abort',
+        'read',
+        'addSubmission',
+        'dispatch',
+        'read',
+      ]);
+      expect(h.flue.readTargets[0]).toBe('sub_host');
+      // A compare-and-set from the phase it was judged stalled in (L1).
+      const stop = h.calls.find((c) => c.method === 'setPhaseIf' && c.args[2] === 'stopped');
+      expect(stop?.args.slice(1)).toEqual([['investigating'], 'stopped', { reason: STALLED_STOP_REASON }]);
+      expect(h.calls.some((c) => c.method === 'markStopped' || c.method === 'putFeedback')).toBe(false);
+      const dispatched = h.calls.find((c) => c.method === 'setPhase' && c.args[1] === 'dispatched');
+      expect(dispatched?.args[2]).toEqual({ resume: true, worker_pid: 5151 });
+
+      const msg = signalOf(h);
+      expect(msg.type).toBe(BLOCK_RESUME_SIGNAL);
+      expect(msg.body).toContain('This run stalled before it finished (no process was working on it), so it was stopped.');
+      expect(msg.body).toContain('Message from ops:\nthe worker died');
+      const run = await h.store.getRun(RUN_ID);
+      expect(run?.phase).toBe('completed');
+      expect(run?.worker_pid).toBe(5151);
+      expect(run?.feedback).toEqual([]);
+      expect(run?.submissions.map((s) => [s.kind, s.note])).toEqual([
+        ['initial', undefined],
+        ['resume', 'the worker died'],
+      ]);
+
+      await flushRunEventLog();
+      const { events } = await readRunEvents(runsDir, RUN_ID);
+      const pipeline = events.filter((e) => e.source === 'pipeline').map((e) => [e.type, e.data]);
+      expect(pipeline).toContainEqual([
+        'stop',
+        { by: 'ops', reason: 'stalled', stalled: STALLED, stopped_from: 'investigating', aborted: true, abort_settled: 'settled', verdict: false },
+      ]);
+      expect(pipeline).toContainEqual(['resume', { kind: 'resume', from: 'stopped', stalled: STALLED, by: 'ops', note: 'the worker died' }]);
+      const phases = pipeline.filter(([type]) => type === 'phase').map(([, d]) => (d as { phase: string }).phase);
+      expect(phases).toEqual(['dispatched', 'investigating', 'completed']);
+    } finally {
+      await flushRunEventLog();
+      uninstallRunEventLog();
+    }
+  });
+
+  test('stalled with no message is resumed; an old submission that never settles is waited for up to the limit', async () => {
+    let h!: Harness;
+    h = harness({
+      stopPollMs: 0,
+      read: async (signal) => {
+        // The first read is the wait for the aborted submission: it never settles.
+        if (h.flue.reads.length === 1) {
+          await new Promise((_, reject) => signal?.addEventListener('abort', () => reject(signal.reason), { once: true }));
+        }
+        return { text: 'done', submissionId: 'sub-1', data: {} };
+      },
+    });
+    await working(h);
+    const result = await resumeRun(RUN_ID, { by: 'ops' }, withModes(h.deps, { stalled, stalledAbortWaitMs: 20 }).deps);
+    expect(result).toMatchObject({ status: 'completed', mode: 'resume' });
+    expect(signalOf(h).body).not.toContain('Message from');
+  });
+
+  test('stalled: the tunnel check refuses before the run is stopped', async () => {
+    const h = harness({ config: { mock: false } });
+    await working(h);
+    const { deps } = withModes(h.deps, {
+      stalled,
+      resumePreflight: async () => ({ steps: [], warnings: [{ step: 'tunnel', message: 'the bastion is unreachable' }] }),
+    });
+    await expect(resumeRun(RUN_ID, { by: 'ops' }, deps)).rejects.toBeInstanceOf(ResumeNotReadyError);
+    expect(h.flue.aborts).toBe(0);
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('investigating');
+    expect(run?.submissions).toHaveLength(1);
+  });
+
+  test('stalled but settled before the stop: nothing is stopped or aborted and the run is resumed from its new phase', async () => {
+    const h = harness();
+    await working(h);
+    const { deps } = withModes(h.deps, {
+      stalled: async () => {
+        await h.store.setPhase(RUN_ID, 'failed', { reason: 'AgentRunError' });
+        return STALLED;
+      },
+    });
+    const result = await resumeRun(RUN_ID, { by: 'ops' }, deps);
+    expect(result).toMatchObject({ status: 'completed', mode: 'resume' });
+    expect(h.flue.aborts).toBe(0);
+    // The stop was asked for from investigating only, so the failed run was not stopped.
+    expect(h.calls.find((c) => c.method === 'setPhaseIf' && c.args[2] === 'stopped')?.args[1]).toEqual(['investigating']);
+    expect(signalOf(h).body).toContain('This run failed (AgentRunError) before it finished.');
+  });
+
+  test('stalled, then parked on a question before the stop (L1): not stopped, refused with the answer hint', async () => {
+    const h = harness();
+    await working(h);
+    const { deps, modes } = withModes(h.deps, {
+      stalled: async () => {
+        // A fast tool asked the requester while the stalled signal was read.
+        await h.store.putInputRequest(RUN_ID, redactPersisted(sampleInputRequest('q1')));
+        return STALLED;
+      },
+    });
+    const err = await resumeRun(RUN_ID, { by: 'ops', note: 'look again' }, deps).catch((x: unknown) => x);
+    expect(err).toBeInstanceOf(RunNotResumableError);
+    expect(err).toMatchObject({ phase: 'needs_input', hint: RESUME_HINTS.needs_input });
+    expect(modes).toEqual(['resume']);
+    expect(h.flue.aborts).toBe(0);
+    expect(h.flue.dispatches).toHaveLength(0);
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('needs_input');
+    expect(run?.input_request?.question_id).toBe('q1');
+  });
+
+  test('stalled, then its owner came back before the stop (L1): not stopped, the note is sent as a steer', async () => {
+    const h = harness();
+    await working(h, 'dispatched');
+    let reads = 0;
+    const { deps, modes } = withModes(h.deps, {
+      stalled: async () => {
+        reads += 1;
+        if (reads > 1) return null;
+        // The dispatch receipt arrived meanwhile: the run is live again.
+        await h.store.setPhase(RUN_ID, 'investigating');
+        return STALLED;
+      },
+      lease: joinedLease,
+    });
+    const result = await resumeRun(RUN_ID, { by: 'ops', note: 'look at the bank reply' }, deps);
+    expect(modes).toEqual(['resume', 'steer']);
+    expect(result).toMatchObject({ mode: 'steer', joined: true, submission_seq: 2 });
+    expect(h.flue.aborts).toBe(0);
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('investigating');
+    expect(run?.submissions.map((s) => s.kind)).toEqual(['initial', 'steer']);
+  });
+
+  test('two resumes of a stalled run from two processes: the one that stopped it resumes it, the other is refused as in progress', async () => {
+    let releaseWait!: () => void;
+    const waitHeld = new Promise<void>((resolve) => (releaseWait = resolve));
+    let h!: Harness;
+    h = harness({
+      stopPollMs: 0,
+      read: async () => {
+        // The first resume's wait for the aborted submission, held while the others try.
+        if (h.flue.reads.length === 1) await waitHeld;
+        return { text: 'done', submissionId: 'sub-1', data: {} };
+      },
+    });
+    await working(h);
+    // B read the run as investigating and judged it stalled before A's stop landed.
+    let letB!: () => void;
+    const bJudged = new Promise<void>((resolve) => (letB = resolve));
+    const b = resumeRun(
+      RUN_ID,
+      { by: 'b', note: 'from b' },
+      withModes(h.deps, {
+        stalled: async () => {
+          await bJudged;
+          return STALLED;
+        },
+      }).deps,
+    ).catch((x: unknown) => x);
+    const a = resumeRun(RUN_ID, { by: 'a', note: 'from a' }, withModes(h.deps, { stalled }).deps);
+    for (let i = 0; i < 200 && (await h.store.getRun(RUN_ID))?.phase !== 'stopped'; i++) await new Promise((r) => setTimeout(r, 1));
+    expect((await h.store.getRun(RUN_ID))?.phase_reason).toBe(STALLED_STOP_REASON);
+
+    // B's stop finds the run stopped already; judged again, it is A's stop in flight.
+    letB();
+    expect(await b).toMatchObject({ phase: 'stopped', hint: RESUME_HINTS.in_progress });
+    // C comes after the stop: refused at its first check.
+    const c = await resumeRun(RUN_ID, { by: 'c' }, withModes(h.deps, { stalled }).deps).catch((x: unknown) => x);
+    expect(c).toBeInstanceOf(RunNotResumableError);
+    expect(c).toMatchObject({ phase: 'stopped', hint: RESUME_HINTS.in_progress });
+
+    releaseWait();
+    expect(await a).toMatchObject({ status: 'completed', mode: 'resume' });
+    expect(h.flue.aborts).toBe(1);
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('completed');
+    expect(run?.submissions.map((s) => [s.kind, s.note])).toEqual([
+      ['initial', undefined],
+      ['resume', 'from a'],
+    ]);
+  });
+
+  test('a run left stopped as stalled by a resume that added its submission and then died is resumed again', async () => {
+    const h = harness({ stopPollMs: 0 });
+    await working(h);
+    await h.store.setPhaseIf(RUN_ID, ['investigating'], 'stopped', { reason: STALLED_STOP_REASON });
+    await new Promise((r) => setTimeout(r, 5));
+    await h.store.addSubmission(RUN_ID, redactPersisted({ kind: 'resume' as const, note: 'first try' }));
+    const { deps, modes } = withModes(h.deps);
+    const result = await resumeRun(RUN_ID, { by: 'ops', note: 'again' }, deps);
+    expect(modes).toEqual(['resume']);
+    expect(result).toMatchObject({ status: 'completed', mode: 'resume', submission_seq: 3 });
+  });
+
+  test('a failed, stopped or blocked run still resumes with mode resume', async () => {
+    const h = harness({ stopPollMs: 0 });
+    await working(h);
+    await h.store.markStopped(RUN_ID, 'cancelled', cancel());
+    const { deps, modes } = withModes(h.deps);
+    const result = await resumeRun(RUN_ID, { by: 'ops' }, deps);
+    expect(modes).toEqual(['resume']);
+    expect(result.mode).toBe('resume');
+    expect(signalOf(h).body).toContain('This run was stopped before it finished.');
+  });
+});
+
+// ------------------------------------------------------------------ the settle write and the listener (D70)
+
+describe('the settle write and the settle listener (D70)', () => {
+  test('a settle the listener already wrote is not written or embedded again', async () => {
+    for (const outcome of ['completed', 'failed'] as const) {
+      let h!: Harness;
+      h = harness({
+        read: async () => {
+          // The listener handled this settle first: the read lagged past its grace.
+          await h.store.setPhaseIf(RUN_ID, ['investigating'], outcome, outcome === 'failed' ? { reason: 'AgentRunError' } : {});
+          if (outcome === 'completed') return { text: 'done', submissionId: 'sub-1', data: {} };
+          throw new AgentRunError({ outcome: 'failed', submissionId: 'sub-1' });
+        },
+      });
+      const result = await runSubmission(prepared(), h.deps);
+      expect([outcome, result.status]).toEqual([outcome, outcome]);
+      expect([outcome, h.events.filter((e) => e === 'embedRun')]).toEqual([outcome, []]);
+      const run = await h.store.getRun(RUN_ID);
+      expect([outcome, run?.phase, run?.phase_reason]).toEqual([outcome, outcome, outcome === 'failed' ? 'AgentRunError' : undefined]);
+      // The normal path asked with the compare-and-set, from the working phases only.
+      const write = h.calls.filter((c) => c.method === 'setPhaseIf' && c.args[2] === outcome).at(-1);
+      expect(write?.args[1]).toEqual(['dispatched', 'investigating']);
+    }
+  });
+
+  test("a later steer that runs as its own response keeps the phase; the host's settle leaves it", async () => {
+    for (const status of ['running', 'queued'] as const) {
+      let h!: Harness;
+      h = harness({
+        read: async () => {
+          // A steer came in while the host ran, and missed its response.
+          const seq = await h.store.addSubmission(RUN_ID, redactPersisted({ kind: 'steer' as const, note: 'look' }));
+          await h.store.setSubmissionFlueId(RUN_ID, seq, 'sub_steer');
+          if (status === 'running') {
+            // The listener wrote the host's settle, then showed the steer's own response working.
+            await h.store.setPhaseIf(RUN_ID, ['investigating'], 'completed');
+            await h.store.setPhaseIf(RUN_ID, ['completed'], 'investigating');
+          }
+          return { text: 'done', submissionId: 'sub-1', data: {} };
+        },
+      });
+      h.deps = {
+        ...h.deps,
+        lease: async (id) => (id === 'sub_steer' ? { status, leaseExpiresAt: status === 'running' ? NOW.getTime() + 60_000 : 0 } : null),
+      };
+      const result = await runSubmission(prepared(), h.deps);
+      expect([status, result.status]).toEqual([status, 'completed']);
+      const phase = (await h.store.getRun(RUN_ID))?.phase;
+      const embeds = h.events.filter((e) => e === 'embedRun').length;
+      // Running: the steer owns the phase and its settle embeds. Queued: the host writes, and the
+      // listener moves the run on when the steer starts.
+      expect([status, phase, embeds]).toEqual(status === 'running' ? [status, 'investigating', 0] : [status, 'completed', 1]);
+    }
+  });
+});
+
+// ------------------------------------------------------------------ the worker pid and the Flue id (D71)
+
+describe('the worker pid and the Flue id (D71)', () => {
+  test("a dispatch with no worker pid clears an earlier CLI worker's pid, a worker records its own, and a failed Flue id write is logged", async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), 'triage-submit-pid-'));
+    dirs.push(runsDir);
+    installRunEventLog({ runsDir, observe: () => () => undefined });
+    try {
+      for (const workerPid of [undefined, 5151]) {
+        let h!: Harness;
+        const seen: unknown[] = [];
+        h = harness({
+          read: async () => {
+            const run = (await h.store.getRun(RUN_ID))!;
+            // The head has no Flue id to read a lease for; the earlier worker's dead pid must not flag it.
+            const stalled = await loadStalled(run, { stalledAfterMs: 600_000, lease: async () => null, isAlive: (pid) => pid !== 4242 });
+            seen.push([run.worker_pid, run.submissions.at(-1)?.flue_submission_id, stalled]);
+            return { text: 'done', submissionId: 'sub-1', data: {} };
+          },
+        });
+        await h.store.createRun(RUN_ID, redactPersisted(prepared().request, { names: [NAME] }));
+        await h.store.addSubmission(RUN_ID, redactPersisted({ kind: 'initial' as const }));
+        // A CLI worker ran the first submission and is gone.
+        await h.store.setPhase(RUN_ID, 'completed', { worker_pid: 4242 });
+        const inner = h.store;
+        const store = new Proxy(inner, {
+          get(target, prop) {
+            if (prop === 'setSubmissionFlueId') return async () => Promise.reject(new Error('column missing'));
+            const value = Reflect.get(target, prop, target) as unknown;
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        });
+        const deps = { ...h.deps, store, ...(workerPid !== undefined ? { workerPid } : {}) };
+        const result = await askRun(RUN_ID, 'and the refund?', 'ops', deps);
+        expect(result.status).toBe('completed');
+        expect(seen).toEqual([[workerPid, undefined, null]]);
+      }
+      await flushRunEventLog();
+      const { events } = await readRunEvents(runsDir, RUN_ID);
+      const failed = events.filter((e) => e.source === 'pipeline' && e.type === 'flue_id_write_failed').map((e) => e.data);
+      expect(failed).toEqual([
+        { submission_seq: 2, error: 'Error' },
+        { submission_seq: 2, error: 'Error' },
+      ]);
     } finally {
       await flushRunEventLog();
       uninstallRunEventLog();

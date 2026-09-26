@@ -25,18 +25,27 @@
 // counts every model turn of the runs this process drives. It needs no
 // config; usageMeter: false leaves it off (tests).
 //
+// Last, it installs the settle listener (src/ingress/settle-listener.ts,
+// D70), which moves a run's phase when Flue settles its submission in a
+// process where nobody awaits read(), as after a restart. It reads and
+// writes the runtime's run store (triageRuntime().runStore), resolved on the
+// first settle, and the event log's runs dir; settleListener: false leaves it
+// off (tests).
+//
 // src/db.ts is imported lazily: its default export loads the config and
 // builds the adapter on import, which should happen only when a runtime is
 // actually started.
 import type { Agent } from '@flue/runtime';
 import type { PersistenceAdapter } from '@flue/runtime/adapter';
 import { type Flue, start as flueStart, type StartOptions } from '@flue/runtime/node';
+import { triageRuntime } from '../agents/triage-plan.ts';
 import { Triage } from '../agents/triage.agent.ts';
 import { loadConfig, type Config } from '../config/env.ts';
 import { ConfigError } from '../config/errors.ts';
 import { describeEnsure, ensureConfiguredModels } from '../model-refresh.ts';
 import { installRunEventLog } from '../runlog/event-log.ts';
 import { installUsageMeter } from '../usage/meter.ts';
+import { installSettleListener } from './settle-listener.ts';
 
 export type BootOptions = {
   /** Defaults to Flue's start() from @flue/runtime/node. */
@@ -51,6 +60,8 @@ export type BootOptions = {
   readonly eventLog?: false | { readonly runsDir: string };
   /** Installs the usage meter. Default true; false leaves it off. */
   readonly usageMeter?: boolean;
+  /** Installs the settle listener. Default true; false leaves it off. */
+  readonly settleListener?: boolean;
 };
 
 let booted: Promise<Flue> | undefined;
@@ -68,11 +79,12 @@ export function bootRuntime(options: BootOptions = {}): Promise<Flue> {
 
 async function startOnce(options: BootOptions): Promise<Flue> {
   await (options.ensureModels ?? ensureModels)();
-  if (options.eventLog !== false) {
-    const runsDir = options.eventLog?.runsDir ?? runsDirOf();
-    if (runsDir !== undefined) installRunEventLog({ runsDir });
-  }
+  const runsDir = options.eventLog === false ? undefined : (options.eventLog?.runsDir ?? runsDirOf());
+  if (runsDir !== undefined) installRunEventLog({ runsDir });
   if (options.usageMeter !== false) installUsageMeter();
+  if (options.settleListener !== false) {
+    installSettleListener({ store: () => triageRuntime().runStore, ...(runsDir !== undefined ? { runsDir } : {}) });
+  }
   const db = options.db !== undefined ? await options.db() : (await import('../db.ts')).default;
   const start = options.start ?? flueStart;
   return start({ agents: options.agents ?? [Triage], db });

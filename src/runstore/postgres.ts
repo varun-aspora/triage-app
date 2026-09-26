@@ -77,6 +77,9 @@ import {
 } from './types.ts';
 import {
   assertBlockId,
+  assertFlueSubmissionId,
+  assertPhaseList,
+  WORKING_PHASES,
   assertQuestionId,
   BlockNotOpenError,
   BlockOpenError,
@@ -202,8 +205,13 @@ ON CONFLICT (run_id) DO NOTHING`,
 
   // A run in phase $7 (stopped) stays there unless $6 (resume) is set.
   setPhase: `UPDATE triage.runs
-SET phase = $2, phase_reason = $3::text, worker_pid = COALESCE($4::integer, worker_pid), updated_at = $5::timestamptz
+SET phase = $2, phase_reason = $3::text, worker_pid = CASE WHEN $8::boolean THEN $4::integer ELSE worker_pid END, updated_at = $5::timestamptz
 WHERE run_id = $1 AND (phase <> $7::text OR $6::boolean)
+RETURNING run_id`,
+  // Compare-and-set: $6 is the from-phases as a JSON array.
+  setPhaseIf: `UPDATE triage.runs
+SET phase = $2, phase_reason = $3::text, worker_pid = CASE WHEN $7::boolean THEN $4::integer ELSE worker_pid END, updated_at = $5::timestamptz
+WHERE run_id = $1 AND phase IN (SELECT jsonb_array_elements_text($6::jsonb))
 RETURNING run_id`,
 
   putClassification: `UPDATE triage.runs
@@ -245,6 +253,10 @@ RETURNING run_id`,
   nextSubmissionSeq: 'SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM triage.submissions WHERE run_id = $1',
   insertSubmission: `INSERT INTO triage.submissions (run_id, seq, kind, question, created_at, question_id, answer, block_id, note)
 VALUES ($1, $2, $3, $4::text, $5::timestamptz, $6::text, $7::text, $8::text, $9::text)`,
+  // D71: Flue's submission id, from the dispatch receipt. The run's updated_at is left alone.
+  setSubmissionFlueId: `UPDATE triage.submissions SET flue_submission_id = $3::text
+WHERE run_id = $1 AND seq = $2
+RETURNING seq`,
 
   nextEvidenceVersion:
     'SELECT COALESCE(MAX(version), 0) + 1 AS version FROM triage.evidence WHERE run_id = $1 AND key = $2',
@@ -275,21 +287,36 @@ RETURNING run_id`,
 FROM triage.runs WHERE run_id = $1`,
   latestEvidence: `SELECT DISTINCT ON (key) key, version, findings FROM triage.evidence
 WHERE run_id = $1 ORDER BY key, version DESC`,
-  submissions: `SELECT s.seq, s.kind, s.question, s.question_id, s.answer, s.block_id, s.note, s.created_at, r.report, r.report_md
+  submissions: `SELECT s.seq, s.kind, s.question, s.question_id, s.answer, s.block_id, s.note, s.created_at, s.flue_submission_id,
+  r.report, r.report_md
 FROM triage.submissions s LEFT JOIN triage.reports r ON r.run_id = s.run_id AND r.seq = s.seq
 WHERE s.run_id = $1 ORDER BY s.seq`,
   feedback: 'SELECT body FROM triage.feedback WHERE run_id = $1 ORDER BY id',
 
   // SUM(usd) is null when no row has a price; the token sum is null when the run has no rows.
-  // usd_unpriced with a non-null usd_total makes the total partial.
+  // usd_unpriced with a non-null usd_total makes the total partial. The lateral
+  // join gives the stalled check's inputs (D71) on a row in a working phase
+  // ($5, WORKING_PHASES as a JSON array) and nulls on any other; $6 is 'steer'.
   listRuns: `SELECT r.run_id, r.created_at, r.updated_at, r.phase, r.category, r.tier_final, r.report_status,
   (SELECT COUNT(*) FROM triage.submissions s WHERE s.run_id = r.run_id) AS submissions,
   (SELECT f.verdict FROM triage.feedback f WHERE f.run_id = r.run_id ORDER BY f.id DESC LIMIT 1) AS feedback_verdict,
   (SELECT SUM(u.usd) FROM triage.run_usage u WHERE u.run_id = r.run_id) AS usd_total,
   (SELECT SUM(u.input_tokens::bigint + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens)::bigint
     FROM triage.run_usage u WHERE u.run_id = r.run_id) AS tokens_total,
-  EXISTS (SELECT 1 FROM triage.run_usage u WHERE u.run_id = r.run_id AND u.usd IS NULL) AS usd_unpriced
+  EXISTS (SELECT 1 FROM triage.run_usage u WHERE u.run_id = r.run_id AND u.usd IS NULL) AS usd_unpriced,
+  w.flue_submission_id, w.steer_flue_submission_id, w.worker_pid
 FROM triage.runs r
+LEFT JOIN LATERAL (
+  SELECT
+    (SELECT s.flue_submission_id FROM triage.submissions s
+      WHERE s.run_id = r.run_id AND s.kind <> $6::text ORDER BY s.seq DESC LIMIT 1) AS flue_submission_id,
+    (SELECT s.flue_submission_id FROM triage.submissions s
+      WHERE s.run_id = r.run_id AND s.kind = $6::text AND s.flue_submission_id IS NOT NULL
+        AND s.seq > COALESCE((SELECT MAX(h.seq) FROM triage.submissions h WHERE h.run_id = r.run_id AND h.kind <> $6::text), 0)
+      ORDER BY s.seq DESC LIMIT 1) AS steer_flue_submission_id,
+    r.worker_pid AS worker_pid
+  WHERE r.phase IN (SELECT jsonb_array_elements_text($5::jsonb))
+) w ON true
 WHERE ($1::timestamptz IS NULL OR r.created_at >= $1::timestamptz)
   AND ($2::text IS NULL OR r.phase = $2::text)
   AND ($3::text IS NULL OR r.category = $3::text)
@@ -420,6 +447,18 @@ function toFloat(value: unknown, label: string): number {
   return n;
 }
 
+/** The stalled check's inputs from a listRuns row (D71). All null on a row that is not in a working phase. */
+function stalledInputs(row: Row): Pick<RunSummary, 'flue_submission_id' | 'steer_flue_submission_id' | 'worker_pid'> {
+  const flueId = optText(row.flue_submission_id);
+  const steerId = optText(row.steer_flue_submission_id);
+  const pid = row.worker_pid === null || row.worker_pid === undefined ? undefined : toInt(row.worker_pid, 'worker pid');
+  return {
+    ...(flueId !== undefined ? { flue_submission_id: flueId } : {}),
+    ...(steerId !== undefined ? { steer_flue_submission_id: steerId } : {}),
+    ...(pid !== undefined ? { worker_pid: pid } : {}),
+  };
+}
+
 /** Groups usage rows, read in seq order, into one entry per seq. */
 function groupUsage(rows: readonly Row[]): SubmissionUsage[] {
   const out: { seq: number; rows: UsageRow[]; updated_at: string; final: boolean }[] = [];
@@ -500,7 +539,7 @@ class PostgresRunStore implements RunStore {
     const id = assertRunId(runId);
     parseRecord(RunPhaseSchema, phase, 'phase');
     if (detail.reason !== undefined) assertClean(detail.reason, 'phase reason');
-    if (detail.worker_pid !== undefined) positiveInt(detail.worker_pid, 'worker pid');
+    if (detail.worker_pid !== undefined && detail.worker_pid !== null) positiveInt(detail.worker_pid, 'worker pid');
     const rows = await this.#runner.query(SQL.setPhase, [
       id,
       phase,
@@ -509,9 +548,33 @@ class PostgresRunStore implements RunStore {
       this.#iso(),
       detail.resume === true,
       'stopped',
+      // Left out keeps the recorded pid; null clears it.
+      detail.worker_pid !== undefined,
     ]);
     if (rows.length > 0) return true;
     // No row updated: the run is missing, or stopped.
+    const exists = await this.#runner.query(SQL.runExists, [id]);
+    if (exists.length === 0) throw new RunNotFoundError(id);
+    return false;
+  }
+
+  async setPhaseIf(runId: RunId, fromPhases: readonly RunPhase[], phase: RunPhase, detail: PhaseDetail = {}): Promise<boolean> {
+    const id = assertRunId(runId);
+    const from = assertPhaseList(fromPhases);
+    parseRecord(RunPhaseSchema, phase, 'phase');
+    if (detail.reason !== undefined) assertClean(detail.reason, 'phase reason');
+    if (detail.worker_pid !== undefined && detail.worker_pid !== null) positiveInt(detail.worker_pid, 'worker pid');
+    const rows = await this.#runner.query(SQL.setPhaseIf, [
+      id,
+      phase,
+      detail.reason ?? null,
+      detail.worker_pid ?? null,
+      this.#iso(),
+      JSON.stringify(from),
+      detail.worker_pid !== undefined,
+    ]);
+    if (rows.length > 0) return true;
+    // No row updated: the run is missing, or in a phase not listed.
     const exists = await this.#runner.query(SQL.runExists, [id]);
     if (exists.length === 0) throw new RunNotFoundError(id);
     return false;
@@ -634,6 +697,17 @@ class PostgresRunStore implements RunStore {
       ]);
       return seq;
     });
+  }
+
+  async setSubmissionFlueId(runId: RunId, seq: number, flueSubmissionId: string): Promise<void> {
+    const id = assertRunId(runId);
+    const n = positiveInt(seq, 'submission id');
+    const flueId = assertFlueSubmissionId(flueSubmissionId);
+    const rows = await this.#runner.query(SQL.setSubmissionFlueId, [id, n, flueId]);
+    if (rows.length > 0) return;
+    const exists = await this.#runner.query(SQL.runExists, [id]);
+    if (exists.length === 0) throw new RunNotFoundError(id);
+    throw new RunStoreError(`submission ${n} not found`);
   }
 
   async putReport(runId: RunId, submissionId: number, report: Persisted<Report>, md: Persisted<string>): Promise<void> {
@@ -865,6 +939,7 @@ class PostgresRunStore implements RunStore {
       const answer = optText(row.answer);
       const blockId = optText(row.block_id);
       const note = optText(row.note);
+      const flueId = optText(row.flue_submission_id);
       const report = row.report === null || row.report === undefined ? null : (fromJson(row.report, 'report') as Report);
       return {
         kind: parseRecord(SubmissionInputSchema.entries.kind, row.kind, 'submission kind'),
@@ -875,6 +950,7 @@ class PostgresRunStore implements RunStore {
         ...(note !== undefined ? { note } : {}),
         seq: toInt(row.seq, 'submission seq'),
         created_at: toIso(row.created_at, 'submission time'),
+        ...(flueId !== undefined ? { flue_submission_id: assertFlueSubmissionId(flueId) } : {}),
         report,
         report_md: report === null ? null : (optText(row.report_md) ?? null),
       };
@@ -948,7 +1024,7 @@ class PostgresRunStore implements RunStore {
     const phase = query.phase === undefined ? null : parseRecord(RunPhaseSchema, query.phase, 'phase');
     if (query.limit !== undefined && !Number.isFinite(query.limit)) throw new RunStoreError('invalid limit');
     const limit = query.limit === undefined ? null : Math.max(0, Math.floor(query.limit));
-    const rows = await this.#runner.query(SQL.listRuns, [since, phase, query.category ?? null, limit]);
+    const rows = await this.#runner.query(SQL.listRuns, [since, phase, query.category ?? null, limit, JSON.stringify(WORKING_PHASES), 'steer']);
     return rows.map((row) => {
       const category = optText(row.category);
       const tier = optText(row.tier_final);
@@ -970,6 +1046,7 @@ class PostgresRunStore implements RunStore {
           ? { tokens_total: toInt(row.tokens_total, 'usage token total') }
           : {}),
         ...(priced && row.usd_unpriced === true ? { usd_partial: true } : {}),
+        ...stalledInputs(row),
       };
       return parseRecord(RunSummarySchema, summary, 'run summary');
     });

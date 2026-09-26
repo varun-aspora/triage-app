@@ -1,13 +1,22 @@
 // triage status <run_id> [--json]
 //
 // Prints {run_id, status, phase, tier_final, submissions, preflight_warnings,
-// input_request?, block?, reason?, usage?} from the run store. status is the phase
+// input_request?, block?, reason?, stalled?, usage?} from the run store. status is the phase
 // folded into running, completed, failed or stopped, plus 'needs_input'
 // (parked on a question for the requester; the worker is gone by design, P6 §4.5),
 // 'blocked' (parked on a system that did not answer, D55; `triage resume`
 // sends it on) and 'stalled': the phase is not terminal and the worker pid
 // recorded on the run is no longer alive, so nothing will finish the run.
 // Crash recovery is not built in v1; the caller reruns.
+//
+// stalled (D71) comes from loadStalled in src/ingress/stalled.ts, the same
+// check the run view uses: no_owner when the run's Flue submission lost its
+// lease or the worker pid is dead, no_progress when events.jsonl has been
+// quiet for TRIAGE_STALLED_AFTER_MS. It is set only while the phase is
+// dispatched or investigating, and it leaves status alone, so a run whose
+// worker died is status 'stalled' with stalled.reason no_owner, as before.
+// The lease is read from the Flue database with openSubmissionLeases, since
+// this process runs no runtime; the worker pid is checked once for both.
 //
 // usage (D59) is the run's token and cost totals from src/usage/summary.ts,
 // present in --json only when something was counted. The human form prints
@@ -19,9 +28,12 @@
 // with wait and usage.
 import * as v from 'valibot';
 import type { Config } from '../../config/env.ts';
+import type { SubmissionLeases } from '../../db.ts';
+import { hasFlueSubmission, loadStalled, oncePerPid, STALLABLE_PHASES, stalledSubjectOf } from '../../ingress/stalled.ts';
 import { createRunStore } from '../../runstore/index.ts';
 import { isTerminalPhase, type RunRecord, type RunStore } from '../../runstore/types.ts';
 import { RunIdSchema } from '../../types/core.ts';
+import type { Stalled } from '../../types/stalled.ts';
 import type { RunUsageView, UsageTotals } from '../../types/usage.ts';
 import { summariseUsage } from '../../usage/summary.ts';
 import { answerHint, blockLines, copyBlock, questionLines, resumeHint } from '../lib/input-request.ts';
@@ -157,7 +169,7 @@ export function usageLines(view: RunUsageView, now: number): string[] {
   return [`cost: ${usageTotalText(view, now)}`, ...usageBreakdownLines(view, 'model')];
 }
 
-export function statusOutput(run: RunRecord, isAlive: PidChecker): StatusOutput {
+export function statusOutput(run: RunRecord, isAlive: PidChecker, stalled: Stalled | null = null): StatusOutput {
   const status = runStatusOf(run, isAlive);
   return {
     run_id: run.run_id,
@@ -169,8 +181,54 @@ export function statusOutput(run: RunRecord, isAlive: PidChecker): StatusOutput 
     ...(run.input_request !== null ? { input_request: { ...run.input_request, options: [...run.input_request.options] } } : {}),
     ...(run.block !== null ? { block: copyBlock(run.block) } : {}),
     ...reasonField(run, status),
+    ...(stalled !== null ? { stalled: { reason: stalled.reason, since: stalled.since } } : {}),
     ...usageField(usageViewOf(run, status)),
   };
+}
+
+/** The human line for a stalled run (D71). */
+export function stalledLine(stalled: Stalled): string {
+  return stalled.reason === 'no_owner'
+    ? `stalled: no process is working on the run (since ${stalled.since})`
+    : `stalled: no progress since ${stalled.since}`;
+}
+
+/** Opens Flue lease reads without a runtime. src/db.ts is imported only here, since its default export loads the config. */
+export const defaultOpenLeases = async (config: Config): Promise<SubmissionLeases> =>
+  (await import('../../db.ts')).openSubmissionLeases(config);
+
+/**
+ * The run's stalled signal for status. Opens the Flue database only when the
+ * run is working and has a Flue id to read a lease for (its latest
+ * non-steer submission's, or a later steer's). Never throws.
+ */
+export async function statusStalled(
+  run: RunRecord,
+  config: Config,
+  isAlive: PidChecker,
+  openLeases: (config: Config) => Promise<SubmissionLeases>,
+  now: () => number,
+): Promise<Stalled | null> {
+  if (!STALLABLE_PHASES.includes(run.phase)) return null;
+  let leases: SubmissionLeases | null = null;
+  if (hasFlueSubmission(stalledSubjectOf(run))) {
+    try {
+      leases = await openLeases(config);
+    } catch {
+      leases = null;
+    }
+  }
+  try {
+    return await loadStalled(run, {
+      stalledAfterMs: config.budgets.stalledAfterMs,
+      runsDir: config.paths.runsDir,
+      lease: leases?.lease ?? (async () => null),
+      isAlive,
+      now,
+    });
+  } finally {
+    await leases?.close().catch(() => undefined);
+  }
 }
 
 /** { reason } for a failed or stopped run, with the same fallbacks as `triage wait`. */
@@ -197,14 +255,17 @@ export const defaultOpenStore: OpenStore = (config) => createRunStore(config);
 export type StatusCommandOptions = {
   readonly openStore?: OpenStore<'getRun'>;
   readonly isAlive?: PidChecker;
-  /** For 'updated Ns ago'. */
+  /** For 'updated Ns ago' and the stalled check. */
   readonly now?: () => number;
+  /** Flue lease reads for the stalled check (D71). Defaults to openSubmissionLeases from src/db.ts. */
+  readonly openLeases?: (config: Config) => Promise<SubmissionLeases>;
 };
 
 export function createStatusCommand(options: StatusCommandOptions = {}): CliCommand {
   const openStore: OpenStore<'getRun'> = options.openStore ?? defaultOpenStore;
-  const isAlive = options.isAlive ?? pidAlive;
+  const checkPid = options.isAlive ?? pidAlive;
   const now = options.now ?? Date.now;
+  const openLeases = options.openLeases ?? defaultOpenLeases;
   return {
     path: ['status'],
     summary: 'show where a run is: phase, tier, submissions, cost and pre-flight warnings',
@@ -217,17 +278,22 @@ export function createStatusCommand(options: StatusCommandOptions = {}): CliComm
       const runId = args[0];
       if (!checkRunIdArg(io, json, runId)) return EXIT.USAGE;
 
-      const store = await openStore(ctx.config());
+      const config = ctx.config();
+      const store = await openStore(config);
       const run = await store.getRun(runId);
       if (run === null) return printNotFound(io, json, runId);
 
-      const out = statusOutput(run, isAlive);
+      // status and the stalled check read the same pid; it is checked once.
+      const isAlive = oncePerPid(checkPid);
+      const stalled = await statusStalled(run, config, isAlive, openLeases, now);
+      const out = statusOutput(run, isAlive, stalled);
       if (json) {
         emitJson(io, StatusOutputSchema, out);
       } else {
         printHuman(io, [
           `run ${out.run_id}: ${out.status} (phase ${out.phase}${isTerminalPhase(out.phase) ? '' : ', not finished'})`,
           ...(out.reason !== undefined ? [`reason: ${out.reason}`] : []),
+          ...(out.stalled !== undefined ? [stalledLine(out.stalled)] : []),
           `tier: ${out.tier_final ?? 'not decided yet'}`,
           `submissions: ${out.submissions}`,
           ...usageLines(out.usage ?? usageViewOf(run, out.status), now()),

@@ -55,7 +55,11 @@
 //
 // Every step records a phase: preflight, identity, classifying, dispatched,
 // investigating, then completed or failed (or needs_input or blocked, when a
-// tool parked the run).
+// tool parked the run). investigating is written only while the run is still
+// dispatched, so a tool that parked the run before it keeps its phase. The
+// settle writes completed or failed with the compare-and-set the settle
+// listener uses (D70), from dispatched or investigating only, so of the two
+// only the first writes, and only the one that wrote embeds.
 //
 // Screenshots (D36): Flue's dispatch message takes image parts
 // ({ kind: 'user', body, attachments: [{ type: 'image', data, mimeType }] }),
@@ -102,6 +106,37 @@
 // resume (ResumeNotReadyError, a RunNotResumableError) with the run left as
 // it was.
 //
+// resumeRun also takes a run that is still working, dispatched or
+// investigating (D72). It reads the run's stalled signal (D71) first:
+//   - not stalled: the person's message is a steer. It is stored as a
+//     submission of kind steer and dispatched to the same instance as a user
+//     message, like a follow-up. Flue joins it into the live response at the
+//     next turn boundary: after the tool calls of the turn in flight have
+//     run, and before the next model call, so no tool call is cut short or
+//     skipped. It settles with that response. The steer writes no phase and
+//     no worker pid before the read. After it, Flue's lease for the steer
+//     says whether it joined (joinedInto), or, when there is no lease to
+//     read, the usage meter does: a steer that ran its own response has its
+//     own turns. A joined steer leaves the phase, the usage and the embedding
+//     to the host's settle and only reports the outcome. A steer that missed
+//     the live response (the host settled first) runs as its own response,
+//     an ordinary follow-up: the settle listener shows the run investigating
+//     once Flue starts it (D70), and its settle writes the phase with the
+//     same compare-and-set the listener uses, so it overwrites no question,
+//     no block and nothing a later follow-up owns. A steer needs a message.
+//   - stalled: the run is stopped with reason 'stalled' and no verdict (a
+//     person did not reject it), only if it is still in the phase it was
+//     judged stalled in; a run that moved on is judged once more from its
+//     new phase. Flue is asked to abort the instance, and the resume waits,
+//     up to STALLED_ABORT_WAIT_MS, for the aborted submission to settle,
+//     then one stop poll more, with the run stopped all along. A late settle
+//     of the old submission is then refused by the store or ignored by the
+//     settle listener (D70), and a reader in another process has seen the
+//     stop. Then it resumes as for a stopped run, on the same instance and
+//     conversation.
+// The mode ('steer' or 'resume') is told to deps.onResumeMode before
+// anything is dispatched and returned on the result.
+//
 // A run can be stopped from another process (src/ingress/stop.ts). While a
 // run works, the pipeline reads the store every STOP_POLL_MS; once the phase
 // is stopped it aborts its own steps and, after dispatch, the Flue instance.
@@ -117,6 +152,7 @@ import { readFile } from 'node:fs/promises';
 import {
   type Agent,
   type AgentHandleDispatchRequest,
+  AgentRunError,
   type AgentInstanceHandle,
   type AgentReadOptions,
   type DeliveredAttachment,
@@ -144,6 +180,8 @@ import { createExecRunner, type ExecRunner } from '../connectors/exec.ts';
 import { errorText, safeErrorText, scrubSecrets, stripAddresses } from '../connectors/error-text.ts';
 import { mockPortFromFixtures } from '../connectors/mock.ts';
 import { ConnectorError } from '../connectors/types.ts';
+import { pidAlive } from '../cli/commands/status.command.ts';
+import { submissionLease, type SubmissionLease, type SubmissionLeaseReader } from '../db/submission-lease.ts';
 import { decisionProviderFor } from '../decisions/registry.ts';
 import { createEmbedder, type EmbedUsage, type Embedder, type FetchLike, HASH_MODEL } from '../embed/index.ts';
 import { createJsonlAuditSink } from '../gate/audit-sink.ts';
@@ -160,6 +198,7 @@ import { priorCasesFor, type PriorCasesResult } from '../runstore/prior-cases.ts
 import {
   type PhaseDetail,
   RunNotFoundError,
+  WORKING_PHASES,
   type RunPhase,
   type RunRecord,
   RunStoppedError,
@@ -178,6 +217,7 @@ import { type Entity, type Interface, type KnownIds, RunIdSchema, type RunId, ty
 import type { IdChain } from '../types/id-chain.ts';
 import { INPUT_ANSWER_CHAIN_ATTR, INPUT_ANSWER_SIGNAL, type InputRequest, QuestionIdSchema } from '../types/input-request.ts';
 import type { Attachment, TriageRequest } from '../types/request.ts';
+import type { Stalled } from '../types/stalled.ts';
 import type { UsageRow } from '../types/usage.ts';
 import {
   dropIntake,
@@ -192,7 +232,8 @@ import {
 import { type IdentityUsage, type IngressIdentity, NO_IDS_GAP, resolveIngressIdentity } from './identity.ts';
 import { IngressInputError } from './normalise.ts';
 import type { PreparedSubmission } from './prepare.ts';
-import { renderAnswer, renderAsk, renderResume, renderThread, type RenderImages, type ResumeFrom } from './render-thread.ts';
+import { renderAnswer, renderAsk, renderResume, renderSteer, renderThread, type RenderImages, type ResumeFrom } from './render-thread.ts';
+import { currentLease, DEFAULT_STALLED_AFTER_MS, loadStalled, STALLABLE_PHASES, stalledSubjectOf } from './stalled.ts';
 
 // ------------------------------------------------------------------ types
 
@@ -243,6 +284,27 @@ export type SettleDeps = {
   readonly resumePreflight?: (input: { readonly signal: AbortSignal }) => Promise<Pick<PreflightResult, 'steps' | 'warnings'>>;
   /** Drives the live usage flush (D59). Defaults to an unref'd setInterval. */
   readonly usageFlushTimer?: UsageFlushTimer;
+  /**
+   * The run's stalled signal (D71), which a resume of a working run reads
+   * (D72). Left out: loadStalled with the key's default wait and this
+   * process's Flue leases, without the event log.
+   */
+  readonly stalled?: (run: RunRecord) => Promise<Stalled | null>;
+  /** Told whether a resume steers the run or resumes it, once that is decided and before anything is dispatched. */
+  readonly onResumeMode?: (mode: ResumeMode) => void;
+  /** Reads a Flue submission's lease, to tell whether a steer joined. Defaults to this process's (submissionLease). */
+  readonly lease?: SubmissionLeaseReader;
+  /** How long a resume of a stalled run waits for the aborted submission to settle. Default STALLED_ABORT_WAIT_MS. */
+  readonly stalledAbortWaitMs?: number;
+  /**
+   * The CLI worker's pid. Written with the dispatched phase of a submission
+   * that is not a steer (D72), so the worker that resumes a stalled run
+   * records its pid only after the stalled check, and a steer never takes
+   * the pid of the process that works on the run. Left out, that phase
+   * write clears the recorded pid (D71), which belonged to an earlier
+   * submission.
+   */
+  readonly workerPid?: number;
 };
 
 export type SubmissionDeps = SettleDeps & {
@@ -280,6 +342,9 @@ export type SubmissionDeps = SettleDeps & {
 
 export type SubmissionStatus = 'completed' | 'failed' | 'needs_input' | 'blocked' | 'stopped';
 
+/** What a resume did (D72): steered a working run with the message, or resumed a run that had settled, parked, stopped or stalled. */
+export type ResumeMode = 'steer' | 'resume';
+
 export type SubmissionResult = {
   readonly run_id: RunId;
   readonly status: SubmissionStatus;
@@ -297,6 +362,10 @@ export type SubmissionResult = {
   readonly block?: BlockRecord;
   /** Things that did not happen after the settle, such as embeddings. */
   readonly gaps: readonly string[];
+  /** resumeRun only: whether it steered the run or resumed it (D72). */
+  readonly mode?: ResumeMode;
+  /** A steer only: true when Flue joined it into the live response, false when it ran as its own response. */
+  readonly joined?: boolean;
 };
 
 /** read() waited longer than the read timeout. The run was asked to abort. */
@@ -368,31 +437,86 @@ export function resumeReadinessRefusal(
 
 /** The hints RunNotResumableError carries. The CLI and the HTTP routes reuse them. */
 export const RESUME_HINTS = {
-  running: 'the run is still working; follow it with triage wait',
+  starting: 'the run has not started its investigation yet; follow it with triage wait',
+  running: 'the run is still working and is not stalled; add a message to steer it, or follow it with triage wait',
   needs_input: 'answer it with triage input',
   completed: 'ask a follow-up with triage ask',
   never_started: 'the run never started an investigation; start a new run',
+  in_progress: 'another resume of this run is still starting; wait a moment and look at the run again',
 } as const;
+
+/** What resumeRefusal needs to refuse a steer with nothing to say: the message, and the run's stalled signal. */
+export type SteerCheck = {
+  readonly note?: string;
+  readonly stalled: Stalled | null;
+};
 
 /**
  * Why a stored run cannot be resumed, or null when it can: blocked, failed
- * after it was dispatched, or stopped after it was dispatched. Without a
- * submission there is no conversation to continue.
+ * or stopped after it was dispatched, or still working after its dispatch
+ * (D72: steered, or stopped and resumed when stalled). Without a submission
+ * there is no conversation to continue. Given the steer check, a working run
+ * that is not stalled is refused when the message is blank; without it that
+ * is left to resumeRun. A run another resume is taking over (stalledStopInFlight)
+ * is refused with RESUME_HINTS.in_progress, in any process.
  */
-export function resumeRefusal(run: Pick<RunRecord, 'run_id' | 'phase' | 'submissions'>): RunNotResumableError | null {
+export function resumeRefusal(run: ResumeRefusalRun, steer?: SteerCheck, now: number = Date.now()): RunNotResumableError | null {
   switch (run.phase) {
     case 'blocked':
       return null;
     case 'failed':
     case 'stopped':
-      return run.submissions.length > 0 ? null : new RunNotResumableError(run.run_id, run.phase, RESUME_HINTS.never_started);
+      if (run.submissions.length === 0) return new RunNotResumableError(run.run_id, run.phase, RESUME_HINTS.never_started);
+      return stalledStopInFlight(run, now) ? new RunNotResumableError(run.run_id, run.phase, RESUME_HINTS.in_progress) : null;
+    case 'dispatched':
+    case 'investigating':
+      if (run.submissions.length === 0) return new RunNotResumableError(run.run_id, run.phase, RESUME_HINTS.starting);
+      if (steer !== undefined && steer.stalled === null && (steer.note ?? '').trim() === '') {
+        return new RunNotResumableError(run.run_id, run.phase, RESUME_HINTS.running);
+      }
+      return null;
     case 'needs_input':
       return new RunNotResumableError(run.run_id, run.phase, RESUME_HINTS.needs_input);
     case 'completed':
       return new RunNotResumableError(run.run_id, run.phase, RESUME_HINTS.completed);
     default:
-      return new RunNotResumableError(run.run_id, run.phase, RESUME_HINTS.running);
+      return new RunNotResumableError(run.run_id, run.phase, RESUME_HINTS.starting);
   }
+}
+
+/** What resumeRefusal reads from a run. updated_at and phase_reason tell a stalled stop in flight. */
+export type ResumeRefusalRun = Pick<RunRecord, 'run_id' | 'phase' | 'submissions'> & Partial<Pick<RunRecord, 'phase_reason' | 'updated_at'>>;
+
+/** The phase reason of a run a resume stopped because it had stalled (D72). */
+export const STALLED_STOP_REASON = 'stalled';
+
+/** How long a resume of a stalled run waits for the aborted submission to settle: two of Flue's recovery scans. */
+export const STALLED_ABORT_WAIT_MS = 30_000;
+
+/**
+ * How long a run stopped as stalled counts as another resume's stop in
+ * flight: twice the abort wait, which covers the wait, the stop poll after
+ * it and the dispatch.
+ */
+export const STALLED_STOP_HOLD_MS = 2 * STALLED_ABORT_WAIT_MS;
+
+/**
+ * True while a run stopped as stalled belongs to the resume that stopped it
+ * (D72): stopped with reason 'stalled', no submission added since the stop
+ * (the stop is the run's latest updated_at, and adding a submission does not
+ * move it), and the stop less than STALLED_STOP_HOLD_MS old. That resume
+ * sends it on without asking again, so any other resume, in this process or
+ * another, is refused. A stop left over (the resume added its submission and
+ * then failed, or its process died) is resumable once the hold has passed;
+ * a resume that fails after its stop writes failed, which is resumable at once.
+ */
+export function stalledStopInFlight(run: ResumeRefusalRun, now: number): boolean {
+  if (run.phase !== 'stopped' || run.phase_reason !== STALLED_STOP_REASON || run.updated_at === undefined) return false;
+  const stoppedAt = Date.parse(run.updated_at);
+  if (!Number.isFinite(stoppedAt)) return false;
+  if (run.submissions.some((sub) => Date.parse(sub.created_at) > stoppedAt)) return false;
+  // A stop stamped a little ahead of this clock (another host) is recent too.
+  return now - stoppedAt < STALLED_STOP_HOLD_MS;
 }
 
 /** Extra wait on top of the run's own deadline before read() gives up. */
@@ -645,6 +769,8 @@ export type ResumeInput = {
  * Sends a blocked run on (D55), or one that failed after dispatch, or a
  * stopped one: closes the open block as resumed and dispatches a
  * triage.resume signal on the same instance as a submission of kind resume.
+ * A run that is still working is steered with the message, or, when it has
+ * stalled, stopped and then resumed (D72).
  */
 export async function resumeRun(runId: string, input: ResumeInput, deps: SettleDeps): Promise<SubmissionResult> {
   if (!v.is(RunIdSchema, runId)) throw new IngressInputError('run_id', 'is not a run id');
@@ -655,12 +781,21 @@ export async function resumeRun(runId: string, input: ResumeInput, deps: SettleD
 
   const run = await deps.store.getRun(runId);
   if (run === null) throw new RunNotFoundError(runId);
-  const refusal = resumeRefusal(run);
+  return resumeStored(run, by, note, deps, true);
+}
+
+/** resumeRun from the stored run. replan: a run that settled on the way is looked at once more, from its new phase. */
+async function resumeStored(run: RunRecord, by: string, note: string, deps: SettleDeps, replan: boolean): Promise<SubmissionResult> {
+  const runId = run.run_id;
+  const working = STALLABLE_PHASES.includes(run.phase);
+  const stalled = working ? await stalledSignal(run, deps) : null;
+  const refusal = resumeRefusal(run, { note, stalled });
   if (refusal !== null) throw refusal;
+  if (working && stalled === null) return steerRun(run, by, note, deps, replan);
 
   // The network path first (D56): in local mode this brings the SSFB tunnel
   // back, and a tunnel that does not come up refuses the resume here, before
-  // the block is closed, so the run stays parked as it was.
+  // the block is closed or a stalled run is stopped, so the run stays as it was.
   if (deps.resumePreflight !== undefined && !deps.config.mock.enabled) {
     const ready = await deps.resumePreflight({ signal: deps.signal ?? new AbortController().signal });
     const notReady = resumeReadinessRefusal(run, ready);
@@ -672,10 +807,27 @@ export async function resumeRun(runId: string, input: ResumeInput, deps: SettleD
     if (notReady !== null) throw notReady;
   }
 
+  deps.onResumeMode?.('resume');
+  let from = run;
+  if (stalled !== null) {
+    const stopped = await stopStalled(run, stalled, by, deps);
+    if (stopped === null) {
+      // It moved on before the stop (it settled, parked on a question or a
+      // block, or its owner came back): the same request is judged once more
+      // from the new phase, so it is steered, resumed or refused as a request
+      // made now would be.
+      const latest = await deps.store.getRun(runId);
+      if (latest === null) throw new RunNotFoundError(runId);
+      if (!replan) throw resumeRefusal(latest) ?? new RunNotResumableError(runId, latest.phase, RESUME_HINTS.running);
+      return resumeStored(latest, by, note, deps, false);
+    }
+    from = stopped;
+  }
+
   const now = deps.now ?? (() => new Date());
   const at = now().toISOString();
   // A run that failed after stop_blocked stored its block still has it open; it is closed too.
-  const open = run.block;
+  const open = from.block;
   if (open !== null) {
     await deps.store.resolveBlock(
       runId,
@@ -685,30 +837,142 @@ export async function resumeRun(runId: string, input: ResumeInput, deps: SettleD
   }
   logRunEvent(runId, 'resume', {
     kind: 'resume',
-    from: run.phase,
+    from: from.phase,
+    ...(stalled !== null ? { stalled } : {}),
     ...(open !== null ? { block_id: open.block_id } : {}),
     by,
     ...(note !== '' ? { note } : {}),
   });
 
-  const message: DeliveredMessage = { kind: 'signal', type: BLOCK_RESUME_SIGNAL, body: renderResume(resumeFrom(run), { by, at, note }) };
-  return dispatchAndSettle(
+  const message: DeliveredMessage = {
+    kind: 'signal',
+    type: BLOCK_RESUME_SIGNAL,
+    body: renderResume(resumeFrom(from, stalled), { by, at, note }),
+  };
+  const result = await dispatchAndSettle(
     runId,
     { kind: 'resume', ...(open !== null ? { block_id: open.block_id } : {}), ...(note !== '' ? { note } : {}) },
     { message },
     { id: runId },
     deps,
   );
+  return Object.freeze({ ...result, mode: 'resume' as const });
 }
 
 // What the signal tells the model the run was doing. A blocked run whose
 // block was closed but not sent on (a crash between the two writes) is
 // described by its last block.
-function resumeFrom(run: RunRecord): ResumeFrom {
+function resumeFrom(run: RunRecord, stalled: Stalled | null): ResumeFrom {
   const block = run.block ?? (run.phase === 'blocked' ? run.block_history.at(-1) : undefined);
   if (block !== undefined) return { kind: 'blocked', block };
-  if (run.phase === 'stopped') return { kind: 'stopped' };
+  if (run.phase === 'stopped') {
+    if (stalled !== null) return { kind: 'stopped', stalled: { reason: stalled.reason } };
+    return run.phase_reason === STALLED_STOP_REASON ? { kind: 'stopped', stalled: {} } : { kind: 'stopped' };
+  }
   return { kind: 'failed', ...(run.phase_reason !== undefined ? { reason: run.phase_reason } : {}) };
+}
+
+/** The run's stalled signal from deps.stalled, or loadStalled over this process's leases. Never throws. */
+async function stalledSignal(run: RunRecord, deps: SettleDeps): Promise<Stalled | null> {
+  try {
+    if (deps.stalled !== undefined) return await deps.stalled(run);
+    return await loadStalled(run, { stalledAfterMs: DEFAULT_STALLED_AFTER_MS, ...(deps.lease !== undefined ? { lease: deps.lease } : {}) });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The steer (D72): the message goes to the working run as a submission of
+ * kind steer, which Flue joins into the live response. A run that settled
+ * while the stalled signal was read has no live response: it is resumed or
+ * refused from its new phase instead.
+ */
+async function steerRun(run: RunRecord, by: string, note: string, deps: SettleDeps, replan: boolean): Promise<SubmissionResult> {
+  const runId = run.run_id;
+  const latest = await deps.store.getRun(runId);
+  if (latest === null) throw new RunNotFoundError(runId);
+  if (!STALLABLE_PHASES.includes(latest.phase)) {
+    if (!replan) throw resumeRefusal(latest) ?? new RunNotResumableError(runId, latest.phase, RESUME_HINTS.running);
+    return resumeStored(latest, by, note, deps, false);
+  }
+  deps.onResumeMode?.('steer');
+  const now = deps.now ?? (() => new Date());
+  logRunEvent(runId, 'resume', { kind: 'steer', from: latest.phase, by, note });
+  // A user message, like a follow-up (askRun): the model reads it as the
+  // person speaking, not as a framework event. renderSteer adds no
+  // instructions of its own, and the fixed rules still bind.
+  const message: DeliveredMessage = { kind: 'user', body: renderSteer({ by, at: now().toISOString(), note }) };
+  const result = await dispatchAndSettle(runId, { kind: 'steer', note }, { message }, { id: runId }, deps);
+  return Object.freeze({ ...result, mode: 'steer' as const });
+}
+
+/**
+ * Stops a stalled run for its resume (D72): phase stopped with reason
+ * 'stalled' and no verdict, then a durable Flue abort of the instance, then
+ * a wait for the aborted submission to settle and one stop poll more. The
+ * run stays stopped all along, so a late write of the old submission's
+ * settle is refused and a reader in another process sees the stop.
+ *
+ * The stop is a compare-and-set on the phase the run was judged stalled in:
+ * a run that moved on meanwhile (a question or a block a tool opened, a
+ * settle, a follow-up that moved it to another working phase) is not
+ * stopped. Returns the stopped run, or null when nothing was written. A run
+ * in a working phase has no open question or block, so there is nothing for
+ * markStopped to close.
+ */
+async function stopStalled(run: RunRecord, stalled: Stalled, by: string, deps: SettleDeps): Promise<RunRecord | null> {
+  const runId = run.run_id;
+  const from = run.phase;
+  if (!(await deps.store.setPhaseIf(runId, [from], 'stopped', { reason: STALLED_STOP_REASON }))) return null;
+
+  const handle = deps.dispatcher.init(deps.agent, { id: runId });
+  let aborted = true;
+  let abortError: string | undefined;
+  try {
+    await handle.abort();
+  } catch (err) {
+    // The resume still goes on: its dispatch queues behind the old submission until Flue settles it.
+    aborted = false;
+    abortError = className(err);
+  }
+  // The submission that was live, from the run as stored now (the record the
+  // resume started from may predate the host's receipt): a steer's own
+  // response when one ran, else the head's (D71).
+  const stopped = await deps.store.getRun(runId);
+  const live = await currentLease(stalledSubjectOf(stopped ?? run), deps.lease ?? submissionLease);
+  const settle = aborted ? await abortSettled(handle, live?.flueSubmissionId, deps) : 'skipped';
+  await delay(deps.stopPollMs ?? STOP_POLL_MS);
+  logRunEvent(runId, 'stop', {
+    by,
+    reason: STALLED_STOP_REASON,
+    stalled,
+    stopped_from: from,
+    aborted,
+    abort_settled: settle,
+    verdict: false,
+    ...(abortError !== undefined ? { error: abortError } : {}),
+  });
+  const latest = await deps.store.getRun(runId);
+  if (latest === null) throw new RunNotFoundError(runId);
+  return latest;
+}
+
+/** Waits for the aborted submission to settle. A read that rejects with AgentRunError is the settle. */
+async function abortSettled(handle: AgentHandle, flueId: string | undefined, deps: SettleDeps): Promise<'settled' | 'timeout' | 'unknown'> {
+  if (flueId === undefined) return 'unknown';
+  const timeout = AbortSignal.timeout(deps.stalledAbortWaitMs ?? STALLED_ABORT_WAIT_MS);
+  try {
+    await handle.read(flueId, { signal: deps.signal !== undefined ? AbortSignal.any([deps.signal, timeout]) : timeout });
+    return 'settled';
+  } catch (err) {
+    if (err instanceof AgentRunError) return 'settled';
+    return timeout.aborted ? 'timeout' : 'unknown';
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
 }
 
 // ------------------------------------------------------------------ settle
@@ -722,6 +986,8 @@ async function dispatchAndSettle(
 ): Promise<SubmissionResult> {
   const store = deps.store;
   const callerSignal = deps.signal ?? new AbortController().signal;
+  // A steer (D72) joins the response that is running, which owns the phase: it writes none before the read.
+  const steer = submission.kind === 'steer';
 
   let seq: number;
   let handle: AgentHandle;
@@ -729,15 +995,29 @@ async function dispatchAndSettle(
   let investigating: boolean;
   try {
     seq = await store.addSubmission(runId, redactPersisted(submission));
-    // Only a follow-up or a resume may move a stopped run on.
-    await advance(store, runId, 'dispatched', submission.kind === 'ask' || submission.kind === 'resume' ? { resume: true } : {});
+    // Only a follow-up or a resume may move a stopped run on. A dispatch
+    // with no worker pid clears the recorded one (D71): an earlier CLI
+    // worker's pid does not belong to this submission.
+    if (!steer) {
+      await advance(store, runId, 'dispatched', {
+        ...(submission.kind === 'ask' || submission.kind === 'resume' ? { resume: true } : {}),
+        worker_pid: deps.workerPid ?? null,
+      });
+    }
     handle = deps.dispatcher.init(deps.agent, initOptions);
     receipt = await handle.dispatch(request);
     logRunEvent(runId, 'dispatch', { submission_seq: seq, kind: submission.kind, submission_id: receipt.submissionId });
-    investigating = (await setPhaseLogged(store, runId, 'investigating')) !== false;
+    // D71: stalled detection reads this submission's Flue lease by the id, so it is recorded as soon as it is
+    // known. It changes no phase. A display hint, so a failed write is logged and the run goes on.
+    await Promise.resolve()
+      .then(() => store.setSubmissionFlueId(runId, seq, receipt.submissionId))
+      .catch((err: unknown) => logRunEvent(runId, 'flue_id_write_failed', { submission_seq: seq, error: className(err) }));
+    investigating = steer || (await markInvestigating(store, runId));
   } catch (err) {
     if (err instanceof RunStoppedError) throw err;
-    await recordFailed(store, runId, err);
+    // A steer that could not be sent leaves the working run as it is.
+    if (steer) logRunEvent(runId, 'steer_failed', { error: err });
+    else await recordFailed(store, runId, err);
     throw err;
   }
 
@@ -783,7 +1063,9 @@ async function dispatchAndSettle(
         let cause = err;
         if (timeout.aborted) {
           cause = new SubmissionReadTimeoutError(timeoutMs);
-          await handle.abort().catch(() => undefined);
+          // Not for a steer: the abort would end the host's response it may have joined, whose own read and
+          // Flue's run timeout end it; a steer that ran its own response has that run timeout too.
+          if (!steer) await handle.abort().catch(() => undefined);
         }
         status = 'failed';
         error = failureReason(cause);
@@ -791,44 +1073,65 @@ async function dispatchAndSettle(
     }
     watch.dispose();
 
+    // Whether a steer joined the live response (D72). A joined steer settled
+    // with its host, whose own settle writes the phase, the usage and the
+    // embedding; this one only reports. A steer that ran as its own response
+    // settles like any follow-up.
+    const joined = steer ? await steerJoined(runId, submissionId, deps) : undefined;
+
+    let wrote: SettleWrite = 'none';
+    let parkedOn: RunRecord | null = null;
+    if (status === 'completed' || joined === true) parkedOn = await store.getRun(runId);
     if (status === 'completed') {
       // The response may have ended on ask_requester or stop_blocked: then the
       // run is parked on the question or the block the tool stored, not done.
-      const run = await store.getRun(runId);
+      const run = parkedOn;
       if (run !== null && run.phase === 'needs_input' && run.input_request !== null) {
         status = 'needs_input';
         inputRequest = run.input_request;
       } else if (run !== null && run.phase === 'blocked' && run.block !== null) {
         status = 'blocked';
         block = run.block;
-        logRunEvent(runId, 'blocked', { submission_seq: seq, block_id: block.block_id, systems: block.systems });
+        if (joined !== true) logRunEvent(runId, 'blocked', { submission_seq: seq, block_id: block.block_id, systems: block.systems });
       }
     }
-    // A refused write means a stop landed first (an abort from another
-    // process settles the read as failed): the stop wins.
-    if (status === 'completed' && (await setPhaseLogged(store, runId, 'completed')) === false) status = 'stopped';
-    if (status === 'failed' && (await setPhaseLogged(store, runId, 'failed', { reason: error ?? 'Error' })) === false) {
-      status = 'stopped';
-      error = undefined;
+    if (joined === true) {
+      // The host's write already refused or will refuse on a stopped run: the stop wins here too.
+      if ((status === 'completed' || status === 'failed') && parkedOn?.phase === 'stopped') {
+        status = 'stopped';
+        error = undefined;
+      }
+    } else if (status === 'completed' || status === 'failed') {
+      // A refused write means a stop landed first (an abort from another
+      // process settles the read as failed): the stop wins.
+      wrote = await writeSettled(runId, seq, steer, status, status === 'failed' ? { reason: error ?? 'Error' } : {}, deps);
+      if (wrote === 'stopped') {
+        status = 'stopped';
+        error = undefined;
+      }
     }
 
     // The counts are in the store as soon as the status is. The flush is
-    // stopped first, so no live write lands after this one.
+    // stopped first, so no live write lands after this one. A joined steer
+    // has no turns of its own (they carry the host's submission id), so
+    // nothing is written for it.
     await flush.stop();
     await writeUsage(store, runId, seq, snapshotSubmission(runId, submissionId), true);
 
     // A parked run (needs_input, blocked) is embedded when it settles for real,
-    // like any other. A stopped one is not embedded.
-    const embeds = status === 'completed' || status === 'failed';
+    // like any other. A stopped one is not embedded, and a joined steer leaves
+    // it to the host, a steer that left the phase alone to the one that owns it.
+    const embeds = wrote === 'wrote';
     const gaps = embeds ? await embedAfterSettle(deps, runId, seq, submissionId) : [];
     // Again with the embedding rows; final replaces final.
     if (embeds) await writeUsage(store, runId, seq, snapshotSubmission(runId, submissionId), true);
     dropSubmission(runId, submissionId);
-    logUnassignedUsage(runId);
+    if (joined !== true) logUnassignedUsage(runId);
     logRunEvent(runId, 'settled', {
       submission_seq: seq,
       submission_id: receipt.submissionId,
       status,
+      ...(joined !== undefined ? { joined } : {}),
       ...(error !== undefined ? { error } : {}),
       ...(readError !== undefined ? { read_error: readError } : {}),
       ...(replyText !== undefined ? { reply_text: replyText } : {}),
@@ -844,6 +1147,7 @@ async function dispatchAndSettle(
       ...(inputRequest !== undefined ? { input_request: inputRequest } : {}),
       ...(block !== undefined ? { block } : {}),
       gaps: Object.freeze(gaps),
+      ...(joined !== undefined ? { joined } : {}),
     });
   } finally {
     // Every path, a throw included, stops the live flush.
@@ -851,7 +1155,86 @@ async function dispatchAndSettle(
   }
 }
 
-async function embedAfterSettle(deps: SettleDeps, runId: RunId, seq: number, submissionId: string): Promise<string[]> {
+/** What the settle's phase write did: wrote it, refused by a stop, left alone (a steer, below), or none was due. */
+type SettleWrite = 'wrote' | 'stopped' | 'left' | 'none';
+
+/**
+ * The phases a steer that ran as its own response (D72) may settle from:
+ * investigating once the settle listener saw it start (D70), or the
+ * completed or failed the host left when the listener has not yet.
+ */
+const STEER_OWN_FROM: readonly RunPhase[] = ['investigating', 'completed', 'failed'];
+
+/**
+ * The settle's phase write, with the compare-and-set the settle listener
+ * uses (D70), so the two never both write, and so both never embed: the one
+ * that wrote embeds. It overwrites no question or block and nothing a later
+ * submission (not a steer) owns. A submission that is not a steer writes
+ * from the working phases, and leaves the phase to a later steer that runs
+ * as its own response: the listener may already show that one investigating.
+ * A steer that ran as its own response writes from STEER_OWN_FROM. 'stopped'
+ * when the run is stopped, else 'left' when nothing was written.
+ */
+async function writeSettled(
+  runId: RunId,
+  seq: number,
+  steer: boolean,
+  phase: 'completed' | 'failed',
+  detail: PhaseDetail,
+  deps: SettleDeps,
+): Promise<SettleWrite> {
+  const store = deps.store;
+  const run = await store.getRun(runId);
+  if (run === null) throw new RunNotFoundError(runId);
+  if (run.phase === 'stopped') return 'stopped';
+  if (run.submissions.some((sub) => sub.kind !== 'steer' && sub.seq > seq)) return 'left';
+  if (!steer && (await steerRunsOwnResponse(run, seq, deps))) return 'left';
+  if (await setPhaseIfLogged(store, runId, steer ? STEER_OWN_FROM : WORKING_PHASES, phase, detail)) return 'wrote';
+  return (await store.getRun(runId))?.phase === 'stopped' ? 'stopped' : 'left';
+}
+
+/**
+ * Whether a steer after this submission runs, or ran, as its own response
+ * (D72): its lease left the queue and joined nothing. A steer with no Flue
+ * id or no lease to read counts as not started.
+ */
+async function steerRunsOwnResponse(run: RunRecord, seq: number, deps: SettleDeps): Promise<boolean> {
+  const read = deps.lease ?? submissionLease;
+  for (const sub of run.submissions) {
+    if (sub.kind !== 'steer' || sub.seq <= seq || sub.flue_submission_id === undefined) continue;
+    let lease: SubmissionLease | null;
+    try {
+      lease = await read(sub.flue_submission_id);
+    } catch {
+      lease = null;
+    }
+    if (lease !== null && lease.joinedInto === undefined && lease.status !== 'queued') return true;
+  }
+  return false;
+}
+
+/**
+ * Whether the steer joined the live response: Flue's lease for it keeps
+ * joinedInto once settled. With no lease to read (no runtime connected in
+ * this process), the usage meter decides: a steer that ran its own response
+ * in this process has turns of its own.
+ */
+async function steerJoined(runId: RunId, submissionId: string, deps: SettleDeps): Promise<boolean> {
+  let lease: SubmissionLease | null;
+  try {
+    lease = await (deps.lease ?? submissionLease)(submissionId);
+  } catch {
+    lease = null;
+  }
+  if (lease !== null) return lease.joinedInto !== undefined;
+  return usageVersion(runId, submissionId) === 0;
+}
+
+/** What embedAfterSettle reads from the deps. */
+export type EmbedAfterSettleDeps = Pick<SettleDeps, 'store' | 'embedder' | 'embedRun'>;
+
+/** embedRun after a settle, its calls counted on the submission. Returns the gaps; never throws. The settle listener (D70) calls it too. */
+export async function embedAfterSettle(deps: EmbedAfterSettleDeps, runId: RunId, seq: number, submissionId: string): Promise<string[]> {
   const embed = deps.embedRun ?? defaultEmbedRun;
   try {
     const r = await embed(deps.store, deps.embedder, runId, {
@@ -1059,6 +1442,29 @@ async function setPhaseLogged(store: RunStore, runId: RunId, phase: RunPhase, de
   return written !== false;
 }
 
+/** store.setPhaseIf, with a 'phase' line only when it wrote (as the settle listener logs). */
+async function setPhaseIfLogged(
+  store: RunStore,
+  runId: RunId,
+  fromPhases: readonly RunPhase[],
+  phase: RunPhase,
+  detail: PhaseDetail = {},
+): Promise<boolean> {
+  const written = await store.setPhaseIf(runId, fromPhases, phase, detail);
+  if (written) logRunEvent(runId, 'phase', { phase, ...detail });
+  return written;
+}
+
+/**
+ * Moves the run to investigating once Flue accepted the dispatch, only from
+ * dispatched: a fast tool may already have parked it on a question or a
+ * block, which stays. False only when the run was stopped meanwhile.
+ */
+async function markInvestigating(store: RunStore, runId: RunId): Promise<boolean> {
+  if (await setPhaseIfLogged(store, runId, ['dispatched'], 'investigating')) return true;
+  return (await store.getRun(runId))?.phase !== 'stopped';
+}
+
 export function defaultReadTimeoutMs(config: SubmissionConfig): number {
   const attempts = Math.max(1, config.budgets.runMaxAttempts);
   return config.budgets.runTimeoutMs * attempts + READ_GRACE_MS;
@@ -1205,6 +1611,27 @@ async function recordFailed(store: RunStore, runId: RunId, err: unknown): Promis
   }
 }
 
+/**
+ * A resume that failed after it stopped a stalled run and before its
+ * dispatch (D72) leaves the run failed with the D67 reason, not stopped as
+ * stalled: a compare-and-set from stopped, so a run that moved on is left
+ * alone. Logs the error, and a 'phase' line when it wrote. A refusal
+ * (RunNotResumableError) or a stop wrote nothing to undo and is skipped, so
+ * another resume's stop in flight is never overwritten. Never throws.
+ */
+export async function recordStalledResumeFailed(store: Pick<RunStore, 'setPhaseIf'>, runId: RunId, err: unknown): Promise<boolean> {
+  if (err instanceof RunNotResumableError || err instanceof RunStoppedError || err instanceof RunNotFoundError) return false;
+  logRunEvent(runId, 'failed', { error: err, from: 'stopped' });
+  const detail = { reason: failureReason(err) };
+  try {
+    const written = await store.setPhaseIf(runId, ['stopped'], 'failed', detail);
+    if (written) logRunEvent(runId, 'phase', { phase: 'failed', ...detail });
+    return written;
+  } catch {
+    return false;
+  }
+}
+
 // ------------------------------------------------------------------ production deps
 
 export type SubmissionDepsOptions = {
@@ -1273,6 +1700,9 @@ export function submissionDeps(options: SubmissionDepsOptions = {}): SubmissionD
         redactionNames,
       }),
     classify: (input, signal, onUsage) => classifyThread(input, { config, signal, ...(onUsage !== undefined ? { onUsage } : {}) }),
+    // The resume of a working run reads it (D72); the same inputs as the run view's (D71).
+    stalled: (run) =>
+      loadStalled(run, { stalledAfterMs: config.budgets.stalledAfterMs, runsDir: config.paths.runsDir, isAlive: pidAlive }),
     tierAcceptsImages: (tier) => {
       try {
         return acceptsImages(modelForTier(tier, config));
@@ -1299,7 +1729,8 @@ function infraReposToSync(config: Config, registry: Registry): readonly string[]
 }
 
 // A refused MODEL_EMBEDDING must not stop runs: embeddings are derived data.
-function embedderFor(config: Config, fetchImpl: FetchLike | undefined): Embedder | null {
+// The settle listener (D70) builds its embedder with it too.
+export function embedderFor(config: Config, fetchImpl: FetchLike | undefined): Embedder | null {
   try {
     return createEmbedder(config, { fetch: fetchImpl ?? ((url, reqInit) => fetch(url, reqInit)) });
   } catch (err) {
