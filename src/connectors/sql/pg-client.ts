@@ -323,7 +323,7 @@ function pgText(err: unknown, sqlstate: string, secrets: readonly string[]): str
  */
 export function mapPgError(err: unknown, where: string, envName: EnvVarName, secrets: readonly string[]): ConnectorError {
   if (isConnectorError(err)) return err;
-  const code = typeof (err as { code?: unknown })?.code === 'string' ? (err as { code: string }).code : '';
+  const code = errorCode(err);
   const pgMessage = stringField(err, 'message');
   const said = (text: string): string => {
     const safe = scrub(stripAddresses(text), secrets);
@@ -706,10 +706,10 @@ export function createSqlConnector(options: SqlConnectorOptions): SqlConnector {
     where: string,
     envName: EnvVarName,
     secrets: readonly string[],
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): ConnectorError {
     if (isConnectorError(err)) return err;
-    if (err instanceof AbortedError || signal?.aborted === true) {
+    if (err instanceof AbortedError || signal.aborted) {
       return new ConnectorError('timeout', `${where}: the sql call was cancelled`);
     }
     return mapPgError(err, where, envName, secrets);
