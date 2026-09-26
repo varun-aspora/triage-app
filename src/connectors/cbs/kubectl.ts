@@ -78,13 +78,20 @@ export type KubeValues = {
   readonly bin?: string;
 };
 
-/** Checks every env-derived kube value and returns a frozen KubeConfig. */
-export function checkKubeConfig(values: KubeValues, keys: KubeKeyNames): KubeConfig {
-  const cfg: KubeConfig = {
+// The four env-derived values, each against its charset.
+function checkKubeValues(values: KubeValues | KubeConfig, keys: KubeKeyNames) {
+  return {
     context: checkEnvArg(values.context, keys.context, CONTEXT),
     namespace: checkEnvArg(values.namespace, keys.namespace, DNS_LABEL),
     selector: checkEnvArg(values.selector, keys.selector, SELECTOR),
     container: checkEnvArg(values.container, keys.container, DNS_LABEL),
+  };
+}
+
+/** Checks every env-derived kube value and returns a frozen KubeConfig. */
+export function checkKubeConfig(values: KubeValues, keys: KubeKeyNames): KubeConfig {
+  const cfg: KubeConfig = {
+    ...checkKubeValues(values, keys),
     timeoutMs: values.timeoutMs,
     keys: Object.freeze({ ...keys }),
     ...(values.bin !== undefined ? { bin: values.bin } : {}),
@@ -106,10 +113,7 @@ export function parseSecretRef(value: unknown, keyName: string): SecretRef {
 
 // Re-checks a KubeConfig built elsewhere, so a caller cannot skip checkKubeConfig.
 function recheck(k: KubeConfig): void {
-  checkEnvArg(k.context, k.keys.context, CONTEXT);
-  checkEnvArg(k.namespace, k.keys.namespace, DNS_LABEL);
-  checkEnvArg(k.selector, k.keys.selector, SELECTOR);
-  checkEnvArg(k.container, k.keys.container, DNS_LABEL);
+  checkKubeValues(k, k.keys);
 }
 
 // ------------------------------------------------------------------- argv
@@ -132,7 +136,8 @@ export function getSecretArgv(k: KubeConfig, secret: SecretRef): string[] {
   return ['--context', k.context, 'get', 'secret', ref.name, '-n', ref.namespace, '-o', 'json'];
 }
 
-const POD_NAME = /^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/;
+// Pod names are DNS subdomains.
+const POD_NAME = DNS_SUBDOMAIN;
 
 export function execCurlArgv(k: KubeConfig, pod: string, maxTimeSec: number): string[] {
   recheck(k);
@@ -153,6 +158,8 @@ function abortError(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
 }
 
+const STDERR_CHARS = 500;
+
 /**
  * Maps an ExecResult that did not exit 0 to a ConnectorError. Keeps a short
  * stderr excerpt with the env values behind the call (context, namespace,
@@ -167,8 +174,6 @@ function failure(r: ExecResult, what: string, signal: AbortSignal, secrets: read
   const said = safeErrorText(stripAddresses(scrubSecrets(r.stderr, secrets)), [], STDERR_CHARS);
   return new ConnectorError('unreachable', `${what} exited with code ${r.exitCode ?? 'none'}${said !== '' ? `: ${said}` : ''}`);
 }
-
-const STDERR_CHARS = 500;
 
 /** The env values a kubectl stderr may echo. */
 function kubeSecrets(k: KubeConfig, extra: readonly string[] = []): string[] {

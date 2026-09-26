@@ -14,7 +14,7 @@
 // fresh file.
 import { randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { ExecRunner } from '../exec.ts';
 import { ConnectorError, type ConnectorContext } from '../types.ts';
 import { podCurl, readCredentials, type KubeConfig, type SecretRef } from './kubectl.ts';
@@ -114,7 +114,7 @@ export async function readCachedToken(path: string): Promise<CachedToken | null>
 }
 
 async function writeCachedToken(path: string, token: CachedToken): Promise<void> {
-  const dir = join(path, '..');
+  const dir = dirname(path);
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const tmp = join(dir, `.${randomUUID()}.tmp`);
   // Only these two fields are written. Credentials never reach this function.
@@ -170,7 +170,7 @@ async function mint(ctx: TokenContext, exec: ExecRunner, cfg: TokenConfig): Prom
     throw new ConnectorError('unreachable', 'the CBS OAuth mint returned no usable access_token');
   }
   const fromJwt = jwtExpiryMs(token);
-  const expiresIn = typeof parsed.expires_in === 'number' ? parsed.expires_in : Number(parsed.expires_in);
+  const expiresIn = Number(parsed.expires_in);
   const fromExpiresIn = Number.isFinite(expiresIn) && expiresIn > 0 ? mintedAt + expiresIn * 1000 : undefined;
   // With neither, the token is used for this call and not cached.
   const expires_at = fromJwt ?? fromExpiresIn ?? mintedAt;

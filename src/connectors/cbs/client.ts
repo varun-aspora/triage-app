@@ -89,6 +89,10 @@ function refused(message: string): ConnectorError {
   return new ConnectorError('refused', message);
 }
 
+function blank(name: string): ConnectorError {
+  return new ConnectorError('not_configured', `cbs_call is not configured for ${CBS_ENTITY}: ${name} is blank`);
+}
+
 /** The path checks on top of the gate: charset, no '..', no '?', no '//'. */
 export function checkPath(path: unknown): string {
   const checked = checkCbsPath(path);
@@ -101,7 +105,7 @@ export function checkPath(path: unknown): string {
 
 /** Refuses unless decision is an allow for exactly this method and path. */
 export function checkDecision(decision: HttpDecision | undefined, method: string, path: string): void {
-  if (decision === undefined || decision === null || typeof decision !== 'object') {
+  if (typeof decision !== 'object' || decision === null) {
     throw refused('cbs_call needs an allow decision from the rules gate');
   }
   if (decision.ok !== true || decision.action !== 'allow') {
@@ -154,7 +158,7 @@ export function createCbsConnector(options: CbsConnectorOptions): CbsConnector {
 
   function envValue(name: string): string {
     const l = lookupEnv(config, name);
-    if (l.state !== 'set') throw new ConnectorError('not_configured', `cbs_call is not configured for ${CBS_ENTITY}: ${name} is blank`);
+    if (l.state !== 'set') throw blank(name);
     return l.value;
   }
 
@@ -170,11 +174,11 @@ export function createCbsConnector(options: CbsConnectorOptions): CbsConnector {
   function realEnv(): RealEnv {
     const api = registry.serviceApi(CBS_ENTITY, CBS_SERVICE);
     if (api === undefined || api.status !== 'ok') {
-      throw new ConnectorError('not_configured', `cbs_call is not configured for ${CBS_ENTITY}: ${CBS_KEYS.gateway} is blank`);
+      throw blank(CBS_KEYS.gateway);
     }
     const ctxCap = registry.kube(CBS_ENTITY).context;
     if (ctxCap.status !== 'ok') {
-      throw new ConnectorError('not_configured', `cbs_call is not configured for ${CBS_ENTITY}: ${ctxCap.envName} is blank`);
+      throw blank(ctxCap.envName);
     }
     const timeoutMs = config.budgets.httpTimeoutMs;
     const kube = checkKubeConfig(
