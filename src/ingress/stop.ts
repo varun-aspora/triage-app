@@ -50,10 +50,6 @@ export type StopDeps = {
   /** A durable Flue abort of the run's instance. Left out: no abort is asked for. */
   readonly abort?: (runId: RunId) => Promise<void>;
   readonly now?: () => Date;
-  /** Config.tracing, so the Cancel verdict also goes to Braintrust (D82). Left out: it does not. */
-  readonly tracing?: FeedbackDeps['tracing'];
-  /** Passed on to recordFeedback. Tests pass a stand-in. */
-  readonly exportFeedback?: FeedbackDeps['exportFeedback'];
 };
 
 export type StopResult = {
@@ -102,13 +98,7 @@ export async function stopRun(runId: string, input: StopInput, deps: StopDeps): 
   const gaps: string[] = [];
   let feedback: FeedbackResult | null = null;
   if (input.verdict !== false) {
-    const feedbackDeps: FeedbackDeps = {
-      store: deps.store,
-      home: deps.home,
-      ...(deps.now !== undefined ? { now: deps.now } : {}),
-      ...(deps.tracing !== undefined ? { tracing: deps.tracing } : {}),
-      ...(deps.exportFeedback !== undefined ? { exportFeedback: deps.exportFeedback } : {}),
-    };
+    const feedbackDeps: FeedbackDeps = { store: deps.store, home: deps.home, ...(deps.now !== undefined ? { now: deps.now } : {}) };
     try {
       feedback = await recordFeedback(runId, { verdict: 'wrong', given_by: by, interface: input.interface, cancelled: true }, feedbackDeps, {
         phase: from,

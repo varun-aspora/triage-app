@@ -106,17 +106,14 @@ For development, run `bun run serve` and `bun run dev:web` side by side and open
 
 ## Tracing
 
-Runs can be traced to Braintrust (D82): one trace per submission with the Triage operation, each model turn (tokens and cost), each tool call, delegated tasks and compactions. The decision model and the embedding calls are traced as their own llm spans tagged with the run id. Feedback verdicts (`triage feedback`, the feedback route, the console, and the Cancel from `stop`) go to the submission's root span as scores. Tracing is off by default and never fails a run, a command or shutdown.
+Off by default (D82). Set `TRIAGE_TRACING` in `TRIAGE_HOME/.env`:
 
-| Key | Default | What it does |
-|---|---|---|
-| `TRIAGE_BRAINTRUST_ENABLED` | `false` | Turns tracing on. A key alone does not. Enabled without `BRAINTRUST_API_KEY` is a config error. |
-| `BRAINTRUST_API_KEY` | blank | Passed to the SDK from config. Never copied into `process.env`, so child processes (qw, ssh, git) never see it. |
-| `BRAINTRUST_PROJECT_NAME` | `triage-app` | The Braintrust project. Set it per home, for example one for dev and one for the eval home. |
-| `TRIAGE_BRAINTRUST_CONTENT` | `metadata` | `metadata` sends ids, model names, timings, token counts and sizes, and no content. `redacted` also sends content after the persisted redaction profile, with the run's ingress names. Screenshots and other binary data are never sent, in either mode. |
-| `BRAINTRUST_APP_URL` | blank | Only for a self-hosted or hybrid Braintrust data plane. |
+- `braintrust`: `BRAINTRUST_API_KEY` and `BRAINTRUST_PROJECT_NAME`. This uses Braintrust's own Flue integration.
+- `otlp`: `TRIAGE_OTLP_ENDPOINT` and `TRIAGE_OTLP_HEADERS` (`k=v,k=v`) for any OTLP backend, for example:
+  - Langfuse: `https://cloud.langfuse.com/api/public/otel/v1/traces` with `Authorization=Basic <base64 pk:sk>,x-langfuse-ingestion-version=4`;
+  - Braintrust: `https://api.braintrust.dev/otel/v1/traces` with `Authorization=Bearer <key>,x-bt-parent=project_name:<name>`.
 
-`triage doctor` shows whether tracing is on, the project and the content mode, without calling Braintrust. The CLI and the server flush pending spans before they exit, for at most a few seconds. Tests and contract tests use the SDK's in-memory logger and never reach Braintrust.
+Agent runs, decisions (`decide()`), classifier calls and embeddings are all traced. Content is redacted with the persisted profile first.
 
 ## Docs
 

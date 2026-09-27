@@ -178,7 +178,6 @@ function memoryStore(runId: string): MemoryStore {
     resolveBlock: unused,
     putEvidence: unused,
     setSubmissionFlueId: unused,
-    setSubmissionTraceSpanId: unused,
     putFeedback: unused,
     claimIdempotencyKey: unused,
     clearExpiredIdempotencyKeys: unused,

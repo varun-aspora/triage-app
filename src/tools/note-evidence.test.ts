@@ -61,7 +61,6 @@ function fakeRunStore(): FakeStore {
     resolveBlock: unused,
     putReport: unused,
     setSubmissionFlueId: unused,
-    setSubmissionTraceSpanId: unused,
     putFeedback: unused,
     claimIdempotencyKey: unused,
     clearExpiredIdempotencyKeys: unused,

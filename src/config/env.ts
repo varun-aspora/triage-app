@@ -19,7 +19,7 @@ import {
   PROVIDER_KEYS,
   RENAMED_KEYS,
   THINKING_LEVELS,
-  TRACING_CONTENT_MODES,
+  TRACING_MODES,
   isEntityKey,
   isTableKey,
   type KeySpec,
@@ -32,7 +32,7 @@ export type GitProtocol = 'ssh' | 'https';
 /** Colour theme of the web console. Display only; nothing else branches on it. */
 export type UiEnv = 'production' | 'non-production';
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
-export type TracingContentMode = (typeof TRACING_CONTENT_MODES)[number];
+export type TracingMode = (typeof TRACING_MODES)[number];
 
 export type Config = {
   readonly home: string;
@@ -108,12 +108,12 @@ export type Config = {
   readonly http: { readonly port: number; readonly authToken?: string; readonly allowSlackPost: boolean };
   readonly ui: { readonly env: UiEnv };
   readonly tracing: {
-    /** TRIAGE_BRAINTRUST_ENABLED, and a key is set (the load fails when enabled without one). */
-    readonly enabled: boolean;
-    readonly apiKey?: string;
-    readonly projectName: string;
-    readonly content: TracingContentMode;
-    readonly appUrl?: string;
+    readonly mode: TracingMode;
+    readonly otlpEndpoint?: string;
+    /** 'k=v,k=v'; a value may contain '='. */
+    readonly otlpHeaders?: string;
+    readonly braintrustApiKey?: string;
+    readonly braintrustProject: string;
   };
   readonly slack: {
     readonly botToken?: string;
@@ -266,11 +266,11 @@ export function configFromRecord(
     },
     ui: { env: r.enumOf<UiEnv>('TRIAGE_UI_ENV') },
     tracing: {
-      enabled: r.bool('TRIAGE_BRAINTRUST_ENABLED'),
-      apiKey: r.str('BRAINTRUST_API_KEY'),
-      projectName: r.requiredStr('BRAINTRUST_PROJECT_NAME'),
-      content: r.enumOf<TracingContentMode>('TRIAGE_BRAINTRUST_CONTENT'),
-      appUrl: r.str('BRAINTRUST_APP_URL'),
+      mode: r.enumOf<TracingMode>('TRIAGE_TRACING'),
+      otlpEndpoint: r.str('TRIAGE_OTLP_ENDPOINT'),
+      otlpHeaders: r.str('TRIAGE_OTLP_HEADERS'),
+      braintrustApiKey: r.str('BRAINTRUST_API_KEY'),
+      braintrustProject: r.requiredStr('BRAINTRUST_PROJECT_NAME'),
     },
     slack: {
       botToken: r.str('SLACK_BOT_TOKEN'),
@@ -313,8 +313,11 @@ export function configFromRecord(
   for (const [old, now] of RENAMED_KEYS) {
     if ((rec[old]?.trim() ?? '') !== '') r.problem(old, `was renamed to ${now}; rename it in the .env`);
   }
-  if (config.tracing.enabled && config.tracing.apiKey === undefined) {
-    r.problem('BRAINTRUST_API_KEY', 'is required when TRIAGE_BRAINTRUST_ENABLED=true');
+  if (config.tracing.mode === 'otlp' && config.tracing.otlpEndpoint === undefined) {
+    r.problem('TRIAGE_OTLP_ENDPOINT', 'is required when TRIAGE_TRACING=otlp');
+  }
+  if (config.tracing.mode === 'braintrust' && config.tracing.braintrustApiKey === undefined) {
+    r.problem('BRAINTRUST_API_KEY', 'is required when TRIAGE_TRACING=braintrust');
   }
   if (config.mock.enabled && config.mock.record) {
     r.problem('TRIAGE_RECORD_FIXTURES', 'requires TRIAGE_MOCK_MODE=false');

@@ -120,7 +120,6 @@ export function createFeedbackCommand(options: FeedbackCommandOptions = {}): Cli
       const deps: FeedbackDeps = {
         store: await makeStore(config),
         home: config.home,
-        tracing: config.tracing,
         ...(options.now !== undefined ? { now: options.now } : {}),
       };
 

@@ -78,6 +78,18 @@ const CASES: Record<string, Case> = {
       ['src/tools/x.ts', '// never read process.env here\nconst processEnvironment = 1;\n'],
     ],
   },
+  'tracing-sdks-in-lib-tracing-only': {
+    bad: [
+      ['src/decisions/decide.ts', "import { traced } from 'braintrust';\n", [1]],
+      ['src/embed/index.ts', "\nimport { trace } from '@opentelemetry/api';\n", [2]],
+      ['src/ingress/runtime.ts', "const m = await import('@flue/opentelemetry');\n", [1]],
+    ],
+    good: [
+      ['src/lib/tracing/braintrust.ts', "import { traced } from 'braintrust';\n"],
+      ['src/lib/tracing/otlp.ts', "import { trace } from '@opentelemetry/api';\n"],
+      ['src/config/keys.ts', "export const TRACING_MODES = ['off', 'otlp', 'braintrust'] as const;\n"],
+    ],
+  },
   'deploy-mode-key': {
     bad: [
       ['src/ops/doctor.ts', "const k = 'TRIAGE_DEPLOY_MODE';\n", [1]],
@@ -141,24 +153,6 @@ const CASES: Record<string, Case> = {
   'no-agent-router': {
     bad: [['src/app.ts', "import { createAgentRouter } from '@flue/runtime';\n", [1]]],
     good: [['src/app.ts', '// There is no createAgentRouter mount (D25).\n']],
-  },
-  'braintrust-in-tracing-only': {
-    bad: [
-      ['src/ingress/runtime.ts', "import { initLogger } from 'braintrust';\n", [1]],
-      ['src/report/feedback.ts', 'const a = 1;\nimport * as bt from "braintrust";\n', [2]],
-      ['src/cli/main.ts', "import 'braintrust';\n", [1]],
-      ['src/cli/main.ts', "const bt = await import('braintrust');\n", [1]],
-      ['src/cli/main.ts', 'const bt = await import(`braintrust`);\n', [1]],
-      ['src/cli/main.ts', "const bt = require('braintrust');\n", [1]],
-      ['src/tracing/other.ts', "import type { Span } from 'braintrust';\n", [1]],
-      ['src/tracing/other.ts', "export { flush } from 'braintrust';\n", [1]],
-      ['src/tracing/other.ts', "import { x } from 'braintrust/dev';\n", [1]],
-    ],
-    good: [
-      ['src/tracing/braintrust.ts', "import type * as Braintrust from 'braintrust';\nconst m = await import('braintrust');\n"],
-      ['src/ingress/runtime.ts', "// installBraintrust loads 'braintrust' lazily\nimport { installBraintrust } from '../tracing/braintrust.ts';\n"],
-      ['src/tracing/other.ts', "const key = Symbol.for('braintrust.flue.observe-bridge');\nconst p = '@braintrust/core';\n"],
-    ],
   },
   'no-shell-true': {
     bad: [

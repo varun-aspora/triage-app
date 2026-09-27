@@ -9,8 +9,7 @@
 //
 // On a signal, src/server/shutdown.ts first writes a stderr line and a
 // server_shutdown line to each active run's event log, so a run killed by
-// the stop says so, and flushes the event log again before the exit. Then
-// it waits a few seconds at most for the queued Braintrust spans (D82).
+// the stop says so, and flushes the event log again before the exit.
 
 const [major, minor] = process.versions.node.split('.').map(Number);
 if (major < 22 || (major === 22 && minor < 19)) {
@@ -36,11 +35,12 @@ try {
 }
 process.stdout.write(`triage-server: listening on port ${server.port}\n`);
 
-const { noteShutdown, flushBeforeExit, flushTracesBeforeExit } = await import('../src/server/shutdown.ts');
+const { noteShutdown, flushBeforeExit } = await import('../src/server/shutdown.ts');
+const { flushTracing } = await import('../src/lib/tracing/index.ts');
 
 async function exit(exitCode) {
   flushBeforeExit();
-  await flushTracesBeforeExit();
+  await flushTracing();
   process.exit(exitCode);
 }
 
