@@ -37,6 +37,10 @@ export const SSFB_WORKFLOW_BY_FORM =
 export const RTL_WORKFLOW_BY_FORM =
   "SELECT workflow_identifier, status, current_step_identifier FROM workflow_executions WHERE reference_id = $1 AND reference_type = 'FORM' ORDER BY created_at DESC LIMIT 5";
 
+/** aspora_user_id: RTL runs keyed to the user rather than a form (seen on RTL, not in any source). */
+export const RTL_WORKFLOW_BY_USER =
+  "SELECT workflow_identifier, status, current_step_identifier FROM workflow_executions WHERE reference_id = $1 AND reference_type = 'USER' ORDER BY created_at DESC LIMIT 5";
+
 /** customer_id: the rhythm account mappings. account_id is for admin APIs, account_number for logs. */
 export const RHYTHM_ACCOUNTS_BY_CUSTOMER =
   'SELECT account_id, account_number, account_type, scheme_code FROM customer_account_mappings WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 10';
@@ -147,6 +151,14 @@ export const IDENTITY_STATEMENTS = Object.freeze({
     table: 'workflow_executions',
     sql: RTL_WORKFLOW_BY_FORM,
     params: ['account_form_id'],
+  }),
+  workflow_rtl_user: statement({
+    hop: 'aspora_user_id.rtl_workflow',
+    entity: 'rtl',
+    service: 'workflow',
+    table: 'workflow_executions',
+    sql: RTL_WORKFLOW_BY_USER,
+    params: ['aspora_user_id'],
   }),
   customer_accounts: statement({
     hop: 'customer_id.accounts',

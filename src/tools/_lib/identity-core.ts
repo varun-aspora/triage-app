@@ -200,18 +200,28 @@ class Walk {
     }
   }
 
-  /** account_form_id on the SSFB workflow copy, then the RTL copy when the first has nothing. */
+  /**
+   * account_form_id on the SSFB workflow copy, then the RTL copy when the
+   * first has nothing. When neither gives a run, the RTL runs keyed to the
+   * user: a run started before the form existed stays keyed to the user.
+   */
   private async workflow(): Promise<void> {
     const S = IDENTITY_STATEMENTS;
     const ssfb = await this.hop(S.workflow_ssfb, 'account_form_id', [], undefined);
-    if (ssfb === null) return;
-    if (ssfb.status === 'resolved') {
+    if (ssfb !== null && ssfb.status === 'resolved') {
       this.workflowState(S.workflow_ssfb, ssfb.rows);
       this.record(S.workflow_rtl, 'account_form_id', 'skipped', this.nowIso());
       return;
     }
-    const rtl = await this.hop(S.workflow_rtl, 'account_form_id', [], undefined);
-    if (rtl !== null && rtl.status === 'resolved') this.workflowState(S.workflow_rtl, rtl.rows);
+    if (ssfb !== null) {
+      const rtl = await this.hop(S.workflow_rtl, 'account_form_id', [], undefined);
+      if (rtl !== null && rtl.status === 'resolved') {
+        this.workflowState(S.workflow_rtl, rtl.rows);
+        return;
+      }
+    }
+    const byUser = await this.hop(S.workflow_rtl_user, 'aspora_user_id', [], undefined);
+    if (byUser !== null && byUser.status === 'resolved') this.workflowState(S.workflow_rtl_user, byUser.rows);
   }
 
   private workflowState(stmt: IdentityStatement, rows: Rows): void {

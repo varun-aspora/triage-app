@@ -70,19 +70,18 @@ its first queries.
 | RTL side | Other side | Meaning |
 |---|---|---|
 | workflow-op `workflow_executions.reference_id` with `reference_type = 'FORM'` | harbor `account_forms.form_id` (SSFB) | The workflow run for a harbor form. |
+| workflow-op `workflow_executions.reference_id` with `reference_type = 'USER'` | `aspora_user_id` | A run keyed to the user, for example before a harbor form exists. Seen in RTL data; no source states it. |
 | banking-service `form-submission-data` `data_token` | `aspora_user_id` = harbor `account_forms.external_user_ref` | What harbor sends when it pulls the Part-1 form. |
 | harbor `customer.account_form_id` | harbor `form_id` | From customer back to form, on the SSFB side. |
 | banking-service `visa_inquiry_id` | kyc-service `partner_inquiry_id` | The same value under two names. Not a mismatch. |
 | kyc-service request context `x-user-id` | `aspora_user_id` | Who a KYC call was made for. |
 
-Two links are not documented:
+The ID chain reads RTL runs by `account_form_id` (`FORM`) when a form is
+known, and by `aspora_user_id` (`USER`) when there is no form or the form has
+no runs.
 
-- For an RTL Part-1 execution, whether `reference_id` holds the Aspora user
-  id or the form_id (unverified: no source states it). Try the
-  `account_form_id` with `reference_type = 'FORM'` first, then the
-  `aspora_user_id`.
-- Which `kyc_inquiries` column joins to the Aspora user id or the harbor
-  form_id (unverified: no source states it).
+One link is not documented: which `kyc_inquiries` column joins to the Aspora
+user id or the harbor form_id (unverified: no source states it).
 
 ## When to brief investigate_rtl
 

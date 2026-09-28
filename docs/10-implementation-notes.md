@@ -340,6 +340,13 @@ Known gaps:
 - 2026-09-26: removed every foreign key from the run store, per the owner's rule in `src/runstore/migrations/AGENTS.md`. `0001_init.sql` creates no foreign key, and the per-model embedding table DDL has none. `deleteRun` in `postgres.ts` deletes from every table itself; `putFeedback`, `putEmbedding` and `putUsage` check the run under `FOR KEY SHARE`; the feedback and embedding inserts are plain `VALUES` now. `fake-pg.ts` enforces no foreign key and cascades nothing. New contract cases: `deleteRun` clears every kind of row across two embedding models and leaves other runs alone; every write on a deleted run throws `RunNotFoundError`; `putReport` on an unknown run throws `RunNotFoundError`. The folder provider is unchanged.
 - `0001_init.sql` was checked against fake-pg and the Postgres grammar (libpg-query), not against a live database.
 
+### RTL workflow runs by user id (2026-09-28)
+
+- The ID chain has a new hop, `aspora_user_id.rtl_workflow` (`RTL_WORKFLOW_BY_USER` in `src/tools/_lib/identity-statements.ts`). It reads RTL `workflow_executions` with `reference_type = 'USER'` and the Aspora user id as `reference_id`, the same columns and limit as the FORM read. A trace showed RTL keeps some runs this way, and the chain had no route to them.
+- It runs last in the workflow step, only when neither FORM read found a run: either no `account_form_id` is known, or the form has no runs. When a FORM read resolves, it does not run. A resolved read fills the three `workflow_*` basic-state items from `rtl:workflow`.
+- This adds one read against `RTL_WORKFLOW_DB_URL` at ingress (and in `resolve_identity`) for a request that has a user id and no workflow run by form. It is skipped when `rtl` is not enabled. Mock mode needs a `resolve_identity` fixture under the new hop name for such a request; the pipeline fixtures all find a run by form and do not.
+- The link is taken from RTL data seen in one run, not from a source.
+
 ## Commit trailer note
 
 The trailer was pinned in CONVENTIONS.md and plan.json after wave 1 (`74cfcb3`, later `58b12b3`), because implementers had each picked their own model name. Commit T01.3 (`a70343b`) still carries a different co-author line from the rest, and T01.2 (`bb11e37`) was one of the two commits the wave log flagged at the time; on main today only `a70343b` differs. The commits before `58b12b3` also carry a `Claude-Session` line. History was left as is.
