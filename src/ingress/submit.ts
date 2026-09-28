@@ -179,7 +179,6 @@ import {
 import { loadPatterns, matchPattern, type Pattern } from '../classify/patterns.ts';
 import { applyTierPolicy, toTierDecision, type TierPolicyContext, type TierPolicyResult } from '../classify/policy.ts';
 import type { Config } from '../config/env.ts';
-import { ConfigError } from '../config/errors.ts';
 import { knownIdFieldsFor } from '../config/known-ids.ts';
 import type { Registry } from '../config/registry.ts';
 import { infraRepoNames, loadRepos } from '../config/repos.ts';
@@ -190,7 +189,7 @@ import { ConnectorError } from '../connectors/types.ts';
 import { pidAlive } from '../cli/commands/status.command.ts';
 import { submissionLease, type SubmissionLease, type SubmissionLeaseReader } from '../db/submission-lease.ts';
 import { decisionProviderFor } from '../decisions/registry.ts';
-import { createEmbedder, embedderFor, type EmbedUsage, type Embedder, type FetchLike, HASH_MODEL } from '../embed/index.ts';
+import { embedderFor, type EmbedUsage, type Embedder, type FetchLike, HASH_MODEL } from '../embed/index.ts';
 import { createJsonlAuditSink } from '../gate/audit-sink.ts';
 import { clearRunDeadline, runTimes, setRunDeadline } from '../gate/budget.ts';
 import { checkEgress, redactModelFacing, redactPersisted } from '../gate/redact.ts';
