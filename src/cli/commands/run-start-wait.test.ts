@@ -1048,7 +1048,9 @@ describe('status', () => {
   test('a running or failed run that holds an earlier report shows no verdict (W15)', async () => {
     const h = home();
     await seed(h, { phase: 'investigating', report: true });
-    await seed(h, { runId: OTHER_RUN, phase: 'failed', reason: 'stream ended early', report: true });
+    // The report belongs to the first submission; the follow-up after it failed.
+    const store = await seed(h, { runId: OTHER_RUN, phase: 'failed', reason: 'stream ended early', report: true });
+    await store.addSubmission(OTHER_RUN, redactPersisted({ kind: 'ask' as const, question: 'and the refund?' }));
     const cmd = createStatusCommand({ isAlive: () => true });
     for (const [id, status] of [[RUN_ID, 'running'], [OTHER_RUN, 'failed']] as const) {
       const doc = jsonLine((await cli([cmd], ['status', id, '--json'], { config: () => h.config })).out);
@@ -1059,6 +1061,17 @@ describe('status', () => {
       expect(human).toContain(`run ${id}: ${status} (phase `);
       expect(human).not.toContain('root_cause_confirmed');
     }
+  });
+
+  test('a failed run whose last submission has a report shows it as a partial report (D88)', async () => {
+    const h = home();
+    await seed(h, { phase: 'failed', reason: 'AgentRunError: Submission exceeded the configured timeout.', report: true });
+    const cmd = createStatusCommand({ isAlive: () => true });
+    const doc = jsonLine((await cli([cmd], ['status', RUN_ID, '--json'], { config: () => h.config })).out);
+    expect(v.is(StatusOutputSchema, doc)).toBe(true);
+    expect(doc).toMatchObject({ status: 'failed', report_status: 'root_cause_confirmed', confidence: 'medium' });
+    const human = await cli([cmd], ['status', RUN_ID], { config: () => h.config });
+    expect(human.out).toContain(`run ${RUN_ID}: failed · partial report (phase failed)`);
   });
 
   test('a failed or stopped run shows its reason, in --json and the human form', async () => {

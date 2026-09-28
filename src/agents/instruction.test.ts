@@ -15,7 +15,12 @@ const FIXTURE = fileURLToPath(new URL('./__fixtures__/knowledge', import.meta.ur
 const T = '2026-09-20T10:00:00.000Z';
 
 function init(
-  overrides: { hints?: Record<string, unknown>; ids?: Record<string, string>; matched?: string } = {},
+  overrides: {
+    hints?: Record<string, unknown>;
+    ids?: Record<string, string>;
+    matched?: string;
+    hops?: Record<string, unknown>[];
+  } = {},
 ): TriageInit {
   return v.parse(TriageInitSchema, {
     request: {
@@ -46,7 +51,7 @@ function init(
     },
     id_chain: {
       ids: overrides.ids ?? { customer_id: 'cust-test-1', account_form_id: 'form-test-1' },
-      hops: [],
+      hops: overrides.hops ?? [],
       basic_state: [],
     },
   });
@@ -154,6 +159,27 @@ describe('methodText', () => {
     expect(text.split('```').length).toBe(3);
   });
 
+  test('shows the classification and each hop with its status', () => {
+    const hops = [
+      { from: 'customer_id', to: 'account_form_id', source: 'ssfb:harbor.account_forms', status: 'resolved', taken_at: T },
+      { from: 'account_form_id', source: 'rtl:workflow_op.workflows', status: 'not_found', taken_at: T },
+    ];
+    const run = methodText(init({ hops }), { knowledge }).split('## This run')[1] as string;
+    expect(run).toContain('- Classification: category delivery, entities atspl, tier mid');
+    expect(run).toContain(
+      '- Id chain: customer_id -> account_form_id (ssfb:harbor.account_forms): resolved; account_form_id (rtl:workflow_op.workflows): not_found',
+    );
+  });
+
+  test('with no hops, the id chain line says so', () => {
+    expect(methodText(init(), { knowledge })).toContain('- Id chain: no hops');
+  });
+
+  test('a masked id stays masked', () => {
+    const text = methodText(init({ hints: {}, ids: { phone_number: '****4567', account_number: 'XXXXXX1234' } }), { knowledge });
+    expect(text).toContain('- Known ids: phone_number = ****4567, account_number = XXXXXX1234');
+  });
+
   test('fills services in play for a single-entity run', () => {
     const text = methodText(init(), { knowledge, services: { atspl: ['package', 'pulse'] } });
     expect(text).toContain('Services in play: package, pulse');
@@ -179,6 +205,19 @@ describe('methodText', () => {
       rmSync(dir, { recursive: true, force: true });
       loadKnowledge(FIXTURE);
     }
+  });
+});
+
+describe('finish by (D87)', () => {
+  test('the run section ends with the absolute finish-by time', () => {
+    const text = methodText(init(), { knowledge, finishBy: Date.parse('2026-09-28T08:11:00Z') });
+    const run = text.slice(text.indexOf('## This run'));
+    expect(run).toContain('- Id chain:');
+    expect(run.indexOf('- Finish by 2026-09-28T08:11:00Z\n')).toBeGreaterThan(run.indexOf('- Id chain:'));
+  });
+
+  test('without a finish-by time there is no line', () => {
+    expect(methodText(init(), { knowledge })).not.toContain('- Finish by');
   });
 });
 

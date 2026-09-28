@@ -20,6 +20,11 @@
 // not wrapped (EXPLAIN inside a subquery is not SQL); its plan lines come
 // back as rows and are cut to the cap in render like any other result.
 //
+// After the row cap, render keeps what the model sees under
+// TRIAGE_MAX_MODEL_BYTES_PER_CALL (D90): long cells become a preview with
+// their length, and whole rows past the limit are left out. The staged file
+// keeps every row in full.
+//
 // A query Postgres rejects comes back as "Query failed on <entity>:<service>:
 // <Postgres message> (SQLSTATE <code>, <description>)" with what to check
 // next; the pipeline builds that text from src/gate/sql-errors.ts, with the
@@ -29,11 +34,11 @@ import type { FlueLogger } from '@flue/runtime';
 import { defineTool, type ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
 import { safeErrorText } from '../connectors/error-text.ts';
-import type { SqlConnector } from '../connectors/sql/pg-client.ts';
+import { capRows, jsonBytes, type SqlConnector } from '../connectors/sql/pg-client.ts';
 import type { MockPort } from '../connectors/mock.ts';
 import { ConnectorError, type ConnectorContext } from '../connectors/types.ts';
 import { MAX_SQL_LENGTH, type SqlCheck, type SqlRefusalCode, validateSelect } from '../gate/sql.ts';
-import { observeJourneyKeys } from '../gate/scope.ts';
+import { observeJourneyKeys, onlyExemptTables } from '../gate/scope.ts';
 import { buildReadOnlyTxn, explainStatement, wrapWithCap } from '../gate/sql-txn.ts';
 import { semanticKey, type SqlSelectFacts } from '../mock/key.ts';
 import type { Entity } from '../types/core.ts';
@@ -53,6 +58,7 @@ export const SQL_SELECT = 'sql_select';
 
 const MAX_PARAMS = 50;
 const PARAM_MAX_CHARS = 1_000;
+const CELL_PREVIEW_CHARS = 200;
 
 // SQL whose answer depends on when it runs. Never served from the repeat cache.
 // 'now'::timestamptz and one-argument age(col) read the clock without a call.
@@ -81,7 +87,7 @@ const NOT_A_SELECT: Readonly<Partial<Record<SqlRefusalCode, string>>> = Object.f
   INTO: 'SELECT ... INTO creates a table; drop the INTO clause.',
 });
 
-const description = (maxRows: number): string =>
+const description = (maxRows: number, maxBytes: number): string =>
   "Run one read-only SELECT against one of this entity's service databases. " +
   'Send exactly one SELECT (WITH ... SELECT is fine); writes, SET/RESET/SHOW and more than one statement are ' +
   `refused. Put every value in params and refer to it as $1, $2, ... in order; never write ids into the SQL text. ` +
@@ -93,6 +99,9 @@ const description = (maxRows: number): string =>
   'only aggregates (count, sum, avg, min/max of non-id columns, grouped by non-id columns). ' +
   `At most ${maxRows} rows come back; truncated is true when there were more, and the full result is ` +
   'in staged_file in the sandbox. Returns rows, row_count, truncated and taken_at. ' +
+  `Rows are also cut to about ${Math.round(maxBytes / 1024)} KB: past that, cells over ${CELL_PREVIEW_CHARS} characters show a ` +
+  'preview and their length, later rows are left out, and bytes_cut says how much was cut. ' +
+  'Avoid SELECT * on tables with wide JSON columns; name the columns you need. ' +
   '"Refused: ..." means the gate stopped the call: read the reason, fix the query and try again, or record the gap. ' +
   '"Query failed ... (SQLSTATE <code>, ...)" carries the database\'s own message: fix what it names and retry. ' +
   '"did not answer" carries the reason too: retry once or use another source. ' +
@@ -155,6 +164,44 @@ function parseAnswer(value: unknown): Answer {
   const parsed = v.safeParse(AnswerSchema, value);
   if (!parsed.success) throw new Error('sql_select: the sql_select answer has the wrong shape (expected { rows: [...] })');
   return parsed.output;
+}
+
+// ------------------------------------------------------------ model-facing size (D90)
+
+type Row = Record<string, unknown>;
+type Rendered = {
+  readonly service: string;
+  readonly columns?: string[];
+  readonly rows: Row[];
+  readonly row_count: number;
+  readonly truncated: boolean;
+};
+
+// Room for staged_file, which the pipeline adds after render (a path of at most 139 characters).
+const STAGED_FILE_ROOM = 160;
+
+// A JSON cell is previewed as its JSON text, so the model sees where it was cut.
+function previewCell(value: unknown): unknown {
+  const text = typeof value === 'string' ? value : value !== null && typeof value === 'object' ? JSON.stringify(value) : undefined;
+  if (text === undefined || text.length <= CELL_PREVIEW_CHARS) return value;
+  return `${text.slice(0, CELL_PREVIEW_CHARS)}… [${text.length} chars]`;
+}
+
+// The description explains the cut; the note only points at the full rows.
+const CUT_NOTE = 'Cut to fit; staged_file has every row in full.';
+
+const previewRow = (row: Row): Row => Object.fromEntries(Object.entries(row).map(([k, value]) => [k, previewCell(value)]));
+
+/** The rendered result cut to maxBytes: long cells previewed, then whole rows kept while they fit. */
+function fitModelBytes(result: Rendered, maxBytes: number): Rendered & { bytes_cut?: number; note?: string } {
+  const full = jsonBytes(result);
+  if (full + STAGED_FILE_ROOM <= maxBytes) return result;
+  // bytes_cut is at most the full size, so its digits never outgrow this measure.
+  const envelope = jsonBytes({ ...result, rows: [], row_count: result.rows.length, truncated: true, bytes_cut: full, note: CUT_NOTE });
+  // capRows counts the [ and ] itself, which the envelope already has.
+  const { rows } = capRows(result.rows.map(previewRow), maxBytes - envelope - STAGED_FILE_ROOM + 2);
+  const out = { ...result, rows, row_count: rows.length, truncated: true, note: CUT_NOTE };
+  return { ...out, bytes_cut: full - jsonBytes(out) };
 }
 
 // ------------------------------------------------------------ gate
@@ -269,11 +316,14 @@ async function runSqlSelect(ctx: ToolContext, entity: Entity, services: readonly
       input: data,
       backing:
         service === 'unknown' ? { envName: 'TRIAGE_ENTITIES', status: 'disabled' } : backingFor(ctx, entity, service),
-      // A device or verification id seen earlier in the run is in scope (D77, Q13).
+      // A device or verification id seen earlier in the run is in scope (D77, Q13),
+      // and a query on the service's config tables alone skips the id check (D89).
       scope: {
         systemic,
         sqlAggregateOnly: check.ok && check.aggregateOnly,
         sqlJourneyParams: check.ok ? check.journeyParams : [],
+        sqlConfigTablesOnly:
+          check.ok && service !== 'unknown' && onlyExemptTables(check.tables, ctx.registry.service(entity, service).scope_exempt_tables ?? []),
         ...observedScopeOf(ctx.runId),
       },
       gate: () => {
@@ -324,13 +374,16 @@ async function runSqlSelect(ctx: ToolContext, entity: Entity, services: readonly
         const answer = parseAnswer(value);
         const rows = answer.rows.slice(0, cap);
         observeJourneyKeys(ctx.runId, SQL_SELECT, data, scopeSetOf(deps), rows, check.ok ? check.rowKeys : undefined);
-        return {
-          service,
-          ...(answer.columns !== undefined ? { columns: answer.columns } : {}),
-          rows,
-          row_count: rows.length,
-          truncated: answer.truncated === true || answer.rows.length > cap,
-        };
+        return fitModelBytes(
+          {
+            service,
+            ...(answer.columns !== undefined ? { columns: answer.columns } : {}),
+            rows,
+            row_count: rows.length,
+            truncated: answer.truncated === true || answer.rows.length > cap,
+          },
+          ctx.config.budgets.maxModelBytesPerCall,
+        );
       },
       stage: (value) => {
         const answer = parseAnswer(value);
@@ -365,7 +418,7 @@ function create(ctx: ToolContext): ToolDefinition {
   const services = sqlServices(ctx, entity);
   return defineTool({
     name: SQL_SELECT,
-    description: description(ctx.config.sql.maxRows),
+    description: description(ctx.config.sql.maxRows, ctx.config.budgets.maxModelBytesPerCall),
     input: inputSchema(services),
     harness: true,
     run: async ({ data, signal, toolCallId, log, harness }): Promise<ToolEnvelope> =>

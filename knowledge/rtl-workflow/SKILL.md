@@ -43,22 +43,23 @@ check after a KYC SDK closes; does not advance) and `POST /go-back`.
 
 | Table | What to look for |
 |---|---|
-| `workflow_executions` | First stop. One row per user run: `reference_id` and `reference_type`, `workflow_identifier`, `status` (RUNNING, COMPLETED, FAILED, MANUAL_REVIEW, REVERTING), `sub_status`, `current_step_identifier` and `current_step_index` (where the user is), and `step_data` (JSONB, per-step results). For a harbor form, `reference_id` = `form_id` and `reference_type` = `FORM`. |
+| `workflow_executions` | First stop. One row per user run: `reference_id` and `reference_type`, `workflow_identifier`, `status` (RUNNING, COMPLETED, FAILED, MANUAL_REVIEW, REVERTING), `sub_status`, `current_step_identifier` and `current_step_index` (where the user is), and `step_data` (JSONB, per-step results). For a harbor form, `reference_id` = `form_id` and `reference_type` = `FORM`; for a run keyed to the user, `reference_id` = the Aspora user id and `reference_type` = `USER`. |
 | `workflow_definitions` | The ordered `steps` JSONB for a `workflow_identifier`; one active row per identifier. Also `definition_settings`. |
 | `ui_templates` | The Velocity or JSON template rendered for each step. |
 | `workflow_execution_actions` | Saga and audit rows for force-step-back and go-back. Check when a revert is stuck (STARTED, COMPENSATED, then DONE or STUCK). |
 
 There is no `workflow_instances` table.
 
-`workflow_executions` is looked up by `reference_id`, which for a harbor form
-is the `form_id`. No user id column is documented for it, so do not filter on
-a guessed `user_id`: get the `form_id` first (the chain's `account_form_id`,
-or from harbor). To
-see the real columns, read `information_schema.columns` for the tables you
-need, in one call:
+`workflow_executions` is looked up by `reference_id` and `reference_type`:
+the `form_id` with `FORM`, or the Aspora user id with `USER`. No user id
+column is documented, so do not filter on a guessed `user_id`. The ID chain
+already reads the `FORM` runs for the chain's `account_form_id`, then the
+`USER` runs for `aspora_user_id` when that finds none. To see the real
+columns, read `information_schema.columns` for the tables you need, in one
+call:
 
 ```
-sql_select { service: 'workflow', sql: "SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_name IN ($1, $2) ORDER BY table_name, ordinal_position", params: ['workflow_executions', 'workflow_execution_actions'] }
+sql_select { service: 'workflow', sql: "SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_name IN ($1, $2, $3) ORDER BY table_name, ordinal_position", params: ['workflow_executions', 'workflow_execution_actions', 'workflow_definitions'] }
 ```
 
 ## Queries
@@ -69,19 +70,31 @@ Where the form is:
 sql_select { service: 'workflow', sql: "SELECT workflow_identifier, status, sub_status, current_step_identifier, current_step_index, step_data FROM workflow_executions WHERE reference_id = $1 AND reference_type = 'FORM'", params: ['<form_id>'] }
 ```
 
-The step list for that definition. Set-returning functions are refused, so
-fetch the `steps` JSONB whole and read the identifiers from the staged rows in
-the sandbox:
+Where the user is, for runs keyed to the user:
 
 ```
-sql_select { service: 'workflow', sql: "SELECT external_id, steps FROM workflow_definitions WHERE external_id = $1", params: ['<definition_id>'] }
+sql_select { service: 'workflow', sql: "SELECT workflow_identifier, status, sub_status, current_step_identifier, current_step_index, step_data FROM workflow_executions WHERE reference_id = $1 AND reference_type = 'USER'", params: ['<aspora_user_id>'] }
 ```
+
+The step list for that definition. Set-returning functions are refused, so
+fetch the `steps` JSONB whole and read the identifiers from the staged rows in
+the sandbox. Ask for `steps` only: `SELECT *` also returns
+`definition_settings` and other wide JSON columns.
+
+```
+sql_select { service: 'workflow', sql: "SELECT steps FROM workflow_definitions WHERE external_id = $1", params: ['<definition_id>'] }
+```
+
+`workflow_definitions` holds no customer data, so a query that reads only this
+table may use a definition id that is not in the ID chain. Joined with
+`workflow_executions` or any other table, the ids are checked as usual, so
+read the definition in its own query.
 
 The source filters definitions by `external_id`. It does not say which
 execution column holds that id, or whether `workflow_definitions` also has a
 `workflow_identifier` column (unverified). If you only have the execution's
-`workflow_identifier`, read one `workflow_definitions` row first to find the
-matching column.
+`workflow_identifier`, find the matching column in the column lookup above
+instead of reading a whole row.
 
 Is it this form, or everyone at this step? An aggregate over the same step:
 

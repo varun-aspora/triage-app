@@ -322,6 +322,34 @@ function wallMsSince(createdAt: string, now: Date): number {
   return Number.isFinite(start) ? Math.max(0, now.getTime() - start) : 0;
 }
 
+export type ReportTailInput = {
+  /** The draft's own gaps, merged with mergeGaps. */
+  readonly draftGaps: readonly string[];
+  /** Gaps from the commit read, added after the pre-flight ones. */
+  readonly commitGaps: readonly string[];
+  readonly warnings: readonly PreflightWarning[];
+  readonly usage: RunUsage | undefined;
+  readonly createdAt: string;
+  readonly now: Date;
+  /** registryNames(), so gaps that differ only by a service are kept apart. */
+  readonly serviceNames: ReadonlySet<string>;
+  /** Ingress names, masked out of the added gaps. */
+  readonly names: readonly string[];
+};
+
+/**
+ * Steps 6 and 7 and the gap merge of step 8: the report's cost and its final
+ * gaps. The partial report of a timed-out run (D88) is built with it too, so
+ * the two reports assemble gaps and cost the same way.
+ */
+export function reportTail(input: ReportTailInput): { readonly gaps: string[]; readonly cost: ReportCost | null } {
+  const cost = computeCost(input.usage, wallMsSince(input.createdAt, input.now));
+  const added = [...input.warnings.map(preflightGap), ...input.commitGaps, ...cost.gaps].map(
+    (gap) => redactPersisted(gap, { names: input.names }).value,
+  );
+  return { gaps: unique([...mergeGaps(input.draftGaps, input.serviceNames), ...added]), cost: cost.cost };
+}
+
 // ------------------------------------------------------------------ tool
 
 type FinishRunContext = {
@@ -343,7 +371,6 @@ export function createFinishReportTool(ctx: ToolContext, options: FinishReportOp
     const names = unique([...(init?.redaction_names ?? []), ...deps.run.redactionNames]);
     const transport: AuditTransport = deps.fixtures.settings.mockMode ? 'mock' : 'real';
     const target = deps.runStore.provider === 'postgres' ? 'TRIAGE_DB_URL' : 'TRIAGE_RUNS_DIR';
-    const safe = (text: string): string => redactPersisted(text, { names }).value;
 
     const audit = (decision: 'allow' | 'deny', exit: string, summary: string, reason?: string): void => {
       deps.audit.write(
@@ -439,20 +466,24 @@ export function createFinishReportTool(ctx: ToolContext, options: FinishReportOp
     // 5. Commits per repo the code walker read.
     const commits = await readCommits(codeRepos(findings), deps.repoCommit, signal);
 
-    // 6. Cost, read after synthesis so its turns are counted.
+    // 6. Cost, read after synthesis so its turns are counted, and 7. pre-flight warnings.
     const usage = deps.usage === undefined ? undefined : await deps.usage(ctx.runId);
-    const cost = computeCost(usage, wallMsSince(record.created_at, now()));
-
-    // 7. Pre-flight warnings.
-    const warnings = init?.preflight_warnings ?? record.classification?.preflight_warnings ?? [];
-
-    const added = [...warnings.map(preflightGap), ...commits.gaps, ...cost.gaps].map(safe);
+    const tail = reportTail({
+      draftGaps: draft.gaps,
+      commitGaps: commits.gaps,
+      warnings: init?.preflight_warnings ?? record.classification?.preflight_warnings ?? [],
+      usage,
+      createdAt: record.created_at,
+      now: now(),
+      serviceNames: registryNames(ctx.registry),
+      names,
+    });
     signal?.throwIfAborted();
 
     // 8. Write.
     const result = await write({
       runId: ctx.runId,
-      draft: { ...draft, gaps: unique([...mergeGaps(draft.gaps, registryNames(ctx.registry)), ...added]), repo_commits: commits.commits, cost: cost.cost },
+      draft: { ...draft, gaps: tail.gaps, repo_commits: commits.commits, cost: tail.cost },
       ingressNames: names,
       store: deps.runStore,
       config: ctx.config,

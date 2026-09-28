@@ -146,6 +146,12 @@
 // status stopped. A follow-up (askRun) or a resume (resumeRun) moves a
 // stopped run on.
 //
+// A response that ran out of time (D88: Flue's submission timeout, or read()
+// giving up) still settles failed, and the settle attaches a partial report
+// to its submission: status inconclusive, built from the evidence saved so
+// far, with a gap that names the timeout and the elapsed time. A report the
+// writer refuses, or a failed write, is logged and the run stays failed.
+//
 // The CLI and the HTTP routes both submit through these functions.
 // submissionDeps() builds the production deps from the Triage runtime.
 import { readFile } from 'node:fs/promises';
@@ -172,7 +178,6 @@ import {
 import { loadPatterns, matchPattern, type Pattern } from '../classify/patterns.ts';
 import { applyTierPolicy, toTierDecision, type TierPolicyContext, type TierPolicyResult } from '../classify/policy.ts';
 import type { Config } from '../config/env.ts';
-import { ConfigError } from '../config/errors.ts';
 import { knownIdFieldsFor } from '../config/known-ids.ts';
 import type { Registry } from '../config/registry.ts';
 import { infraRepoNames, loadRepos } from '../config/repos.ts';
@@ -183,18 +188,24 @@ import { ConnectorError } from '../connectors/types.ts';
 import { pidAlive } from '../cli/commands/status.command.ts';
 import { submissionLease, type SubmissionLease, type SubmissionLeaseReader } from '../db/submission-lease.ts';
 import { decisionProviderFor } from '../decisions/registry.ts';
-import { createEmbedder, type EmbedUsage, type Embedder, type FetchLike, HASH_MODEL } from '../embed/index.ts';
+import { embedderFor, type EmbedUsage, type Embedder, type FetchLike, HASH_MODEL } from '../embed/index.ts';
 import { createJsonlAuditSink } from '../gate/audit-sink.ts';
+import { clearRunDeadline, runTimes, setRunDeadline } from '../gate/budget.ts';
 import { checkEgress, redactModelFacing, redactPersisted } from '../gate/redact.ts';
+import { withRunId } from '../lib/tracing/index.ts';
 import { createMockLayer } from '../mock/index.ts';
 import { acceptsImages, modelForTier } from '../models.ts';
 import { netTcpConnect } from '../ops/doctor/probes.ts';
 import { runPreflight, runTunnelPreflight, type PreflightInput, type PreflightResult } from '../ops/preflight.ts';
 import { syncBeforeRun } from '../ops/repos-autosync.ts';
 import type { TcpProbe } from '../ops/tunnel.ts';
-import { logRunEvent, setRunRedactionNames } from '../runlog/event-log.ts';
+import { logRunEvent, runRedactionNames, setRunRedactionNames } from '../runlog/event-log.ts';
 import { embedRun as defaultEmbedRun } from '../runstore/embed-run.ts';
 import { priorCasesFor, type PriorCasesResult } from '../runstore/prior-cases.ts';
+import { registryNames } from '../report/gaps.ts';
+import { partialReportDraft } from '../report/partial.ts';
+import { writeReport } from '../report/write.ts';
+import { collectFindings, reportTail } from '../tools/finish-report.tool.ts';
 import {
   type PhaseDetail,
   RunNotFoundError,
@@ -223,6 +234,7 @@ import {
   dropIntake,
   dropSubmission,
   recordUsage,
+  runUsageInMemory,
   snapshotIntake,
   snapshotSubmission,
   takeUnassigned,
@@ -241,7 +253,10 @@ export type SubmissionConfig = {
   readonly mock: Pick<Config['mock'], 'enabled'>;
   /** usageFlushMs left out: DEFAULT_USAGE_FLUSH_MS. */
   readonly runs: Pick<Config['runs'], 'priorCases'> & Partial<Pick<Config['runs'], 'usageFlushMs'>>;
-  readonly budgets: Pick<Config['budgets'], 'runTimeoutMs' | 'runMaxAttempts'>;
+  /** wrapUpMs left out: no D87 deadline is recorded, so no time rule or finish-by lines. */
+  readonly budgets: Pick<Config['budgets'], 'runTimeoutMs' | 'runMaxAttempts'> & Partial<Pick<Config['budgets'], 'wrapUpMs'>>;
+  /** For a partial report's env_label (D88). Left out: blank. */
+  readonly display?: Config['display'];
 };
 
 /** The parts of Flue's instance handle the pipeline uses. */
@@ -276,6 +291,8 @@ export type SettleDeps = {
   readonly stopPollMs?: number;
   /** Clock for the answer's resolution time. Defaults to the system clock. */
   readonly now?: () => Date;
+  /** registryNames() of the registry, for the partial report's gap merge (D88). Left out: none. */
+  readonly serviceNames?: ReadonlySet<string>;
   /**
    * The part of pre-flight a resume repeats (D56): the SSFB tunnel in local
    * mode. A tunnel warning refuses the resume (ResumeNotReadyError) before
@@ -536,7 +553,11 @@ const NO_IMAGES_REASON = 'the model for this tier does not accept images';
 
 // ------------------------------------------------------------------ submit
 
-export async function runSubmission(prepared: PreparedSubmission, deps: SubmissionDeps): Promise<SubmissionResult> {
+export function runSubmission(prepared: PreparedSubmission, deps: SubmissionDeps): Promise<SubmissionResult> {
+  return withRunId(prepared.run_id, () => submitInScope(prepared, deps));
+}
+
+async function submitInScope(prepared: PreparedSubmission, deps: SubmissionDeps): Promise<SubmissionResult> {
   const runId = prepared.run_id;
   const request = prepared.request;
   if (!v.is(RunIdSchema, runId)) throw new SubmissionInputError('run_id is not a run id');
@@ -698,7 +719,11 @@ export type AnswerInput = {
 export type AnswerDeps = SettleDeps & { readonly identity?: SubmissionDeps['identity'] };
 
 /** The answer to the question a run is waiting on: closes it and resumes the run as a new submission. */
-export async function answerRun(runId: string, input: AnswerInput, deps: AnswerDeps): Promise<SubmissionResult> {
+export function answerRun(runId: string, input: AnswerInput, deps: AnswerDeps): Promise<SubmissionResult> {
+  return withRunId(runId, () => answerInScope(runId, input, deps));
+}
+
+async function answerInScope(runId: string, input: AnswerInput, deps: AnswerDeps): Promise<SubmissionResult> {
   if (!v.is(RunIdSchema, runId)) throw new IngressInputError('run_id', 'is not a run id');
   const by = typeof input.by === 'string' ? input.by.trim() : '';
   if (by === '') throw new IngressInputError('by', 'is required');
@@ -986,6 +1011,8 @@ async function dispatchAndSettle(
 ): Promise<SubmissionResult> {
   const store = deps.store;
   const callerSignal = deps.signal ?? new AbortController().signal;
+  const now = deps.now ?? (() => new Date());
+  const startedAt = now().getTime();
   // A steer (D72) joins the response that is running, which owns the phase: it writes none before the read.
   const steer = submission.kind === 'steer';
 
@@ -993,6 +1020,7 @@ async function dispatchAndSettle(
   let handle: AgentHandle;
   let receipt: Awaited<ReturnType<AgentHandle['dispatch']>>;
   let investigating: boolean;
+  let ownDeadline = false;
   try {
     seq = await store.addSubmission(runId, redactPersisted(submission));
     // Only a follow-up or a resume may move a stopped run on. A dispatch
@@ -1004,6 +1032,15 @@ async function dispatchAndSettle(
         worker_pid: deps.workerPid ?? null,
       });
     }
+    // D87: the finish-by lines and the time rule count from here. A steer
+    // joins the running response, whose deadline stands; one that finds no
+    // deadline (the response already ended) runs its own response and gets
+    // its own, so its prompt keeps the finish-by line.
+    const { runTimeoutMs, wrapUpMs } = deps.config.budgets;
+    if (wrapUpMs !== undefined && (!steer || runTimes(runId) === undefined)) {
+      setRunDeadline(runId, startedAt + runTimeoutMs, wrapUpMs);
+      ownDeadline = true;
+    }
     handle = deps.dispatcher.init(deps.agent, initOptions);
     receipt = await handle.dispatch(request);
     logRunEvent(runId, 'dispatch', { submission_seq: seq, kind: submission.kind, submission_id: receipt.submissionId });
@@ -1014,6 +1051,7 @@ async function dispatchAndSettle(
       .catch((err: unknown) => logRunEvent(runId, 'flue_id_write_failed', { submission_seq: seq, error: className(err) }));
     investigating = steer || (await markInvestigating(store, runId));
   } catch (err) {
+    if (ownDeadline) clearRunDeadline(runId);
     if (err instanceof RunStoppedError) throw err;
     // A steer that could not be sent leaves the working run as it is.
     if (steer) logRunEvent(runId, 'steer_failed', { error: err });
@@ -1037,6 +1075,7 @@ async function dispatchAndSettle(
     let inputRequest: InputRequest | undefined;
     let block: BlockRecord | undefined;
     let readError: unknown;
+    let timedOut = false;
     try {
       // Stopped before the read began: the abort is on its way, there is nothing to wait for.
       if (watch.signal.aborted) throw watch.signal.reason;
@@ -1069,9 +1108,13 @@ async function dispatchAndSettle(
         }
         status = 'failed';
         error = failureReason(cause);
+        timedOut = isRunTimeout(cause);
       }
     }
     watch.dispose();
+    // The response is over. A steer that runs later as its own response then
+    // sets a new deadline, rather than keeping this one's past one.
+    if (ownDeadline) clearRunDeadline(runId);
 
     // Whether a steer joined the live response (D72). A joined steer settled
     // with its host, whose own settle writes the phase, the usage and the
@@ -1117,6 +1160,11 @@ async function dispatchAndSettle(
     // nothing is written for it.
     await flush.stop();
     await writeUsage(store, runId, seq, snapshotSubmission(runId, submissionId), true);
+
+    // Before the embedding, so the case text has the report. A joined steer leaves it to its host.
+    if (status === 'failed' && timedOut && joined !== true) {
+      await writePartialReport(runId, seq, startedAt, now, deps);
+    }
 
     // A parked run (needs_input, blocked) is embedded when it settles for real,
     // like any other. A stopped one is not embedded, and a joined steer leaves
@@ -1611,6 +1659,62 @@ async function recordFailed(store: RunStore, runId: RunId, err: unknown): Promis
   }
 }
 
+/** D88: the settle error is a run timeout: Flue's submission timeout, or read() giving up. */
+function isRunTimeout(err: unknown): boolean {
+  if (err instanceof SubmissionReadTimeoutError) return true;
+  const cause: unknown = err instanceof AgentRunError ? err.cause : undefined;
+  return (cause as { type?: unknown } | null | undefined)?.type === 'submission_timeout';
+}
+
+/**
+ * Writes the partial report onto submission seq (D88), from the stored
+ * evidence: note_evidence stores before it records into the escalation
+ * store, so the store holds every finding. Never throws.
+ */
+async function writePartialReport(
+  runId: RunId,
+  seq: number,
+  startedAt: number,
+  now: () => Date,
+  deps: SettleDeps,
+): Promise<void> {
+  // The run's names, which a follow-up's dispatch does not carry in initialData.
+  const names = runRedactionNames(runId);
+  try {
+    const run = await deps.store.getRun(runId);
+    if (run === null) return;
+    const findings = collectFindings(run.evidence, []);
+    const draft = partialReportDraft(run, findings, now().getTime() - startedAt);
+    // A dispatched run is always classified.
+    if (draft === null) return;
+    const tail = reportTail({
+      draftGaps: draft.gaps,
+      commitGaps: [],
+      warnings: run.classification?.preflight_warnings ?? [],
+      usage: runUsageInMemory(runId),
+      createdAt: run.created_at,
+      now: now(),
+      serviceNames: deps.serviceNames ?? new Set(),
+      names,
+    });
+    // The findings were masked when stored; the request fields and the gaps were not.
+    const safe = redactPersisted({ ...draft, gaps: tail.gaps }, { names }).value;
+    const result = await writeReport({
+      runId,
+      draft: { ...safe, repo_commits: [], cost: tail.cost },
+      ingressNames: names,
+      store: deps.store,
+      config: { display: deps.config.display ?? {} },
+      submissionId: seq,
+      now,
+    });
+    if (result.ok) logRunEvent(runId, 'partial_report', { submission_seq: seq, findings: findings.length });
+    else logRunEvent(runId, 'partial_report_refused', { submission_seq: seq, reason: result.reason });
+  } catch (err) {
+    logRunEvent(runId, 'partial_report_failed', { submission_seq: seq, error: className(err) });
+  }
+}
+
 /**
  * A resume that failed after it stopped a stalled run and before its
  * dispatch (D72) leaves the run failed with the D67 reason, not stopped as
@@ -1667,6 +1771,7 @@ export function submissionDeps(options: SubmissionDepsOptions = {}): SubmissionD
     runner: options.runner ?? createExecRunner(),
     tcpProbe: options.tcpProbe ?? netTcpConnect,
     isTty: options.isTty ?? false,
+    embedder,
     signal,
   });
   return {
@@ -1675,6 +1780,7 @@ export function submissionDeps(options: SubmissionDepsOptions = {}): SubmissionD
     agent: Triage,
     dispatcher: options.dispatcher ?? { init },
     embedder,
+    serviceNames: registryNames(registry),
     ...(options.signal !== undefined ? { signal: options.signal } : {}),
     ...(options.onEvent !== undefined ? { onEvent: options.onEvent } : {}),
     preflight: ({ signal }) => runPreflight(preflightInput(signal)),
@@ -1725,16 +1831,5 @@ function infraReposToSync(config: Config, registry: Registry): readonly string[]
     return infraRepoNames(registry, loadRepos(config, registry), registry.enabledEntities());
   } catch {
     return [];
-  }
-}
-
-// A refused MODEL_EMBEDDING must not stop runs: embeddings are derived data.
-// The settle listener (D70) builds its embedder with it too.
-export function embedderFor(config: Config, fetchImpl: FetchLike | undefined): Embedder | null {
-  try {
-    return createEmbedder(config, { fetch: fetchImpl ?? ((url, reqInit) => fetch(url, reqInit)) });
-  } catch (err) {
-    if (err instanceof ConfigError) return null;
-    throw err;
   }
 }

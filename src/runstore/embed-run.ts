@@ -13,8 +13,9 @@
 
 import { createHash } from 'node:crypto';
 import { caseCardText, requestText } from '../embed/case-text.ts';
-import { EmbeddingError, type EmbedUsage, type Embedder } from '../embed/index.ts';
+import { embedErrorLabel, type EmbedUsage, type Embedder } from '../embed/index.ts';
 import { redactPersisted, type Persisted } from '../gate/redact.ts';
+import { withRunId } from '../lib/tracing/index.ts';
 import type { RunId } from '../types/core.ts';
 import type { EmbeddingKind, EmbeddingMeta, RunRecord, RunStore } from './types.ts';
 
@@ -58,7 +59,7 @@ export async function embedRun(
   try {
     run = await store.getRun(runId);
   } catch (err) {
-    return result({ gaps: [`embeddings skipped: run store read failed (${label(err)})`] });
+    return result({ gaps: [`embeddings skipped: run store read failed (${embedErrorLabel(err)})`] });
   }
   if (run === null) return result({ gaps: ['embeddings skipped: run not found'] });
 
@@ -85,12 +86,16 @@ export async function embedRun(
 
   let vectors: number[][];
   try {
-    vectors = await embedder.embed(pending.map((p) => p.text), {
-      ...(options.signal !== undefined ? { signal: options.signal } : {}),
-      ...(options.onUsage !== undefined ? { onUsage: options.onUsage } : {}),
-    });
+    // Wrapped here, not at the callers, so the settle listener, reembed and
+    // any later caller all tag the embeddings span with the run id (D91).
+    vectors = await withRunId(runId, () =>
+      embedder.embed(pending.map((p) => p.text), {
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        ...(options.onUsage !== undefined ? { onUsage: options.onUsage } : {}),
+      }),
+    );
   } catch (err) {
-    return result({ unchanged, empty, gaps: [`embeddings failed: ${label(err)}`] });
+    return result({ unchanged, empty, gaps: [`embeddings failed: ${embedErrorLabel(err)}`] });
   }
   if (vectors.length !== pending.length) {
     return result({ unchanged, empty, gaps: ['embeddings failed: embedder returned the wrong number of vectors'] });
@@ -113,7 +118,7 @@ export async function embedRun(
       );
       written.push(p.kind);
     } catch (err) {
-      gaps.push(`${p.kind} embedding not stored (${label(err)})`);
+      gaps.push(`${p.kind} embedding not stored (${embedErrorLabel(err)})`);
     }
   }
   return result({ written, unchanged, empty, gaps });
@@ -170,7 +175,7 @@ export async function reembed(
         has = record !== null && record.embeddings.some((e) => e.model === embedder.model);
       } catch (err) {
         counts.failed++;
-        failures.push({ run_id, gaps: [`embeddings skipped: run store read failed (${label(err)})`] });
+        failures.push({ run_id, gaps: [`embeddings skipped: run store read failed (${embedErrorLabel(err)})`] });
         continue;
       }
       if (has) {
@@ -197,13 +202,6 @@ function hasRow(rows: readonly EmbeddingMeta[], kind: EmbeddingKind, model: stri
 
 function sha256(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
-}
-
-/** A gap label that cannot carry request data: EmbeddingError's fixed message, else the error name. */
-function label(err: unknown): string {
-  if (err instanceof EmbeddingError) return err.message;
-  if (err instanceof Error) return err.name;
-  return 'unknown error';
 }
 
 function result(parts: Partial<EmbedRunResult>): EmbedRunResult {

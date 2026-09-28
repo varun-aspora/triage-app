@@ -7,8 +7,9 @@ not know.
 - Entity: the one entity this delegate covers. One brief per entity. For
   `code_walker`, the entity whose code is in question.
 - Question: one precise question the delegate can answer from its own
-  entity. Say what "done" looks like, which hypothesis it tests and what
-  result would reject it.
+  entity, plus at most two checks that follow from it. Ask first whether the
+  record exists. Say what "done" looks like, which hypothesis it tests and
+  what result would reject it.
 - Ids: the ids from the run's id chain that this entity can use, written as
   `key = value` with the id key names. There are seven: `country`,
   `phone_number`, `aspora_user_id`, `customer_id`, `account_form_id`,
@@ -26,7 +27,7 @@ not know.
 
 ```
 Entity: atspl
-Question: Was a welcome-letter delivery created for this customer, what did the vendor last report, and is the failure isolated to this customer? Hypothesis: the vendor rejected the address; rejected if no delivery was created or the vendor reported it delivered.
+Question: Was a welcome-letter delivery created for this customer? If it was, check what the vendor last reported and whether other customers had the same failure. Hypothesis: the vendor rejected the address; rejected if no delivery was created or the vendor reported it delivered.
 Ids: customer_id = <customer_id>, account_form_id = <account_form_id>
 Window: <window_from> .. <window_to>
 Services in play: package

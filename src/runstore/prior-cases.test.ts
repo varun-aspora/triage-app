@@ -7,6 +7,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
+import { fakeEmbedder } from '../../test/support/fake-embedder.ts';
 import type { EmbedUsage, Embedder } from '../embed/index.ts';
 import { redactPersisted, type Persisted } from '../gate/redact.ts';
 import {
@@ -81,21 +82,10 @@ function spyStore(
   return { store, calls, queries };
 }
 
-/** Returns the unit vector [1, 0, 0] for every text and records what it saw. */
-function fakeEmbedder(fail?: Error): { embedder: Embedder; calls: string[][] } {
-  const calls: string[][] = [];
-  const embedder: Embedder = {
-    model: MODEL,
-    embed: async (texts) => {
-      calls.push(texts.map((t) => t.value));
-      if (fail !== undefined) throw fail;
-      return texts.map(() => [1, 0, 0]);
-    },
-  };
-  return { embedder, calls };
-}
+/** What the query embedder returns for every text. */
+const UNIT = [1, 0, 0];
 
-/** A vector whose cosine with [1, 0, 0] is exactly sim. */
+/** A vector whose cosine with UNIT is exactly sim. */
 function at(sim: number): number[] {
   return [sim, Math.sqrt(1 - sim * sim), 0];
 }
@@ -141,11 +131,11 @@ const UUID_SHAPED = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 describe('priorCasesFor', () => {
   test('flag false returns [] and touches neither the store nor the embedder', async () => {
     const { store, calls } = spyStore(folderStore());
-    const { embedder, calls: embedCalls } = fakeEmbedder();
+    const embedder = fakeEmbedder(UNIT, MODEL);
     const r = await priorCasesFor(OFF, store, embedder, RUN_A);
     expect(r).toEqual({ cases: [], gaps: [] });
     expect(calls).toEqual({});
-    expect(embedCalls).toEqual([]);
+    expect(embedder.calls).toEqual([]);
   });
 
   test('a null embedder returns [] without a store read', async () => {
@@ -164,7 +154,7 @@ describe('priorCasesFor', () => {
     await seedRun(inner, RUN_D, { sim: 0.9 });
     await seedRun(inner, RUN_E, { sim: 0.78 });
     const { store, calls, queries } = spyStore(inner);
-    const { embedder, calls: embedCalls } = fakeEmbedder();
+    const embedder = fakeEmbedder(UNIT, MODEL);
 
     const r = await priorCasesFor(ON, store, embedder, RUN_A, { now: () => NOW });
     expect(r.gaps).toEqual([]);
@@ -183,8 +173,8 @@ describe('priorCasesFor', () => {
 
     // The current run's request text was embedded, and the store was asked
     // for both kinds under the embedder's model, without this run.
-    expect(embedCalls).toHaveLength(1);
-    expect(embedCalls[0]?.[0]).toContain('parent:');
+    expect(embedder.calls).toHaveLength(1);
+    expect(embedder.calls[0]?.[0]).toContain('parent:');
     expect(calls.findSimilar).toBe(1);
     expect(queries[0]).toMatchObject({ model: MODEL, kinds: ['case', 'request'], excludeRunId: RUN_A });
   });
@@ -193,7 +183,7 @@ describe('priorCasesFor', () => {
     const store = folderStore();
     await seedCurrent(store);
     await seedRun(store, RUN_B, { sim: 0.8, requestSim: 0.92 });
-    const { embedder } = fakeEmbedder();
+    const embedder = fakeEmbedder(UNIT, MODEL);
     const r = await priorCasesFor(ON, store, embedder, RUN_A, { now: () => NOW });
     expect(r.cases).toHaveLength(1);
     expect(r.cases[0]?.similarity).toBeCloseTo(0.92, 9);
@@ -204,7 +194,7 @@ describe('priorCasesFor', () => {
     await seedCurrent(store);
     await seedRun(store, RUN_B, { sim: 0.9 });
     await seedRun(store, RUN_C, { sim: 0.74 });
-    const { embedder } = fakeEmbedder();
+    const embedder = fakeEmbedder(UNIT, MODEL);
     const r = await priorCasesFor(ON, store, embedder, RUN_A, { now: () => NOW });
     expect(r.cases).toHaveLength(1);
     expect(r.cases[0]?.similarity).toBeCloseTo(0.9, 9);
@@ -215,7 +205,7 @@ describe('priorCasesFor', () => {
     await seedCurrent(store);
     await seedRun(store, RUN_B, { sim: 0.99, verdict: 'wrong' });
     await seedRun(store, RUN_C, { sim: 0.85, verdict: 'correct' });
-    const { embedder } = fakeEmbedder();
+    const embedder = fakeEmbedder(UNIT, MODEL);
     const r = await priorCasesFor(ON, store, embedder, RUN_A, { now: () => NOW });
     expect(r.cases).toHaveLength(1);
     expect(r.cases[0]?.feedback_verdict).toBe('correct');
@@ -237,7 +227,7 @@ describe('priorCasesFor', () => {
       },
     });
     expect((await inner.findSimilar({ vector: [1, 0, 0], model: MODEL }))[0]?.run_id).toBe(RUN_A);
-    const { embedder } = fakeEmbedder();
+    const embedder = fakeEmbedder(UNIT, MODEL);
     const r = await priorCasesFor(ON, store, embedder, RUN_A, { now: () => NOW });
     expect(r.cases).toHaveLength(1);
     expect(r.cases[0]?.similarity).toBeCloseTo(0.8, 9);
@@ -248,7 +238,7 @@ describe('priorCasesFor', () => {
     await seedCurrent(store);
     await seedRun(store, RUN_B, { sim: 0.9, verdict: 'wrong' });
     await store.putFeedback(RUN_B, p(sampleFeedback('partial', '2026-09-03T10:00:00.000Z')));
-    const { embedder } = fakeEmbedder();
+    const embedder = fakeEmbedder(UNIT, MODEL);
     const r = await priorCasesFor(ON, store, embedder, RUN_A, { now: () => NOW });
     expect(r.cases.map((c) => c.feedback_verdict)).toEqual(['partial']);
   });
@@ -258,7 +248,7 @@ describe('priorCasesFor', () => {
     await seedCurrent(store);
     await seedRun(store, RUN_B, { sim: 0.9, patternId: 'payout-bank-pending', escalated: true, verdict: 'pending' });
     await seedRun(store, RUN_C, { sim: 0.88 });
-    const { embedder } = fakeEmbedder();
+    const embedder = fakeEmbedder(UNIT, MODEL);
     const r = await priorCasesFor(ON, store, embedder, RUN_A, { now: () => NOW });
     expect(r.cases).toHaveLength(2);
     expect(r.cases[0]).toMatchObject({ matched_pattern_id: 'payout-bank-pending', escalated: true, feedback_verdict: 'pending' });
@@ -283,7 +273,7 @@ describe('priorCasesFor', () => {
     // Kebab-case, so it passes the pattern id shape; the final scrub catches it.
     await seedRun(store, RUN_B, { sim: 0.95, patternId: '123e4567-e89b-42d3-a456-426614174000' });
     await seedRun(store, RUN_C, { sim: 0.85 });
-    const { embedder } = fakeEmbedder();
+    const embedder = fakeEmbedder(UNIT, MODEL);
     const r = await priorCasesFor(ON, store, embedder, RUN_A, { now: () => NOW });
     expect(r.cases).toHaveLength(1);
     expect(r.cases[0]?.similarity).toBeCloseTo(0.85, 9);
@@ -294,7 +284,7 @@ describe('priorCasesFor', () => {
     const store = folderStore();
     await seedCurrent(store);
     await seedRun(store, RUN_B, { sim: 0.9, subcategory: 'customer said: "it is stuck, please help!"' });
-    const { embedder } = fakeEmbedder();
+    const embedder = fakeEmbedder(UNIT, MODEL);
     const r = await priorCasesFor(ON, store, embedder, RUN_A, { now: () => NOW });
     expect(r.cases).toHaveLength(1);
     expect(r.cases[0]).not.toHaveProperty('subcategory');
@@ -305,7 +295,7 @@ describe('priorCasesFor', () => {
     await seedCurrent(inner);
     await seedRun(inner, RUN_B, { sim: 0.9 });
     const { store } = spyStore(inner, { findSimilar: new Error('connection to db.internal:5432 refused') });
-    const { embedder } = fakeEmbedder();
+    const embedder = fakeEmbedder(UNIT, MODEL);
     const r = await priorCasesFor(ON, store, embedder, RUN_A);
     expect(r).toEqual({ cases: [], gaps: [PRIOR_CASES_UNAVAILABLE] });
     expect(PRIOR_CASES_UNAVAILABLE).toBe('prior cases unavailable');
@@ -315,7 +305,7 @@ describe('priorCasesFor', () => {
     const inner = folderStore();
     await seedCurrent(inner);
     const { store, calls } = spyStore(inner);
-    const { embedder } = fakeEmbedder(new Error('ollama down'));
+    const embedder = fakeEmbedder(new Error('ollama down'), MODEL);
     const r = await priorCasesFor(ON, store, embedder, RUN_A);
     expect(r).toEqual({ cases: [], gaps: [PRIOR_CASES_UNAVAILABLE] });
     expect(calls.findSimilar).toBeUndefined();
@@ -323,7 +313,7 @@ describe('priorCasesFor', () => {
 
   test('getRun throws or the current run is missing: [] plus the gap', async () => {
     const { store } = spyStore(folderStore(), { getRun: new Error('disk read failed') });
-    const { embedder } = fakeEmbedder();
+    const embedder = fakeEmbedder(UNIT, MODEL);
     expect(await priorCasesFor(ON, store, embedder, RUN_A)).toEqual({ cases: [], gaps: [PRIOR_CASES_UNAVAILABLE] });
     expect(await priorCasesFor(ON, folderStore(), embedder, RUN_A)).toEqual({ cases: [], gaps: [PRIOR_CASES_UNAVAILABLE] });
   });

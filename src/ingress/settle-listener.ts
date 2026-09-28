@@ -81,7 +81,8 @@ import { RunIdSchema, type RunId } from '../types/core.ts';
 import type { UsageRow } from '../types/usage.ts';
 import { dropSubmission, snapshotSubmission } from '../usage/meter.ts';
 import { readQuietly } from './stalled.ts';
-import { className, embedAfterSettle, embedderFor, failureReason, type EmbedRunFn } from './submit.ts';
+import { embedderFor } from '../embed/index.ts';
+import { className, embedAfterSettle, failureReason, type EmbedRunFn } from './submit.ts';
 
 /** How long the listener waits after a settle before it reads the run, so the normal path writes first. */
 export const SETTLE_GRACE_MS = 1000;

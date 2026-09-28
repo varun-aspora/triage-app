@@ -104,7 +104,11 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'TRIAGE_MAX_ASKS_PER_RUN', type: 'int', group: 'budgets', default: '10', min: 0 },
   { name: 'TRIAGE_MAX_RESPONSE_BYTES_PER_CALL', type: 'int', group: 'budgets', default: '1048576', min: 1 },
   { name: 'TRIAGE_MAX_BYTES_PER_RUN', type: 'int', group: 'budgets', default: '20971520', min: 1 },
+  // D90: what the model sees from one sql_select result, apart from the transport caps above.
+  { name: 'TRIAGE_MAX_MODEL_BYTES_PER_CALL', type: 'int', group: 'budgets', default: '24576', min: 1024 },
   { name: 'TRIAGE_RUN_TIMEOUT_MS', type: 'int', group: 'budgets', default: '900000', min: 1 },
+  // D87: wrap-up margin W. Delegate data tools stop at deadline - 2W; the root finishes by deadline - W.
+  { name: 'TRIAGE_WRAP_UP_MS', type: 'int', group: 'budgets', default: '240000', min: 1 },
   { name: 'TRIAGE_RUN_MAX_ATTEMPTS', type: 'int', group: 'budgets', default: '2', min: 1 },
   // D71: a running run with no event for this long shows as stalled.
   { name: 'TRIAGE_STALLED_AFTER_MS', type: 'int', group: 'budgets', default: '600000', min: 1000 },

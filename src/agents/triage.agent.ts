@@ -41,6 +41,7 @@ import {
   useSubagent,
   useTool,
 } from '@flue/runtime';
+import { runTimes } from '../gate/budget.ts';
 import { logActions } from '../runlog/actions.ts';
 import { mergeIdChains, widenIdChain } from '../tools/_lib/context.ts';
 import { toolsFor } from '../tools/index.ts';
@@ -51,7 +52,7 @@ import { deployManifestLines } from './deploy-manifests.ts';
 import { type DelegateEnv, investigatorFor } from './delegates/investigator.ts';
 import type { Escalation } from './escalation.ts';
 import { methodText } from './instruction.ts';
-import { frontendRoutingSkill, overviewSkill, patternsSkill } from './skills.ts';
+import { rootSkills } from './skills.ts';
 import {
   answerChainOf,
   askOpenedFor,
@@ -88,7 +89,11 @@ export function Triage({ id }: AgentProps): string {
 
   const services = Object.fromEntries(plan.entities.map((e) => [e, rt.registry.services(e)]));
   const deployManifests = deployManifestLines(rt.config, rt.registry, plan.entities);
-  useInstruction(methodText(init, { entities: plan.entities, focus: plan.focus, services, deployManifests, knowledge: rt.knowledge }));
+  const times = runTimes(id);
+  const finishBy = times === undefined ? {} : { finishBy: times.finishBy };
+  useInstruction(
+    methodText(init, { entities: plan.entities, focus: plan.focus, services, deployManifests, knowledge: rt.knowledge, ...finishBy }),
+  );
 
   const [savedChain, setSavedChain] = usePersistentState<IdChain | null>('id_chain', null);
   const deps = runDepsFor(id, init, rt, savedChain ?? undefined);
@@ -101,14 +106,9 @@ export function Triage({ id }: AgentProps): string {
   for (const entity of plan.entities) {
     useSubagent(investigatorFor(entity, id, { env }));
     useSubagent(investigatorFor(entity, id, { deep: true, env }));
-    const overview = overviewSkill(entity, rt.knowledge);
-    if (overview !== undefined) useSkill(overview);
   }
   useSubagent(codeWalkerFor(id, { env }));
-  const patterns = patternsSkill(rt.knowledge);
-  if (patterns !== undefined) useSkill(patterns);
-  const routing = frontendRoutingSkill(rt.knowledge);
-  if (routing !== undefined) useSkill(routing);
+  for (const skill of rootSkills(plan.entities, rt.knowledge)) useSkill(skill);
 
   const [savedPlan, setPlan] = usePersistentState<PlanState | null>('plan', null);
   const [evidenceIndex, setEvidenceIndex] = usePersistentState<EvidenceIndexEntry[]>('evidence_index', []);

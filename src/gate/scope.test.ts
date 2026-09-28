@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { makeToolContext } from '../../test/support/fake-tool-context.ts';
+import type { Entity } from '../types/core.ts';
 import type { IdChain } from '../types/id-chain.ts';
 import { extractIdShaped } from './id-patterns.ts';
 import {
@@ -9,6 +11,7 @@ import {
   observeCorrelationIds,
   observedIds,
   observeJourneyKeys,
+  onlyExemptTables,
   releaseObservedIds,
   type ScopeCheckResult,
 } from './scope.ts';
@@ -344,6 +347,46 @@ describe('systemic mode', () => {
     expectDenied(
       checkScope({ tool: 'logs_search', params: { terms: [FOREIGN_ACCOUNT] }, scopeSet: set, logsMode: 'count' }),
     );
+  });
+});
+
+describe('config tables exempt from the id check (D89)', () => {
+  // The lists come from the real registry, read the way sql_select reads them.
+  const registry = makeToolContext().registry;
+  const exemptFor = (entity: Entity, service: string): readonly string[] => registry.service(entity, service).scope_exempt_tables ?? [];
+  const run = (sql: string, id: string, exempt: readonly string[]): ScopeCheckResult => {
+    const check = validateSelect(sql);
+    if (!check.ok) throw new Error(`test SQL did not parse: ${sql}`);
+    return checkScope({ tool: 'sql_select', params: { sql, params: [id] }, scopeSet: set, sqlConfigTablesOnly: onlyExemptTables(check.tables, exempt) });
+  };
+  const BY_DEFINITION = 'SELECT steps FROM workflow_definitions WHERE external_id = $1';
+
+  test('an unknown UUID on workflow_definitions alone is allowed on rtl:workflow', () => {
+    expect(exemptFor('rtl', 'workflow')).toEqual(['workflow_definitions']);
+    expect(run(BY_DEFINITION, FOREIGN_UUID, exemptFor('rtl', 'workflow'))).toEqual({ ok: true });
+  });
+
+  test('a join or subquery with workflow_executions is still checked', () => {
+    const exempt = exemptFor('rtl', 'workflow');
+    expectDenied(
+      run(
+        'SELECT d.steps FROM workflow_definitions d JOIN workflow_executions e ON e.workflow_identifier = d.external_id WHERE d.external_id = $1',
+        FOREIGN_UUID,
+        exempt,
+      ),
+    );
+    expectDenied(
+      run('SELECT steps FROM workflow_definitions WHERE external_id IN (SELECT workflow_identifier FROM workflow_executions WHERE reference_id = $1)', FOREIGN_UUID, exempt),
+    );
+    expectDenied(run('SELECT * FROM workflow_executions WHERE reference_id = $1', FOREIGN_UUID, exempt));
+  });
+
+  test('the list does not apply to another service or entity', () => {
+    expect(exemptFor('rtl', 'banking')).toEqual([]);
+    expect(exemptFor('ssfb', 'workflow')).toEqual([]);
+    expectDenied(run(BY_DEFINITION, FOREIGN_UUID, []));
+    // Without parser facts nothing is exempt.
+    expect(onlyExemptTables([], ['workflow_definitions'])).toBe(false);
   });
 });
 

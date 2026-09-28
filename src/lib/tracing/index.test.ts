@@ -1,22 +1,8 @@
-import { afterEach, describe, expect, test } from 'bun:test';
-import { flushTracing, installTracing, setTracerForTests, withModelSpan, type ModelSpan, type ModelSpanResult, type Tracer } from './index.ts';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+import { recorder } from '../../../test/support/fake-tracer.ts';
+import { flushTracing, installTracing, setTracerForTests, withModelSpan, withRunId } from './index.ts';
 
 afterEach(() => setTracerForTests(undefined));
-
-function recorder(flush: () => Promise<void> = async () => {}): { tracer: Tracer; spans: Array<{ span: ModelSpan; result?: ModelSpanResult }> } {
-  const spans: Array<{ span: ModelSpan; result?: ModelSpanResult }> = [];
-  return {
-    spans,
-    tracer: {
-      withModelSpan: async (span, fn, result) => {
-        const r = await fn();
-        spans.push({ span, ...(result === undefined ? {} : { result: result(r) }) });
-        return r;
-      },
-      flush,
-    },
-  };
-}
 
 describe('withModelSpan', () => {
   test('off: runs the call and records nothing', async () => {
@@ -43,6 +29,54 @@ describe('withModelSpan', () => {
     setTracerForTests(recorder().tracer);
     const boom = new Error('boom');
     await expect(withModelSpan({ op: 'chat', model: 'm' }, async () => Promise.reject(boom))).rejects.toBe(boom);
+  });
+});
+
+describe('installTracing', () => {
+  test('a backend that fails to start writes one line', async () => {
+    const write = spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      // installOtlp reads the endpoint before anything else, so this throws
+      // before any exporter or provider exists.
+      await installTracing({
+        mode: 'otlp',
+        braintrustProject: 'p',
+        get otlpEndpoint(): string {
+          throw new Error('bad endpoint');
+        },
+      });
+      expect(write).toHaveBeenCalledTimes(1);
+      expect(String(write.mock.calls[0]?.[0])).toBe('tracing: otlp failed to start, running untraced (bad endpoint)\n');
+    } finally {
+      write.mockRestore();
+    }
+  });
+});
+
+describe('withRunId', () => {
+  test('a span inside carries the run id; one outside carries none', async () => {
+    const { tracer, spans } = recorder();
+    setTracerForTests(tracer);
+    await withRunId('01JRUNAAAAAAAAAAAAAAAAAAAA', () => withModelSpan({ op: 'decide', model: 'm' }, async () => 1));
+    await withModelSpan({ op: 'decide', model: 'm' }, async () => 2);
+    expect(spans[0]?.span.runId).toBe('01JRUNAAAAAAAAAAAAAAAAAAAA');
+    expect(spans[1]?.span).not.toHaveProperty('runId');
+  });
+
+  test('two concurrent runs keep their own id across awaits and timers', async () => {
+    const { tracer, spans } = recorder();
+    setTracerForTests(tracer);
+    const tick = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const run = (runId: string, first: number, second: number) =>
+      withRunId(runId, async () => {
+        await tick(first);
+        await withModelSpan({ op: 'decide', model: 'm', name: `${runId}-a` }, async () => tick(1));
+        await tick(second);
+        await withModelSpan({ op: 'embeddings', model: 'e', name: `${runId}-b` }, async () => 0);
+      });
+    await Promise.all([run('run-a', 1, 8), run('run-b', 4, 1)]);
+    expect(spans).toHaveLength(4);
+    for (const { span } of spans) expect(span.name?.startsWith(`${span.runId}-`)).toBe(true);
   });
 });
 

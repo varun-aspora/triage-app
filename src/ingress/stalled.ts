@@ -162,7 +162,8 @@ export function latestSteerFlueSubmissionId(run: Pick<RunRecord, 'submissions'>)
   return undefined;
 }
 
-function latestHead(run: Pick<RunRecord, 'submissions'>): RunRecord['submissions'][number] | undefined {
+/** The run's latest submission that is not a steer. */
+export function latestHead(run: Pick<RunRecord, 'submissions'>): RunRecord['submissions'][number] | undefined {
   for (let i = run.submissions.length - 1; i >= 0; i--) {
     const sub = run.submissions[i];
     if (sub !== undefined && sub.kind !== 'steer') return sub;

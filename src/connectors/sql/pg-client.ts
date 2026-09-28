@@ -129,6 +129,8 @@ export type PgPoolConfig = {
   readonly connectionTimeoutMillis: number;
   readonly application_name: string;
   readonly allowExitOnIdle: boolean;
+  readonly keepAlive: boolean;
+  readonly keepAliveInitialDelayMillis: number;
   /** Per-pool type parsers (D73); pg falls back to its defaults for every other type. */
   readonly types: pg.CustomTypesConfig;
 };
@@ -264,12 +266,17 @@ export function capRows(
   const kept: Record<string, unknown>[] = [];
   let bytes = 2; // the [ and ] of the array
   for (const row of rows) {
-    const size = Buffer.byteLength(serialise(row), 'utf8') + (kept.length > 0 ? 1 : 0);
+    const size = jsonBytes(row) + (kept.length > 0 ? 1 : 0);
     if (bytes + size > maxBytes) return { rows: kept, truncated: true };
     bytes += size;
     kept.push(row);
   }
   return { rows: kept, truncated: false };
+}
+
+/** UTF-8 size of the value's JSON, with bigint cells as their digits. */
+export function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(serialise(value), 'utf8');
 }
 
 function serialise(row: unknown): string {
@@ -564,6 +571,11 @@ export function createSqlConnector(options: SqlConnectorOptions): SqlConnector {
         connectionTimeoutMillis: 10_000,
         application_name: 'triage-app',
         allowExitOnIdle: true,
+        // An idle connection to a remote host was dropped after about 28 s
+        // (E5). The first probe must go out before that: pg's default delay of
+        // 0 leaves the OS default, which is usually two hours.
+        keepAlive: true,
+        keepAliveInitialDelayMillis: 10_000,
         types: entityTypeParsers(t.zone),
       }),
     );

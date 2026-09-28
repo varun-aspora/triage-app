@@ -34,6 +34,7 @@ import * as v from 'valibot';
 import type { Config } from '../../config/env.ts';
 import type { Registry } from '../../config/registry.ts';
 import { modelForTier } from '../../models.ts';
+import { finishByText, runTimes } from '../../gate/budget.ts';
 import { actionBrief, logActions } from '../../runlog/actions.ts';
 import { toolsFor } from '../../tools/index.ts';
 import type { Mount, ToolContext, ToolDeps } from '../../tools/types.ts';
@@ -148,6 +149,7 @@ export function investigatorMounts(
     ...(deep ? [codegraphLimitsSkill(knowledge)] : []),
   ];
   const docs = investigatorDocs(entity).map((file) => methodDoc(file, knowledge));
+  const times = runTimes(runId);
   const footer = [
     '## This delegate',
     '',
@@ -157,6 +159,8 @@ export function investigatorMounts(
     ...(notes.missing.length > 0 ? [`- No service notes yet for: ${notes.missing.join(', ')}.`] : []),
     `- Tools mounted: ${tools.map((t) => t.name).join(', ')}.`,
     ...(deep ? ['- You are the deep variant: use the code tools only to explain what the data and logs show.'] : []),
+    // D87: data tools are refused from this time on.
+    ...(times !== undefined ? [`- ${finishByText(times.dataUntil)}`] : []),
     '',
     ...actionBrief(runId, entity),
   ];

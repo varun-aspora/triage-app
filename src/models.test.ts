@@ -292,6 +292,46 @@ describe('registered providers', () => {
   });
 });
 
+describe('ollama thinking (D86)', () => {
+  const provider = models.ollamaProvider('http://localhost:11434/v1', ['qwen3:8b']);
+  const model = provider.getModels()[0]!;
+
+  // Captures the request body and throws before the client sends it. pi-ai has no
+  // 'off' level in stream options; off is an omitted reasoning.
+  async function payloadAt(reasoning: 'low' | undefined): Promise<Record<string, unknown>> {
+    let payload: Record<string, unknown> | undefined;
+    const context = { messages: [{ role: 'user' as const, content: 'hi', timestamp: 0 }] };
+    await provider
+      .streamSimple(model, context, {
+        apiKey: 'ollama',
+        reasoning,
+        onPayload: (p) => {
+          payload = p as Record<string, unknown>;
+          throw new Error('stop before send');
+        },
+      })
+      .result();
+    if (payload === undefined) throw new Error('onPayload was not called');
+    return payload;
+  }
+
+  test('the ollama model declares reasoning with the openai thinking format', () => {
+    expect(model.reasoning).toBe(true);
+    expect(model.compat?.thinkingFormat).toBe('openai');
+  });
+
+  test('low sends reasoning_effort low and off sends none, with no enable_thinking and no fetch', async () => {
+    const fetchSpy = spyOn(globalThis, 'fetch');
+    spies.push(fetchSpy);
+    const low = await payloadAt('low');
+    const off = await payloadAt(undefined);
+    expect(low.reasoning_effort).toBe('low');
+    expect(off.reasoning_effort).toBe('none');
+    expect('enable_thinking' in low || 'enable_thinking' in off).toBe(false);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe('no network', () => {
   test('no function in the module calls fetch', () => {
     const fetchSpy = spyOn(globalThis, 'fetch');

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { SkillDefinition, SubagentDefinition } from '@flue/runtime';
 import type { ToolDefinition } from '@flue/runtime/tool';
 import { ConfigError } from '../../config/errors.ts';
+import { clearRunDeadline, setRunDeadline } from '../../gate/budget.ts';
 import { allToolModules, FORBIDDEN_INPUT_KEYS } from '../../tools/index.ts';
 import { logActions, releaseActions } from '../../runlog/actions.ts';
 import type { ToolDeps } from '../../tools/types.ts';
@@ -306,6 +307,18 @@ describe('delegate body', () => {
       expect(walker).toContain('investigate_atspl sql_select {"sql":"SELECT 2"}');
     } finally {
       releaseActions(runId);
+    }
+  });
+
+  test('with a recorded deadline the footer says to finish by deadline - 2W (D87)', () => {
+    const env = envOf(home());
+    const runId = 'run_delegates_deadline_0001';
+    expect(investigatorMounts('rtl', runId, { env }).instructions).not.toContain('- Finish by');
+    setRunDeadline(runId, Date.parse('2026-09-28T08:15:00Z'), 240_000);
+    try {
+      expect(investigatorMounts('rtl', runId, { env }).instructions).toContain('\n- Finish by 2026-09-28T08:07:00Z\n');
+    } finally {
+      clearRunDeadline(runId);
     }
   });
 

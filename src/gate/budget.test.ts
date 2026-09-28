@@ -6,7 +6,9 @@ import {
   type RunBudgetLimits,
   createRunBudget,
   getRunBudget,
+  clearRunDeadline,
   releaseRunBudget,
+  setRunDeadline,
 } from './budget.ts';
 
 const created: string[] = [];
@@ -29,7 +31,10 @@ function limits(overrides: Partial<RunBudgetLimits> = {}): RunBudgetLimits {
 const refusal = { ok: false, message: BUDGET_EXHAUSTED_MESSAGE };
 
 afterEach(() => {
-  for (const id of created.splice(0)) releaseRunBudget(id);
+  for (const id of created.splice(0)) {
+    releaseRunBudget(id);
+    clearRunDeadline(id);
+  }
 });
 
 describe('tool call cap', () => {
@@ -165,6 +170,47 @@ describe('task cap', () => {
     // Sticky across kinds: tool calls are refused as well, finish_report is not.
     expect(b.consumeToolCall('sql_select', 'ssfb').ok).toBe(false);
     expect(b.consumeToolCall('finish_report').ok).toBe(true);
+  });
+});
+
+describe('time (D87)', () => {
+  const W = 240_000;
+  const deadline = Date.parse('2026-09-28T08:15:00Z');
+  const data = { dataTool: true };
+
+  function timed(nowMs: number) {
+    const l = limits({ now: () => nowMs });
+    setRunDeadline(l.runId, deadline, W);
+    return createRunBudget(l);
+  }
+
+  test('allow: a data tool before deadline - 2W', () => {
+    expect(timed(deadline - 2 * W - 1).consumeToolCall('sql_select', 'ssfb', data)).toEqual({ ok: true });
+  });
+
+  test('deny: a data tool after deadline - 2W is refused with reason time and the finish-by time', () => {
+    const b = timed(deadline - 2 * W);
+    expect(b.consumeToolCall('sql_select', 'ssfb', data)).toEqual({
+      ok: false,
+      message: 'Finish by 2026-09-28T08:11:00Z: save what you have with note_evidence and reply',
+      reason: 'time',
+    });
+    expect(b.consumeToolCall('repo_grep', undefined, data).ok).toBe(false);
+    // A root tool is not a data tool.
+    expect(b.consumeToolCall('resolve_identity')).toEqual({ ok: true });
+    // Not a spent budget: nothing is counted and the run is not exhausted.
+    expect(b.state()).toMatchObject({ calls: 1, codeCalls: 0, exhausted: false });
+  });
+
+  test('allow: note_evidence and finish_report after the soft deadline', () => {
+    const b = timed(deadline - W);
+    expect(b.consumeToolCall('note_evidence', 'ssfb', data)).toEqual({ ok: true });
+    expect(b.consumeToolCall('finish_report', undefined, data)).toEqual({ ok: true });
+  });
+
+  test('allow: no deadline recorded, no time rule', () => {
+    const b = createRunBudget(limits({ now: () => deadline }));
+    expect(b.consumeToolCall('sql_select', 'ssfb', data)).toEqual({ ok: true });
   });
 });
 

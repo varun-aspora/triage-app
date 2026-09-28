@@ -241,6 +241,15 @@ describe('investigator.md', () => {
     expect(flat).not.toContain('30 days');
     expect(flat).toContain('read the app code that sends or receives on that leg');
   });
+
+  test('saves findings after each batch, each call whole, and stops when every key lookup is empty (plan 13 T6)', () => {
+    const flat = text.replace(/\s+/g, ' ');
+    expect(flat).toContain('Call `note_evidence` with an `EntityFindings` object after each batch of reads that finds something');
+    // The report reads the latest version per entity, so an interim call must not drop earlier evidence.
+    expect(flat).toContain('Each call replaces the one before, so send everything found so far');
+    expect(flat).not.toContain('Before you reply, call `note_evidence`');
+    expect(flat).toContain('When every key lookup is still empty, stop: call `note_evidence` with the empty lookups as evidence and a gap');
+  });
 });
 
 describe('code-walker.md', () => {

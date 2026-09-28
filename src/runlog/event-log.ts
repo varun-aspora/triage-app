@@ -144,6 +144,11 @@ export function setRunRedactionNames(runId: string, names: readonly string[]): v
   state().names.set(runId, [...names]);
 }
 
+/** The names setRunRedactionNames recorded for the run in this process, or none. */
+export function runRedactionNames(runId: string): readonly string[] {
+  return state().names.get(runId) ?? [];
+}
+
 /** Writes one pipeline line for the run. A no-op until the log is installed. */
 export function logRunEvent(runId: string, type: string, data: unknown = {}): void {
   const s = state();

@@ -2,12 +2,14 @@
 //
 // methodText(init) joins the orchestrator's knowledge/method docs with a
 // short fixed rule block and the run's own data: run id, window, enabled
-// entities, the entities the request names, known ids and a brief skeleton pre-filled with them. It is pure
+// entities, the entities the request names, known ids, the classification,
+// the id chain's hops and a brief skeleton pre-filled with the ids. It is pure
 // and reads only the knowledge cached at boot, so it is safe in a render.
 // When ingress matched a known pattern, a lead section carries that
 // pattern's first queries for the briefs, marked as a lead to test (D80).
 
 import { parsePatterns, type Pattern } from '../classify/patterns.ts';
+import { finishByText } from '../gate/budget.ts';
 import { ENTITIES, KNOWN_ID_KEYS, type Entity, type KnownIds } from '../types/core.ts';
 import type { TriageInit } from '../types/classification.ts';
 import { currentKnowledge, type Knowledge } from './skills.ts';
@@ -32,6 +34,8 @@ export type MethodOptions = {
   readonly deployManifests?: readonly string[];
   /** Defaults to the knowledge loaded at boot. */
   readonly knowledge?: Knowledge;
+  /** D87: epoch ms the root must finish by (deadline - W). Left out: no finish-by line. */
+  readonly finishBy?: number;
 };
 
 const FIXED_RULES = `## Fixed rules
@@ -57,7 +61,7 @@ export function methodText(init: TriageInit, options: MethodOptions = {}): strin
   const sections = [
     ...docs,
     FIXED_RULES,
-    runSection(init, entities, focus, ids, window, options.deployManifests ?? []),
+    runSection(init, entities, focus, ids, window, options.deployManifests ?? [], options.finishBy),
     ...leadSection(init, knowledge, entities),
     briefSection(focus.length > 0 ? focus : entities, ids, window, options.services),
   ];
@@ -71,6 +75,7 @@ function runSection(
   ids: string,
   window: string,
   deployManifests: readonly string[],
+  finishBy: number | undefined,
 ): string {
   const entityLine =
     entities.length > 0
@@ -89,7 +94,10 @@ function runSection(
     ...deployManifests,
     `- Named in the request: ${focusLine}`,
     `- Known ids: ${ids}`,
-    `- Tier: ${init.classification.tier_final}`,
+    `- Classification: ${classificationLine(init)}`,
+    `- Id chain: ${hopsLine(init)}`,
+    // Absolute, so the text stays the same across the submission's renders and the prompt cache holds.
+    ...(finishBy !== undefined ? [`- ${finishByText(finishBy)}`] : []),
   ].join('\n');
 }
 
@@ -143,6 +151,21 @@ function leadSection(init: TriageInit, knowledge: Knowledge, entities: readonly 
       ...(pattern.lesson !== undefined ? ['', `Lesson from a reviewed case: ${oneLine(pattern.lesson)}`] : []),
     ].join('\n'),
   ];
+}
+
+function classificationLine(init: TriageInit): string {
+  const { proposed, tier_final } = init.classification;
+  const entities = proposed.entities_likely.length > 0 ? proposed.entities_likely.join(', ') : 'none';
+  return `category ${proposed.category}, entities ${entities}, tier ${tier_final}`;
+}
+
+// Hops carry key names and a source, never id values; the values are in Known ids.
+function hopsLine(init: TriageInit): string {
+  const hops = init.id_chain.hops.map((hop) => {
+    const name = hop.to === undefined ? hop.from : `${hop.from} -> ${hop.to}`;
+    return `${name} (${clean(hop.source)}): ${hop.status}`;
+  });
+  return hops.length > 0 ? hops.join('; ') : 'no hops';
 }
 
 function briefSection(

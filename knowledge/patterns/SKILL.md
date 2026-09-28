@@ -46,7 +46,7 @@ quotes an error text that looks familiar.
 | `first_queries` | Optional. The evidence to collect before any hypothesis, one `{entity, query}` per item. Put each entity's queries in that entity's brief on a `Lead:` line, marked as a lead to test, not an answer. |
 | `tier_hint` | The tier that usually settles it. `strong` means brief `investigate_<entity>_deep`, or escalate. |
 | `stable` | True only when the source records a confirmed root cause. |
-| `source_ref` | The note and heading the entry came from. Activate that note if you need the detail. |
+| `source_ref` | The note and heading the entry came from. The investigator for that entity has the note; name it in the brief. |
 | `lesson` | Optional. What a reviewed case taught, from its actual root cause. It says where the answer was last time; this run still needs its own evidence. |
 
 The recipes use `<placeholder>` ids. Replace them with ids from the id chain,

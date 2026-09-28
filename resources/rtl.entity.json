@@ -7,6 +7,7 @@
       "api": "RTL_WORKFLOW_API_URL",
       "quickwit_service": "workflow-op-service",
       "repo": "workflow-op",
+      "scope_exempt_tables": ["workflow_definitions"],
       "note": "RTL copy; Shivalik copy is ssfb:workflow. Logs full outbound request and response bodies; never quote personal data or tokens from them"
     },
     "banking": {

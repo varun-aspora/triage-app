@@ -32,6 +32,7 @@ import type { FlueLogger, Sandbox } from '@flue/runtime';
 import type { Config } from '../../config/env.ts';
 import { errorText, excerpt, safeErrorText, scrubSecrets, stripAddresses } from '../../connectors/error-text.ts';
 import { makeAuditLine } from '../../gate/audit.ts';
+import { isExhausted } from '../../gate/budget.ts';
 import { checkScope, type LogsMode } from '../../gate/scope.ts';
 import { classifySqlState, isSqlState, maskSqlValues, sqlErrorMessage, type SqlStateInfo } from '../../gate/sql-errors.ts';
 import { redactModelFacing, redactPersisted } from '../../gate/redact.ts';
@@ -95,6 +96,8 @@ export type ScopeOptions = {
   readonly observed?: ReadonlySet<string>;
   /** From the SQL parser: the $n params compared only to a device_id or verification_id column (Q13). */
   readonly sqlJourneyParams?: readonly number[];
+  /** The query reads only its service's scope_exempt_tables (D89). */
+  readonly sqlConfigTablesOnly?: boolean;
 };
 
 export type FixtureRef<K extends FixtureKind> = {
@@ -376,10 +379,10 @@ export async function runIoTool<K extends FixtureKind, T>(
 
   // 2. Budget.
   step('budget');
-  const budget = deps.budget.consumeToolCall(spec.tool, entity ?? undefined);
+  const budget = deps.budget.consumeToolCall(spec.tool, entity ?? undefined, { dataTool: true });
   if (!budget.ok) {
-    // An entity or per-tool cap refuses that target only; the run goes on.
-    if (budget.reason !== 'entity_calls' && budget.reason !== 'tool_cap') deps.escalation.markBudgetExhausted();
+    // An entity or per-tool cap or the time rule (D87) refuses this call only; the run goes on.
+    if (isExhausted(budget.reason)) deps.escalation.markBudgetExhausted();
     audit({ decision: 'deny', exit: 'refused', transport: noIoTransport, reason: `budget: ${budget.reason}` });
     return refuse(budget.message);
   }
@@ -397,6 +400,7 @@ export async function runIoTool<K extends FixtureKind, T>(
       ...(options.logsMode !== undefined ? { logsMode: options.logsMode } : {}),
       ...(options.observed !== undefined ? { observed: options.observed } : {}),
       ...(options.sqlJourneyParams !== undefined ? { sqlJourneyParams: options.sqlJourneyParams } : {}),
+      ...(options.sqlConfigTablesOnly !== undefined ? { sqlConfigTablesOnly: options.sqlConfigTablesOnly } : {}),
     });
     if (!result.ok) {
       audit({ decision: 'deny', exit: 'refused', transport: noIoTransport, reason: result.reason });
