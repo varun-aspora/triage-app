@@ -146,6 +146,12 @@
 // status stopped. A follow-up (askRun) or a resume (resumeRun) moves a
 // stopped run on.
 //
+// A response that ran out of time (D88: Flue's submission timeout, or read()
+// giving up) still settles failed, and the settle attaches a partial report
+// to its submission: status inconclusive, built from the evidence saved so
+// far, with a gap that names the timeout and the elapsed time. A report the
+// writer refuses, or a failed write, is logged and the run stays failed.
+//
 // The CLI and the HTTP routes both submit through these functions.
 // submissionDeps() builds the production deps from the Triage runtime.
 import { readFile } from 'node:fs/promises';
@@ -161,6 +167,7 @@ import {
   init,
 } from '@flue/runtime';
 import * as v from 'valibot';
+import type { RecordedFindings } from '../agents/escalation.ts';
 import { triageRuntime, type TriageRuntime } from '../agents/triage-plan.ts';
 import { Triage } from '../agents/triage.agent.ts';
 import {
@@ -197,6 +204,10 @@ import type { TcpProbe } from '../ops/tunnel.ts';
 import { logRunEvent, setRunRedactionNames } from '../runlog/event-log.ts';
 import { embedRun as defaultEmbedRun } from '../runstore/embed-run.ts';
 import { priorCasesFor, type PriorCasesResult } from '../runstore/prior-cases.ts';
+import { codeClaimDetail } from '../report/finding-refs.ts';
+import { mergeGaps } from '../report/gaps.ts';
+import { writeReport } from '../report/write.ts';
+import { collectFindings, computeCost, wallMsSince } from '../tools/finish-report.tool.ts';
 import {
   type PhaseDetail,
   RunNotFoundError,
@@ -216,8 +227,10 @@ import {
   TriageInitSchema,
 } from '../types/classification.ts';
 import { type Entity, type Interface, type KnownIds, RunIdSchema, type RunId, type Tier } from '../types/core.ts';
+import { EVIDENCE_LADDER_STEPS, type EvidenceLadderStep } from '../types/findings.ts';
 import type { IdChain } from '../types/id-chain.ts';
 import { INPUT_ANSWER_CHAIN_ATTR, INPUT_ANSWER_SIGNAL, type InputRequest, QuestionIdSchema } from '../types/input-request.ts';
+import type { ReportDraft } from '../types/report.ts';
 import type { Attachment, TriageRequest } from '../types/request.ts';
 import type { Stalled } from '../types/stalled.ts';
 import type { UsageRow } from '../types/usage.ts';
@@ -225,6 +238,7 @@ import {
   dropIntake,
   dropSubmission,
   recordUsage,
+  runUsageInMemory,
   snapshotIntake,
   snapshotSubmission,
   takeUnassigned,
@@ -245,6 +259,8 @@ export type SubmissionConfig = {
   readonly runs: Pick<Config['runs'], 'priorCases'> & Partial<Pick<Config['runs'], 'usageFlushMs'>>;
   /** wrapUpMs left out: no D87 deadline is recorded, so no time rule or finish-by lines. */
   readonly budgets: Pick<Config['budgets'], 'runTimeoutMs' | 'runMaxAttempts'> & Partial<Pick<Config['budgets'], 'wrapUpMs'>>;
+  /** For a partial report's env_label (D88). Left out: blank. */
+  readonly display?: Config['display'];
 };
 
 /** The parts of Flue's instance handle the pipeline uses. */
@@ -997,6 +1013,8 @@ async function dispatchAndSettle(
 ): Promise<SubmissionResult> {
   const store = deps.store;
   const callerSignal = deps.signal ?? new AbortController().signal;
+  const now = deps.now ?? (() => new Date());
+  const startedAt = now().getTime();
   // A steer (D72) joins the response that is running, which owns the phase: it writes none before the read.
   const steer = submission.kind === 'steer';
 
@@ -1022,7 +1040,7 @@ async function dispatchAndSettle(
     // its own, so its prompt keeps the finish-by line.
     const { runTimeoutMs, wrapUpMs } = deps.config.budgets;
     if (wrapUpMs !== undefined && (!steer || runTimes(runId) === undefined)) {
-      setRunDeadline(runId, (deps.now ?? (() => new Date()))().getTime() + runTimeoutMs, wrapUpMs);
+      setRunDeadline(runId, startedAt + runTimeoutMs, wrapUpMs);
       ownDeadline = true;
     }
     handle = deps.dispatcher.init(deps.agent, initOptions);
@@ -1059,6 +1077,7 @@ async function dispatchAndSettle(
     let inputRequest: InputRequest | undefined;
     let block: BlockRecord | undefined;
     let readError: unknown;
+    let timedOut = false;
     try {
       // Stopped before the read began: the abort is on its way, there is nothing to wait for.
       if (watch.signal.aborted) throw watch.signal.reason;
@@ -1091,6 +1110,7 @@ async function dispatchAndSettle(
         }
         status = 'failed';
         error = failureReason(cause);
+        timedOut = isRunTimeout(cause);
       }
     }
     watch.dispose();
@@ -1142,6 +1162,12 @@ async function dispatchAndSettle(
     // nothing is written for it.
     await flush.stop();
     await writeUsage(store, runId, seq, snapshotSubmission(runId, submissionId), true);
+
+    // Before the embedding, so the case text has the report. A joined steer leaves it to its host.
+    if (status === 'failed' && timedOut && joined !== true) {
+      const names = (request.initialData as Partial<TriageInit> | undefined)?.redaction_names ?? [];
+      await writePartialReport(runId, seq, startedAt, names, now, deps);
+    }
 
     // A parked run (needs_input, blocked) is embedded when it settles for real,
     // like any other. A stopped one is not embedded, and a joined steer leaves
@@ -1633,6 +1659,113 @@ async function recordFailed(store: RunStore, runId: RunId, err: unknown): Promis
     await store.setPhase(runId, 'failed', { reason: failureReason(err) });
   } catch {
     // The original error matters more; the run may not exist yet.
+  }
+}
+
+/** D88: the settle error is a run timeout: Flue's submission timeout, or read() giving up. */
+function isRunTimeout(err: unknown): boolean {
+  if (err instanceof SubmissionReadTimeoutError) return true;
+  const cause: unknown = err instanceof AgentRunError ? err.cause : undefined;
+  return (cause as { type?: unknown } | null | undefined)?.type === 'submission_timeout';
+}
+
+function timeoutGap(elapsedMs: number, saved: number): string {
+  const what = saved === 0 ? 'no findings were saved before it' : `this report holds the ${saved} saved ${saved === 1 ? 'finding' : 'findings'} only`;
+  return `the run timed out after ${Math.round(elapsedMs / 1000)} s, before the root wrote its report; ${what}`;
+}
+
+/**
+ * The partial report of a timed-out response (D88), from the saved findings
+ * only: nothing is confirmed, so root_cause is null and the status is
+ * inconclusive. Hypotheses, code claims and the delegates' own gaps go into
+ * gaps, merged as finish_report merges the model's gaps, since the report has
+ * no field for unconfirmed work.
+ */
+function partialReportDraft(
+  run: RunRecord,
+  cls: NonNullable<RunRecord['classification']>,
+  findings: readonly RecordedFindings[],
+  gap: string,
+): ReportDraft {
+  const steps = new Set<EvidenceLadderStep>();
+  const timeline: ReportDraft['timeline'] = [];
+  const entities: Entity[] = [];
+  const unconfirmed: string[] = [];
+  for (const r of findings) {
+    if (r.entity === 'code') {
+      steps.add('code');
+      for (const c of r.findings.claims) unconfirmed.push(`code claim, not confirmed: ${codeClaimDetail(c)}: ${c.what_it_shows}`);
+      continue;
+    }
+    entities.push(r.entity);
+    for (const e of r.findings.evidence) steps.add(e.source);
+    for (const t of r.findings.timeline) timeline.push({ ...t, entity: r.entity });
+    for (const h of r.findings.hypotheses) unconfirmed.push(`${r.entity} hypothesis, not confirmed: ${h}`);
+    for (const g of r.findings.gaps) unconfirmed.push(`${r.entity}: ${g}`);
+  }
+  const source = run.request.source;
+  return {
+    request: {
+      ...(source.kind === 'slack' ? { permalink: source.permalink } : {}),
+      current_ask: '',
+      requested_by: run.request.requested_by,
+    },
+    classification: cls.decision,
+    id_chain: cls.id_chain,
+    current_state: [],
+    timeline: timeline.sort((a, b) => a.at.localeCompare(b.at)),
+    root_cause: null,
+    scope: { kind: 'unknown' },
+    status: 'inconclusive',
+    cx_answer: { action_owner: 'unknown', money_safe: 'unknown', should_retry: 'wait', reply_text: '' },
+    actions: { cx: [], eng: [], ops_bank: [] },
+    suggested_fix: [],
+    confidence: 'low',
+    confidence_reason: 'the run timed out before the investigation finished',
+    evidence_ladder: EVIDENCE_LADDER_STEPS.filter((s) => steps.has(s)),
+    entities_consulted: entities,
+    gaps: [gap, ...mergeGaps(unconfirmed)],
+    escalated: false,
+    escalation_reasons: [],
+    images_seen: cls.decision.proposed.images_seen && cls.decision.images_dropped !== true,
+  };
+}
+
+/**
+ * Writes the partial report onto submission seq (D88), from the stored
+ * evidence: note_evidence stores before it records into the escalation
+ * store, so the store holds every finding. Never throws.
+ */
+async function writePartialReport(
+  runId: RunId,
+  seq: number,
+  startedAt: number,
+  names: readonly string[],
+  now: () => Date,
+  deps: SettleDeps,
+): Promise<void> {
+  try {
+    const run = await deps.store.getRun(runId);
+    // A dispatched run is always classified.
+    if (run === null || run.classification === null) return;
+    const findings = collectFindings(run.evidence, []);
+    const draft = partialReportDraft(run, run.classification, findings, timeoutGap(now().getTime() - startedAt, findings.length));
+    const cost = computeCost(runUsageInMemory(runId), wallMsSince(run.created_at, now()));
+    // The findings were masked when stored; the request fields and the gaps were not.
+    const safe = redactPersisted({ ...draft, gaps: [...new Set([...draft.gaps, ...cost.gaps])] }, { names }).value;
+    const result = await writeReport({
+      runId,
+      draft: { ...safe, repo_commits: [], cost: cost.cost },
+      ingressNames: names,
+      store: deps.store,
+      config: { display: deps.config.display ?? {} },
+      submissionId: seq,
+      now,
+    });
+    if (result.ok) logRunEvent(runId, 'partial_report', { submission_seq: seq, findings: findings.length });
+    else logRunEvent(runId, 'partial_report_refused', { submission_seq: seq, reason: result.reason });
+  } catch (err) {
+    logRunEvent(runId, 'partial_report_failed', { submission_seq: seq, error: className(err) });
   }
 }
 

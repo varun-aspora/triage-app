@@ -34,6 +34,7 @@ import type { UsageRow } from '../types/usage.ts';
 import type { Stalled } from '../types/stalled.ts';
 import type { RunPhase, RunRecord } from '../runstore/types.ts';
 import { priceUsage } from '../usage/price.ts';
+import { NO_USAGE_GAP } from '../tools/finish-report.tool.ts';
 import {
   installUsageMeter,
   recordUsage,
@@ -644,6 +645,84 @@ describe('read and settle', () => {
     expect(result.status).toBe('failed');
     expect(result.error).toBe(`${new SubmissionReadTimeoutError(20).name}: gave up waiting for the run after 20 ms`);
     expect(h.flue.aborts).toBe(1);
+  });
+
+  const timeoutError = (): AgentRunError =>
+    new AgentRunError({
+      outcome: 'failed',
+      submissionId: 'sub-1',
+      cause: { name: 'FlueError', type: 'submission_timeout', message: 'Submission exceeded the configured timeout.' },
+    });
+
+  test('a timed-out settle stays failed and attaches a partial report from the saved findings (D88)', async () => {
+    const entity = {
+      evidence: [{ source: 'db' as const, at: NOW.toISOString(), query_or_path: 'harbor.account_forms', summary: 'form verified' }],
+      timeline: [{ at: NOW.toISOString(), what: 'form verified', source: { source: 'db' as const, entity: 'ssfb' as const } }],
+      hypotheses: ['vendor rejected the address'],
+      confidence: 'medium' as const,
+      gaps: ['vendor logs not read'],
+    };
+    const code = {
+      claims: [{ repo: 'ssfb-api', file: 'src/dispatch.ts', lines: '10-20', what_it_shows: 'retries stop after one rejection' }],
+      confidence: 'low' as const,
+    };
+    const h = harness({
+      onDispatch: async (store) => {
+        await store.putEvidence(RUN_ID, 'ssfb', redactPersisted(entity));
+        await store.putEvidence(RUN_ID, 'code', redactPersisted(code));
+      },
+      read: async () => {
+        throw timeoutError();
+      },
+    });
+    const result = await runSubmission(prepared(), h.deps);
+    expect(result.status).toBe('failed');
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('failed');
+    expect(run?.phase_reason).toContain('Submission exceeded the configured timeout.');
+    const report = run?.submissions[0]?.report;
+    expect(report).toMatchObject({
+      status: 'inconclusive',
+      root_cause: null,
+      confidence: 'low',
+      entities_consulted: ['ssfb'],
+      evidence_ladder: ['db', 'code'],
+      timeline: [{ entity: 'ssfb', what: 'form verified' }],
+    });
+    expect(report?.gaps[0]).toMatch(/^the run timed out after \d+ s, before the root wrote its report; this report holds the 2 saved findings only$/);
+    expect(report?.gaps).toContain('ssfb hypothesis, not confirmed: vendor rejected the address');
+    expect(report?.gaps).toContain('ssfb: vendor logs not read');
+    expect(report?.gaps).toContain('code claim, not confirmed: ssfb-api/src/dispatch.ts:10-20: retries stop after one rejection');
+    // Written before the embedding, so the case text sees it.
+    expect(h.events.indexOf('putReport')).toBeLessThan(h.events.indexOf('embedRun'));
+  });
+
+  test('a timed-out settle with no saved findings writes a report with the timeout gap only (D88)', async () => {
+    const h = harness({
+      read: async () => {
+        throw timeoutError();
+      },
+    });
+    await runSubmission(prepared(), h.deps);
+    const run = await h.store.getRun(RUN_ID);
+    expect(run?.phase).toBe('failed');
+    const report = run?.submissions[0]?.report;
+    expect(report).toMatchObject({ status: 'inconclusive', timeline: [], entities_consulted: [], evidence_ladder: [] });
+    expect(report?.gaps).toHaveLength(2);
+    expect(report?.gaps[0]).toMatch(/^the run timed out after \d+ s, before the root wrote its report; no findings were saved before it$/);
+    // The fake Flue counts no usage.
+    expect(report?.gaps[1]).toBe(NO_USAGE_GAP);
+  });
+
+  test('a failed settle that is not a timeout writes no report', async () => {
+    const h = harness({
+      read: async () => {
+        throw new AgentRunError({ outcome: 'failed', submissionId: 'sub-1', cause: { name: 'ProviderError', message: 'stream ended early' } });
+      },
+    });
+    await runSubmission(prepared(), h.deps);
+    expect((await h.store.getRun(RUN_ID))?.report).toBeNull();
+    expect(h.calls.some((c) => c.method === 'putReport')).toBe(false);
   });
 
   test('a caller abort stops the wait without marking the run failed', async () => {

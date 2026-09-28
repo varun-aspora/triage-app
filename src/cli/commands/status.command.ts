@@ -24,6 +24,9 @@
 // may hold the report of an earlier submission (after a resume or a steer),
 // which is not this run's verdict. The human form puts them next to the
 // status: 'run X: completed · inconclusive, low confidence (phase completed)'.
+// A failed run whose last submission that is not a steer has a report timed
+// out and got a partial report (D88): it carries the two fields too, and the
+// human form reads 'run X: failed · partial report (phase failed)'.
 //
 // usage (D59) is the run's token and cost totals from src/usage/summary.ts,
 // present in --json only when something was counted. The human form prints
@@ -36,7 +39,7 @@
 import * as v from 'valibot';
 import type { Config } from '../../config/env.ts';
 import type { SubmissionLeases } from '../../db.ts';
-import { hasFlueSubmission, loadStalled, oncePerPid, STALLABLE_PHASES, stalledSubjectOf } from '../../ingress/stalled.ts';
+import { hasFlueSubmission, latestHead, loadStalled, oncePerPid, STALLABLE_PHASES, stalledSubjectOf } from '../../ingress/stalled.ts';
 import { createRunStore } from '../../runstore/index.ts';
 import { isTerminalPhase, type RunRecord, type RunStore } from '../../runstore/types.ts';
 import { RunIdSchema } from '../../types/core.ts';
@@ -190,13 +193,19 @@ export function statusOutput(run: RunRecord, isAlive: PidChecker, stalled: Stall
     ...reasonField(run, status),
     ...(stalled !== null ? { stalled: { reason: stalled.reason, since: stalled.since } } : {}),
     ...usageField(usageViewOf(run, status)),
-    ...(status === 'completed' && run.report !== null ? { report_status: run.report.status, confidence: run.report.confidence } : {}),
+    ...verdictField(run, status),
   };
 }
 
-/** ' · inconclusive, low confidence' for a completed run with a report, else ''. */
+function verdictField(run: RunRecord, status: RunStatus): Pick<StatusOutput, 'report_status' | 'confidence'> {
+  const report = status === 'completed' ? run.report : status === 'failed' ? (latestHead(run)?.report ?? null) : null;
+  return report === null ? {} : { report_status: report.status, confidence: report.confidence };
+}
+
+/** ' · inconclusive, low confidence' for a completed run with a report, ' · partial report' for a failed one, else ''. */
 function verdictText(out: StatusOutput): string {
-  return out.report_status === undefined ? '' : ` · ${out.report_status}, ${out.confidence} confidence`;
+  if (out.report_status === undefined) return '';
+  return out.status === 'failed' ? ' · partial report' : ` · ${out.report_status}, ${out.confidence} confidence`;
 }
 
 /** The human line for a stalled run (D71). */

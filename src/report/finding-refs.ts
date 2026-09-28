@@ -56,7 +56,7 @@ export function findingRefs(run: Pick<RunRecord, 'evidence' | 'report'>): Findin
           key,
           version: record.version,
           text: c.what_it_shows,
-          detail: `${c.repo}/${c.file}:${c.lines}`,
+          detail: codeClaimDetail(c),
         });
       });
       continue;
@@ -80,6 +80,11 @@ export function findingRefs(run: Pick<RunRecord, 'evidence' | 'report'>): Findin
     out.push({ id: ROOT_CAUSE_ID, kind: 'root_cause', key: null, version: null, text: statement });
   }
   return out;
+}
+
+/** Where a code claim points: repo/file:lines. */
+export function codeClaimDetail(c: Pick<CodeFindings['claims'][number], 'repo' | 'file' | 'lines'>): string {
+  return `${c.repo}/${c.file}:${c.lines}`;
 }
 
 export type ParsedFindingId =

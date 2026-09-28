@@ -317,7 +317,7 @@ async function readCommits(
   return { commits, gaps };
 }
 
-function wallMsSince(createdAt: string, now: Date): number {
+export function wallMsSince(createdAt: string, now: Date): number {
   const start = Date.parse(createdAt);
   return Number.isFinite(start) ? Math.max(0, now.getTime() - start) : 0;
 }
