@@ -43,7 +43,7 @@ up yourself when a delegate's answer quotes an error text that looks familiar.
 | `query_recipe` | The first checks, written as investigator tool calls. Copy them into the brief with the ids and window from the id chain. |
 | `tier_hint` | The tier that usually settles it. `strong` means brief `investigate_<entity>_deep`, or escalate. |
 | `stable` | True only when the source records a confirmed root cause. |
-| `source_ref` | The note and heading the entry came from. Activate that note if you need the detail. |
+| `source_ref` | The note and heading the entry came from. The investigator for that entity has the note; name it in the brief. |
 
 The recipes use `<placeholder>` ids. Replace them with ids from the id chain,
 never with ids you guessed. A brief still needs everything the brief template

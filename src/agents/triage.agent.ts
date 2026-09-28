@@ -50,7 +50,7 @@ import { deployManifestLines } from './deploy-manifests.ts';
 import { type DelegateEnv, investigatorFor } from './delegates/investigator.ts';
 import type { Escalation } from './escalation.ts';
 import { methodText } from './instruction.ts';
-import { frontendRoutingSkill, overviewSkill, patternsSkill } from './skills.ts';
+import { rootSkills } from './skills.ts';
 import {
   answerChainOf,
   askOpenedFor,
@@ -99,14 +99,9 @@ export function Triage({ id }: AgentProps): string {
   for (const entity of plan.entities) {
     useSubagent(investigatorFor(entity, id, { env }));
     useSubagent(investigatorFor(entity, id, { deep: true, env }));
-    const overview = overviewSkill(entity, rt.knowledge);
-    if (overview !== undefined) useSkill(overview);
   }
   useSubagent(codeWalkerFor(id, { env }));
-  const patterns = patternsSkill(rt.knowledge);
-  if (patterns !== undefined) useSkill(patterns);
-  const routing = frontendRoutingSkill(rt.knowledge);
-  if (routing !== undefined) useSkill(routing);
+  for (const skill of rootSkills(plan.entities, rt.knowledge)) useSkill(skill);
 
   const [savedPlan, setPlan] = usePersistentState<PlanState | null>('plan', null);
   const [evidenceIndex, setEvidenceIndex] = usePersistentState<EvidenceIndexEntry[]>('evidence_index', []);

@@ -46,8 +46,8 @@ aspora_user_id
 ```
 
 The harbor table is `customer`, singular. `account_forms.status_v2` is the
-authoritative form status; the older `status` column is a lossy projection
-(see the ssfb-harbor note).
+authoritative form status; the older `status` column is a lossy projection.
+The SSFB investigator has the detail in the ssfb-harbor note.
 
 Hops, in the order `resolve_identity` tries them. Every hop is a fixed
 parameterised statement.
@@ -65,7 +65,8 @@ parameterised statement.
 
 `phone_number` and `country` have no hop: they reach you as the thread gave
 them. There is no device hop; for a device or SIM case, go from the user to
-guardian as the ssfb-guardian note says.
+guardian. The SSFB investigator has the ssfb-guardian note; name it in the
+brief.
 
 Basic state read with the chain: harbor customer `state` and `sub_state`,
 `account_forms.status_v2`, and the rhythm account status and debit flag. Each
@@ -86,7 +87,7 @@ unless the thread names it.
 | `customer_id` (harbor) | harbor customer tables and admin API; rhythm mappings, limits and beneficiaries; the `x-customer-id` header, which the HTTP tool sets from the chain |
 | `account_id` (rhythm UUID) | rhythm admin APIs and `transfer_transactions` |
 | `account_number` (CBS) | the best key for rhythm log searches and for CBS account reads |
-| CIF | CBS customer reads; stored encrypted in `customer.external_reference_id` (see ssfb-harbor) |
+| CIF | CBS customer reads; stored encrypted in `customer.external_reference_id`; the SSFB investigator has the ssfb-harbor note |
 | `txn_ref_id` | one transfer in `transfer_transactions` and in rhythm logs |
 
 Log correlation ids (`x_req_id`, `x_txn_id`) are reused across requests, so
@@ -128,9 +129,10 @@ with different data.
 ```
 
 If the digital form never reaches `signed`, customer creation never starts and
-nothing logs an error. The ssfb-harbor note has the state machines.
+nothing logs an error. The SSFB investigator has the state machines in the
+ssfb-harbor note; name it in the brief.
 
-## Which note to read
+## Which services are in play
 
 | Thread says | Services in play |
 |---|---|
