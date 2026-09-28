@@ -1,22 +1,8 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
-import { flushTracing, installTracing, setTracerForTests, withModelSpan, withRunId, type ModelSpan, type ModelSpanResult, type Tracer } from './index.ts';
+import { recorder } from '../../../test/support/fake-tracer.ts';
+import { flushTracing, installTracing, setTracerForTests, withModelSpan, withRunId } from './index.ts';
 
 afterEach(() => setTracerForTests(undefined));
-
-function recorder(flush: () => Promise<void> = async () => {}): { tracer: Tracer; spans: Array<{ span: ModelSpan; result?: ModelSpanResult }> } {
-  const spans: Array<{ span: ModelSpan; result?: ModelSpanResult }> = [];
-  return {
-    spans,
-    tracer: {
-      withModelSpan: async (span, fn, result) => {
-        const r = await fn();
-        spans.push({ span, ...(result === undefined ? {} : { result: result(r) }) });
-        return r;
-      },
-      flush,
-    },
-  };
-}
 
 describe('withModelSpan', () => {
   test('off: runs the call and records nothing', async () => {

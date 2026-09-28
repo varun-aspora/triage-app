@@ -17,7 +17,7 @@ import { decide, yesNo } from '../decisions/decide.ts';
 import { fakeDecisionProvider } from '../decisions/fake.ts';
 import { createEmbedder, HASH_MODEL, type Embedder } from '../embed/index.ts';
 import { isPersisted, redactPersisted } from '../gate/redact.ts';
-import { setTracerForTests, type ModelSpan } from '../lib/tracing/index.ts';
+import { setTracerForTests } from '../lib/tracing/index.ts';
 import { embedRun, type EmbedRunResult } from '../runstore/embed-run.ts';
 import { createFolderRunStore, folderRunStoreFromConfig } from '../runstore/folder.ts';
 import { RunNotFoundError, RunStoppedError, type RunStore } from '../runstore/types.ts';
@@ -72,6 +72,7 @@ import {
   HASH_USAGE_MODEL,
   type UsageFlushTimer,
 } from './submit.ts';
+import { recorder } from '../../test/support/fake-tracer.ts';
 import { makeTestHome } from '../../test/support/home.ts';
 
 // ------------------------------------------------------------------ synthetic data
@@ -2713,14 +2714,8 @@ describe('run id on model spans (D91)', () => {
   afterEach(() => setTracerForTests(undefined));
 
   test('the identity, classify and post-settle embedding spans all carry the run id', async () => {
-    const spans: ModelSpan[] = [];
-    setTracerForTests({
-      withModelSpan: async (span, fn) => {
-        spans.push(span);
-        return fn();
-      },
-      flush: async () => {},
-    });
+    const { tracer, spans } = recorder();
+    setTracerForTests(tracer);
     const decisions = fakeDecisionProvider(() => ({ ok: { kind: 'yes_no', yes: 0.9 } }));
     const ask = (name: string) => decide(decisions, { state: 'synthetic', questions: { ok: yesNo('ok?') } }, { name });
     const embedder = createEmbedder(
@@ -2741,7 +2736,7 @@ describe('run id on model spans (D91)', () => {
     });
 
     expect((await runSubmission(prepared(), h.deps)).status).toBe('completed');
-    expect(spans.map((s) => [s.op, s.name, s.runId])).toEqual([
+    expect(spans.map(({ span: s }) => [s.op, s.name, s.runId])).toEqual([
       ['decide', 'identity', RUN_ID],
       ['decide', 'classify', RUN_ID],
       ['embeddings', undefined, RUN_ID],
