@@ -35,6 +35,7 @@ import { mockPortFromFixtures } from '../connectors/mock.ts';
 import { safeErrorText, stripAddresses } from '../connectors/error-text.ts';
 import { ConnectorError } from '../connectors/types.ts';
 import { makeAuditLine } from '../gate/audit.ts';
+import { isExhausted } from '../gate/budget.ts';
 import { extractIdShaped } from '../gate/id-patterns.ts';
 import { redactModelFacing } from '../gate/redact.ts';
 import { extendScopeSet, inScope, type ScopeSet } from '../gate/scope.ts';
@@ -314,7 +315,7 @@ async function runResolveIdentity(ctx: ToolContext, flue: RunInput): Promise<Too
 
   const budget = deps.budget.consumeToolCall(RESOLVE_IDENTITY);
   if (!budget.ok) {
-    if (budget.reason !== 'entity_calls') deps.escalation.markBudgetExhausted();
+    if (isExhausted(budget.reason)) deps.escalation.markBudgetExhausted();
     audit('deny', 'refused', `${RESOLVE_IDENTITY}: budget`, `budget: ${budget.reason}`);
     return refused(budget.message, now);
   }

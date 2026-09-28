@@ -8,6 +8,7 @@ import type { Config } from '../../../config/env.ts';
 import type { Registry } from '../../../config/registry.ts';
 import { loadRepos, type RepoPin, repoEnum } from '../../../config/repos.ts';
 import { makeAuditLine } from '../../../gate/audit.ts';
+import { isExhausted } from '../../../gate/budget.ts';
 import { redactModelFacing } from '../../../gate/redact.ts';
 import type { AuditTransport } from '../../../types/audit.ts';
 import type { Entity } from '../../../types/core.ts';
@@ -115,10 +116,10 @@ export async function runCodeTool(spec: CodeRunSpec): Promise<ToolEnvelope> {
   };
   const refuse = (message: string): ToolEnvelope => refused(redactModelFacing(message), now);
 
-  const budget = deps.budget.consumeToolCall(spec.tool, ctx.entity ?? undefined);
+  const budget = deps.budget.consumeToolCall(spec.tool, ctx.entity ?? undefined, { dataTool: true });
   if (!budget.ok) {
-    // The code cap (tool_cap) refuses code tools only; the run goes on.
-    if (budget.reason !== 'entity_calls' && budget.reason !== 'tool_cap') deps.escalation.markBudgetExhausted();
+    // The code cap (tool_cap) refuses code tools only, and the time rule (D87) this call only; the run goes on.
+    if (isExhausted(budget.reason)) deps.escalation.markBudgetExhausted();
     audit('deny', 'refused', spec.tool, `budget: ${budget.reason}`);
     return refuse(budget.message);
   }

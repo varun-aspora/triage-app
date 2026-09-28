@@ -9,6 +9,7 @@
 // pattern's first queries for the briefs, marked as a lead to test (D80).
 
 import { parsePatterns, type Pattern } from '../classify/patterns.ts';
+import { utcTime } from '../gate/quickwit-window.ts';
 import { ENTITIES, KNOWN_ID_KEYS, type Entity, type KnownIds } from '../types/core.ts';
 import type { TriageInit } from '../types/classification.ts';
 import { currentKnowledge, type Knowledge } from './skills.ts';
@@ -33,6 +34,8 @@ export type MethodOptions = {
   readonly deployManifests?: readonly string[];
   /** Defaults to the knowledge loaded at boot. */
   readonly knowledge?: Knowledge;
+  /** D87: epoch ms the root must finish by (deadline - W). Left out: no finish-by line. */
+  readonly finishBy?: number;
 };
 
 const FIXED_RULES = `## Fixed rules
@@ -58,7 +61,7 @@ export function methodText(init: TriageInit, options: MethodOptions = {}): strin
   const sections = [
     ...docs,
     FIXED_RULES,
-    runSection(init, entities, focus, ids, window, options.deployManifests ?? []),
+    runSection(init, entities, focus, ids, window, options.deployManifests ?? [], options.finishBy),
     ...leadSection(init, knowledge, entities),
     briefSection(focus.length > 0 ? focus : entities, ids, window, options.services),
   ];
@@ -72,6 +75,7 @@ function runSection(
   ids: string,
   window: string,
   deployManifests: readonly string[],
+  finishBy: number | undefined,
 ): string {
   const entityLine =
     entities.length > 0
@@ -92,6 +96,8 @@ function runSection(
     `- Known ids: ${ids}`,
     `- Classification: ${classificationLine(init)}`,
     `- Id chain: ${hopsLine(init)}`,
+    // Absolute, so the text stays the same across the submission's renders and the prompt cache holds.
+    ...(finishBy !== undefined ? [`- Finish by ${utcTime(finishBy)}`] : []),
   ].join('\n');
 }
 

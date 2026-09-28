@@ -208,6 +208,19 @@ describe('methodText', () => {
   });
 });
 
+describe('finish by (D87)', () => {
+  test('the run section ends with the absolute finish-by time', () => {
+    const text = methodText(init(), { knowledge, finishBy: Date.parse('2026-09-28T08:11:00Z') });
+    const run = text.slice(text.indexOf('## This run'));
+    expect(run).toContain('- Id chain:');
+    expect(run.indexOf('- Finish by 2026-09-28T08:11:00Z\n')).toBeGreaterThan(run.indexOf('- Id chain:'));
+  });
+
+  test('without a finish-by time there is no line', () => {
+    expect(methodText(init(), { knowledge })).not.toContain('- Finish by');
+  });
+});
+
 describe('deploy manifests', () => {
   test('the lines go into the run section after the enabled entities', () => {
     const line = '- Deploy manifests for rtl: repo k8s-manifests.';

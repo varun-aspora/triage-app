@@ -32,6 +32,7 @@ import type { FlueLogger, Sandbox } from '@flue/runtime';
 import type { Config } from '../../config/env.ts';
 import { errorText, excerpt, safeErrorText, scrubSecrets, stripAddresses } from '../../connectors/error-text.ts';
 import { makeAuditLine } from '../../gate/audit.ts';
+import { isExhausted } from '../../gate/budget.ts';
 import { checkScope, type LogsMode } from '../../gate/scope.ts';
 import { classifySqlState, isSqlState, maskSqlValues, sqlErrorMessage, type SqlStateInfo } from '../../gate/sql-errors.ts';
 import { redactModelFacing, redactPersisted } from '../../gate/redact.ts';
@@ -379,10 +380,10 @@ export async function runIoTool<K extends FixtureKind, T>(
 
   // 2. Budget.
   step('budget');
-  const budget = deps.budget.consumeToolCall(spec.tool, entity ?? undefined);
+  const budget = deps.budget.consumeToolCall(spec.tool, entity ?? undefined, { dataTool: true });
   if (!budget.ok) {
-    // An entity or per-tool cap refuses that target only; the run goes on.
-    if (budget.reason !== 'entity_calls' && budget.reason !== 'tool_cap') deps.escalation.markBudgetExhausted();
+    // An entity or per-tool cap or the time rule (D87) refuses this call only; the run goes on.
+    if (isExhausted(budget.reason)) deps.escalation.markBudgetExhausted();
     audit({ decision: 'deny', exit: 'refused', transport: noIoTransport, reason: `budget: ${budget.reason}` });
     return refuse(budget.message);
   }

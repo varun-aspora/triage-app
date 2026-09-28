@@ -69,6 +69,7 @@ const BUDGET_TARGET: Record<BudgetRefusalReason, string> = {
   bytes: 'TRIAGE_MAX_BYTES_PER_RUN',
   entity_calls: 'TRIAGE_MAX_TASKS_PER_RUN',
   tool_cap: 'TRIAGE_MAX_LOG_CALLS_PER_RUN',
+  time: 'TRIAGE_WRAP_UP_MS',
 };
 
 /** Run id used on audit lines when the operation carries none that fits RunIdSchema. */

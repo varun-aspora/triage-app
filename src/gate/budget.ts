@@ -1,10 +1,12 @@
-// Per-run budgets: tool calls, task delegations, rows, Quickwit hits and bytes.
+// Per-run budgets: tool calls, task delegations, rows, Quickwit hits, bytes
+// and time (D87).
 // Every I/O tool asks its run's budget before doing anything else. All limits
 // arrive as arguments (config and the entity registry supply them); this
 // module reads no env. Budgets live in a process-level registry keyed by
 // run_id, so counters for different runs never share state.
 import * as v from 'valibot';
 import { type Entity, EntitySchema, type RunId, RunIdSchema } from '../types/core.ts';
+import { utcTime } from './quickwit-window.ts';
 
 export const BUDGET_EXHAUSTED_MESSAGE = 'budget exhausted, finish with what you have';
 
@@ -24,7 +26,8 @@ export const CODE_TOOLS: readonly string[] = Object.freeze([
   'code_impact',
 ]);
 
-export type ExhaustedReason = 'tool_calls' | 'tasks' | 'bytes';
+const EXHAUSTED_REASONS = ['tool_calls', 'tasks', 'bytes'] as const;
+export type ExhaustedReason = (typeof EXHAUSTED_REASONS)[number];
 
 export interface EntityLimits {
   maxCalls?: number;
@@ -49,13 +52,20 @@ export interface RunBudgetLimits {
   perTool?: Readonly<Record<string, ToolCap>>;
   /** One cap shared by CODE_TOOLS, counted outside maxToolCalls (D78). */
   codeCap?: ToolCap;
+  /** Epoch ms, for the time rule (D87). Defaults to Date.now. */
+  now?: () => number;
 }
 
-export type BudgetRefusalReason = ExhaustedReason | 'entity_calls' | 'tool_cap';
+export type BudgetRefusalReason = ExhaustedReason | 'entity_calls' | 'tool_cap' | 'time';
 
-// message is the fixed exhausted text, or for tool_cap a sentence that names
-// the tool, the cap and its setting.
+// message is the fixed exhausted text, for tool_cap a sentence that names
+// the tool, the cap and its setting, and for time the finish-by sentence.
 export type BudgetDecision = { ok: true } | { ok: false; message: string; reason: BudgetRefusalReason };
+
+/** True when the refusal means a run limit is spent, which escalates. The other reasons refuse one target or one call. */
+export function isExhausted(reason: BudgetRefusalReason): reason is ExhaustedReason {
+  return (EXHAUSTED_REASONS as readonly string[]).includes(reason);
+}
 
 // keepBytes is how much of the response the tool may keep; truncate is true
 // when a single response is larger than maxBytesPerCall.
@@ -76,7 +86,8 @@ export interface BudgetState {
 
 export interface RunBudget {
   readonly runId: RunId;
-  consumeToolCall(tool: string, entity?: Entity): BudgetDecision;
+  /** dataTool: a delegate data tool (runIoTool, runCodeTool), which the time rule (D87) applies to. */
+  consumeToolCall(tool: string, entity?: Entity, opts?: { dataTool?: boolean }): BudgetDecision;
   consumeTask(): BudgetDecision;
   clampRows(n?: number): number;
   clampHits(entity: Entity, n?: number): number;
@@ -89,6 +100,27 @@ export class BudgetConfigError extends Error {
 }
 
 const registry = new Map<RunId, RunBudget>();
+
+// D87 times per run, set at dispatch from the current submission's deadline.
+// Kept apart from the budget, which may be created later, at the first tool call.
+// dataUntil (deadline - 2W): delegate data tools are refused from here.
+// finishBy (deadline - W): the root's finish-by time.
+export type RunTimes = { readonly dataUntil: number; readonly finishBy: number };
+const runTimesByRun = new Map<RunId, RunTimes>();
+
+/** Records the run's D87 times from its deadline (epoch ms) and TRIAGE_WRAP_UP_MS. */
+export function setRunDeadline(runId: RunId, deadlineMs: number, wrapUpMs: number): void {
+  runTimesByRun.set(runId, { dataUntil: deadlineMs - 2 * wrapUpMs, finishBy: deadlineMs - wrapUpMs });
+}
+
+/** The run's D87 times, or undefined when this process has no submission of it in flight. */
+export function runTimes(runId: RunId): RunTimes | undefined {
+  return runTimesByRun.get(runId);
+}
+
+export function clearRunDeadline(runId: RunId): void {
+  runTimesByRun.delete(runId);
+}
 
 function requirePositiveInt(name: string, value: unknown): number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
@@ -155,6 +187,7 @@ export function createRunBudget(limits: RunBudgetLimits): RunBudget {
   const perEntity = validateEntityLimits(limits.perEntity);
   const perTool = validateToolCaps(limits.perTool);
   const codeCap = limits.codeCap === undefined ? undefined : validateCap('codeCap', limits.codeCap);
+  const now = limits.now ?? Date.now;
   if (registry.has(runId)) throw new BudgetConfigError(`budget already exists for run ${runId}`);
 
   let calls = 0;
@@ -187,11 +220,25 @@ export function createRunBudget(limits: RunBudgetLimits): RunBudget {
     return { ok: true };
   };
 
+  // After dataUntil a delegate's data tools are refused. The refusal names the
+  // root's finish-by time as the latest time to reply. Not sticky and not exhaustion.
+  const timeRefusal = (): BudgetDecision | undefined => {
+    const times = runTimesByRun.get(runId);
+    if (times === undefined || now() < times.dataUntil) return undefined;
+    return {
+      ok: false,
+      message: `Finish by ${utcTime(times.finishBy)}: save what you have with note_evidence and reply`,
+      reason: 'time',
+    };
+  };
+
   const budget: RunBudget = {
     runId,
 
-    consumeToolCall(tool, entity) {
+    consumeToolCall(tool, entity, opts) {
       if (BUDGET_EXEMPT_TOOLS.includes(tool)) return { ok: true };
+      const late = opts?.dataTool === true ? timeRefusal() : undefined;
+      if (late !== undefined) return late;
       if (codeCap !== undefined && CODE_TOOLS.includes(tool)) return consumeCodeCall(tool, codeCap);
       if (exhaustedReason !== undefined) return refuse(exhaustedReason);
       if (calls >= maxToolCalls) {
@@ -279,5 +326,6 @@ export function getRunBudget(runId: RunId): RunBudget | undefined {
 // Drops a finished run's budget so the registry does not grow for the life of
 // the process. Returns false when there was nothing to drop.
 export function releaseRunBudget(runId: RunId): boolean {
+  runTimesByRun.delete(runId);
   return registry.delete(runId);
 }

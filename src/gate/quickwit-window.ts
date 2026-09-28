@@ -83,7 +83,12 @@ export function windowSeconds(window: TimeWindow): { readonly start: number; rea
 
 /** An epoch second as the RFC3339 UTC text qw --from and --to take, such as 2026-09-23T10:00:00Z. */
 export function qwTime(seconds: number): string {
-  return new Date(seconds * 1000).toISOString().replace('.000Z', 'Z');
+  return utcTime(seconds * 1000);
+}
+
+/** Epoch ms as RFC3339 UTC to the second, such as 2026-09-23T10:00:00Z. */
+export function utcTime(ms: number): string {
+  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
 function toWindow(fromMs: number, toMs: number): TimeWindow {

@@ -41,6 +41,7 @@ import {
   useSubagent,
   useTool,
 } from '@flue/runtime';
+import { runTimes } from '../gate/budget.ts';
 import { logActions } from '../runlog/actions.ts';
 import { mergeIdChains, widenIdChain } from '../tools/_lib/context.ts';
 import { toolsFor } from '../tools/index.ts';
@@ -88,7 +89,11 @@ export function Triage({ id }: AgentProps): string {
 
   const services = Object.fromEntries(plan.entities.map((e) => [e, rt.registry.services(e)]));
   const deployManifests = deployManifestLines(rt.config, rt.registry, plan.entities);
-  useInstruction(methodText(init, { entities: plan.entities, focus: plan.focus, services, deployManifests, knowledge: rt.knowledge }));
+  const times = runTimes(id);
+  const finishBy = times === undefined ? {} : { finishBy: times.finishBy };
+  useInstruction(
+    methodText(init, { entities: plan.entities, focus: plan.focus, services, deployManifests, knowledge: rt.knowledge, ...finishBy }),
+  );
 
   const [savedChain, setSavedChain] = usePersistentState<IdChain | null>('id_chain', null);
   const deps = runDepsFor(id, init, rt, savedChain ?? undefined);

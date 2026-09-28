@@ -185,6 +185,7 @@ import { submissionLease, type SubmissionLease, type SubmissionLeaseReader } fro
 import { decisionProviderFor } from '../decisions/registry.ts';
 import { createEmbedder, embedderFor, type EmbedUsage, type Embedder, type FetchLike, HASH_MODEL } from '../embed/index.ts';
 import { createJsonlAuditSink } from '../gate/audit-sink.ts';
+import { clearRunDeadline, runTimes, setRunDeadline } from '../gate/budget.ts';
 import { checkEgress, redactModelFacing, redactPersisted } from '../gate/redact.ts';
 import { withRunId } from '../lib/tracing/index.ts';
 import { createMockLayer } from '../mock/index.ts';
@@ -242,7 +243,8 @@ export type SubmissionConfig = {
   readonly mock: Pick<Config['mock'], 'enabled'>;
   /** usageFlushMs left out: DEFAULT_USAGE_FLUSH_MS. */
   readonly runs: Pick<Config['runs'], 'priorCases'> & Partial<Pick<Config['runs'], 'usageFlushMs'>>;
-  readonly budgets: Pick<Config['budgets'], 'runTimeoutMs' | 'runMaxAttempts'>;
+  /** wrapUpMs left out: no D87 deadline is recorded, so no time rule or finish-by lines. */
+  readonly budgets: Pick<Config['budgets'], 'runTimeoutMs' | 'runMaxAttempts'> & Partial<Pick<Config['budgets'], 'wrapUpMs'>>;
 };
 
 /** The parts of Flue's instance handle the pipeline uses. */
@@ -1002,6 +1004,7 @@ async function dispatchAndSettle(
   let handle: AgentHandle;
   let receipt: Awaited<ReturnType<AgentHandle['dispatch']>>;
   let investigating: boolean;
+  let ownDeadline = false;
   try {
     seq = await store.addSubmission(runId, redactPersisted(submission));
     // Only a follow-up or a resume may move a stopped run on. A dispatch
@@ -1013,6 +1016,15 @@ async function dispatchAndSettle(
         worker_pid: deps.workerPid ?? null,
       });
     }
+    // D87: the finish-by lines and the time rule count from here. A steer
+    // joins the running response, whose deadline stands; one that finds no
+    // deadline (the response already ended) runs its own response and gets
+    // its own, so its prompt keeps the finish-by line.
+    const { runTimeoutMs, wrapUpMs } = deps.config.budgets;
+    if (wrapUpMs !== undefined && (!steer || runTimes(runId) === undefined)) {
+      setRunDeadline(runId, (deps.now ?? (() => new Date()))().getTime() + runTimeoutMs, wrapUpMs);
+      ownDeadline = true;
+    }
     handle = deps.dispatcher.init(deps.agent, initOptions);
     receipt = await handle.dispatch(request);
     logRunEvent(runId, 'dispatch', { submission_seq: seq, kind: submission.kind, submission_id: receipt.submissionId });
@@ -1023,6 +1035,7 @@ async function dispatchAndSettle(
       .catch((err: unknown) => logRunEvent(runId, 'flue_id_write_failed', { submission_seq: seq, error: className(err) }));
     investigating = steer || (await markInvestigating(store, runId));
   } catch (err) {
+    if (ownDeadline) clearRunDeadline(runId);
     if (err instanceof RunStoppedError) throw err;
     // A steer that could not be sent leaves the working run as it is.
     if (steer) logRunEvent(runId, 'steer_failed', { error: err });
@@ -1081,6 +1094,9 @@ async function dispatchAndSettle(
       }
     }
     watch.dispose();
+    // The response is over. A steer that runs later as its own response then
+    // sets a new deadline, rather than keeping this one's past one.
+    if (ownDeadline) clearRunDeadline(runId);
 
     // Whether a steer joined the live response (D72). A joined steer settled
     // with its host, whose own settle writes the phase, the usage and the
