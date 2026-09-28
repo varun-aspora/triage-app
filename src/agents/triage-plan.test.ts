@@ -303,13 +303,13 @@ describe('triagePlan: entities, delegates and skills', () => {
 // ------------------------------------------------------------------ mount and deps
 
 describe('the triage mount', () => {
-  test('toolsFor(triage) holds ask_requester, stop_blocked, resolve_identity, note_evidence and finish_report only', () => {
+  test('toolsFor(triage) holds ask_requester, stop_blocked, resolve_identity, note_evidence, run_log and finish_report only', () => {
     const h = home();
     useTestRuntime(h);
     const runId = nextRunId();
     const deps = runDepsFor(runId, init({ runId }));
     const names = toolsFor('triage', triageToolContext(runId, deps)).map((t) => t.name).sort();
-    expect(names).toEqual(['ask_requester', 'finish_report', 'note_evidence', 'resolve_identity', 'stop_blocked']);
+    expect(names).toEqual(['ask_requester', 'finish_report', 'note_evidence', 'resolve_identity', 'run_log', 'stop_blocked']);
     for (const io of ['sql_select', 'http_call', 'logs_search']) expect(names).not.toContain(io);
     settleRun(runId);
   });

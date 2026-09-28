@@ -43,8 +43,8 @@ the CX team replies with.
 - `suggested_fix`: the fixes below; an empty list when none applies.
 - `confidence` and `confidence_reason`: `high`, `medium` or `low`, as the
   method describes, and one line on why.
-- `evidence_ladder`: the rungs actually used, from `api`, `db`, `logs`, `cbs`
-  and `code`.
+- `evidence_ladder`: the sources actually used, in the order they were used,
+  from `api`, `db`, `logs`, `cbs` and `code`.
 - `entities_consulted`: the entities an investigator was briefed on.
 - `gaps`: what could not be checked and why, one line each.
 - `escalated` and `escalation_reasons`: write false and an empty list.

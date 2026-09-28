@@ -436,6 +436,8 @@ export const CODE_TOOLS = [
 ] as const;
 /** The code tools both investigator variants have, scoped to their entity's repos. */
 export const REPO_TOOLS = ['repo_read', 'repo_grep'] as const;
+/** On every agent: the run action log (D79). */
+export const SHARED_TOOLS = ['run_log'] as const;
 /** Flue sandbox tools, on every agent through the one inherited sandbox (D45). */
 export const SANDBOX_TOOLS = ['read', 'write', 'edit', 'bash', 'grep', 'glob'] as const;
 /** Flue framework tools. */
@@ -446,6 +448,7 @@ export const KNOWN_TOOLS: ReadonlySet<string> = new Set([
   ...INVESTIGATOR_TOOLS,
   ...SSFB_EXTRA_TOOLS,
   ...CODE_TOOLS,
+  ...SHARED_TOOLS,
   ...SANDBOX_TOOLS,
   ...FRAMEWORK_TOOLS,
 ]);
@@ -462,7 +465,7 @@ const SKILL_TOOLS = ['activate_skill', 'read_skill_resource'] as const;
  * one adds the rest of the code tools.
  */
 export function allowedTools(agent: AgentKind, entity?: Entity): ReadonlySet<string> {
-  const base: string[] = [...SANDBOX_TOOLS, ...SKILL_TOOLS];
+  const base: string[] = [...SANDBOX_TOOLS, ...SKILL_TOOLS, ...SHARED_TOOLS];
   switch (agent) {
     case 'triage':
       return new Set([...base, ...TRIAGE_TOOLS, 'task']);

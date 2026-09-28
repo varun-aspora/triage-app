@@ -173,6 +173,8 @@ async function runCbsCall(
         entity: SSFB,
         key: semanticKey('cbs_call', { entity: SSFB, method, path, ...withBody }),
       }),
+      // Reads only; a write always runs (D79).
+      repeat: () => (method === 'GET' || method === 'HEAD') && { method, path },
       real: async (signal) => {
         const out = await connectorFor(ctx).call(realConnectorContext(ctx, signal), {
           path,

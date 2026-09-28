@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import {
   BUDGET_EXHAUSTED_MESSAGE,
   BudgetConfigError,
+  CODE_TOOLS,
   type RunBudgetLimits,
   createRunBudget,
   getRunBudget,
@@ -43,7 +44,8 @@ describe('tool call cap', () => {
     // Sticky: every later non-exempt call and task is refused too.
     expect(b.consumeToolCall('logs_search', 'atspl')).toMatchObject(refusal);
     expect(b.consumeTask()).toMatchObject(refusal);
-    expect(b.accountBytes(10)).toMatchObject(refusal);
+    // A call that got through (a code tool) still keeps its bytes (D78).
+    expect(b.accountBytes(10)).toMatchObject({ ok: true });
     expect(b.state().exhausted).toBe(true);
     expect(b.state().calls).toBe(120);
   });
@@ -94,6 +96,54 @@ describe('tool call cap', () => {
     expect(b.consumeToolCall('sql_select', 'ssfb')).toEqual({ ok: true });
     expect(b.consumeToolCall('sql_select', 'ssfb')).toEqual({ ok: true });
     expect(b.consumeToolCall('sql_select', 'ssfb')).toMatchObject({ ...refusal, reason: 'tool_calls' });
+  });
+
+  describe('code tools (D78)', () => {
+    const codeCap = { maxCalls: 400, setting: 'TRIAGE_MAX_CODE_CALLS_PER_RUN' };
+
+    test('120 production reads plus 50 code reads: production refused at 121, code still allowed', () => {
+      const b = createRunBudget(limits({ codeCap }));
+      for (let i = 0; i < 120; i++) {
+        expect(b.consumeToolCall('sql_select', 'ssfb')).toEqual({ ok: true });
+        if (i < 50) expect(b.consumeToolCall(CODE_TOOLS[i % CODE_TOOLS.length] ?? 'repo_read', 'ssfb')).toEqual({ ok: true });
+      }
+      // The run cap message is unchanged.
+      expect(b.consumeToolCall('sql_select', 'ssfb')).toEqual({ ...refusal, reason: 'tool_calls' });
+      expect(b.consumeToolCall('repo_grep', 'ssfb')).toEqual({ ok: true });
+      expect(b.state()).toMatchObject({ calls: 120, codeCalls: 51, exhausted: true, exhaustedReason: 'tool_calls' });
+    });
+
+    test('deny: code refused at its own cap with the key and value; the run is not exhausted', () => {
+      const b = createRunBudget(limits({ codeCap: { ...codeCap, maxCalls: 3 } }));
+      for (let i = 0; i < 3; i++) expect(b.consumeToolCall('code_explore')).toEqual({ ok: true });
+      const fourth = b.consumeToolCall('repo_read', 'ssfb');
+      expect(fourth).toEqual({
+        ok: false,
+        reason: 'tool_cap',
+        message:
+          'repo_read refused: this run has used all 3 of its code tool calls (TRIAGE_MAX_CODE_CALLS_PER_RUN=3). ' +
+          'Other tools still work; finish with the evidence you have.',
+      });
+      expect(b.state()).toMatchObject({ calls: 0, codeCalls: 3, exhausted: false });
+      expect(b.consumeToolCall('sql_select', 'ssfb')).toEqual({ ok: true });
+    });
+
+    test('deny: a spent byte budget still stops code tools', () => {
+      const b = createRunBudget(limits({ codeCap }));
+      for (let i = 0; i < 3; i++) b.accountBytes(1_000);
+      expect(b.state().exhaustedReason).toBe('bytes');
+      expect(b.consumeToolCall('repo_read')).toEqual({ ...refusal, reason: 'bytes' });
+    });
+
+    test('without a codeCap, code tools count inside the run limit', () => {
+      const b = createRunBudget(limits({ maxToolCalls: 1 }));
+      expect(b.consumeToolCall('repo_read')).toEqual({ ok: true });
+      expect(b.consumeToolCall('repo_read')).toEqual({ ...refusal, reason: 'tool_calls' });
+    });
+
+    test('construction with a code cap of 0 throws', () => {
+      expect(() => createRunBudget(limits({ codeCap: { ...codeCap, maxCalls: 0 } }))).toThrow(BudgetConfigError);
+    });
   });
 
   test('construction with a per-tool cap of 0 throws', () => {

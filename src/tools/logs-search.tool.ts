@@ -447,6 +447,13 @@ async function runLogsSearch(ctx: ToolContext, entity: Entity, args: RunArgs): P
           key: semanticKey('logs_search', logsKeyInput(r.cfg, queryInput, r.query.mode, r.query.groupBy)),
         };
       },
+      // The input with the window this call resolves to, to the minute, so a
+      // relative or default window repeated seconds later is the same key;
+      // offset and limit keep pages apart (D79).
+      repeat: () => {
+        const w = resolveWindow(data.from, data.to, requestWindow, now);
+        return w.ok && { ...data, from: w.window.from.slice(0, 16), to: w.window.to.slice(0, 16) };
+      },
       real: async (signal) => {
         const connector = deps.connectors.quickwit;
         if (connector === undefined) throw new ConnectorError('not_configured', 'the run has no Quickwit connector');

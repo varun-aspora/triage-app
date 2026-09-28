@@ -147,6 +147,7 @@ describe('allowlist', () => {
       'repo_grep',
       'repo_read',
       'resolve_identity',
+      'run_log',
       'sql_select',
       'stop_blocked',
       'task',

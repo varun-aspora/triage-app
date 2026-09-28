@@ -263,14 +263,14 @@ describe('buildLogsQuery: query text', () => {
 describe('buildLogsQuery: denoise', () => {
   test('"only" builds the owner\'s filter exactly', () => {
     expect(query({ denoise: 'only' })).toBe(
-      "((NOT service:'kong'* AND NOT service:'kafka'* AND NOT 'Api execution completed') OR level:error)",
+      "((* AND NOT service:'kong'* AND NOT service:'kafka'* AND NOT 'Api execution completed') OR level:error)",
     );
     expect(query({ denoise: 'only' })).toBe(DENOISE_FILTER);
   });
 
   test('"with_message" ORs the message onto the filter exactly', () => {
     expect(query({ denoise: 'with_message', message: 'CBS API error' })).toBe(
-      "((NOT service:'kong'* AND NOT service:'kafka'* AND NOT 'Api execution completed') OR level:error) OR 'CBS API error'",
+      "((* AND NOT service:'kong'* AND NOT service:'kafka'* AND NOT 'Api execution completed') OR level:error) OR 'CBS API error'",
     );
   });
 

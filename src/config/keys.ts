@@ -98,6 +98,8 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'TRIAGE_MAX_TOOL_CALLS_PER_RUN', type: 'int', group: 'budgets', default: '120', min: 1 },
   // D76: logs_search calls per run, counted inside the tool-call limit.
   { name: 'TRIAGE_MAX_LOG_CALLS_PER_RUN', type: 'int', group: 'budgets', default: '50', min: 1 },
+  // D78: repo_* and code_* calls per run, outside the tool-call limit.
+  { name: 'TRIAGE_MAX_CODE_CALLS_PER_RUN', type: 'int', group: 'budgets', default: '400', min: 1 },
   { name: 'TRIAGE_MAX_TASKS_PER_RUN', type: 'int', group: 'budgets', default: '12', min: 0 },
   { name: 'TRIAGE_MAX_ASKS_PER_RUN', type: 'int', group: 'budgets', default: '10', min: 0 },
   { name: 'TRIAGE_MAX_RESPONSE_BYTES_PER_CALL', type: 'int', group: 'budgets', default: '1048576', min: 1 },

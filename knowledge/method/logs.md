@@ -128,7 +128,9 @@ returns hits:
    about 30 days.
 6. Drop `level`. The text may be logged at `info` or `warn`.
 
-Steps 3 to 6 are the order the tool's 0-hit note gives.
+Steps 3 to 6 are the order the tool's 0-hit note gives. For an empty lookup
+by the known id, the investigator note ("Empty means ask why") says what comes
+after this ladder.
 
 If the ladder still returns zero, report the absence as a finding and list the
 queries you ran.

@@ -7,7 +7,7 @@ Notes for `logs_search` on RTL. The general rules are in the logs note above.
 - RTL logs are the London cluster's production app logs. The tool picks the
   cluster and index from config. If `logs_search` answers `not_configured`,
   add the gap `rtl logs not configured`, say so in the reply, and work from
-  the DB and API rungs.
+  the DB and code.
 - RTL log service names end in `-service`. A name without the suffix returns
   0 hits.
 - The tool accepts only `service`, `level`, `message`, `error`, `raw_message`

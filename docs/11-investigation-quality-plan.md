@@ -1,8 +1,9 @@
 # 11. Investigation quality plan
 
 Status: in implementation from 2026-09-28 on branch `feat/investigation-quality`, one wave
-at a time. Decisions D73 to D81 and D83 to D85 are reserved for the choices below (D82 is
-Braintrust tracing); each is written into `docs/05-decisions.md` when its wave lands.
+at a time. Decisions D73 to D81, D83 to D85 and D92 are reserved for the choices below (D82 is
+Braintrust tracing; D86 to D91 are proposed by the trace 6d4d fix plan); each is written into
+`docs/05-decisions.md` when its wave lands.
 
 ## 1. Why this plan exists
 
@@ -165,10 +166,10 @@ when it is done.
   - `denoise` (SSFB only): wraps the query in the owner's noise filter, which drops kong and
     kafka lines and the `Api execution completed` access lines unless they are errors:
     - `denoise: "with_message"`:
-      `((NOT service:'kong'* AND NOT service:'kafka'* AND NOT 'Api execution completed') OR level:error) OR <message>`,
+      `((* AND NOT service:'kong'* AND NOT service:'kafka'* AND NOT 'Api execution completed') OR level:error) OR <message>`,
       so the message's own lines are kept even when they come from a filtered service;
     - `denoise: "only"`:
-      `((NOT service:'kong'* AND NOT service:'kafka'* AND NOT 'Api execution completed') OR level:error)`;
+      `((* AND NOT service:'kong'* AND NOT service:'kafka'* AND NOT 'Api execution completed') OR level:error)`;
     - no `denoise`: the message (or terms) alone.
     The skill says to use it on the first SSFB query of an investigation, and, when the error
     could be in kong or kafka, to run a `count` without it first. Other filters (ids, fields,
@@ -184,7 +185,8 @@ when it is done.
     UUID there and says why. On SSFB the exact id fields in its registry allowlist
     (`customer_id`, `form_id`, `x-device-id`, `x-customer-id`) stay available as well, because
     the old refs used them with success; `contains` stays as the fallback after a zero.
-  - `--explain` on `qw` calls, so the result shows the query Quickwit actually ran.
+  - `--explain` on `qw` calls, so the result shows the query Quickwit actually ran. Not sent
+    yet: it waits for one manual run by the owner (section 8).
 - **More inputs, from the refs survey (Appendix A).** Each one unblocks a pattern the old
   investigations used and today's tool cannot express:
   - `any_of`: OR groups, for example levels `error` or `warn`, several message labels, several
@@ -201,8 +203,8 @@ when it is done.
   - `columns`: extra fields in each hit (`status`, `latency`, `client-ip`, `User-Agent`,
     `path`), for the app-vs-admin split.
   - `order`: `newest` (default) or `oldest`, for timelines and walks.
-  - `index`: another index from the entity's registry allowlist (London `core-prod-app-logs`
-    for RTL, ATSPL `envoy-logs`, otel indexes), never a free name.
+  - ~~`index`: another index from the entity's registry allowlist~~ Dropped by the owner
+    (2026-09-28): RTL and ATSPL already search `core-prod-app-logs` and `envoy-logs`.
   - `fields`: hyphenated names bare (`x-device-id`, `x-customer-id`), and ranges on numeric
     fields (`status_code: "[400 TO 599]"`).
   - Warnings in the result: `error` on workflow-op or kong (the whole line is in `message`);
@@ -271,7 +273,7 @@ when it is done.
 
 ### Wave 3: method and run memory
 
-#### W6. Rewrite the investigation method (fixes C4, C6, C8, D78)
+#### W6. Rewrite the investigation method (fixes C4, C6, C8, D81)
 
 `knowledge/method/investigator.md`, `orchestrator.md`, `brief-template.md`:
 
@@ -295,7 +297,7 @@ when it is done.
 - **Client code.** When the backend is shown to behave correctly and the remaining leg is the
   device, read the app code that sends or receives on that leg.
 
-#### W7. Pattern handlers for known issues (from RCACopilot handlers)
+#### W7. Pattern handlers for known issues (from RCACopilot handlers, D80)
 
 - A known pattern can carry "first queries": the fixed evidence to collect before
   hypothesising. Start with SIM binding stuck (W13). The orchestrator puts the handler's first
@@ -322,7 +324,7 @@ when it is done.
   same query with another window runs; brief contains the prior calls; budget unchanged on a
   cached repeat.
 
-#### W9. Code tools leave the run limit (fixes C10, D80)
+#### W9. Code tools leave the run limit (fixes C10, D78)
 
 - `repo_grep`, `repo_read`, the new find/tree/ls tools and the `code_*` tools stop counting
   toward `TRIAGE_MAX_TOOL_CALLS_PER_RUN`. They get their own loop guard,
@@ -349,7 +351,7 @@ when it is done.
 - **Tests.** Jail refuses `..` and dot paths; caps and `truncated` flags; `files_only` returns
   unique paths.
 
-#### W11. Attach repo AGENTS.md / CLAUDE.md on demand (D81)
+#### W11. Attach repo AGENTS.md / CLAUDE.md on demand (D83)
 
 How Flue allows it (checked against the Flue references):
 
@@ -423,7 +425,7 @@ How Flue allows it (checked against the Flue references):
 - Written in triage-app tool terms (`logs_search`, `sql_select`, `repo_*`), not Shivalik
   scripts. Lands after W4, because it describes the new `logs_search` inputs.
 
-#### W13. Skill updates (fixes C3, C4)
+#### W13. Skill updates (fixes C3, C4, D84)
 
 - `ssfb-guardian`: the device path for users who never verified (id → device id from app
   logs → `device_auth_attempts WHERE device_id`); `PENDING` forever for abandoned attempts;
@@ -445,7 +447,7 @@ How Flue allows it (checked against the Flue references):
   `Failed to verify token and create session`), marked as seen in past investigations, so the
   model searches exact labels instead of guessing words.
 
-#### W14. Keep knowledge in step with the Shivalik workspace, and learn from reviewed cases (fixes C12, C14, D83, D85)
+#### W14. Keep knowledge in step with the Shivalik workspace, and learn from reviewed cases (fixes C12, C14, D85, D92)
 
 - **Shivalik AGENTS.md files, verbatim.** Copy every `AGENTS.md` and `NRI_ONBOARDING.md`
   under `atspl/`, `rtl/`, `shivalik/` and `frontend/` into the skill that ports it, as a
@@ -527,13 +529,17 @@ rejected and why.
 | D75 | Admin APIs offered | Configured services only |
 | D76 | `logs_search` shape | Optional service, plain-word message, paging, 30-day default, UUID segments ANDed |
 | D77 | Correlation ids in scope | When seen in an earlier result of the same run |
-| D78 | Method order | No fixed ladder; logs and DB first; empty → why → new key |
-| D79 | Run action log | Every call logged, handed to briefs; exact repeats reuse results |
-| D80 | Code tool budget | Outside the run limit; own cap |
-| D81 | Repo docs | Attached from root to path, once per conversation, capped |
-| D83 | Shivalik sources | Verbatim as skill resources, scanned, drift-checked |
-| D84 | Schema lookups | Skills' column lists first; multi-table lookups; no generated files |
-| D85 | Learning from reviews | Faster path → reviewed pattern note |
+| D78 | Code tool budget (W9) | Outside the run limit; own cap |
+| D79 | Run action log (W8) | Every call logged, handed to briefs; exact repeats reuse results |
+| D80 | Pattern first queries (W7) | A matched pattern's first queries go into the brief as a lead |
+| D81 | Method order (W6) | No fixed ladder; logs and DB first; empty → why → new key |
+| D83 | Repo docs (W11) | Attached from root to path, once per conversation, capped |
+| D84 | Schema lookups (W13) | Skills' column lists first; multi-table lookups; no generated files |
+| D85 | Shivalik sources (W14) | Verbatim as skill resources, scanned, drift-checked |
+| D92 | Learning from reviews (W14) | Faster path → reviewed pattern note |
+
+D82 is Braintrust tracing (on `main`). D86 to D91 are proposed by the trace 6d4d fix plan, so
+the next free number after D85 is D92.
 
 ## 8. Owner answers (2026-09-26)
 
@@ -547,6 +553,16 @@ rejected and why.
 | Q7 | SSFB noise | The owner's noise filter as the `denoise` option (W4), used on the first SSFB query; a `count` without it when the error could be in kong or kafka |
 | Q5 | UUIDs and other values | Owner's `qw`/Grafana samples: values with spaces or dashes go whole in single quotes; `NOT 'a' AND NOT 'b'` for exclusions; `--explain`; `--sort-by timestamp`; `--from`/`--to` in UTC; paging with `--offset`. Captured in the tool (W4) and the logs skill (W12) |
 | Q6 | Time window | Always pass both `--from` and `--to`; enforced in the tool (W4) |
+
+Answers given on 2026-09-28, to the questions left open by wave 2:
+
+| # | Question | Answer |
+|---|---|---|
+| Q9 | Owner's local `.env` still set `TRIAGE_DEFAULT_LOOKBACK_DAYS=7` | Now 30, changed outside the repo. The method notes point to the run's window rather than a number of days |
+| Q10 | `qw --explain` output | Skipped for now. `--explain` stays unsent until the owner runs it by hand; still open |
+| Q11 | SSFB denoise on Quickwit 0.8, where a group of only NOTs may match nothing | Yes: the NOT group starts with `*`, so `(* AND NOT service:'kong'* AND NOT service:'kafka'* AND NOT 'Api execution completed') OR level:error` (D76) |
+| Q12 | The `logs_search` `index` input | Dropped from the plan |
+| Q13 | Device ids and verification ids found in a result are refused by the scope check, so the SIM device path dead-ends | Extend the D77 rule to them in wave 5 (with W13): `device_id`, `x-device-id` and `verification_id` are in scope once an earlier result in the same run, fetched by a chain id, has shown them. Briefs may carry them, and the method's pivot to them comes back. Until then the method records them as a gap |
 
 ## Appendix A. Logging patterns in the Shivalik refs (survey, 2026-09-26)
 

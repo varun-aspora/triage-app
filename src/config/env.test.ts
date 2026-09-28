@@ -133,6 +133,7 @@ describe('defaults with an empty .env', () => {
     expect(c.sandbox.timeoutMs).toBe(30000);
     expect(c.budgets.maxToolCallsPerRun).toBe(120);
     expect(c.budgets.maxLogCallsPerRun).toBe(50);
+    expect(c.budgets.maxCodeCallsPerRun).toBe(400);
     expect(c.budgets.maxTasksPerRun).toBe(12);
     expect(c.budgets.maxResponseBytesPerCall).toBe(1048576);
     expect(c.budgets.maxBytesPerRun).toBe(20971520);
@@ -296,6 +297,7 @@ describe('type refusals name the key', () => {
     ['TRIAGE_SQL_MAX_ROWS', '12abc'],
     ['TRIAGE_MAX_TOOL_CALLS_PER_RUN', '0'],
     ['TRIAGE_MAX_LOG_CALLS_PER_RUN', '0'],
+    ['TRIAGE_MAX_CODE_CALLS_PER_RUN', '0'],
     ['TRIAGE_MAX_RESPONSE_BYTES_PER_CALL', '1MB'],
     ['TRIAGE_MAX_BYTES_PER_RUN', '-5'],
     ['TRIAGE_HTTP_PORT', '70000'],

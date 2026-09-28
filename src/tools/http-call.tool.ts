@@ -405,6 +405,8 @@ async function runHttpCall(ctx: ToolContext, services: ServiceLists, flue: HttpR
         const p = planned();
         return { kind: 'http_call', key: semanticKey('http_call', keyFacts(entity, serviceName, p, input)) };
       },
+      // GET and HEAD only; any other method runs every time (D79).
+      repeat: () => NO_BODY_METHODS.has(input.method ?? 'GET') && input,
       real: async (signal) => {
         const p = planned();
         const connector = deps.connectors.http;

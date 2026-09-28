@@ -5,15 +5,18 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as v from 'valibot';
 import { TriageInitSchema, type TriageInit } from '../types/classification.ts';
+import { matchPattern, parsePatterns } from '../classify/patterns.ts';
 import { BRIEF_FIELDS, methodText, ORCHESTRATOR_DOCS } from './instruction.ts';
-import { loadKnowledge } from './skills.ts';
+import { type Knowledge, loadKnowledge } from './skills.ts';
 
 const FIXTURE = fileURLToPath(new URL('./__fixtures__/knowledge', import.meta.url));
 
 // All values below are synthetic.
 const T = '2026-09-20T10:00:00.000Z';
 
-function init(overrides: { hints?: Record<string, unknown>; ids?: Record<string, string> } = {}): TriageInit {
+function init(
+  overrides: { hints?: Record<string, unknown>; ids?: Record<string, string>; matched?: string } = {},
+): TriageInit {
   return v.parse(TriageInitSchema, {
     request: {
       request_id: '01J8ZQ7XK3TESTRUN0000000000',
@@ -36,6 +39,7 @@ function init(overrides: { hints?: Record<string, unknown>; ids?: Record<string,
         tier_proposed: 'cheap',
         confidence: 0.8,
         images_seen: false,
+        ...(overrides.matched !== undefined ? { matched_pattern_id: overrides.matched } : {}),
       },
       tier_final: 'mid',
       rule_fired: 'rule_4_money_moved',
@@ -59,9 +63,11 @@ describe('methodText', () => {
     expect(text).toContain('Run id: 01J8ZQ7XK3TESTRUN0000000000');
   });
 
-  test('covers the evidence ladder, confidence rubric, taken_at and parallel fan-out', () => {
+  test('covers the evidence sources, confidence rubric, taken_at and parallel fan-out', () => {
     const text = methodText(init(), { knowledge });
-    expect(text).toContain('Evidence ladder: admin API (when configured), then DB, then logs, then CBS (SSFB only)');
+    expect(text).toContain('Evidence: no fixed order of sources. Logs and DB reads first');
+    expect(text).toContain('an admin API only for live state the DB does not hold');
+    expect(text).not.toContain('then DB, then logs, then CBS');
     expect(text).toContain('never replay a call');
     expect(text).toMatch(/Confidence: high when .*; medium when .*; low when /);
     expect(text).toContain('taken_at');
@@ -183,5 +189,80 @@ describe('deploy manifests', () => {
     const run = text.slice(text.indexOf('## This run'));
     expect(run.indexOf(line)).toBeGreaterThan(run.indexOf('- Enabled entities:'));
     expect(run.indexOf(line)).toBeLessThan(run.indexOf('- Named in the request:'));
+  });
+});
+
+describe('known pattern lead (D80)', () => {
+  const entry = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: 'fixture-vendor-fail',
+    category: 'delivery',
+    signature: { regex: ['courier rejected'], services: [] },
+    entities: ['atspl', 'ssfb'],
+    query_recipe: 'sql_select on package delivery_requests for <customer_id>',
+    tier_hint: 'mid',
+    stable: false,
+    source_ref: 'knowledge/atspl-package/SKILL.md#Known issues',
+    first_queries: [
+      { entity: 'atspl', query: 'sql_select on package delivery_requests where external_ref_id = <customer_id>' },
+      { entity: 'ssfb', query: 'logs_search on harbor for WelcomeLetterDeliveryRequested' },
+    ],
+    ...over,
+  });
+
+  // The fixture knowledge with its patterns.json replaced.
+  function withPatterns(file: string): Knowledge {
+    const skill = knowledge.skills.get('patterns');
+    if (skill === undefined) throw new Error('the fixture knowledge has no patterns skill');
+    const skills = new Map(knowledge.skills);
+    skills.set('patterns', { ...skill, files: { ...skill.files, 'patterns.json': file } });
+    return { ...knowledge, skills };
+  }
+  const lead = (text: string): string => {
+    const start = text.indexOf('## Known pattern lead');
+    return start < 0 ? '' : text.slice(start, text.indexOf('## Brief skeleton'));
+  };
+
+  test('no matched pattern, no lead', () => {
+    const k = withPatterns(JSON.stringify([entry()]));
+    expect(methodText(init(), { knowledge: k })).not.toContain('## Known pattern lead');
+  });
+
+  test('the thread match puts each entity\'s first queries in the lead, before the brief skeleton', () => {
+    const k = withPatterns(JSON.stringify([entry()]));
+    const match = matchPattern('The courier rejected the welcome letter', [], 'delivery', parsePatterns([entry()]));
+    expect(match?.matched_pattern_id).toBe('fixture-vendor-fail');
+    const text = methodText(init({ matched: match?.matched_pattern_id }), { knowledge: k, entities: ['atspl', 'ssfb'] });
+    const section = lead(text);
+    expect(section).toContain('The thread matches known pattern `fixture-vendor-fail` (delivery, from knowledge/atspl-package/SKILL.md#Known issues).');
+    expect(section).toContain('It is a lead to test, not an answer: this run can differ.');
+    expect(section).toContain('`Lead: known pattern fixture-vendor-fail, to test, not an answer. First queries: <that entity\'s queries>`');
+    expect(section).toContain('`pattern fixture-vendor-fail tried and rejected: <what did not match>`');
+    expect(section).toContain('leave `matched_pattern_id` out of the report');
+    expect(section).toContain('- atspl: sql_select on package delivery_requests where external_ref_id = <customer_id>\n');
+    expect(section).toContain('- ssfb: logs_search on harbor for WelcomeLetterDeliveryRequested');
+    expect(text.indexOf('## Known pattern lead')).toBeGreaterThan(text.indexOf('## This run'));
+  });
+
+  test('a first query for an entity not enabled says to list it as a gap', () => {
+    const k = withPatterns(JSON.stringify([entry()]));
+    const section = lead(methodText(init({ matched: 'fixture-vendor-fail' }), { knowledge: k, entities: ['atspl'] }));
+    expect(section).toContain('- ssfb: logs_search on harbor for WelcomeLetterDeliveryRequested (entity not enabled in this run; list it as a gap)');
+    expect(section).not.toContain('- atspl: sql_select on package delivery_requests where external_ref_id = <customer_id> (');
+  });
+
+  test('without first_queries, the query_recipe is the first check', () => {
+    const { first_queries: _drop, ...plain } = entry();
+    const k = withPatterns(JSON.stringify([plain]));
+    const section = lead(methodText(init({ matched: 'fixture-vendor-fail' }), { knowledge: k }));
+    expect(section).toContain('First check (query_recipe, for atspl, ssfb): sql_select on package delivery_requests for <customer_id>');
+    expect(section).not.toContain('\nFirst queries:\n');
+  });
+
+  test('a matched id with no entry, or a bad file, reaches the model with the reason', () => {
+    const missing = lead(methodText(init({ matched: 'gone-pattern' }), { knowledge: withPatterns(JSON.stringify([entry()])) }));
+    expect(missing).toContain('Ingress matched `gone-pattern`, but its entry could not be read: no entry in patterns.json has that id.');
+    const bad = lead(methodText(init({ matched: 'fixture-vendor-fail' }), { knowledge: withPatterns('[{"id":') }));
+    expect(bad).toContain('Ingress matched `fixture-vendor-fail`, but its entry could not be read:');
+    expect(bad).toContain('Investigate as usual.');
   });
 });

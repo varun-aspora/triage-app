@@ -11,6 +11,7 @@ import { FixtureMissError } from '../../src/mock/errors.ts';
 import { createMockLayer } from '../../src/mock/index.ts';
 import { keyString, semanticKey } from '../../src/mock/key.ts';
 import type { FixtureStore } from '../../src/mock/store.ts';
+import { releaseActions } from '../../src/runlog/actions.ts';
 import type { RunStore } from '../../src/runstore/types.ts';
 import { createToolDeps } from '../../src/tools/_lib/context.ts';
 import type { StagingHarness } from '../../src/tools/_lib/pipeline.ts';
@@ -103,6 +104,7 @@ function setup(opts: Setup = {}): H {
   cleanups.push(() => {
     releaseRunBudget(runId);
     releaseEscalation(runId);
+    releaseActions(runId);
   });
   const storeKeys: H['storeKeys'] = [];
   const store: FixtureStore = {
@@ -661,5 +663,72 @@ describe('sql_select: description', () => {
     expect(text).toContain('EXPLAIN ANALYZE');
     expect(text).toContain('no row cap');
     expect(text).toContain('SQLSTATE');
+  });
+});
+
+// ------------------------------------------------------------------ repeats (D79)
+
+describe('sql_select: exact repeats', () => {
+  const asAgent = (h: H, agent: string): H => {
+    const ctx = { ...h.ctx, agent };
+    return { ...h, ctx, tool: toolModule.create(ctx, 'investigator') };
+  };
+
+  test('a second identical call returns the earlier result with a note and uses no budget', async () => {
+    const h = asAgent(setup({ env: REAL }), 'investigate_atspl');
+    const first = await call(h, { service: 'package', sql: SELECT_ONE, params: [CUSTOMER] });
+    const calls = h.ctx.deps.budget.state().calls;
+    // Whitespace differences still count as the same query.
+    const again = await call(h, { service: 'package', sql: `  ${SELECT_ONE.replace(/ /g, '\n  ')} `, params: [CUSTOMER] });
+    expect(again.output.status).toBe('ok');
+    expect(again.output.data).toEqual(first.output.data);
+    expect(again.output.message).toBe(
+      'Already run by investigate_atspl at 10:00:00Z; result reused, nothing new was queried. ' +
+        'If it was empty, find out why before trying again; for new data change the key, window, page or filter.',
+    );
+    expect(h.sql.calls).toHaveLength(1);
+    expect(h.ctx.deps.budget.state().calls).toBe(calls);
+    expect(h.audit.lines.at(-1)).toMatchObject({ decision: 'allow', exit: 'reused' });
+  });
+
+  test('two different SELECTs on the same table both run', async () => {
+    const h = setup({ env: REAL });
+    await call(h, { service: 'package', sql: SELECT_ONE, params: [CUSTOMER] });
+    await call(h, { service: 'package', sql: 'SELECT id FROM delivery_requests WHERE external_ref_id = $1', params: [CUSTOMER] });
+    expect(h.sql.calls).toHaveLength(2);
+  });
+
+  test('string literals that differ only in spacing are different queries', async () => {
+    const h = setup({ env: REAL });
+    const sql = (note: string): string => `SELECT id FROM delivery_requests WHERE external_ref_id = $1 AND note = '${note}'`;
+    await call(h, { service: 'package', sql: sql('a  b'), params: [CUSTOMER] });
+    await call(h, { service: 'package', sql: sql('a b'), params: [CUSTOMER] });
+    expect(h.sql.calls).toHaveLength(2);
+  });
+
+  test.each([
+    "created_at > now() - interval '1 day'",
+    "created_at > 'now'::timestamptz - interval '1 day'",
+    "created_at::date = 'today'::date",
+    "age(created_at) < interval '1 day'",
+  ])('a query that reads the clock always runs again: %s', async (where) => {
+    const h = setup({ env: REAL });
+    const sql = `SELECT id FROM delivery_requests WHERE external_ref_id = $1 AND ${where}`;
+    await call(h, { service: 'package', sql, params: [CUSTOMER] });
+    const again = await call(h, { service: 'package', sql, params: [CUSTOMER] });
+    expect(again.output.message).toBeUndefined();
+    expect(h.sql.calls).toHaveLength(2);
+  });
+
+  test('a refused or failed call is not kept: the same call runs again', async () => {
+    const server = 'column "stauts" does not exist.';
+    const fail = new SqlStateError('refused', `atspl:package: query failed (SQLSTATE 42703): ${server}`, '42703', 'query', server);
+    const h = setup({ env: REAL, sql: fakeSql([], { fail }) });
+    for (let i = 0; i < 2; i++) {
+      const env = await call(h, { service: 'package', sql: SELECT_ONE, params: [CUSTOMER] });
+      expect(env.output.status).toBe('refused');
+    }
+    expect(h.sql.calls).toHaveLength(2);
+    expect(h.audit.lines.map((l) => l.exit)).toEqual(['query_error', 'query_error']);
   });
 });

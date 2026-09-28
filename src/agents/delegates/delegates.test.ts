@@ -6,7 +6,10 @@ import type { SkillDefinition, SubagentDefinition } from '@flue/runtime';
 import type { ToolDefinition } from '@flue/runtime/tool';
 import { ConfigError } from '../../config/errors.ts';
 import { allToolModules, FORBIDDEN_INPUT_KEYS } from '../../tools/index.ts';
+import { logActions, releaseActions } from '../../runlog/actions.ts';
+import type { ToolDeps } from '../../tools/types.ts';
 import { ENTITIES, type Entity } from '../../types/core.ts';
+import { ok } from '../../types/tool-result.ts';
 import { makeTestHome, REPO_ROOT, type TestHome } from '../../../test/support/home.ts';
 import { throwingDeps } from '../../../test/support/fake-tool-context.ts';
 import { loadKnowledge, type Knowledge } from '../skills.ts';
@@ -31,7 +34,7 @@ const FAKE_ENC_KEY = 'QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU
 const CODE_TOOLS = ['code_explore', 'code_impact', 'code_node', 'repo_grep', 'repo_read'];
 const REPO_TOOLS = ['repo_grep', 'repo_read'];
 const CODEGRAPH_TOOLS = ['code_explore', 'code_impact', 'code_node'];
-const BASE_TOOLS = ['http_call', 'logs_search', 'note_evidence', 'sql_select', ...REPO_TOOLS];
+const BASE_TOOLS = ['http_call', 'logs_search', 'note_evidence', 'run_log', 'sql_select', ...REPO_TOOLS];
 const SSFB_ALWAYS = ['detect_silent_reversals', 'get_account_statement'];
 const SSFB_FLAGGED = ['cbs_call', 'decrypt_fields', 'encrypt_lookup_value'];
 const ENTITY_IO = ['sql_select', 'http_call', 'logs_search'];
@@ -202,7 +205,7 @@ describe('tool sets (mock mode, credentials blank)', () => {
     test(`${label}: code_walker mounts code tools and note_evidence, no entity I/O`, () => {
       const env = envOf(home({ flags }));
       const names = namesOf(codeWalkerMounts(RUN, { env }).tools);
-      expect(sorted(names)).toEqual(sorted([...CODE_TOOLS, 'note_evidence']));
+      expect(sorted(names)).toEqual(sorted([...CODE_TOOLS, 'note_evidence', 'run_log']));
       for (const name of [...ENTITY_IO, ...SSFB_ALWAYS, ...SSFB_FLAGGED, 'resolve_identity', 'finish_report']) {
         expect(names).not.toContain(name);
       }
@@ -219,7 +222,7 @@ describe('tool sets (mock mode, credentials blank)', () => {
       expect(normal).not.toContain(name);
       expect(deep).not.toContain(name);
     }
-    expect(sorted(normal)).toEqual(sorted(ENTITY_IO.concat('note_evidence')));
+    expect(sorted(normal)).toEqual(sorted(ENTITY_IO.concat('note_evidence', 'run_log')));
     expect(deep).toContain('code_explore');
   });
 
@@ -283,6 +286,29 @@ describe('model-visible schemas', () => {
 });
 
 describe('delegate body', () => {
+  test('the instructions end with the calls already made in the run (D79)', async () => {
+    const env = envOf(home());
+    const runId = 'run_delegates_brief_0001';
+    const deps = { run: { redactionNames: [] }, now: () => new Date('2026-09-28T04:30:18.000Z') } as unknown as ToolDeps;
+    const tool = { name: 'sql_select', run: async () => ok({ row_count: 3 }) } as unknown as ToolDefinition;
+    const call = async (agent: string, entity: Entity | null, sql: string): Promise<void> => {
+      const ctx = { runId, entity, agent, config: env.config, registry: env.registry, deps };
+      await (logActions([tool], ctx)[0]!.run as (c: unknown) => Promise<unknown>)({ data: { sql }, toolCallId: 't' });
+    };
+    try {
+      expect(investigatorMounts('ssfb', runId, { env }).instructions).toContain('## Already done in this run\n');
+      await call('investigate_ssfb', 'ssfb', 'SELECT 1');
+      await call('investigate_atspl', 'atspl', 'SELECT 2');
+      const ssfb = investigatorMounts('ssfb', runId, { env, deep: true }).instructions;
+      expect(ssfb).toEndWith('- 04:30:18Z investigate_ssfb sql_select {"sql":"SELECT 1"} -> ok rows=3\n');
+      expect(ssfb).not.toContain('SELECT 2');
+      const walker = codeWalkerMounts(runId, { env }).instructions;
+      expect(walker).toContain('investigate_atspl sql_select {"sql":"SELECT 2"}');
+    } finally {
+      releaseActions(runId);
+    }
+  });
+
   test('investigator mounts its tools and service notes with useTool and useSkill and returns the method text', () => {
     const env = envOf(home());
     const hooks = recorder();
@@ -321,7 +347,7 @@ describe('delegate body', () => {
     expect(normal.skills.map((s) => s.name)).not.toContain('codegraph-limits');
     for (const m of [normal, deep]) {
       expect(m.instructions).toContain('## When a source fails or lacks the data');
-      const order = ['Read the error', 'Look it up in the code', 'Try another rung', 'Only then record the gap'];
+      const order = ['Read the error', 'Look it up in the code', 'Try another source', 'Only then record the gap'];
       const at = order.map((phrase) => m.instructions.indexOf(phrase));
       expect(at.every((i) => i >= 0)).toBe(true);
       expect([...at].sort((a, b) => a - b)).toEqual(at);
@@ -333,7 +359,7 @@ describe('delegate body', () => {
     const hooks = recorder();
     const text = render(codeWalkerFor(RUN, { env, hooks }));
     expect(sorted(hooks.skills.map((s) => s.name))).toEqual(['codegraph-limits', 'frontend-routing', 'repo-map']);
-    expect(sorted(namesOf(hooks.tools))).toEqual(sorted([...CODE_TOOLS, 'note_evidence']));
+    expect(sorted(namesOf(hooks.tools))).toEqual(sorted([...CODE_TOOLS, 'note_evidence', 'run_log']));
     expect(text).toContain('# Code walker');
   });
 
@@ -355,11 +381,12 @@ describe('delegate body', () => {
 
   test('entity and run id reach the tools by closure', () => {
     const env = envOf(home());
-    const ctx = delegateContext(RUN, 'atspl', env);
+    const ctx = delegateContext(RUN, 'atspl', env, 'investigate_atspl');
     expect(ctx.entity).toBe('atspl');
     expect(ctx.runId).toBe(RUN);
+    expect(ctx.agent).toBe('investigate_atspl');
     expect(Object.isFrozen(ctx)).toBe(true);
-    expect(delegateContext(RUN, null, env).entity).toBeNull();
+    expect(delegateContext(RUN, null, env, CODE_WALKER_NAME).entity).toBeNull();
   });
 });
 

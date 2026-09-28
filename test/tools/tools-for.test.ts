@@ -26,7 +26,7 @@ const CBS_FLAG = 'SSFB_CBS_VIA_KUBECTL_ENABLED';
 
 // repo_grep and repo_read are on both investigator variants, scoped to the entity's repos.
 const REPO_TOOLS = ['repo_grep', 'repo_read'];
-const BASE_INVESTIGATOR = ['http_call', 'logs_search', 'note_evidence', 'sql_select', ...REPO_TOOLS];
+const BASE_INVESTIGATOR = ['http_call', 'logs_search', 'note_evidence', 'run_log', 'sql_select', ...REPO_TOOLS];
 const SSFB_ALWAYS = ['detect_silent_reversals', 'get_account_statement'];
 const SSFB_CRYPTO = ['decrypt_fields', 'encrypt_lookup_value'];
 // Scoped to ssfb in their module. The crypto tools serve any entity with a field-encryption service (D48).
@@ -130,16 +130,16 @@ describe('per-mount and per-entity membership', () => {
     }
   });
 
-  test('the triage mount holds ask_requester, stop_blocked, resolve_identity, note_evidence and finish_report only', () => {
+  test('the triage mount holds ask_requester, stop_blocked, resolve_identity, note_evidence, run_log and finish_report only', () => {
     for (const h of [plain, allOn]) {
       const set = names(toolsFor('triage', ctxFrom(h, null)));
-      expect(set).toEqual(sorted(['ask_requester', 'finish_report', 'note_evidence', 'resolve_identity', 'stop_blocked']));
+      expect(set).toEqual(sorted(['ask_requester', 'finish_report', 'note_evidence', 'resolve_identity', 'run_log', 'stop_blocked']));
     }
   });
 
-  test('code_walker holds the five code tools and note_evidence', () => {
+  test('code_walker holds the five code tools, note_evidence and run_log', () => {
     for (const h of [plain, allOn]) {
-      expect(names(toolsFor('code_walker', ctxFrom(h, null)))).toEqual(sorted([...CODE_TOOLS, 'note_evidence']));
+      expect(names(toolsFor('code_walker', ctxFrom(h, null)))).toEqual(sorted([...CODE_TOOLS, 'note_evidence', 'run_log']));
     }
   });
 

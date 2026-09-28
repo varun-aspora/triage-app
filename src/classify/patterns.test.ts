@@ -126,6 +126,25 @@ describe('parsePatterns rejects invalid files', () => {
   test('a non-array top level is rejected', () => {
     expectFail({ patterns: [] }, 'array');
   });
+
+  test('first_queries must be a non-empty list of {entity, query}', () => {
+    expectFail([good({ id: 'no-queries', first_queries: [] })], '"no-queries"', 'first_queries');
+    expectFail([good({ id: 'bad-entity-q', first_queries: [{ entity: 'bank', query: 'x' }] })], '"bad-entity-q"', 'entity');
+    expectFail([good({ id: 'blank-q', first_queries: [{ entity: 'ssfb', query: ' ' }] })], '"blank-q"', 'query');
+    expectFail([good({ id: 'extra-q', first_queries: [{ entity: 'ssfb', query: 'x', note: 'y' }] })], '"extra-q"');
+  });
+});
+
+describe('first_queries', () => {
+  test('is optional, and kept in order when present', () => {
+    const first_queries = [
+      { entity: 'ssfb', query: 'logs_search on harbor' },
+      { entity: 'rtl', query: 'sql_select on devices' },
+    ];
+    const [without, withQueries] = parsePatterns([good({ id: 'a' }), good({ id: 'b', entities: ['ssfb', 'rtl'], first_queries })]);
+    expect(without?.first_queries).toBeUndefined();
+    expect(withQueries?.first_queries).toEqual(first_queries as Pattern['first_queries']);
+  });
 });
 
 describe('matchPattern', () => {

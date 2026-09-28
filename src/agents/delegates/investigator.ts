@@ -22,6 +22,11 @@
 //
 // Skills: the entity's service notes and repo-map on both variants, and
 // codegraph-limits on the deep variant, the only one with CodeGraph tools.
+//
+// Every mounted tool is wrapped by logActions, and the instruction text ends
+// with "Already done in this run": the run's action log as it stood when the
+// task started (D79). Flue renders a delegate once per task (its task
+// session has no rerender), so that text stays fixed for the whole task.
 
 import { defineSubagent, useSkill, useTool, type SkillDefinition, type SubagentDefinition } from '@flue/runtime';
 import type { ToolDefinition } from '@flue/runtime/tool';
@@ -29,6 +34,7 @@ import * as v from 'valibot';
 import type { Config } from '../../config/env.ts';
 import type { Registry } from '../../config/registry.ts';
 import { modelForTier } from '../../models.ts';
+import { actionBrief, logActions } from '../../runlog/actions.ts';
 import { toolsFor } from '../../tools/index.ts';
 import type { Mount, ToolContext, ToolDeps } from '../../tools/types.ts';
 import { EntitySchema, RunIdSchema, type Entity, type RunId } from '../../types/core.ts';
@@ -130,11 +136,11 @@ export function investigatorMounts(
   const deep = options.deep === true;
   const { env } = options;
   const mount: Mount = deep ? 'investigator_deep' : 'investigator';
-  const ctx = delegateContext(runId, entity, env);
+  const ctx = delegateContext(runId, entity, env, investigatorName(entity, deep));
   const knowledge = env.knowledge ?? currentKnowledge();
   const services = env.registry.services(entity);
   const notes = serviceSkills(entity, services, knowledge);
-  const tools = toolsFor(mount, ctx);
+  const tools = logActions(toolsFor(mount, ctx), ctx);
   const skills = [...notes.skills, repoMapSkill(knowledge), ...(deep ? [codegraphLimitsSkill(knowledge)] : [])];
   const docs = investigatorDocs(entity).map((file) => methodDoc(file, knowledge));
   const footer = [
@@ -146,6 +152,8 @@ export function investigatorMounts(
     ...(notes.missing.length > 0 ? [`- No service notes yet for: ${notes.missing.join(', ')}.`] : []),
     `- Tools mounted: ${tools.map((t) => t.name).join(', ')}.`,
     ...(deep ? ['- You are the deep variant: use the code tools only to explain what the data and logs show.'] : []),
+    '',
+    ...actionBrief(runId, entity),
   ];
 
   return freezeMounts(tools, skills, docs, footer);
@@ -171,10 +179,10 @@ export function freezeMounts(
   });
 }
 
-/** The T01.6 ToolContext for a delegate. Entity and run id are fixed here, by closure. */
-export function delegateContext(runId: RunId, entity: Entity | null, env: DelegateEnv): ToolContext {
+/** The T01.6 ToolContext for a delegate. Entity, run id and agent name are fixed here, by closure. */
+export function delegateContext(runId: RunId, entity: Entity | null, env: DelegateEnv, agent: string): ToolContext {
   const deps = typeof env.deps === 'function' ? env.deps() : env.deps;
-  return Object.freeze({ runId, entity, config: env.config, registry: env.registry, deps });
+  return Object.freeze({ runId, entity, agent, config: env.config, registry: env.registry, deps });
 }
 
 /** Calls the hooks for every tool and skill and returns the instruction text. */

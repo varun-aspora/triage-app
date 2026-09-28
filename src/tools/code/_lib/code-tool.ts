@@ -110,7 +110,8 @@ export async function runCodeTool(spec: CodeRunSpec): Promise<ToolEnvelope> {
 
   const budget = deps.budget.consumeToolCall(spec.tool, ctx.entity ?? undefined);
   if (!budget.ok) {
-    if (budget.reason !== 'entity_calls') deps.escalation.markBudgetExhausted();
+    // The code cap (tool_cap) refuses code tools only; the run goes on.
+    if (budget.reason !== 'entity_calls' && budget.reason !== 'tool_cap') deps.escalation.markBudgetExhausted();
     audit('deny', 'refused', spec.tool, `budget: ${budget.reason}`);
     return refuse(budget.message);
   }

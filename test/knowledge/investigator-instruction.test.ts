@@ -97,10 +97,12 @@ describe('tool names per agent', () => {
     expect(mentionedTools(read('code-walker.md')).filter((t) => !allowed.has(t))).toEqual([]);
   });
 
-  test('investigator.md names no orchestrator tool and covers the ladder tools', () => {
+  test('investigator.md names no orchestrator tool and covers the source tools', () => {
     const tools = mentionedTools(read('investigator.md'));
     for (const t of TRIAGE_TOOLS.filter((x) => x !== 'note_evidence')) expect(tools).not.toContain(t);
-    for (const t of ['logs_search', 'sql_select', 'http_call', 'note_evidence', 'cbs_call']) expect(tools).toContain(t);
+    for (const t of ['logs_search', 'sql_select', 'http_call', 'note_evidence', 'cbs_call', 'repo_grep', 'repo_read', 'run_log']) {
+      expect(tools).toContain(t);
+    }
     for (const t of ['encrypt_lookup_value', 'decrypt_fields']) expect(tools).toContain(t);
   });
 
@@ -177,15 +179,32 @@ describe('investigator.md', () => {
     for (const level of ['`high`', '`medium`', '`low`']) expect(text).toContain(level);
   });
 
-  test('covers the brief, the ladder, gaps, scope, /data and a short reply', () => {
+  test('covers the brief, the sources, gaps, scope, /data and a short reply', () => {
     expect(text).toMatch(/brief is the whole context/i);
-    expect(text).toMatch(/Admin API[\s\S]*DB[\s\S]*Logs[\s\S]*CBS/);
+    expect(text).toMatch(/\*\*Logs\*\*[\s\S]*\*\*DB\*\*[\s\S]*\*\*Code\*\*[\s\S]*\*\*Admin API\*\*[\s\S]*\*\*CBS\*\*/);
     expect(text).toContain('not configured for <entity>:<service>');
     expect(text).toContain('unreachable');
     expect(text).toContain("scope: 'systemic'");
     expect(text).toContain('/data/<call_id>.json');
     expect(text).toMatch(/never guess a plaintext/i);
     expect(text).toMatch(/Reply to the parent/);
+  });
+
+  test('has no fixed ladder, and covers hypotheses, empty lookups, log text, the window and client code (D81)', () => {
+    const flat = text.replace(/\s+/g, ' ');
+    expect(flat).not.toMatch(/evidence ladder|\brungs?\b/i);
+    expect(flat).toContain('There is no fixed order of sources');
+    expect(flat).toContain('only for live state the DB does not hold, and only when it is mounted');
+    expect(flat).toContain('say which hypothesis it tests and what result would reject it');
+    expect(flat).toContain('## Empty means ask why');
+    expect(flat).toMatch(/first make sure the query itself is sound[\s\S]*read the code that writes that row or log line/);
+    expect(flat).toContain('do not reword the same text or run the same key again');
+    expect(flat).toMatch(/A device id or a verification id is not one of the run's ids[\s\S]*Put it under `gaps`/);
+    expect(flat).toContain('## Where log text comes from');
+    expect(flat).toMatch(/`aspora_user_id`[\s\S]*"x-customer-id"[\s\S]*`group_by: \["message"\]`/);
+    expect(flat).toMatch(/the run's default window[\s\S]*set `from` to that time/);
+    expect(flat).not.toContain('30 days');
+    expect(flat).toContain('read the app code that sends or receives on that leg');
   });
 });
 

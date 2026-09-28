@@ -16,7 +16,7 @@ Pass the registry name as `service`; the tool maps it to the name in the logs.
 
 The registry also lists `cohort`, `pdfgen`, `reminder`, `bro`, `eventbus` and
 `audit`, which log under their own names (unverified: their field layout was
-not sampled). `finacle` has no logs here; use the CBS rung for it.
+not sampled). `finacle` has no logs here; read it through CBS.
 
 ## Document schema
 

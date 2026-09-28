@@ -99,7 +99,7 @@ let seq = 0;
 
 type Rig = { ctx: ToolContext; audit: MemoryAuditSink; runId: string };
 
-function rig(opts: { entity?: Entity | null; config?: Config; maxToolCalls?: number } = {}): Rig {
+function rig(opts: { entity?: Entity | null; config?: Config; maxToolCalls?: number; maxCodeCalls?: number } = {}): Rig {
   seq += 1;
   const runId = `run_repo_tools_${seq}`;
   const config = opts.config ?? home.config;
@@ -118,6 +118,7 @@ function rig(opts: { entity?: Entity | null; config?: Config; maxToolCalls?: num
       maxRowsPerCall: 200,
       maxBytesPerCall: 1_000_000,
       maxBytesPerRun: 10_000_000,
+      ...(opts.maxCodeCalls !== undefined ? { codeCap: { maxCalls: opts.maxCodeCalls, setting: 'TRIAGE_MAX_CODE_CALLS_PER_RUN' } } : {}),
     }),
     audit,
     fixtures: createMockLayer(config, { store: emptyStore }),
@@ -374,6 +375,25 @@ describe('repo_read', () => {
     const second = await call(readModule, r, { repo: REPO, path: 'src/app.go' });
     expect(second.output.status).toBe('refused');
     expect(r.audit.lines.at(-1)).toMatchObject({ decision: 'deny', reason: 'budget: tool_calls' });
+  });
+
+  test('deny: the code cap refuses with its key and value, and the run goes on', async () => {
+    const r = rig({ maxToolCalls: 1, maxCodeCalls: 2 });
+    expect((await call(readModule, r, { repo: REPO, path: 'src/app.go' })).output.status).toBe('ok');
+    expect((await call(grepModule, r, { repo: REPO, pattern: 'func' })).output.status).toBe('ok');
+    const third = await call(readModule, r, { repo: REPO, path: 'src/app.go' });
+    expect(third.output).toMatchObject({ status: 'refused' });
+    expect(third.output.message).toContain('(TRIAGE_MAX_CODE_CALLS_PER_RUN=2)');
+    expect(r.audit.lines.at(-1)).toMatchObject({ decision: 'deny', reason: 'budget: tool_cap' });
+    expect(r.ctx.deps.escalation.snapshot().budgetExhausted).toBe(false);
+  });
+
+  test('a spent run limit does not stop repo_read under the code cap', async () => {
+    const r = rig({ maxToolCalls: 1, maxCodeCalls: 5 });
+    expect(r.ctx.deps.budget.consumeToolCall('sql_select').ok).toBe(true);
+    expect(r.ctx.deps.budget.consumeToolCall('sql_select')).toMatchObject({ ok: false, reason: 'tool_calls' });
+    expect((await call(readModule, r, { repo: REPO, path: 'src/app.go' })).output.status).toBe('ok');
+    expect(r.ctx.deps.escalation.snapshot().budgetExhausted).toBe(false);
   });
 
   test('an aborted signal throws before any work', async () => {

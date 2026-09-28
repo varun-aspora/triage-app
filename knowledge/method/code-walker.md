@@ -32,6 +32,10 @@ YAML and docs are not indexed. When a call crosses a service boundary, follow
 it by searching the other repo for the route or topic name. Confirm every claim
 by reading the lines with `repo_read`.
 
+Code tools have their own cap per run (`TRIAGE_MAX_CODE_CALLS_PER_RUN`),
+outside the run's tool-call limit. It is a cap, not a target: stop when the
+lines you have read answer the brief.
+
 If a tool answers `not_configured` or refuses, say which repo and which tool in
 the reply, and continue with the others.
 

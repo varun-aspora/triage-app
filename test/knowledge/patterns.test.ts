@@ -2,7 +2,8 @@
 // pass the loader's schema (src/classify/patterns.ts) and the curation rules
 // on top of it: a known category, registry services, investigator tools in the
 // recipe and a source_ref that points at a knowledge note heading or a named
-// triage-shivalik skill, never at past case folders.
+// triage-shivalik skill, never at past case folders. Optional first_queries
+// (D80) run on a listed entity and name that entity's investigator tools.
 
 import { describe, expect, test } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
@@ -141,6 +142,18 @@ function checkPatterns(raw: readonly unknown[], ctx: Context): string[] {
     for (const m of p.query_recipe.matchAll(/<[^>\s]*>/g)) {
       if (!new RegExp(`^${PLACEHOLDER.source}$`).test(m[0])) bad(`placeholder ${m[0]} is not <snake_case>`);
     }
+
+    // first_queries (D80): each one runs on a listed entity and names that
+    // entity's investigator tools.
+    for (const q of p.first_queries ?? []) {
+      if (!p.entities.includes(q.entity)) bad(`first_queries entity ${q.entity} is not in entities`);
+      const tools = mentionedTools(q.query);
+      if (tools.length === 0) bad(`first_queries item for ${q.entity} names no tool`);
+      for (const tool of tools) if (!recipeTools([q.entity]).has(tool)) bad(`first_queries names ${tool}, not an investigator tool on ${q.entity}`);
+      for (const m of q.query.matchAll(/<[^>\s]*>/g)) {
+        if (!new RegExp(`^${PLACEHOLDER.source}$`).test(m[0])) bad(`placeholder ${m[0]} is not <snake_case>`);
+      }
+    }
   });
   return out;
 }
@@ -246,6 +259,23 @@ describe('patterns SKILL.md', () => {
   });
 });
 
+// ------------------------------------------------------ the method notes
+
+describe('the method notes carry the pattern lead rule (D80)', () => {
+  const method = (name: string) => readFileSync(join(KNOWLEDGE_DIR, 'method', name), 'utf8');
+
+  test.each(['orchestrator.md', 'investigator.md'])('%s: run the first queries, drop a pattern that does not match, report it', (name) => {
+    const text = method(name).replace(/\s+/g, ' ');
+    expect(text).toContain('`Lead:` line');
+    expect(text).toMatch(/does not match/);
+    expect(text).toContain('`pattern <id> tried and rejected: <what did not match>`');
+  });
+
+  test('the investigator note says a lead is not an answer', () => {
+    expect(method('investigator.md').replace(/\s+/g, ' ')).toContain('a lead to test, not an answer');
+  });
+});
+
 // ------------------------------------------------------------- deny paths
 
 describe('the curation rules refuse bad entries', () => {
@@ -299,6 +329,12 @@ describe('the curation rules refuse bad entries', () => {
     ['a recipe naming a code tool', { query_recipe: 'code_explore on harbor' }, 'code_explore'],
     ['a recipe naming a sandbox tool', { query_recipe: 'logs_search, then `bash` over the rows' }, 'bash'],
     ['a recipe with a bad placeholder', { query_recipe: 'logs_search for <Form-ID>' }, 'placeholder'],
+    ['an empty first_queries', { first_queries: [] }, 'first_queries'],
+    ['a first query on an unlisted entity', { first_queries: [{ entity: 'rtl', query: 'logs_search on x' }] }, 'not in entities'],
+    ['a first query with no tool', { first_queries: [{ entity: 'ssfb', query: 'check harbor' }] }, 'names no tool'],
+    ['a first query naming a Triage tool', { first_queries: [{ entity: 'ssfb', query: 'resolve_identity' }] }, 'resolve_identity'],
+    ['a first query with a bad placeholder', { first_queries: [{ entity: 'ssfb', query: 'logs_search for <Form-ID>' }] }, 'placeholder'],
+    ['a first query with an extra field', { first_queries: [{ entity: 'ssfb', query: 'logs_search', why: 'x' }] }, 'first_queries'],
   ])('rejects %s', (_label, patch, reason) => {
     expect(problems(patch).join('\n')).toContain(reason);
   });
@@ -315,6 +351,22 @@ describe('the curation rules refuse bad entries', () => {
       query_recipe: 'get_account_statement for the account',
     });
     expect(out.join('\n')).toContain('get_account_statement');
+  });
+
+  test('accepts first queries on listed entities', () => {
+    const first_queries = [
+      { entity: 'ssfb', query: 'logs_search on harbor, fields form_id = <form_id>' },
+      { entity: 'ssfb', query: 'get_account_statement for the window' },
+    ];
+    expect(problems({ first_queries })).toEqual([]);
+  });
+
+  test('rejects an SSFB-only tool in an atspl first query', () => {
+    const out = problems({
+      entities: ['ssfb', 'atspl'],
+      first_queries: [{ entity: 'atspl', query: 'get_account_statement for the account' }],
+    });
+    expect(out.join('\n')).toContain('not an investigator tool on atspl');
   });
 
   test('allows an SSFB-only tool on an ssfb entry', () => {

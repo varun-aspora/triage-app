@@ -132,6 +132,7 @@ function budgetFor(opts: CreateToolDepsOptions): RunBudget {
     maxBytesPerRun: budgets.maxBytesPerRun,
     perEntity: perEntityLimits(opts.config, opts.registry),
     perTool: { logs_search: { maxCalls: budgets.maxLogCallsPerRun, setting: 'TRIAGE_MAX_LOG_CALLS_PER_RUN' } },
+    codeCap: { maxCalls: budgets.maxCodeCallsPerRun, setting: 'TRIAGE_MAX_CODE_CALLS_PER_RUN' },
   });
 }
 

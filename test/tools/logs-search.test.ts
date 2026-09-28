@@ -16,6 +16,7 @@ import { quickwitSlot, resetQuickwitSlotsForTests } from '../../src/gate/semapho
 import { createMockLayer } from '../../src/mock/index.ts';
 import { keyString } from '../../src/mock/key.ts';
 import type { FixtureStore } from '../../src/mock/store.ts';
+import { releaseActions } from '../../src/runlog/actions.ts';
 import type { RunStore } from '../../src/runstore/types.ts';
 import { createToolDeps } from '../../src/tools/_lib/context.ts';
 import { conformanceProblems, FORBIDDEN_INPUT_KEYS } from '../../src/tools/index.ts';
@@ -80,6 +81,8 @@ type SetupOptions = {
   requestWindow?: TimeWindow | null;
   /** Build the run budget from the home's config (per-tool caps included). */
   budgetFromConfig?: boolean;
+  /** The run clock; NOW by default. */
+  clock?: () => Date;
 };
 
 function setup(opts: SetupOptions = {}): Setup {
@@ -102,6 +105,7 @@ function setup(opts: SetupOptions = {}): Setup {
     releaseRunBudget(runId);
     releaseEscalation(runId);
     releaseObservedIds(runId);
+    releaseActions(runId);
   });
   const audit = createMemoryAuditSink();
   const storeCalls: StoreCall[] = [];
@@ -135,7 +139,7 @@ function setup(opts: SetupOptions = {}): Setup {
     ...(budget !== undefined ? { budget } : {}),
     audit,
     fixtures: createMockLayer(mockConfig, { store }),
-    now: () => new Date(NOW),
+    now: opts.clock ?? (() => new Date(NOW)),
     ...(requestWindow !== null ? { requestWindow } : {}),
   });
   const ctx = makeToolContext({ config: h.config, registry: h.registry, entity, runId, deps });
@@ -707,8 +711,9 @@ describe('per-run call cap', () => {
   test('the 51st logs_search call in a run is refused with the cap; other tools are not held back', async () => {
     const s = setup({ fixture: HITS_FIXTURE, budgetFromConfig: true });
     expect(s.h.config.budgets.maxLogCallsPerRun).toBe(50);
-    for (let i = 0; i < 50; i++) dataOf(await s.call({ service: 'harbor', message: 'doc fetch failed' }));
-    const out = await s.call({ service: 'harbor', message: 'doc fetch failed' });
+    // A different page each time, so no call is an exact repeat (D79).
+    for (let i = 0; i < 50; i++) dataOf(await s.call({ service: 'harbor', message: 'doc fetch failed', offset: i }));
+    const out = await s.call({ service: 'harbor', message: 'doc fetch failed', offset: 50 });
     expect(out.output.status).toBe('refused');
     expect(out.output.message).toBe(
       'logs_search refused: this run has used all 50 of its logs_search calls (TRIAGE_MAX_LOG_CALLS_PER_RUN=50). ' +
@@ -950,5 +955,36 @@ describe('envelope and staging', () => {
     ac.abort();
     await expect(s.call({ service: 'harbor', message: 'x' }, { signal: ac.signal })).rejects.toBeDefined();
     expect(s.audit.lines).toHaveLength(0);
+  });
+});
+
+describe('exact repeats (D79)', () => {
+  test('the same search is reused; another window or page runs', async () => {
+    const s = setup({ fixture: HITS_FIXTURE });
+    const q = { service: 'harbor', message: 'doc fetch failed' };
+    dataOf(await s.call(q));
+    const again = await s.call(q);
+    expect(again.output.message).toContain('result reused, nothing new was queried');
+    expect(lastAudit(s)).toMatchObject({ exit: 'reused' });
+    expect(s.storeCalls).toHaveLength(1);
+
+    // The request window resolved explicitly is the same call.
+    await s.call({ ...q, from: REQUEST_WINDOW.from, to: REQUEST_WINDOW.to });
+    expect(s.storeCalls).toHaveLength(1);
+
+    const other = await s.call({ ...q, from: '2026-09-22T00:00:00.000Z', to: NOW.toISOString() });
+    expect(other.output.message).toBeUndefined();
+    await s.call({ ...q, offset: 250 });
+    expect(s.storeCalls).toHaveLength(3);
+  });
+
+  test('a relative window repeated seconds later is reused', async () => {
+    let at = NOW.getTime() + 5_000;
+    const s = setup({ fixture: HITS_FIXTURE, clock: () => new Date(at) });
+    const q = { service: 'harbor', message: 'doc fetch failed', from: '2d' };
+    await s.call(q);
+    at += 15_000;
+    expect((await s.call(q)).output.message).toContain('result reused');
+    expect(s.storeCalls).toHaveLength(1);
   });
 });

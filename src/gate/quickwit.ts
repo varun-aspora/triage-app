@@ -107,8 +107,12 @@ export const PAGE_SIZE = 250;
 /** A query over this many hits returns early (D76); no page starts at or past it. */
 export const HIT_LIMIT = 5_000;
 
-/** The owner's SSFB noise filter: drops kong, kafka and access lines unless they are errors. */
-export const DENOISE_FILTER = "((NOT service:'kong'* AND NOT service:'kafka'* AND NOT 'Api execution completed') OR level:error)";
+/**
+ * The owner's SSFB noise filter: drops kong, kafka and access lines unless
+ * they are errors. The leading * keeps a group of only NOTs matching on
+ * Quickwit 0.8 (owner, 2026-09-28).
+ */
+export const DENOISE_FILTER = "((* AND NOT service:'kong'* AND NOT service:'kafka'* AND NOT 'Api execution completed') OR level:error)";
 
 // Fields the model may not filter through `fields`: service and level have
 // their own inputs, and the time window is applied by quickwit-window.ts.

@@ -52,6 +52,21 @@ export const SQL_SELECT = 'sql_select';
 const MAX_PARAMS = 50;
 const PARAM_MAX_CHARS = 1_000;
 
+// SQL whose answer depends on when it runs. Never served from the repeat cache.
+// 'now'::timestamptz and one-argument age(col) read the clock without a call.
+const READS_CLOCK =
+  /\b(?:now|clock_timestamp|statement_timestamp|transaction_timestamp|timeofday)\s*\(|\b(?:current_date|current_time|current_timestamp|localtime|localtimestamp)\b|'(?:now|today|yesterday|tomorrow)'|\bage\s*\(\s*[^,()]+\)/i;
+
+// The repeat key's SQL: whitespace collapses outside quotes only, so string
+// literals that differ in spacing stay different queries.
+function repeatSql(sql: string): string {
+  return sql
+    .trim()
+    .split(/('(?:[^']|'')*'|"(?:[^"]|"")*")/)
+    .map((part, i) => (i % 2 === 1 ? part : part.replace(/\s+/g, ' ')))
+    .join('');
+}
+
 const WRITE_ADVICE = 'If a write is needed, recommend it under actions in the report instead.';
 
 // Codes that mean "this is not a single SELECT". They all get the same
@@ -268,6 +283,8 @@ async function runSqlSelect(ctx: ToolContext, entity: Entity, services: readonly
         kind: 'sql_select',
         key: semanticKey('sql_select', keyFacts(entity, service, check, params)),
       }),
+      // A query that reads the clock can answer differently next time (D79).
+      repeat: () => !READS_CLOCK.test(data.sql) && { ...data, sql: repeatSql(data.sql) },
       real: async (signal) => {
         const connector = deps.connectors.sql;
         if (connector === undefined) throw new ConnectorError('not_configured', 'no sql connector for this run');
