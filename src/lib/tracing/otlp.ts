@@ -11,6 +11,7 @@ import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 import { BatchSpanProcessor, NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import type { Config } from '../../config/env.ts';
 import { mask, type Tracer } from './index.ts';
+import { OTLP_RUN_ID_KEY } from './keys.ts';
 
 export function installOtlp(tracing: Config['tracing']): Tracer {
   const exporter = new OTLPTraceExporter({ url: tracing.otlpEndpoint, headers: parseHeaders(tracing.otlpHeaders) });
@@ -21,12 +22,13 @@ export function installOtlp(tracing: Config['tracing']): Tracer {
   return {
     withModelSpan: (s, fn, result) =>
       tracer.startActiveSpan(
-        `${s.op} ${s.model}`,
+        `${s.op} ${s.name ?? s.model}`,
         {
           attributes: {
             'gen_ai.operation.name': s.op,
             'gen_ai.request.model': s.model,
             ...(s.name === undefined ? {} : { 'triage.decision.name': s.name }),
+            ...(s.runId === undefined ? {} : { [OTLP_RUN_ID_KEY]: s.runId }),
           },
         },
         async (span) => {

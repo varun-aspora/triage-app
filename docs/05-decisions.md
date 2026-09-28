@@ -670,6 +670,13 @@ Append-only. When a decision is reversed, add a new entry that supersedes it; do
 - **Assumptions**: a real Ollama reads `reasoning_effort` on its OpenAI endpoint the same way, `"none"` included, and ignores a top-level `enable_thinking` (not tested here). Every Ollama-tier model is a thinking model whose server accepts `reasoning_effort` with `"none"`. A server that rejects the field fails the request instead of ignoring it (Splash answers 400 to an unknown value), so a non-thinking model on this provider would need its own entry. `low` is assumed to cut thinking well below the 85% share; the next owner run checks it (plan 13, T3).
 - **Later**: stop sending old thinking back as `reasoning_content` (pi-ai 875–880).
 
+### D91. The run id on the app's own model spans (2026-09-28; closes D82's correlation gap)
+- **Problem**: D82's `decide`, `embeddings` and `chat` spans carried no run id, so the ingress decisions and the post-settle embedding of a run could not be found next to its Flue traces.
+- **Chosen**: one `AsyncLocalStorage` in `src/lib/tracing/index.ts`. `withRunId(runId, fn)` sets it, and `withModelSpan` copies it onto the span as `runId`. Ingress sets it in `runSubmission` and `answerRun`, and `embedRun` sets it around its embed call, which covers the settle listener and `triage runs reembed`. With tracing off `withRunId` just runs `fn`. Each adapter writes it under the key its vendor's Flue instrumentation uses for the instance id: `flue.instance_id` in Braintrust metadata, `flue.instance.id` as an OTLP attribute. One filter on that key joins a run. Span names are now `<op> <name>` (`decide identity`), with the model kept in metadata.
+- **Still several traces**: Braintrust starts every Flue prompt as a new root, and the ingress decisions finish before dispatch, so a run stays one Flue trace per submission plus one per decision and embedding call. The key joins them; nothing nests them.
+- **Rejected**: an explicit `runId` parameter on `decide()` and the embedder. It touches `DecideOptions`, the identity and classify call sites, `ClassifyDeps` (which has no run id today), the embed options, prior cases and `embedRun`, and every future caller has to remember it. That breaks D82's "no code at the call site".
+- **Assumptions**: the Flue instance id equals the run id (ingress inits with `{ id: runId }`). The vendor keys are internal to braintrust 3.35.0 and `@flue/opentelemetry`; `src/lib/tracing/keys.ts` holds them and `keys.test.ts` reads the installed dist code and fails on a rename.
+
 ## Assumptions (explicit; each needs your confirmation or correction)
 
 | # | Assumption | Basis | If wrong |

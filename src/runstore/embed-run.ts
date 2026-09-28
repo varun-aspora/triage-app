@@ -15,6 +15,7 @@ import { createHash } from 'node:crypto';
 import { caseCardText, requestText } from '../embed/case-text.ts';
 import { embedErrorLabel, type EmbedUsage, type Embedder } from '../embed/index.ts';
 import { redactPersisted, type Persisted } from '../gate/redact.ts';
+import { withRunId } from '../lib/tracing/index.ts';
 import type { RunId } from '../types/core.ts';
 import type { EmbeddingKind, EmbeddingMeta, RunRecord, RunStore } from './types.ts';
 
@@ -85,10 +86,14 @@ export async function embedRun(
 
   let vectors: number[][];
   try {
-    vectors = await embedder.embed(pending.map((p) => p.text), {
-      ...(options.signal !== undefined ? { signal: options.signal } : {}),
-      ...(options.onUsage !== undefined ? { onUsage: options.onUsage } : {}),
-    });
+    // Wrapped here, not at the callers, so the settle listener, reembed and
+    // any later caller all tag the embeddings span with the run id (D91).
+    vectors = await withRunId(runId, () =>
+      embedder.embed(pending.map((p) => p.text), {
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        ...(options.onUsage !== undefined ? { onUsage: options.onUsage } : {}),
+      }),
+    );
   } catch (err) {
     return result({ unchanged, empty, gaps: [`embeddings failed: ${embedErrorLabel(err)}`] });
   }

@@ -13,9 +13,12 @@ import type { TriageRuntime } from '../agents/triage-plan.ts';
 import { Triage } from '../agents/triage.agent.ts';
 import { unknownClassification } from '../classify/classify.ts';
 import { applyTierPolicy, type TierPolicyContext } from '../classify/policy.ts';
-import { HASH_MODEL, type Embedder } from '../embed/index.ts';
+import { decide, yesNo } from '../decisions/decide.ts';
+import { fakeDecisionProvider } from '../decisions/fake.ts';
+import { createEmbedder, HASH_MODEL, type Embedder } from '../embed/index.ts';
 import { isPersisted, redactPersisted } from '../gate/redact.ts';
-import type { EmbedRunResult } from '../runstore/embed-run.ts';
+import { setTracerForTests, type ModelSpan } from '../lib/tracing/index.ts';
+import { embedRun, type EmbedRunResult } from '../runstore/embed-run.ts';
 import { createFolderRunStore, folderRunStoreFromConfig } from '../runstore/folder.ts';
 import { RunNotFoundError, RunStoppedError, type RunStore } from '../runstore/types.ts';
 import { type Classification, type TriageInit, TriageInitSchema } from '../types/classification.ts';
@@ -2622,5 +2625,47 @@ describe('usage', () => {
     await runSubmission(prepared({ runId: RUN_2 }), d.deps);
     expect(dflt.ms).toEqual([DEFAULT_USAGE_FLUSH_MS]);
     expect(dflt.cancelled()).toBe(1);
+  });
+});
+
+// ------------------------------------------------------------------ tracing
+
+describe('run id on model spans (D91)', () => {
+  afterEach(() => setTracerForTests(undefined));
+
+  test('the identity, classify and post-settle embedding spans all carry the run id', async () => {
+    const spans: ModelSpan[] = [];
+    setTracerForTests({
+      withModelSpan: async (span, fn) => {
+        spans.push(span);
+        return fn();
+      },
+      flush: async () => {},
+    });
+    const decisions = fakeDecisionProvider(() => ({ ok: { kind: 'yes_no', yes: 0.9 } }));
+    const ask = (name: string) => decide(decisions, { state: 'synthetic', questions: { ok: yesNo('ok?') } }, { name });
+    const embedder = createEmbedder(
+      { mock: { enabled: true }, models: { embedding: 'ollama/nomic-embed-text' }, providers: {}, budgets: { httpTimeoutMs: 1_000 } },
+      { fetch: () => Promise.reject(new Error('mock mode never fetches')) },
+    );
+    const h = harness({
+      embedder,
+      embedRun,
+      identity: async () => {
+        await ask('identity');
+        return { id_chain: CHAIN, basic_state: [], gaps: [] };
+      },
+      classify: async () => {
+        await ask('classify');
+        return goodClassification();
+      },
+    });
+
+    expect((await runSubmission(prepared(), h.deps)).status).toBe('completed');
+    expect(spans.map((s) => [s.op, s.name, s.runId])).toEqual([
+      ['decide', 'identity', RUN_ID],
+      ['decide', 'classify', RUN_ID],
+      ['embeddings', undefined, RUN_ID],
+    ]);
   });
 });
