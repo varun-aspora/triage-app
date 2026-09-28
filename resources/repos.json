@@ -22,6 +22,8 @@
   { "repo": "vance-android", "entities": ["ssfb", "atspl", "rtl"] },
   { "repo": "vance-ios", "entities": ["ssfb", "atspl", "rtl"] },
   { "repo": "x-ray", "entities": ["rtl"] },
+  { "repo": "verification-service", "entities": ["rtl"] },
+  { "repo": "app-server", "entities": ["rtl"] },
   { "repo": "munin", "entities": ["rtl"] },
   { "repo": "prod-ssfb-aspora-argo", "entities": ["ssfb"] },
   { "repo": "non-prod-aspora-argo", "entities": ["ssfb"] },

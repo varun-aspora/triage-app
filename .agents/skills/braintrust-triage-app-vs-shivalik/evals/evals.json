@@ -1,0 +1,62 @@
+{
+  "skill_name": "braintrust-triage-app-vs-shivalik",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "/braintrust-triage-app-vs-shivalik --app-span-id d4c3d9f5d238fba6 --shivalik-span-id ee10b243-420c-5c5f-b0e4-9e50ebb3da4a",
+      "expected_output": "Resolves the app child span to root 6d4d0b739610563474a19847f482eec8, compares with shivalik root ee10b243, writes the report with all sections, span-id evidence, real triage-app file paths, no customer PII.",
+      "files": [],
+      "assertions": [
+        "Report file written",
+        "Report has all required sections",
+        "Names the correct app root span id",
+        "Names the correct shivalik root span id",
+        "Cites at least 10 distinct real span ids as evidence",
+        "Every cited span id exists in the traces",
+        "Cites at least 3 triage-app files, all of which exist",
+        "Says the triage-app run timed out",
+        "Does not report triage-app cost as $0; flags it as missing",
+        "No phone numbers or emails quoted",
+        "Actionables split into Win / Optimize / Dynamic-but-secure, each with at least one item",
+        "Dynamic items name both an opening and a guard",
+        "Actionables marked new or planned",
+        "Has a suggested order"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "shivalik got the sim verification ticket right again and triage-app just timed out. app trace is 6d4d0b739610563474a19847f482eec8, shivalik one is 9490a827-242a-5a6d-a2aa-de8e352a10cd. why is shivalik better and what should i fix in triage-app?",
+      "expected_output": "Same report for the second shivalik run; uses default projects; notes the app run timed out and the cost gap.",
+      "files": [],
+      "assertions": [
+        "Report file written",
+        "Report has all required sections",
+        "Names the correct app root span id",
+        "Names the correct shivalik root span id",
+        "Cites at least 10 distinct real span ids as evidence",
+        "Every cited span id exists in the traces",
+        "Cites at least 3 triage-app files, all of which exist",
+        "Says the triage-app run timed out",
+        "Does not report triage-app cost as $0; flags it as missing",
+        "No phone numbers or emails quoted",
+        "Actionables split into Win / Optimize / Dynamic-but-secure, each with at least one item",
+        "Dynamic items name both an opening and a guard",
+        "Actionables marked new or planned",
+        "Has a suggested order"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "/braintrust-triage-app-vs-shivalik --app-span-id 6d4d0b739610563474a19847f482eec9 --shivalik-span-id ee10b243-420c-5c5f-b0e4-9e50ebb3da4a",
+      "expected_output": "App span id does not exist in varun-test. Stops and says so; does not substitute the nearby trace 6d4d0b...eec8 or write a comparison report.",
+      "files": [],
+      "assertions": [
+        "No comparison report written for a span id that does not exist",
+        "Chat says the app span id was not found in varun-test",
+        "Does not build a comparison from the neighbouring trace 6d4d\u2026eec8",
+        "Suggests the close match 6d4d\u2026eec8 without using it",
+        "Says whether the shivalik id was found"
+      ]
+    }
+  ]
+}
