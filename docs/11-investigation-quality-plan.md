@@ -368,17 +368,15 @@ How Flue allows it (checked against the Flue references):
   - `repo_read`, `repo_find`, `repo_tree`: the chain of the target path.
   - `repo_grep`: the root file only, plus the list of matched directories that have such
     files, so the model can read them.
-- **Once per conversation per file path.** Kept in `usePersistentState('repoDocsSent')` in
-  each delegate and the root, so it survives recovery and each delegate (fresh context)
-  tracks its own set. Flue's `ToolContext` has no conversation id, and tools are rebuilt each
-  render, so the state is passed into the tool factory.
+- **Once per conversation per file path.** Kept in a `WeakMap` keyed by the `ToolContext`,
+  which each delegate render builds new, so each task tracks its own set.
+  `usePersistentState` throws in a delegate render, and the root mounts no code tool (D83).
 - **Caps.** 8 KB per file and 16 KB per result, with a note when cut. `@imports` inside
   CLAUDE.md are not followed.
 - **Result shape.** `repo_docs: [{ path, text, truncated }]` next to the normal data.
 - **Size check.** Today: vance-android 9 files (1,178 lines), vance-ios 12 (1,403), audit 10
   (996), rhythm 3 (613), pulse-backend 589 lines, go-commons 466; most repos have 0 or 1.
-- **Files.** `src/tools/code/_lib/code-tool.ts`, `src/tools/code/_lib/repo-docs.ts` (new),
-  `src/agents/delegates/*`.
+- **Files.** `src/tools/code/_lib/code-tool.ts`, `src/tools/code/_lib/repo-docs.ts` (new).
 - **Tests.** First read under `a/b/` attaches `AGENTS.md`, `a/AGENTS.md`, `a/b/CLAUDE.md` in
   that order; second read in the same conversation attaches nothing; a new delegate gets them
   again; sibling `a/c/AGENTS.md` never attached; caps applied.

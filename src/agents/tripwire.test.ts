@@ -22,7 +22,7 @@ import {
   UNKNOWN_RUN_ID,
 } from './tripwire.ts';
 
-const CODE_TOOLS = ['code_explore', 'code_node', 'code_impact', 'repo_read', 'repo_grep'] as const;
+const CODE_TOOLS = ['code_explore', 'code_node', 'code_impact', 'repo_read', 'repo_grep', 'repo_find', 'repo_tree'] as const;
 
 // A synthetic base64 key: only its presence matters to enabled().
 const FAKE_FIELD_KEY = 'dGVzdC1rZXktbm90LXJlYWwtMDEyMzQ1Njc4OTAxMjM0NQ==';
@@ -144,8 +144,10 @@ describe('allowlist', () => {
       'note_evidence',
       'read',
       'read_skill_resource',
+      'repo_find',
       'repo_grep',
       'repo_read',
+      'repo_tree',
       'resolve_identity',
       'run_log',
       'sql_select',

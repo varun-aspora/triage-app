@@ -8,7 +8,7 @@ import { defineTool } from '@flue/runtime/tool';
 import * as v from 'valibot';
 import type { ToolModule } from '../types.ts';
 import { codeToolEnabled, type CodeOutcome, repoNamesFor, runCodeTool } from './_lib/code-tool.ts';
-import { MAX_FILE_BYTES, MAX_PATH_CHARS, resolveInRepo } from './_lib/jail.ts';
+import { MAX_FILE_BYTES, MAX_PATH_CHARS, parentRel, resolveInRepo } from './_lib/jail.ts';
 
 export const READ_LIMITS = Object.freeze({
   maxFileBytes: MAX_FILE_BYTES,
@@ -93,6 +93,7 @@ export async function readRange(reposDir: string | undefined, input: ReadInput, 
       ...(truncated ? { note: `output capped; call again with start_line ${end + 1} for more` } : {}),
     },
     summary: `${NAME} ${input.repo}:${jailed.rel} lines ${start}-${end} of ${total}`,
+    docs: { repo: input.repo, dir: parentRel(jailed.rel), self: jailed.rel },
   };
 }
 

@@ -31,8 +31,8 @@ const RUN = 'run_delegates_0001';
 // Not a real key: enabled() only checks that the value is non-blank, and no tool runs here.
 const FAKE_ENC_KEY = 'QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB';
 
-const CODE_TOOLS = ['code_explore', 'code_impact', 'code_node', 'repo_grep', 'repo_read'];
-const REPO_TOOLS = ['repo_grep', 'repo_read'];
+const CODE_TOOLS = ['code_explore', 'code_impact', 'code_node', 'repo_find', 'repo_grep', 'repo_read', 'repo_tree'];
+const REPO_TOOLS = ['repo_find', 'repo_grep', 'repo_read', 'repo_tree'];
 const CODEGRAPH_TOOLS = ['code_explore', 'code_impact', 'code_node'];
 const BASE_TOOLS = ['http_call', 'logs_search', 'note_evidence', 'run_log', 'sql_select', ...REPO_TOOLS];
 const SSFB_ALWAYS = ['detect_silent_reversals', 'get_account_statement'];

@@ -17,6 +17,8 @@ export const BUDGET_EXEMPT_TOOLS: readonly string[] = ['finish_report', 'note_ev
 export const CODE_TOOLS: readonly string[] = Object.freeze([
   'repo_grep',
   'repo_read',
+  'repo_find',
+  'repo_tree',
   'code_explore',
   'code_node',
   'code_impact',

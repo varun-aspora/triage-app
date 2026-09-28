@@ -46,9 +46,11 @@ column and log message names before you query.
 - **DB**: `sql_select`, one SELECT with `$n` parameters. A row cap applies, so
   select the columns you need and order by time.
 - **Code**: `repo_grep` and `repo_read`, and `code_explore` on the deep
-  variant. Migrations and models give table and column names, handlers give
+  variant. `repo_find` (paths by glob) and `repo_tree` (a directory, depth 1
+  is ls) find a path so you never guess one. Migrations and models give table and column names, handlers give
   log messages, and the code that writes a row or line says when it is
-  written.
+  written. The repo's own agent notes (AGENTS.md files) arrive as `repo_docs`
+  with code results; read them, they say how that code is laid out.
 - **Admin API**: `http_call`, only for live state the DB does not hold, and
   only when it is mounted. It is GET unless a rule allows more.
 - **CBS**, SSFB only: `cbs_call`, when it is mounted. It is the only way to

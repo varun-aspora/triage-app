@@ -13,7 +13,7 @@
 // throw inside a delegate render, and the sandbox is inherited from the root.
 //
 // The normal variant has no model override and inherits the run's tier
-// model. Both variants get repo_grep and repo_read over their own entity's
+// model. Both variants get the repo_* tools over their own entity's
 // repos, so a failed read (an unknown column, a missing table) can be looked
 // up in migrations and models without a code_walker round trip. The deep
 // variant runs on MODEL_TIER_STRONG with thinking high and also gets the

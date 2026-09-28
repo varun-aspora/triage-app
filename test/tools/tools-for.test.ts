@@ -24,8 +24,8 @@ const FAKE_REPOS_DIR = '/triage-test/repos';
 const ENC_KEY = 'SSFB_HARBOR_FIELD_ENC_KEY';
 const CBS_FLAG = 'SSFB_CBS_VIA_KUBECTL_ENABLED';
 
-// repo_grep and repo_read are on both investigator variants, scoped to the entity's repos.
-const REPO_TOOLS = ['repo_grep', 'repo_read'];
+// The repo_* tools are on both investigator variants, scoped to the entity's repos.
+const REPO_TOOLS = ['repo_find', 'repo_grep', 'repo_read', 'repo_tree'];
 const BASE_INVESTIGATOR = ['http_call', 'logs_search', 'note_evidence', 'run_log', 'sql_select', ...REPO_TOOLS];
 const SSFB_ALWAYS = ['detect_silent_reversals', 'get_account_statement'];
 const SSFB_CRYPTO = ['decrypt_fields', 'encrypt_lookup_value'];
@@ -224,7 +224,7 @@ describe('flag and key gating', () => {
     for (const [mount, entity] of [['code_walker', null], ['investigator_deep', 'rtl']] as const) {
       const ctx = ctxFrom(h, entity);
       const set = names(toolsFor(mount, ctx));
-      for (const name of ['repo_read', 'repo_grep']) {
+      for (const name of REPO_TOOLS) {
         expect(set).not.toContain(name);
         expect(planRow(mount, ctx, name)).toEqual({ name, on: false, reason: 'TRIAGE_REPOS_DIR is blank' });
       }

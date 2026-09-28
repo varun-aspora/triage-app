@@ -433,9 +433,11 @@ export const CODE_TOOLS = [
   'code_impact',
   'repo_read',
   'repo_grep',
+  'repo_find',
+  'repo_tree',
 ] as const;
 /** The code tools both investigator variants have, scoped to their entity's repos. */
-export const REPO_TOOLS = ['repo_read', 'repo_grep'] as const;
+export const REPO_TOOLS = ['repo_read', 'repo_grep', 'repo_find', 'repo_tree'] as const;
 /** On every agent: the run action log (D79). */
 export const SHARED_TOOLS = ['run_log'] as const;
 /** Flue sandbox tools, on every agent through the one inherited sandbox (D45). */

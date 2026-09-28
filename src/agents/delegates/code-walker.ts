@@ -3,7 +3,7 @@
 // A plain module without the agent directive. codeWalkerFor(runId) returns a
 // defineSubagent() definition on codeWalkerModel() (MODEL_CODE_WALKER, blank
 // falls back to MODEL_TIER_STRONG). The body mounts toolsFor('code_walker'):
-// the CodeGraph tools, repo_read, repo_grep and note_evidence, and no entity
+// the CodeGraph tools, the repo_* tools and note_evidence, and no entity
 // I/O tool. The tool context has no entity; the run id comes by closure.
 // Skills are repo-map and codegraph-limits, plus frontend-routing, which
 // knowledge/README.md also assigns to code_walker. Like the investigators,
@@ -48,7 +48,7 @@ export function codeWalkerFor(runId: RunId, options: CodeWalkerOptions): Subagen
   return defineSubagent({
     name: CODE_WALKER_NAME,
     description:
-      'Reads code in the pinned repos with CodeGraph, repo_grep and repo_read, and records CodeFindings with repo, file and line citations. ' +
+      'Reads code in the pinned repos with CodeGraph and the repo_* tools (grep, read, find, tree), and records CodeFindings with repo, file and line citations. ' +
       'Use it to explain an error text, log label or state transition from the code. It sees only the brief, so give the question, the repos or services in play and the exact text to explain.',
     agent,
     model: codeWalkerModel(env.config),

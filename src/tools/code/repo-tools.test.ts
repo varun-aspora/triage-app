@@ -7,7 +7,7 @@ import * as v from 'valibot';
 import { releaseEscalation } from '../../agents/escalation.ts';
 import { type Config, configFromRecord } from '../../config/env.ts';
 import { createMemoryAuditSink, type MemoryAuditSink } from '../../gate/audit-sink.ts';
-import { createRunBudget, releaseRunBudget } from '../../gate/budget.ts';
+import { CODE_TOOLS, createRunBudget, releaseRunBudget } from '../../gate/budget.ts';
 import { createMockLayer } from '../../mock/index.ts';
 import type { FixtureStore } from '../../mock/store.ts';
 import type { RunStore } from '../../runstore/types.ts';
@@ -21,8 +21,13 @@ import type { Mount, ToolContext, ToolModule } from '../types.ts';
 import { codeToolEnabled, repoNamesFor } from './_lib/code-tool.ts';
 import { compileGlob, grepRepo } from './_lib/grep.ts';
 import { resolveInRepo, resolveRepoRoot } from './_lib/jail.ts';
+import { repoDocsFor } from './_lib/repo-docs.ts';
+import { findPaths, toolModule as findModule } from './repo-find.tool.ts';
 import { toolModule as grepModule } from './repo-grep.tool.ts';
-import { toolModule as readModule } from './repo-read.tool.ts';
+import { readRange, toolModule as readModule } from './repo-read.tool.ts';
+import { toolModule as treeModule } from './repo-tree.tool.ts';
+
+const REPO_MODULES = [readModule, grepModule, findModule, treeModule];
 
 // ------------------------------------------------------------------ synthetic repo
 
@@ -99,7 +104,9 @@ let seq = 0;
 
 type Rig = { ctx: ToolContext; audit: MemoryAuditSink; runId: string };
 
-function rig(opts: { entity?: Entity | null; config?: Config; maxToolCalls?: number; maxCodeCalls?: number } = {}): Rig {
+function rig(
+  opts: { entity?: Entity | null; config?: Config; maxToolCalls?: number; maxCodeCalls?: number; maxBytesPerRun?: number } = {},
+): Rig {
   seq += 1;
   const runId = `run_repo_tools_${seq}`;
   const config = opts.config ?? home.config;
@@ -117,7 +124,7 @@ function rig(opts: { entity?: Entity | null; config?: Config; maxToolCalls?: num
       maxTasks: 5,
       maxRowsPerCall: 200,
       maxBytesPerCall: 1_000_000,
-      maxBytesPerRun: 10_000_000,
+      maxBytesPerRun: opts.maxBytesPerRun ?? 10_000_000,
       ...(opts.maxCodeCalls !== undefined ? { codeCap: { maxCalls: opts.maxCodeCalls, setting: 'TRIAGE_MAX_CODE_CALLS_PER_RUN' } } : {}),
     }),
     audit,
@@ -145,9 +152,14 @@ async function call(module: ToolModule, r: Rig, data: unknown, mount: Mount = 'c
   return v.parse(ToolEnvelopeSchema, env);
 }
 
+type FindData = { paths: string[]; offset: number; next_offset: number | null; truncated: boolean; notes: string[] };
+type TreeData = { path: string; depth: number; entries: { path: string; files?: number; dirs?: number }[]; truncated: boolean; notes: string[] };
 type ReadData = { path: string; start_line: number; end_line: number; total_lines: number; text: string; truncated: boolean; note?: string };
 type GrepData = {
-  matches: { path: string; line: number; text: string }[];
+  matches: { path: string; line: number; text: string; before?: string[]; after?: string[] }[];
+  files?: string[];
+  counts?: { path: string; count: number }[];
+  total?: number;
   files_scanned: number;
   files_skipped: { binary: number; too_large: number };
   truncated: boolean;
@@ -231,6 +243,7 @@ describe('resolveInRepo', () => {
   test('refuses a directory when a file is expected, a missing file and a file over the size cap', () => {
     expect(resolveInRepo(reposDir, REPO, 'src')).toMatchObject({ ok: false, code: 'not_file' });
     expect(resolveInRepo(reposDir, REPO, 'src/nope.go')).toMatchObject({ ok: false, code: 'not_found' });
+    expect(resolveInRepo(reposDir, REPO, 'src/app.go', { expect: 'dir' })).toMatchObject({ ok: false, code: 'not_dir' });
     expect(resolveInRepo(reposDir, REPO, 'src/big.txt', { maxBytes: 100 })).toMatchObject({ ok: false, code: 'too_large' });
   });
 });
@@ -239,7 +252,7 @@ describe('resolveInRepo', () => {
 
 describe('tool modules', () => {
   test('mount on code_walker and investigator (deep inherits it) and pass the input-schema conformance rules', () => {
-    for (const m of [readModule, grepModule]) {
+    for (const m of REPO_MODULES) {
       expect(m.mounts).toEqual(['code_walker', 'investigator']);
       const ctx = makeToolContext({ config: home.config, registry: home.registry });
       expect(m.enabled(ctx, 'code_walker')).toEqual({ on: true });
@@ -255,8 +268,11 @@ describe('tool modules', () => {
   test('are off when TRIAGE_REPOS_DIR is blank', () => {
     const ctx = makeToolContext({ env: { TRIAGE_REPOS_DIR: '' } });
     expect(codeToolEnabled(ctx)).toEqual({ on: false, reason: 'TRIAGE_REPOS_DIR is blank' });
-    expect(readModule.enabled(ctx, 'code_walker').on).toBe(false);
-    expect(grepModule.enabled(ctx, 'code_walker').on).toBe(false);
+    for (const m of REPO_MODULES) expect(m.enabled(ctx, 'code_walker').on).toBe(false);
+  });
+
+  test('every repo tool counts against the code cap (CODE_TOOLS)', () => {
+    for (const m of REPO_MODULES) expect(CODE_TOOLS).toContain(m.name);
   });
 
   test('the repo picklist comes from repos.json and narrows to the investigator entity', () => {
@@ -270,9 +286,9 @@ describe('tool modules', () => {
 
   test('deny: an unknown repo is refused by the picklist', () => {
     const r = rig();
-    for (const m of [readModule, grepModule]) {
+    for (const m of REPO_MODULES) {
       const tool = m.create(r.ctx, 'code_walker');
-      const bad = v.safeParse(tool.input as v.GenericSchema, { repo: 'not-a-repo', path: 'x', pattern: 'x' });
+      const bad = v.safeParse(tool.input as v.GenericSchema, { repo: 'not-a-repo', path: 'x', pattern: 'x', glob: '*.go' });
       expect(bad.success).toBe(false);
     }
     // An investigator for atspl does not get ssfb repos.
@@ -288,12 +304,12 @@ describe('tool modules', () => {
     expect(own.output.status).toBe('ok');
 
     const rtl = rig({ entity: 'rtl' });
-    for (const m of [readModule, grepModule]) {
+    for (const m of REPO_MODULES) {
       const tool = m.create(rtl.ctx, 'investigator');
-      expect(v.safeParse(tool.input as v.GenericSchema, { repo: REPO, path: 'src/app.go', pattern: 'x' }).success).toBe(false);
+      expect(v.safeParse(tool.input as v.GenericSchema, { repo: REPO, path: 'src', pattern: 'x', glob: '*.go' }).success).toBe(false);
       // Past the schema, run() refuses it too and audits the deny.
       const run = tool.run as (c: unknown) => Promise<ToolEnvelope>;
-      const env = await run({ data: { repo: REPO, path: 'src/app.go', pattern: 'Handle' }, toolCallId: 'c', log });
+      const env = await run({ data: { repo: REPO, path: 'src', pattern: 'Handle', glob: '*.go' }, toolCallId: 'c', log });
       expect(env.output.status).toBe('refused');
       expect(rtl.audit.lines.at(-1)).toMatchObject({ decision: 'deny', reason: 'unknown repo', entity: 'rtl' });
     }
@@ -521,6 +537,171 @@ describe('repo_grep', () => {
   });
 });
 
+describe('repo_grep modes', () => {
+  test('files_only returns each matching path once, capped by max_matches', async () => {
+    const r = rig();
+    const d = (await call(grepModule, r, { repo: REPO, pattern: 'Handle', path_glob: 'src/**', files_only: true })).output.data as GrepData;
+    expect(d.files).toEqual(['src/app.go', 'src/big.txt', 'src/util/strings.go', 'src/util/strings_test.go']);
+    expect(new Set(d.files).size).toBe(4);
+    expect(d.matches).toBeUndefined();
+    const capped = (await call(grepModule, r, { repo: REPO, pattern: 'Handle', files_only: true, max_matches: 2 })).output.data as GrepData;
+    expect(capped.files).toHaveLength(2);
+    expect(capped.truncated).toBe(true);
+    expect(capped.notes.join(' ')).toContain('stopped at 2 files');
+  });
+
+  test('count_only returns matches per file and the total', async () => {
+    const r = rig();
+    const d = (await call(grepModule, r, { repo: REPO, pattern: 'Handle', path_glob: 'src/**', count_only: true })).output.data as GrepData;
+    expect(d.counts).toEqual([
+      { path: 'src/app.go', count: 1 },
+      { path: 'src/big.txt', count: 1000 },
+      { path: 'src/util/strings.go', count: 1 },
+      { path: 'src/util/strings_test.go', count: 1 },
+    ]);
+    expect(d.total).toBe(1003);
+    const floor = await grepRepo({ reposDir, repo: REPO, pattern: 'row', glob: 'src/big.txt', mode: 'count', limits: { maxCountPerFile: 10 } });
+    expect(floor.ok && floor.result.counts).toEqual([{ path: 'src/big.txt', count: 10 }]);
+    if (floor.ok) expect(floor.result.notes.join(' ')).toContain('per-file count cap');
+  });
+
+  test('context_lines adds lines around a match and merges overlapping ranges', async () => {
+    const r = rig();
+    const one = (await call(grepModule, r, { repo: REPO, pattern: 'HandleTransfer', path_glob: 'src/*.go', context_lines: 2 })).output.data as GrepData;
+    expect(one.matches).toEqual([
+      { path: 'src/app.go', line: 10, text: 'func HandleTransfer(ctx Context) error {', before: ['// line 8', '// line 9'], after: ['// line 11', '// line 12'] },
+    ]);
+    const near = (await call(grepModule, r, { repo: REPO, pattern: '^row (3|5) ', path_glob: 'src/big.txt', context_lines: 2 })).output
+      .data as GrepData;
+    expect(near.matches.map((m) => [m.line, m.before, m.after])).toEqual([
+      [3, ['row 1 Handle', 'row 2 Handle'], ['row 4 Handle']],
+      [5, [], ['row 6 Handle', 'row 7 Handle']],
+    ]);
+    // No context by default, so the old shape holds.
+    const plain = (await call(grepModule, r, { repo: REPO, pattern: 'HandleTransfer', path_glob: 'src/*.go' })).output.data as GrepData;
+    expect(plain.matches[0]).toEqual({ path: 'src/app.go', line: 10, text: 'func HandleTransfer(ctx Context) error {' });
+  });
+
+  test('deny: context_lines over 5, both list modes, and context with a list mode are refused with the reason', async () => {
+    const r = rig();
+    const tool = grepModule.create(r.ctx, 'code_walker');
+    expect(v.safeParse(tool.input as v.GenericSchema, { repo: REPO, pattern: 'x', context_lines: 6 }).success).toBe(false);
+    expect(v.safeParse(tool.input as v.GenericSchema, { repo: REPO, pattern: 'x', context_lines: -1 }).success).toBe(false);
+    const both = await call(grepModule, r, { repo: REPO, pattern: 'x', files_only: true, count_only: true });
+    expect(both.output).toMatchObject({ status: 'refused' });
+    expect(JSON.stringify(both.output)).toContain('files_only and count_only');
+    const ctx = await call(grepModule, r, { repo: REPO, pattern: 'x', count_only: true, context_lines: 1 });
+    expect(JSON.stringify(ctx.output)).toContain('context_lines applies to matching lines only');
+    expect(r.audit.lines.slice(-2).map((l) => l.reason)).toEqual(['grep: both modes', 'grep: context with a list mode']);
+  });
+});
+
+describe('repo_find', () => {
+  test('allow: a name glob finds paths anywhere, in path order, skipping dot paths and outside links', async () => {
+    const r = rig();
+    const env = await call(findModule, r, { repo: REPO, glob: '*.go' });
+    expect(env.output.status).toBe('ok');
+    const d = env.output.data as FindData;
+    expect(d.paths).toEqual(['link-ok.go', 'src/app.go', 'src/util/strings.go', 'src/util/strings_test.go']);
+    expect(d).toMatchObject({ offset: 0, next_offset: null, truncated: false });
+    const all = (await call(findModule, r, { repo: REPO, glob: '**', limit: 200 })).output.data as FindData;
+    for (const p of all.paths) {
+      expect(p.split('/').some((s) => s.startsWith('.'))).toBe(false);
+      expect(p.startsWith('linkdir')).toBe(false);
+      expect(['link-out.txt', 'link-git.txt']).not.toContain(p);
+    }
+    expect(JSON.stringify(all)).not.toContain(MARKER);
+    expect(r.audit.lines[0]).toMatchObject({ tool: 'repo_find', decision: 'allow', transport: 'mock' });
+  });
+
+  test('pages with offset and limit, and says where the next page starts', async () => {
+    const r = rig();
+    const first = (await call(findModule, r, { repo: REPO, glob: 'src/**/*.go', limit: 2 })).output.data as FindData;
+    expect(first).toMatchObject({ paths: ['src/app.go', 'src/util/strings.go'], next_offset: 2, truncated: true });
+    expect(first.notes.join(' ')).toContain('offset 2');
+    const second = (await call(findModule, r, { repo: REPO, glob: 'src/**/*.go', limit: 2, offset: 2 })).output.data as FindData;
+    expect(second).toMatchObject({ paths: ['src/util/strings_test.go'], next_offset: null, truncated: false });
+    const tool = findModule.create(r.ctx, 'code_walker');
+    expect(v.safeParse(tool.input as v.GenericSchema, { repo: REPO, glob: '*', limit: 201 }).success).toBe(false);
+  });
+
+  test('a walk cap marks the result truncated with the reason', async () => {
+    const out = await findPaths(reposDir, { repo: REPO, glob: '**' }, undefined, { maxWalkEntries: 3 });
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const d = out.data as FindData;
+    expect(d.truncated).toBe(true);
+    expect(d.next_offset).toBeNull();
+    expect(d.notes.join(' ')).toContain('3 directory entries');
+  });
+
+  test('deny: a glob into a dot-directory, with .. or absolute is refused; a missing directory says so', async () => {
+    const r = rig();
+    for (const glob of ['.git/**', '**/.env', '../**', '/etc/*', 'src/*;rm']) {
+      const env = await call(findModule, r, { repo: REPO, glob });
+      expect(env.output.status).toBe('refused');
+      // The refusal names this tool's input, not repo_grep's path_glob.
+      expect(env.output.message).toMatch(/^glob /);
+    }
+    expect(r.audit.lines.every((l) => l.decision === 'deny')).toBe(true);
+    const missing = (await call(findModule, r, { repo: REPO, glob: 'nope/**/*.go' })).output.data as FindData;
+    expect(missing.paths).toEqual([]);
+    expect(missing.notes.join(' ')).toContain('repo_tree');
+  });
+
+  test('a glob with no wildcard that matches nothing says it matches whole names', async () => {
+    const d = (await call(findModule, rig(), { repo: REPO, glob: 'strings' })).output.data as FindData;
+    expect(d.paths).toEqual([]);
+    expect(d.notes.join(' ')).toContain("try '*strings*'");
+  });
+});
+
+describe('repo_tree', () => {
+  test('depth 1 is ls: directories end in / with counts, dot names and outside links are left out', async () => {
+    const r = rig();
+    const env = await call(treeModule, r, { repo: REPO, depth: 1 });
+    expect(env.output.status).toBe('ok');
+    const d = env.output.data as TreeData;
+    expect(d.entries.map((e) => e.path)).toEqual(['bin/', 'docs/', 'link-ok.go', 'slow/', 'src/']);
+    expect(d.entries.find((e) => e.path === 'src/')).toEqual({ path: 'src/', files: 2, dirs: 1 });
+    expect(d.truncated).toBe(false);
+    expect(JSON.stringify(env)).not.toContain(MARKER);
+    expect(r.audit.lines[0]).toMatchObject({ tool: 'repo_tree', decision: 'allow' });
+  });
+
+  test('depth reaches down from path, and paths stay relative to the repo root', async () => {
+    const r = rig();
+    const two = (await call(treeModule, r, { repo: REPO, path: 'src' })).output.data as TreeData;
+    expect(two.depth).toBe(2);
+    expect(two.entries.map((e) => e.path)).toEqual(['src/app.go', 'src/big.txt', 'src/util/', 'src/util/strings.go', 'src/util/strings_test.go']);
+    const one = (await call(treeModule, r, { repo: REPO, path: 'src', depth: 1 })).output.data as TreeData;
+    expect(one.entries.map((e) => e.path)).toEqual(['src/app.go', 'src/big.txt', 'src/util/']);
+    const tool = treeModule.create(r.ctx, 'code_walker');
+    expect(v.safeParse(tool.input as v.GenericSchema, { repo: REPO, depth: 5 }).success).toBe(false);
+    expect(v.safeParse(tool.input as v.GenericSchema, { repo: REPO, depth: 0 }).success).toBe(false);
+  });
+
+  test('the entry cap keeps the shallow levels and says how to see the rest', async () => {
+    const r = rig();
+    const d = (await call(treeModule, r, { repo: REPO, depth: 4, limit: 5 })).output.data as TreeData;
+    expect(d.entries.map((e) => e.path)).toEqual(['bin/', 'docs/', 'link-ok.go', 'slow/', 'src/']);
+    expect(d.truncated).toBe(true);
+    expect(d.notes.join(' ')).toContain('raise limit (up to 500)');
+  });
+
+  test('deny: .., dot paths and a file are refused with a pointer to the right tool', async () => {
+    const r = rig();
+    for (const path of ['..', 'src/../..', '.git', '.github/workflows', '/etc', 'linkdir']) {
+      expect((await call(treeModule, r, { repo: REPO, path })).output.status).toBe('refused');
+    }
+    const file = await call(treeModule, r, { repo: REPO, path: 'src/app.go' });
+    expect(JSON.stringify(file.output)).toContain('repo_read');
+    expect(r.audit.lines.every((l) => l.decision === 'deny')).toBe(true);
+    const missing = await call(readModule, r, { repo: REPO, path: 'src/nope.go' });
+    expect(JSON.stringify(missing.output)).toContain('repo_find');
+  });
+});
+
 describe('compileGlob', () => {
   test('matches names without a slash and paths with one', () => {
     const name = compileGlob('*.{go,ts}');
@@ -533,5 +714,126 @@ describe('compileGlob', () => {
     expect(path.test('src/util/strings.go')).toBe(true);
     expect(path.test('docs/app.go')).toBe(false);
     expect(path.baseDir).toBe('src');
+  });
+});
+
+// ------------------------------------------------------------------ repo docs (W11, D83)
+
+describe('repo docs', () => {
+  const DOCS_REPO = 'audit';
+  const docsRepo = (): string => join(reposDir, DOCS_REPO);
+  const putDoc = (rel: string, text: string): void => {
+    const path = join(docsRepo(), rel);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, text);
+  };
+  // 91-byte lines: each file cuts to 8,189 bytes, so two leave no room for the root file.
+  const line = 'x'.repeat(90);
+
+  beforeAll(() => {
+    putDoc('AGENTS.md', 'root agents\n');
+    putDoc('a/AGENTS.md', 'a agents\n');
+    putDoc('a/b/CLAUDE.md', 'a/b claude\n');
+    putDoc('a/b/x.go', 'needle one\n');
+    putDoc('a/c/AGENTS.md', 'sibling agents\n');
+    putDoc('a/c/y.go', 'needle two\n');
+    putDoc('sym/AGENTS.md', 'sym agents\n');
+    symlinkSync(join(docsRepo(), 'sym', 'AGENTS.md'), join(docsRepo(), 'sym', 'CLAUDE.md'));
+    putDoc('sym/z.go', 'z\n');
+    putDoc('imp/CLAUDE.md', '@AGENTS.md\n');
+    putDoc('imp/AGENTS.md', 'imp agents\n');
+    putDoc('imp/f.go', 'f\n');
+    putDoc('big/AGENTS.md', `${Array.from({ length: 120 }, () => line).join('\n')}\n`);
+    putDoc('big/deep/AGENTS.md', `${Array.from({ length: 120 }, () => line).join('\n')}\n`);
+    putDoc('big/deep/f.go', 'f\n');
+    mkdirSync(join(docsRepo(), 'rf'), { recursive: true });
+    symlinkSync(join(base, 'outside', 'secret.txt'), join(docsRepo(), 'rf', 'AGENTS.md'));
+    putDoc('rf/f.go', 'f\n');
+  });
+
+  type Docs = { repo_docs?: { path: string; text: string; truncated: boolean }[]; docs_to_read?: string[]; repo_docs_notes?: string[] };
+  const docsOf = async (module: ToolModule, r: Rig, data: unknown): Promise<Docs> => {
+    const env = await call(module, r, { repo: DOCS_REPO, ...(data as object) });
+    expect(env.output.status).toBe('ok');
+    return env.output.data as Docs;
+  };
+  const paths = (d: Docs): string[] | undefined => d.repo_docs?.map((x) => x.path);
+
+  test('a first read attaches the chain root first, a second attaches nothing, a new delegate gets them again', async () => {
+    const r = rig();
+    const first = await docsOf(readModule, r, { path: 'a/b/x.go' });
+    expect(paths(first)).toEqual(['AGENTS.md', 'a/AGENTS.md', 'a/b/CLAUDE.md']);
+    expect(first.repo_docs?.[0]).toEqual({ path: 'AGENTS.md', text: 'root agents\n', truncated: false });
+    expect(JSON.stringify(first)).not.toContain('sibling agents');
+    expect((await docsOf(readModule, r, { path: 'a/b/x.go' })).repo_docs).toBeUndefined();
+    // The sibling gets only its own file; the shared chain was sent already.
+    expect(paths(await docsOf(readModule, r, { path: 'a/c/y.go' }))).toEqual(['a/c/AGENTS.md']);
+    expect(paths(await docsOf(readModule, rig(), { path: 'a/b/x.go' }))).toEqual(['AGENTS.md', 'a/AGENTS.md', 'a/b/CLAUDE.md']);
+  });
+
+  test('repo_tree and repo_find attach the chain of their base directory', async () => {
+    const r = rig();
+    expect(paths(await docsOf(treeModule, r, { path: 'a', depth: 1 }))).toEqual(['AGENTS.md', 'a/AGENTS.md']);
+    expect(paths(await docsOf(findModule, r, { glob: 'a/b/**' }))).toEqual(['a/b/CLAUDE.md']);
+    // A name glob has no leading directory, so only the root chain applies.
+    expect(paths(await docsOf(findModule, rig(), { glob: '*.go' }))).toEqual(['AGENTS.md']);
+  });
+
+  test('repo_grep attaches only the root file and lists the doc files on the matched chains', async () => {
+    const r = rig();
+    const d = await docsOf(grepModule, r, { pattern: 'needle' });
+    expect(paths(d)).toEqual(['AGENTS.md']);
+    expect(d.docs_to_read).toEqual(['a/AGENTS.md', 'a/b/CLAUDE.md', 'a/c/AGENTS.md']);
+    expect(JSON.stringify(d)).not.toContain('a agents');
+    expect((await docsOf(grepModule, r, { pattern: 'needle', files_only: true })).repo_docs).toBeUndefined();
+  });
+
+  test('repo_read of a listed doc file leaves it out of repo_docs and marks it sent', async () => {
+    const r = rig();
+    await docsOf(grepModule, r, { pattern: 'needle' });
+    const d = (await docsOf(readModule, r, { path: 'a/b/CLAUDE.md' })) as Docs & ReadData;
+    expect(d.text).toContain('a/b claude');
+    expect(paths(d)).toEqual(['a/AGENTS.md']);
+    expect((await docsOf(readModule, r, { path: 'a/b/x.go' })).repo_docs).toBeUndefined();
+  });
+
+  test('a doc file the jail refuses is noted once per task', async () => {
+    const r = rig();
+    const first = await docsOf(readModule, r, { path: 'rf/f.go' });
+    expect((first.repo_docs_notes ?? []).join(' ')).toContain('rf/AGENTS.md not attached');
+    expect(JSON.stringify(first)).not.toContain(MARKER);
+    expect((await docsOf(readModule, r, { path: 'rf/f.go' })).repo_docs_notes).toBeUndefined();
+  });
+
+  test('a result the byte budget refuses leaves its docs unsent', async () => {
+    const plain = await readRange(reposDir, { repo: DOCS_REPO, path: 'a/b/x.go' });
+    if (!plain.ok) throw new Error('plain read failed');
+    const r = rig({ maxBytesPerRun: Buffer.byteLength(JSON.stringify(plain.data)) + 20 });
+    const env = await call(readModule, r, { repo: DOCS_REPO, path: 'a/b/x.go' });
+    expect(env.output.status).toBe('refused');
+    expect(r.audit.lines.at(-1)).toMatchObject({ decision: 'deny', reason: 'budget: bytes' });
+    const again = await repoDocsFor(r.ctx, { repo: DOCS_REPO, dir: 'a/b' });
+    expect((again.fields.repo_docs as { path: string }[]).map((x) => x.path)).toEqual(['AGENTS.md', 'a/AGENTS.md', 'a/b/CLAUDE.md']);
+  });
+
+  test('a symlinked CLAUDE.md counts once, and one that only imports AGENTS.md is skipped', async () => {
+    const r = rig();
+    expect(paths(await docsOf(readModule, r, { path: 'sym/z.go' }))).toEqual(['AGENTS.md', 'sym/AGENTS.md']);
+    expect(paths(await docsOf(readModule, r, { path: 'imp/f.go' }))).toEqual(['imp/AGENTS.md']);
+  });
+
+  test('caps: 8 KB per file and 16 KB per result, nearest first; a pending file comes with the next call', async () => {
+    const r = rig();
+    const d = await docsOf(readModule, r, { path: 'big/deep/f.go' });
+    expect(paths(d)).toEqual(['big/AGENTS.md', 'big/deep/AGENTS.md']);
+    for (const doc of d.repo_docs ?? []) {
+      expect(doc.truncated).toBe(true);
+      expect(Buffer.byteLength(doc.text)).toBeLessThanOrEqual(8 * 1024);
+    }
+    const notes = (d.repo_docs_notes ?? []).join(' ');
+    expect(notes).toContain('cut at 8 KB');
+    expect(notes).toContain('not attached');
+    expect(notes).toContain('AGENTS.md;');
+    expect(paths(await docsOf(treeModule, r, { depth: 1 }))).toEqual(['AGENTS.md']);
   });
 });
