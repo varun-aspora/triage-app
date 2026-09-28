@@ -326,6 +326,5 @@ export function getRunBudget(runId: RunId): RunBudget | undefined {
 // Drops a finished run's budget so the registry does not grow for the life of
 // the process. Returns false when there was nothing to drop.
 export function releaseRunBudget(runId: RunId): boolean {
-  runTimesByRun.delete(runId);
   return registry.delete(runId);
 }

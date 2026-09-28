@@ -6,6 +6,7 @@ import {
   type RunBudgetLimits,
   createRunBudget,
   getRunBudget,
+  clearRunDeadline,
   releaseRunBudget,
   setRunDeadline,
 } from './budget.ts';
@@ -30,7 +31,10 @@ function limits(overrides: Partial<RunBudgetLimits> = {}): RunBudgetLimits {
 const refusal = { ok: false, message: BUDGET_EXHAUSTED_MESSAGE };
 
 afterEach(() => {
-  for (const id of created.splice(0)) releaseRunBudget(id);
+  for (const id of created.splice(0)) {
+    releaseRunBudget(id);
+    clearRunDeadline(id);
+  }
 });
 
 describe('tool call cap', () => {

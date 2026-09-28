@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { SkillDefinition, SubagentDefinition } from '@flue/runtime';
 import type { ToolDefinition } from '@flue/runtime/tool';
 import { ConfigError } from '../../config/errors.ts';
-import { releaseRunBudget, setRunDeadline } from '../../gate/budget.ts';
+import { clearRunDeadline, setRunDeadline } from '../../gate/budget.ts';
 import { allToolModules, FORBIDDEN_INPUT_KEYS } from '../../tools/index.ts';
 import { logActions, releaseActions } from '../../runlog/actions.ts';
 import type { ToolDeps } from '../../tools/types.ts';
@@ -318,7 +318,7 @@ describe('delegate body', () => {
     try {
       expect(investigatorMounts('rtl', runId, { env }).instructions).toContain('\n- Finish by 2026-09-28T08:07:00Z\n');
     } finally {
-      releaseRunBudget(runId);
+      clearRunDeadline(runId);
     }
   });
 
