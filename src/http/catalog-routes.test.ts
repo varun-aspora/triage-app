@@ -108,11 +108,11 @@ describe('GET /services', () => {
     expect(body.entities.map((e: { entity: string }) => e.entity)).toEqual(['ssfb', 'rtl']);
 
     const rtl = body.entities[1].services;
-    expect(rtl.map((s: { key: string }) => s.key)).toEqual(['workflow', 'banking', 'kyc', 'canopy', 'cohort', 'comms']);
+    expect(rtl.map((s: { key: string }) => s.key)).toEqual(['workflow', 'banking', 'kyc', 'canopy', 'cohort', 'comms', 'appserver', 'verification', 'uservault']);
     expect(rtl[0]).toEqual({
       key: 'workflow',
       repo: 'workflow-op',
-      quickwit_service: 'workflow-op',
+      quickwit_service: 'workflow-op-service',
       db_env: { name: 'RTL_WORKFLOW_DB_URL', state: 'set' },
       api_env: { name: 'RTL_WORKFLOW_API_URL', state: 'blank' },
       transport: null,

@@ -127,10 +127,10 @@ refused or returns nothing.
 
 ## Logs
 
-The registry maps `workflow` to the log service `workflow-op`. It may log as
-`workflow-v2` instead (unverified: the source says to confirm when
-investigating). If `workflow-op` returns nothing for a window where the form
-clearly moved, record that as a gap.
+The registry maps `workflow` to the log service `workflow-op-service`. It logs
+full outbound request and response bodies; never quote personal data or
+tokens from them. If it returns nothing for a window where the form clearly
+moved, record that as a gap.
 
 ## Known issues
 

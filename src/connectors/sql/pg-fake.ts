@@ -1,7 +1,9 @@
 // A scripted pg pool for the SQL connector tests. It never opens a socket:
 // every query is recorded per checked-out client and answered by the
 // respond() hook. Role check statements answer from `writable` and `reader`
-// unless respond() handles them.
+// unless respond() handles them. A string cell in a field that carries a
+// dataTypeID goes through the pool config's type parsers, the way pg's Result
+// parses a text row, so a test can script a value as Postgres sends it.
 //
 // Clients are EventEmitters like pg's, so a test can close the socket under
 // a query (drop) the way pg reports it: 'error' on the client from a
@@ -64,14 +66,14 @@ export function fakePg(options: FakePgOptions = {}): FakePg {
   const writable = (): boolean =>
     typeof options.writable === 'function' ? options.writable() : options.writable === true;
 
-  function makeClient(): PgClientLike {
+  function makeClient(config: PgPoolConfig): PgClientLike {
     const log: FakeClientLog = { id: clients.length + 1, queries: [], releases: [], errorListeners: [] };
     clients.push(log);
     let released = false;
     let dead = false;
     const answer = async (query: PgQuery): Promise<PgQueryResult> => {
       const scripted = await options.respond?.(query, log);
-      if (scripted !== undefined) return scripted;
+      if (scripted !== undefined) return parseTyped(scripted, config);
       if (query.text === ROLE_CHECK_SQL) {
         return {
           rows: [{ reader: options.reader === true, writable: writable() }],
@@ -120,7 +122,7 @@ export function fakePg(options: FakePgOptions = {}): FakePg {
           if (err !== undefined) throw err;
         }
         outstanding += 1;
-        return makeClient();
+        return makeClient(config);
       },
       async end() {
         ended += 1;
@@ -148,6 +150,20 @@ export function fakePg(options: FakePgOptions = {}): FakePg {
     roleClients: () => clients.filter(ranRoleCheck),
     selectClients: () => clients.filter((c) => !ranRoleCheck(c)),
   };
+}
+
+function parseTyped(result: PgQueryResult, config: PgPoolConfig): PgQueryResult {
+  const typed = (result.fields ?? []).filter((f) => f.dataTypeID !== undefined);
+  if (typed.length === 0) return result;
+  const rows = result.rows.map((row) => {
+    const out = { ...row };
+    for (const f of typed) {
+      const value = out[f.name];
+      if (typeof value === 'string') out[f.name] = config.types.getTypeParser(f.dataTypeID as number, 'text')(value);
+    }
+    return out;
+  });
+  return { ...result, rows };
 }
 
 function ranRoleCheck(client: FakeClientLog): boolean {

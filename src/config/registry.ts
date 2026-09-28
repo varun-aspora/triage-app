@@ -50,9 +50,26 @@ export const FieldEncryptionSchema = v.strictObject({
 });
 export type FieldEncryption = v.InferOutput<typeof FieldEncryptionSchema>;
 
+/** How a `timestamp without time zone` value is read when the registry names no zone (D73). */
+export const DEFAULT_NAIVE_TIMESTAMP_ZONE = 'UTC';
+
+function isTimeZone(zone: string): boolean {
+  if (!/^[A-Z][A-Za-z0-9_+/-]*$/.test(zone)) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: zone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export const TimeZoneSchema = v.pipe(v.string(), v.check(isTimeZone, 'must be an IANA time zone such as UTC or Asia/Kolkata'));
+
 export const ServiceSpecSchema = v.pipe(
   v.strictObject({
     db: v.optional(RegistryEnvNameSchema),
+    /** The zone the service writes its `timestamp without time zone` columns in. Default UTC (D73). */
+    naive_timestamp_zone: v.optional(TimeZoneSchema),
     api: v.optional(RegistryEnvNameSchema),
     quickwit_service: v.optional(v.pipe(v.string(), v.minLength(1))),
     repo: v.optional(RepoNameSchema),
@@ -63,6 +80,7 @@ export const ServiceSpecSchema = v.pipe(
     note: v.optional(v.string()),
   }),
   v.check((s) => s.transport === undefined || s.api !== undefined, 'transport cbs needs an api env name'),
+  v.check((s) => s.naive_timestamp_zone === undefined || s.db !== undefined, 'naive_timestamp_zone needs a db env name'),
 );
 export type ServiceSpec = v.InferOutput<typeof ServiceSpecSchema>;
 
@@ -130,6 +148,8 @@ export type Capability =
 
 /** 'cbs' means the base URL is reachable only through cbs_call, never http_call. */
 export type ApiCapability = Capability & { readonly transport: 'http' | 'cbs' };
+/** naiveTimestampZone is the service's naive_timestamp_zone, or UTC. */
+export type DbCapability = Capability & { readonly naiveTimestampZone: string };
 export type AuthCapability = Capability & { readonly header: string; readonly scheme: 'Bearer' | 'Basic' };
 export type FieldEncryptionCapability = Capability & { readonly algorithm: 'aes-siv' };
 export type KubeCapability = { readonly context: Capability; readonly awsProfile: Capability };
@@ -182,7 +202,7 @@ export type Registry = {
   spec(entity: Entity): EntityRegistry;
   services(entity: Entity): readonly string[];
   service(entity: Entity, service: string): ServiceSpec;
-  serviceDb(entity: Entity, service: string): Capability | undefined;
+  serviceDb(entity: Entity, service: string): DbCapability | undefined;
   serviceApi(entity: Entity, service: string): ApiCapability | undefined;
   serviceAuth(entity: Entity, service: string): AuthCapability | undefined;
   fieldEncryption(entity: Entity, service: string): FieldEncryptionCapability | undefined;
@@ -289,7 +309,8 @@ export function buildRegistry(config: Config, docs: readonly { file: string; doc
   return makeRegistry(specs, enabled, resolve, look);
 }
 
-// Checks the schema cannot express: file name, env prefix, cbs wiring.
+// Checks the schema cannot express: file name, env prefix, cbs wiring, one
+// naive timestamp zone per database.
 function structureProblems(file: string, spec: EntityRegistry): RegistryProblem[] {
   const out: RegistryProblem[] = [];
   const base = file.split('/').pop() ?? file;
@@ -303,6 +324,20 @@ function structureProblems(file: string, spec: EntityRegistry): RegistryProblem[
   for (const [service, s] of Object.entries(spec.services)) {
     if (s.transport === 'cbs' && spec.cbs === undefined) {
       out.push({ key: file, reason: `services.${service} has transport cbs but the registry has no cbs block` });
+    }
+  }
+  // One pool per db env name reads every service behind it, so they must agree.
+  const zones = new Map<string, { service: string; zone: string }>();
+  for (const [service, s] of Object.entries(spec.services)) {
+    if (s.db === undefined) continue;
+    const zone = s.naive_timestamp_zone ?? DEFAULT_NAIVE_TIMESTAMP_ZONE;
+    const first = zones.get(s.db);
+    if (first === undefined) zones.set(s.db, { service, zone });
+    else if (first.zone !== zone) {
+      out.push({
+        key: file,
+        reason: `services.${first.service} and services.${service} share ${s.db} but set different naive_timestamp_zone (${first.zone}, ${zone}); give them the same zone`,
+      });
     }
   }
   return out;
@@ -415,7 +450,8 @@ function makeRegistry(
     service: (entity, service) => serviceOf(specOf(entity), service),
     serviceDb(entity, service) {
       const s = serviceOf(enabledSpec(entity), service);
-      return s.db === undefined ? undefined : cap(s.db);
+      if (s.db === undefined) return undefined;
+      return extend(cap(s.db), { naiveTimestampZone: s.naive_timestamp_zone ?? DEFAULT_NAIVE_TIMESTAMP_ZONE });
     },
     serviceApi(entity, service) {
       const s = serviceOf(enabledSpec(entity), service);

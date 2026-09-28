@@ -109,13 +109,22 @@ describe('shipped registries', () => {
       'pdfgen', 'reminder', 'bro', 'eventbus', 'audit', 'finacle',
     ]);
     expect(r.services('atspl')).toEqual(['package', 'pulse', 'canopy', 'comms', 'engage']);
-    expect(r.services('rtl')).toEqual(['workflow', 'banking', 'kyc', 'canopy', 'cohort', 'comms']);
+    expect(r.services('rtl')).toEqual(['workflow', 'banking', 'kyc', 'canopy', 'cohort', 'comms', 'appserver', 'verification', 'uservault']);
   });
 
   test('ATSPL log service strings come from the qw survey', () => {
     const r = registry();
     expect(r.service('atspl', 'pulse').quickwit_service).toBe('pulse-backend');
     expect(r.service('atspl', 'package').quickwit_service).toBe('package');
+  });
+
+  test('RTL log service names end in -service and match the logs-rtl note (D74)', () => {
+    const r = registry();
+    const names = r.services('rtl').map((s) => [s, r.service('rtl', s).quickwit_service] as const);
+    expect(names.filter(([, q]) => !q?.endsWith('-service'))).toEqual([]);
+    const note = readFileSync(join(ROOT, 'knowledge/method/logs-rtl.md'), 'utf8');
+    const rows = [...note.matchAll(/^\| `([a-z0-9]+)` \| `([a-z0-9-]+)` \|$/gm)].map((m) => [m[1], m[2]] as const);
+    expect(rows).toEqual(names);
   });
 
   test('the three api.rules.json files are exactly []', () => {
@@ -191,7 +200,7 @@ describe('TRIAGE_ENTITIES', () => {
     expect(() => r.quickwit('atspl')).toThrow(RegistryError);
     expect(() => r.kube('atspl')).toThrow(RegistryError);
     // Structure stays readable.
-    expect(r.services('rtl')).toEqual(['workflow', 'banking', 'kyc', 'canopy', 'cohort', 'comms']);
+    expect(r.services('rtl')).toEqual(['workflow', 'banking', 'kyc', 'canopy', 'cohort', 'comms', 'appserver', 'verification', 'uservault']);
   });
 });
 
@@ -246,7 +255,7 @@ describe('missing and blank keys', () => {
     expect(db.value).toBe('postgresql://u:hunter2-db@db.test:5432/x');
     expect(JSON.stringify(db)).not.toContain('hunter2');
     expect(inspect(db)).not.toContain('hunter2');
-    expect({ ...db }).toEqual({ status: 'ok', envName: 'SSFB_HARBOR_DB_URL' } as never);
+    expect({ ...db }).toEqual({ status: 'ok', envName: 'SSFB_HARBOR_DB_URL', naiveTimestampZone: 'UTC' } as never);
   });
 
   test('a service without a db or api key returns undefined', () => {
@@ -272,6 +281,51 @@ describe('missing and blank keys', () => {
     expect(JSON.stringify(on)).not.toContain('tok-bro-secret');
     const off = registry({ SSFB_BRO_ADMIN_TOKEN: '' }).serviceAuth('ssfb', 'bro');
     expect(off?.status).toBe('disabled');
+  });
+});
+
+describe('naive timestamp zone (D73)', () => {
+  test('a db capability carries UTC when the service names no zone', () => {
+    expect(registry().serviceDb('rtl', 'banking')?.naiveTimestampZone).toBe('UTC');
+  });
+
+  test('a db capability carries the zone the service names', () => {
+    const docs = shippedDocs((d) => {
+      d.rtl.services.banking = { ...d.rtl.services.banking, naive_timestamp_zone: 'Asia/Kolkata' };
+    });
+    const r = buildRegistry(config(), docs);
+    expect(r.serviceDb('rtl', 'banking')?.naiveTimestampZone).toBe('Asia/Kolkata');
+    expect(r.serviceDb('rtl', 'kyc')?.naiveTimestampZone).toBe('UTC');
+  });
+
+  test('two services on one db env name with different zones fail loading', () => {
+    const docs = shippedDocs((d) => {
+      d.rtl.services.kyc = { ...d.rtl.services.kyc, db: 'RTL_BANKING_DB_URL', naive_timestamp_zone: 'Asia/Kolkata' };
+    });
+    const err = registryError(() => buildRegistry(config(), docs));
+    expect(err.keys).toEqual(['resources/rtl.entity.json']);
+    expect(err.message).toContain(
+      'services.banking and services.kyc share RTL_BANKING_DB_URL but set different naive_timestamp_zone (UTC, Asia/Kolkata)',
+    );
+  });
+
+  test('two services on one db env name with the same zone load', () => {
+    const docs = shippedDocs((d) => {
+      d.rtl.services.banking = { ...d.rtl.services.banking, naive_timestamp_zone: 'Europe/London' };
+      d.rtl.services.kyc = { ...d.rtl.services.kyc, db: 'RTL_BANKING_DB_URL', naive_timestamp_zone: 'Europe/London' };
+    });
+    expect(buildRegistry(config(), docs).serviceDb('rtl', 'kyc')?.naiveTimestampZone).toBe('Europe/London');
+  });
+
+  test('an unknown zone, or a zone on a service without a db, is refused', () => {
+    const bad = shippedDocs((d) => {
+      d.rtl.services.banking = { ...d.rtl.services.banking, naive_timestamp_zone: 'Mars/Olympus' };
+    });
+    expect(registryError(() => buildRegistry(config(), bad)).message).toContain('must be an IANA time zone');
+    const noDb = shippedDocs((d) => {
+      d.ssfb.services.finacle = { ...d.ssfb.services.finacle, naive_timestamp_zone: 'UTC' };
+    });
+    expect(registryError(() => buildRegistry(config(), noDb)).message).toContain('naive_timestamp_zone needs a db env name');
   });
 });
 

@@ -16,8 +16,8 @@ import type { FixtureStore } from '../../src/mock/store.ts';
 import type { RunStore } from '../../src/runstore/types.ts';
 import { createToolDeps, type ToolConnectors } from '../../src/tools/_lib/context.ts';
 import type { StagingHarness } from '../../src/tools/_lib/pipeline.ts';
-import { apiServices, capBody, HTTP_BODY_MAX_CHARS, toolModule } from '../../src/tools/http-call.tool.ts';
-import { allToolNames } from '../../src/tools/index.ts';
+import { apiServices, capBody, HTTP_BODY_MAX_CHARS, offeredServices, toolModule } from '../../src/tools/http-call.tool.ts';
+import { allToolNames, toolsFor } from '../../src/tools/index.ts';
 import type { ToolContext } from '../../src/tools/types.ts';
 import type { AuditLine } from '../../src/types/audit.ts';
 import type { Entity } from '../../src/types/core.ts';
@@ -388,6 +388,71 @@ describe('http_call services', () => {
     const s = setup({ real: true, noConnector: true });
     const env = await call(s, { service: 'harbor', path: '/admin/v1/x' });
     expect(env.output.status).toBe('not_configured');
+  });
+});
+
+// ------------------------------------------------------------------ configured services (D75)
+
+describe('http_call offers only configured services in real mode', () => {
+  const REAL = { TRIAGE_MOCK_MODE: 'false', TRIAGE_MOCK_STRICT: 'false' };
+  const picklist = (tool: ToolDefinition, service: string): boolean =>
+    v.safeParse(tool.input as v.GenericSchema, { service, path: '/x' }).success;
+
+  test('rtl with all three API URLs blank: no http_call on either investigator', () => {
+    const ctx = makeToolContext({ entity: 'rtl', env: REAL });
+    expect(offeredServices(ctx)).toEqual([]);
+    expect(toolModule.enabled(ctx, 'investigator')).toEqual({
+      on: false,
+      reason: 'rtl has no HTTP API service configured',
+    });
+    for (const mount of ['investigator', 'investigator_deep'] as const) {
+      expect(toolsFor(mount, ctx).map((t) => t.name)).not.toContain('http_call');
+    }
+  });
+
+  test('rtl with one API URL set: http_call offers only that service', () => {
+    const ctx = makeToolContext({ entity: 'rtl', env: { ...REAL, RTL_KYC_API_URL: 'http://kyc.test.invalid' } });
+    expect(offeredServices(ctx)).toEqual(['kyc']);
+    expect(toolsFor('investigator', ctx).map((t) => t.name)).toContain('http_call');
+  });
+
+  test('ssfb with the guardian URL blank: guardian is not in the picklist', () => {
+    const s = setup({ real: true });
+    expect(offeredServices(s.ctx)).not.toContain('guardian');
+    expect(picklist(s.tool, 'guardian')).toBe(false);
+    expect(picklist(s.tool, 'harbor')).toBe(true);
+    const set = setup({ real: true, env: { SSFB_GUARDIAN_API_URL: 'http://guardian.test.invalid' } });
+    expect(picklist(set.tool, 'guardian')).toBe(true);
+  });
+
+  test('a blank auth token drops the service in real mode only', () => {
+    expect(offeredServices(setup({ real: true }).ctx)).not.toContain('bro');
+    expect(offeredServices(setup({ real: true, env: { SSFB_BRO_ADMIN_TOKEN: FAKE_TOKEN } }).ctx)).toContain('bro');
+    expect(offeredServices(setup().ctx)).toContain('bro');
+  });
+
+  test('mock mode offers every API service, so test and eval homes keep http_call', () => {
+    const ctx = makeToolContext({ entity: 'rtl' });
+    expect(offeredServices(ctx)).toEqual(apiServices(ctx));
+    expect(toolModule.enabled(ctx, 'investigator')).toEqual({ on: true });
+  });
+
+  test('a call on a service that is not offered still answers not configured with its reason', async () => {
+    const s = setup({ real: true });
+    const env = await call(s, { service: 'guardian', path: '/admin/v1/x' });
+    expect(env.output.status).toBe('not_configured');
+    expect(env.output.message).toBe('not configured for ssfb:guardian');
+    const line = lastAudit(s);
+    expect(line.exit).toBe('not_configured');
+    expect(line.reason).toBe('not configured: SSFB_GUARDIAN_API_URL is blank');
+    expect(s.fetchCalls.length).toBe(0);
+  });
+
+  test('the bad-service refusal lists only the offered services', async () => {
+    const s = setup({ real: true });
+    const env = await call(s, { service: 'comms', path: '/x' });
+    expect(env.output.status).toBe('refused');
+    expect(env.output.message).toBe('Refused: ssfb has no HTTP API named that. Use one of: harbor.');
   });
 });
 

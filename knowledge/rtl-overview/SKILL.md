@@ -39,8 +39,9 @@ to query for them. A Shivalik-side fix to one of these services does not
 imply the RTL copy is fixed; if a case points at one of them, say so in the
 report and escalate.
 
-Also out of reach: user-vault (email verification, user basics) and the app
-server are Aspora core services, not RTL, and not in any registry.
+Also out of reach: user-vault (email verification, user basics), the app
+server and verification-service have no DB or API here, but their logs can be
+searched as the `uservault`, `appserver` and `verification` services.
 verification-service is still referenced by the `NRI_ONBOARDING_V4` step
 definitions for some KYC steps, but kyc-service replaces it for NRE/NRO.
 

@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from 'bun:test';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inspect } from 'node:util';
+import pg from 'pg';
 import { loadRegistry } from '../../config/registry.ts';
 import { masksValues } from '../../gate/sql-errors.ts';
 import { buildReadOnlyTxn, explainStatement, wrapWithCap } from '../../gate/sql-txn.ts';
@@ -14,7 +15,9 @@ import {
   capRows,
   createSqlConnector,
   dsnSecrets,
+  entityTypeParsers,
   mapPgError,
+  naiveTimestampText,
   SqlStateError,
   type PgQuery,
   type RetryInfo,
@@ -446,6 +449,80 @@ describe('pool', () => {
     expect(everyForm(err)).not.toContain(dsn);
     expectNoSecret(everyForm(err));
     expect(factory).toHaveBeenCalledTimes(0);
+  });
+});
+
+describe('dates and naive timestamps (D73)', () => {
+  const STAMP = '2026-09-07 10:03:57.437';
+
+  test('reads 1114 as ISO with Z and 1082 as stored, whatever process.env.TZ is', async () => {
+    const saved = process.env.TZ;
+    try {
+      for (const tz of ['Asia/Kolkata', 'UTC']) {
+        process.env.TZ = tz;
+        // The zone change took effect, so a Date-based parser would give a different answer here.
+        expect(new Date(2026, 8, 7).getTimezoneOffset()).toBe(tz === 'UTC' ? 0 : -330);
+        const { pg: fake, connector } = setup({}, {
+          fake: {
+            respond: (q) =>
+              q.text.startsWith('SELECT * FROM')
+                ? {
+                    rows: [{ at: STAMP, day: '2026-09-07', paid: '2026-09-07 10:03:57.437+00', ats: `{"${STAMP}",NULL}`, days: '{2026-09-07,2026-09-08}' }],
+                    fields: [
+                      { name: 'at', dataTypeID: 1114 },
+                      { name: 'day', dataTypeID: 1082 },
+                      { name: 'paid', dataTypeID: 1184 },
+                      { name: 'ats', dataTypeID: 1115 },
+                      { name: 'days', dataTypeID: 1182 },
+                    ],
+                  }
+                : undefined,
+          },
+        });
+        const out = await connector.runSelect(ctxOf(), input());
+        const row = out.data!.rows[0]!;
+        expect(row.at).toBe('2026-09-07T10:03:57.437Z');
+        expect(row.day).toBe('2026-09-07');
+        expect(row.ats).toEqual(['2026-09-07T10:03:57.437Z', null]);
+        expect(row.days).toEqual(['2026-09-07', '2026-09-08']);
+        // timestamptz keeps pg's parser; its offset makes it right in any TZ.
+        expect((row.paid as Date).toISOString()).toBe('2026-09-07T10:03:57.437Z');
+        expect(fake.configs[0]!.types.getTypeParser(1114, 'text')(STAMP)).toBe('2026-09-07T10:03:57.437Z');
+      }
+    } finally {
+      if (saved === undefined) delete process.env.TZ;
+      else process.env.TZ = saved;
+    }
+  });
+
+  test('keeps every fractional digit, and returns infinity, BC and far years as stored', () => {
+    expect(naiveTimestampText('2026-09-07 10:03:57.437123', 'UTC')).toBe('2026-09-07T10:03:57.437123Z');
+    expect(naiveTimestampText('2026-09-07 10:03:57', 'UTC')).toBe('2026-09-07T10:03:57Z');
+    for (const stored of ['infinity', '-infinity', '0044-03-15 12:00:00 BC', '10000-01-01 00:00:00']) {
+      expect(naiveTimestampText(stored, 'UTC')).toBe(stored);
+    }
+  });
+
+  test('a zone other than UTC gives the stored text plus the zone name', () => {
+    const types = entityTypeParsers('Asia/Kolkata');
+    expect(types.getTypeParser(1114, 'text')('2026-09-07 10:03:57')).toBe('2026-09-07 10:03:57 Asia/Kolkata');
+    expect(types.getTypeParser(1115 as Parameters<typeof types.getTypeParser>[0], 'text')('{"2026-09-07 10:03:57"}')).toEqual(['2026-09-07 10:03:57 Asia/Kolkata']);
+    expect(types.getTypeParser(1082, 'text')('2026-09-07')).toBe('2026-09-07');
+  });
+
+  test("pg's own row parser uses the pool's types, and the global pg.types is untouched", () => {
+    const Result = (pg as unknown as { Result: new (rowMode: undefined, types: pg.CustomTypesConfig) => {
+      addFields(fields: { name: string; dataTypeID: number; format: string }[]): void;
+      parseRow(values: string[]): Record<string, unknown>;
+    } }).Result;
+    const result = new Result(undefined, entityTypeParsers('UTC'));
+    result.addFields([
+      { name: 'at', dataTypeID: 1114, format: 'text' },
+      { name: 'day', dataTypeID: 1082, format: 'text' },
+    ]);
+    expect(result.parseRow([STAMP, '2026-09-07'])).toEqual({ at: '2026-09-07T10:03:57.437Z', day: '2026-09-07' });
+    expect(pg.types.getTypeParser(1114, 'text')(STAMP)).toBeInstanceOf(Date);
+    expect(pg.types.getTypeParser(1082, 'text')('2026-09-07')).toBeInstanceOf(Date);
   });
 });
 

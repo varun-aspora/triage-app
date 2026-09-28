@@ -48,7 +48,7 @@ calls" are the extra requests a step makes to render or check input.
 | Step | `screen_type` | `workflowOwner` | Submit | Data calls |
 |---|---|---|---|---|
 | journey | `nri_journey_stepper` | `ASPORA_RTL` | `rtl:workflow` | none |
-| user basics | `nri_onboarding_user_basics_page` | `ASPORA_RTL` | `rtl:workflow` | `rtl:banking`; email identity through user-vault (no registry key) |
+| user basics | `nri_onboarding_user_basics_page` | `ASPORA_RTL` | `rtl:workflow` | `rtl:banking`; email identity through user-vault (logs only: `rtl:uservault`) |
 | user details | `nri_onboarding_user_details_page` | `ASPORA_RTL` | `rtl:workflow` | none |
 | PAN and name | `nri_onboarding_pan_details_page` | `SHIVALIK_BANK` | `ssfb:workflow` | `ssfb:harbor` PAN dedupe and document verification |
 | address | `nri_onboarding_address_page` | `ASPORA_RTL` | `rtl:workflow` | `ssfb:harbor` address lookup |

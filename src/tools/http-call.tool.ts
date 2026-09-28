@@ -28,6 +28,10 @@
 // a bad path or method is still refused, and the call then answers
 // 'not configured for <entity>:<service>'.
 //
+// In real mode the service picklist leaves out services whose base URL or
+// auth token is blank, and an entity with none gets no http_call (D75). The
+// not-configured answer stays as the second check.
+//
 // The fixture key is entity, service, method, the relative path and the
 // query. The model sees status, the body cut to a size cap, rule_index and
 // taken_at; the full body is staged to /data/<toolCallId>.json.
@@ -95,7 +99,7 @@ type ServiceFacts = {
   readonly auth: AuthCapability | undefined;
 };
 
-function serviceFacts(ctx: ToolContext, entity: Entity, service: string): ServiceFacts | undefined {
+function serviceFacts(ctx: Pick<ToolContext, 'registry'>, entity: Entity, service: string): ServiceFacts | undefined {
   try {
     return {
       spec: ctx.registry.service(entity, service),
@@ -108,7 +112,7 @@ function serviceFacts(ctx: ToolContext, entity: Entity, service: string): Servic
 }
 
 /** The env var behind the call. In real mode a blank auth token also means not configured. */
-function backingFor(ctx: ToolContext, entity: Entity, service: string, facts: ServiceFacts | undefined): BackingRef {
+function backingFor(mockMode: boolean, entity: Entity, service: string, facts: ServiceFacts | undefined): BackingRef {
   const api = facts?.api;
   if (api === undefined) {
     const name = /^[a-z][a-z0-9_]*$/.test(service) ? `${entity}_${service}_API_URL` : `${entity}_API_URL`;
@@ -116,11 +120,27 @@ function backingFor(ctx: ToolContext, entity: Entity, service: string, facts: Se
   }
   if (api.status !== 'ok') return { envName: api.envName, status: api.status };
   const auth = facts?.auth;
-  if (auth !== undefined && auth.status !== 'ok' && !ctx.deps.fixtures.settings.mockMode) {
+  if (auth !== undefined && auth.status !== 'ok' && !mockMode) {
     return { envName: auth.envName, status: auth.status };
   }
   return { envName: api.envName, status: 'ok' };
 }
+
+/**
+ * The API services the model is offered (D75). In real mode a service whose
+ * base URL or auth token is blank is left out, since every call to it answers
+ * not configured. Mock mode offers every API service: test and eval homes keep
+ * every URL blank, and a call there still answers not configured.
+ */
+export function offeredServices(ctx: Pick<ToolContext, 'registry' | 'entity' | 'config'>): readonly string[] {
+  const all = apiServices(ctx);
+  const entity = ctx.entity;
+  if (entity === null || ctx.config.mock.enabled) return all;
+  return Object.freeze(all.filter((s) => backingFor(false, entity, s, serviceFacts(ctx, entity, s)).status === 'ok'));
+}
+
+/** Every API service of the entity, and the ones the model is offered. */
+type ServiceLists = { readonly known: readonly string[]; readonly offered: readonly string[] };
 
 // ------------------------------------------------------------ rules
 
@@ -186,7 +206,7 @@ type GateResult = { readonly gate: GateDecision; readonly plan?: CallPlan };
 function decideCall(
   ctx: ToolContext,
   entity: Entity,
-  services: readonly string[],
+  services: ServiceLists,
   facts: ServiceFacts | undefined,
   input: HttpCallInput,
 ): GateResult {
@@ -201,10 +221,10 @@ function decideCall(
       ),
     };
   }
-  if (!services.includes(service) || facts === undefined || facts.api === undefined) {
+  if (!services.known.includes(service) || facts === undefined || facts.api === undefined) {
     return {
       gate: deny(
-        `Refused: ${entity} has no HTTP API named that. Use one of: ${services.filter((s) => s !== CBS_SERVICE).join(', ')}.`,
+        `Refused: ${entity} has no HTTP API named that. Use one of: ${services.offered.filter((s) => s !== CBS_SERVICE).join(', ')}.`,
         'bad_service: not an API service of the entity',
       ),
     };
@@ -352,13 +372,14 @@ type HttpRunInput = {
   readonly harness?: StagingHarness;
 };
 
-async function runHttpCall(ctx: ToolContext, services: readonly string[], flue: HttpRunInput): Promise<ToolEnvelope> {
+async function runHttpCall(ctx: ToolContext, services: ServiceLists, flue: HttpRunInput): Promise<ToolEnvelope> {
   const entity = ctx.entity;
   const deps = ctx.deps;
   const input = flue.data;
   const service = typeof input.service === 'string' ? input.service : '';
-  // Only a listed service name goes into audit lines and messages.
-  const serviceName = services.includes(service) ? service : 'unknown';
+  // Only a listed service name goes into audit lines and messages. A known
+  // service that is not offered still gets its not-configured answer.
+  const serviceName = services.known.includes(service) ? service : 'unknown';
   if (entity === null) throw new Error('http_call needs an investigator entity');
   const facts = serviceName === 'unknown' ? undefined : serviceFacts(ctx, entity, serviceName);
 
@@ -373,7 +394,7 @@ async function runHttpCall(ctx: ToolContext, services: readonly string[], flue: 
       tool: HTTP_CALL_TOOL,
       service: serviceName,
       input,
-      backing: backingFor(ctx, entity, serviceName, facts),
+      backing: backingFor(deps.fixtures.settings.mockMode, entity, serviceName, facts),
       scope: {},
       gate: () => {
         const result = decideCall(ctx, entity, services, facts, input);
@@ -496,17 +517,17 @@ export const toolModule: ToolModule = Object.freeze({
   entities: 'all' as const,
   enabled(ctx: ToolContext) {
     if (ctx.entity === null) return { on: false, reason: 'http_call needs an investigator entity' } as const;
-    if (apiServices(ctx).filter((s) => s !== CBS_SERVICE).length === 0) {
-      return { on: false, reason: `${ctx.entity} lists no service with an HTTP API` } as const;
+    if (offeredServices(ctx).filter((s) => s !== CBS_SERVICE).length === 0) {
+      return { on: false, reason: `${ctx.entity} has no HTTP API service configured` } as const;
     }
     return { on: true } as const;
   },
   create(ctx: ToolContext): ToolDefinition {
-    const services = apiServices(ctx);
+    const services: ServiceLists = { known: apiServices(ctx), offered: offeredServices(ctx) };
     return defineTool({
       name: HTTP_CALL_TOOL,
       description: DESCRIPTION,
-      input: inputSchema(services),
+      input: inputSchema(services.offered),
       harness: true,
       run: async ({ data, signal, toolCallId, log, harness }): Promise<ToolEnvelope> =>
         runHttpCall(ctx, services, {
