@@ -48,7 +48,7 @@ the CX team replies with.
 - `entities_consulted`: the entities an investigator was briefed on.
 - `gaps`: what could not be checked and why, one line each.
 - `escalated` and `escalation_reasons`: write false and an empty list.
-  `finish_report` sets them when it escalates.
+  `finish_report` sets them when escalation fires, on a strong run too.
 - `images_seen`: true only if the thread's images were in your input and you
   read them.
 
@@ -80,7 +80,10 @@ When more than one fits, use the first that fits in this order: `resolved`,
   side or the bank's has to finish first.
 - `reply_text`: a short reply the CX team can paste to the user. Plain words,
   no internal service names, no ids, no personal data, and no promise the
-  evidence does not support.
+  evidence does not support. When the evidence shows what the user can do
+  (retry, update the app, check their SIM or network, upload a document),
+  give those steps. Ask the user to wait for guidance only when the evidence
+  supports no step.
 - `escalate_to`: optional. The team or role to escalate to, when someone must
   pick it up.
 

@@ -302,6 +302,8 @@ function escalationRecord(r: Report): string {
     `- Escalated: ${yesNo(r.escalated)}`,
     `- Reasons:${reasons.length === 0 ? ' none' : ''}`,
     ...reasons.map((reason) => `  - ${reason}`),
+    // finish_report records the reasons on a strong run without a synthesis pass (W15).
+    ...(r.escalated && c.tier_final === 'strong' ? ['- Action: already on strong; synthesis not run'] : []),
     `- Final tier: ${c.tier_final}`,
     `- Rule fired: ${codeSpan(c.rule_fired)}`,
     `- Tier override by: ${c.tier_override_by === undefined ? 'nobody' : inline(c.tier_override_by)}`,

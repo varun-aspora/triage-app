@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "kind": "logs_search",
+  "entity": "ssfb",
+  "key": {
+    "entity": "ssfb",
+    "terms": [
+      "message:POST /guardian/api/v1/callbacks/vendors/twilio/sms"
+    ],
+    "mode": "count"
+  },
+  "key_string": "{\"entity\":\"ssfb\",\"mode\":\"count\",\"terms\":[\"message:POST /guardian/api/v1/callbacks/vendors/twilio/sms\"]}",
+  "result": {
+    "count": 0,
+    "num_hits": 0,
+    "window": {
+      "from": "2026-08-29T00:00:00.000Z",
+      "to": "2026-09-28T00:00:00.000Z"
+    },
+    "truncated": false
+  },
+  "meta": {
+    "source": "hand",
+    "recorded_at": "2026-09-28T00:00:00.000Z"
+  }
+}

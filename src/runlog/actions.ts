@@ -186,12 +186,15 @@ export function outcomeOf(result: unknown): string {
 
 // ------------------------------------------------------------ repeat cache
 
+/** In the message of every reused result, so a run log shows which results were reused. */
+export const REUSED_MARK = 'result reused, nothing new was queried';
+
 /** The earlier ok result for this key, with the note the model sees, or undefined. */
 export function findRepeat(runId: string, key: string, now: Date): ToolEnvelope | undefined {
   const hit = runs.get(runId)?.repeats.get(key);
   if (hit === undefined || now.getTime() - Date.parse(hit.at) > REPEAT_TTL_MS) return undefined;
   const note =
-    `Already run by ${hit.by} at ${clockOf(hit.at)}; result reused, nothing new was queried. ` +
+    `Already run by ${hit.by} at ${clockOf(hit.at)}; ${REUSED_MARK}. ` +
     'If it was empty, find out why before trying again; for new data change the key, window, page or filter.';
   const earlier = hit.envelope.output.message;
   return { output: { ...hit.envelope.output, message: earlier ? `${note} ${earlier}` : note } };

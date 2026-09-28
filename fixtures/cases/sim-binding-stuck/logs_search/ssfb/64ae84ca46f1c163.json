@@ -1,0 +1,89 @@
+{
+  "schema": 1,
+  "kind": "logs_search",
+  "entity": "ssfb",
+  "key": {
+    "entity": "ssfb",
+    "service": "harbor",
+    "terms": [
+      "de71ce00-0000-4000-8000-000000000002",
+      "message:checking verification status"
+    ],
+    "mode": "search"
+  },
+  "key_string": "{\"entity\":\"ssfb\",\"mode\":\"search\",\"service\":\"harbor\",\"terms\":[\"de71ce00-0000-4000-8000-000000000002\",\"message:checking verification status\"]}",
+  "result": {
+    "hits": [
+      {
+        "timestamp": "2026-09-24T11:52:49.000Z",
+        "service": "harbor",
+        "level": "info",
+        "message": "checking verification status",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "verification_id": "7e41f100-0000-4000-8000-000000000017",
+        "status": "PENDING",
+        "has_data_token": false
+      },
+      {
+        "timestamp": "2026-09-24T11:52:29.000Z",
+        "service": "harbor",
+        "level": "info",
+        "message": "checking verification status",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "verification_id": "7e41f100-0000-4000-8000-000000000017",
+        "status": "PENDING",
+        "has_data_token": false
+      },
+      {
+        "timestamp": "2026-09-07T10:13:20.000Z",
+        "service": "harbor",
+        "level": "info",
+        "message": "checking verification status",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "verification_id": "7e41f100-0000-4000-8000-000000000002",
+        "status": "PENDING",
+        "has_data_token": false
+      },
+      {
+        "timestamp": "2026-09-07T10:13:00.000Z",
+        "service": "harbor",
+        "level": "info",
+        "message": "checking verification status",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "verification_id": "7e41f100-0000-4000-8000-000000000002",
+        "status": "PENDING",
+        "has_data_token": false
+      },
+      {
+        "timestamp": "2026-09-07T10:04:46.000Z",
+        "service": "harbor",
+        "level": "info",
+        "message": "checking verification status",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "verification_id": "7e41f100-0000-4000-8000-000000000001",
+        "status": "PENDING",
+        "has_data_token": false
+      },
+      {
+        "timestamp": "2026-09-07T10:04:26.000Z",
+        "service": "harbor",
+        "level": "info",
+        "message": "checking verification status",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "verification_id": "7e41f100-0000-4000-8000-000000000001",
+        "status": "PENDING",
+        "has_data_token": false
+      }
+    ],
+    "num_hits": 145,
+    "window": {
+      "from": "2026-08-29T00:00:00.000Z",
+      "to": "2026-09-28T00:00:00.000Z"
+    },
+    "truncated": true
+  },
+  "meta": {
+    "source": "hand",
+    "recorded_at": "2026-09-28T00:00:00.000Z"
+  }
+}

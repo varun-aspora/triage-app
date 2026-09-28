@@ -16,10 +16,12 @@
 //      tier and money_moved come from initialData when it is wired, else from
 //      the stored classification, else from the draft.
 //   4. When escalation fired and the tier is not strong, replace the draft
-//      with synthesizeOnStrong(). A ResultUnavailableError keeps the draft
-//      with a gap (synthesis.ts handles that). The pass runs at most
-//      MAX_SYNTHESIS_PASSES times per run, so a synthesized report that keeps
-//      failing the egress check cannot loop forever. The count lives in a
+//      with synthesizeOnStrong(). On a strong run the draft is kept and the
+//      fired reasons are recorded (escalated true, W15). A
+//      ResultUnavailableError keeps the draft with a gap (synthesis.ts
+//      handles that). The pass runs at most MAX_SYNTHESIS_PASSES times per
+//      run, so a synthesized report that keeps failing the egress check
+//      cannot loop forever. The count lives in a
 //      module-level map keyed by run id, because Flue re-renders the agent
 //      before every model turn and so builds a fresh tool each time.
 //   5. repo_commits: one { repo, commit } per repo in the code evidence, from
@@ -32,8 +34,9 @@
 //      unpriced_models and gets a gap, and the total is partial. No reader or
 //      no rows gives cost null and a gap.
 //   7. initialData.preflight_warnings (or the stored ones) become gaps.
-//   8. writeReport() with the ingress names (initialData.redaction_names plus
-//      deps.run.redactionNames). A refusal is returned as a refused envelope
+//   8. writeReport() with the draft's near-duplicate gaps merged
+//      (src/report/gaps.ts) and the ingress names (initialData.redaction_names
+//      plus deps.run.redactionNames). A refusal is returned as a refused envelope
 //      with the retry text; it is never thrown and nothing is written.
 //
 // Every gap this tool adds goes through the persisted profile first, so a
@@ -53,6 +56,7 @@ import { computeEscalation, type Escalation, type RecordedFindings } from '../ag
 import { makeAuditLine } from '../gate/audit.ts';
 import { redactModelFacing, redactPersisted } from '../gate/redact.ts';
 import { currentCommit, type CommitResult, type ReposDeps } from '../ops/repos.ts';
+import { mergeGaps, registryNames } from '../report/gaps.ts';
 import { refusalMessage, writeReport, type WriteReportArgs, type WriteReportResult } from '../report/write.ts';
 import { RunNotFoundError, type RunRecord } from '../runstore/types.ts';
 import type { AuditTransport } from '../types/audit.ts';
@@ -426,6 +430,9 @@ export function createFinishReportTool(ctx: ToolContext, options: FinishReportOp
           escalation_reasons: [...escalation.reasons],
         };
       }
+    } else if (escalation.triggered) {
+      // Already on strong: no synthesis, but the reasons are still recorded.
+      draft = { ...draft, escalated: true, escalation_reasons: [...escalation.reasons] };
     }
     signal?.throwIfAborted();
 
@@ -445,7 +452,7 @@ export function createFinishReportTool(ctx: ToolContext, options: FinishReportOp
     // 8. Write.
     const result = await write({
       runId: ctx.runId,
-      draft: { ...draft, gaps: unique([...draft.gaps, ...added]), repo_commits: commits.commits, cost: cost.cost },
+      draft: { ...draft, gaps: unique([...mergeGaps(draft.gaps, registryNames(ctx.registry)), ...added]), repo_commits: commits.commits, cost: cost.cost },
       ingressNames: names,
       store: deps.runStore,
       config: ctx.config,

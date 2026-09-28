@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "kind": "logs_search",
+  "entity": "ssfb",
+  "key": {
+    "entity": "ssfb",
+    "service": "guardian",
+    "terms": [
+      "columns:iso_country_code",
+      "message:Processing Twilio callback",
+      "order:oldest"
+    ],
+    "mode": "search"
+  },
+  "key_string": "{\"entity\":\"ssfb\",\"mode\":\"search\",\"service\":\"guardian\",\"terms\":[\"columns:iso_country_code\",\"message:Processing Twilio callback\",\"order:oldest\"]}",
+  "result": {
+    "hits": [],
+    "num_hits": 0,
+    "window": {
+      "from": "2026-08-29T00:00:00.000Z",
+      "to": "2026-09-28T00:00:00.000Z"
+    },
+    "truncated": false
+  },
+  "meta": {
+    "source": "hand",
+    "recorded_at": "2026-09-28T00:00:00.000Z"
+  }
+}

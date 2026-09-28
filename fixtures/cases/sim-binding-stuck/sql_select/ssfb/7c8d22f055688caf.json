@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "kind": "sql_select",
+  "entity": "ssfb",
+  "key": {
+    "entity": "ssfb",
+    "service": "harbor",
+    "tables": [
+      "account_forms"
+    ],
+    "params": [
+      "5a1e0000-0000-4000-8000-000000000001"
+    ]
+  },
+  "key_string": "{\"entity\":\"ssfb\",\"params\":[\"5a1e0000-0000-4000-8000-000000000001\"],\"service\":\"harbor\",\"tables\":[\"account_forms\"]}",
+  "result": {
+    "rows": []
+  },
+  "meta": {
+    "source": "hand",
+    "recorded_at": "2026-09-28T00:00:00.000Z"
+  }
+}
