@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { loadRegistry, type Registry } from '../../config/registry.ts';
 import { mockPortFromFixtures, type MockPort } from '../../connectors/mock.ts';
 import { createSqlConnector, type RunSelectInput, type SqlSelectOutcome } from '../../connectors/sql/pg-client.ts';
-import { fakePg } from '../../connectors/sql/pg-fake.ts';
+import { fakePg, type Respond } from '../../connectors/sql/pg-fake.ts';
 import { RoleCheckCache } from '../../connectors/sql/readonly-role.ts';
 import { ConnectorError, envVarName, type ConnectorContext } from '../../connectors/types.ts';
 import { createMemoryAuditSink } from '../../gate/audit-sink.ts';
@@ -98,6 +98,17 @@ function hopOf(result: Awaited<ReturnType<typeof resolveIdChain>>, source: strin
   return result.id_chain.hops.filter((h) => h.source === source && (from === undefined || h.from === from));
 }
 
+/** The real SQL connector over a fake pg. */
+function overFakePg(respond: Respond) {
+  const registry = registryOf();
+  const config = makeTestConfig({ TRIAGE_ENTITIES: 'ssfb,rtl', ...DSNS, TRIAGE_REQUIRE_READONLY_DB_ROLE: 'false' });
+  const pg = fakePg({ respond });
+  const connector = createSqlConnector({ registry, config, pgFactory: pg.factory, roleCache: new RoleCheckCache(), retry: NO_RETRY });
+  const { deps, audit } = depsOf(connector, { entities: registry });
+  const queries = () => pg.selectClients().flatMap((c) => c.queries);
+  return { deps, audit, pg, queries };
+}
+
 const rows = (...r: Record<string, unknown>[]): Handler => () => r;
 
 describe('hop table', () => {
@@ -173,15 +184,17 @@ describe('hop table', () => {
     expect(sql.sqlOf().filter((s) => s === S.HARBOR_FORMS_BY_USER).length).toBe(1);
   });
 
-  test('aspora_user_id that does not resolve is not_found and is not tried as a customer_id', async () => {
+  test('aspora_user_id with no form and no RTL runs is not_found on both and is not tried as a customer_id', async () => {
     const sql = fakeSql();
     const { deps } = depsOf(sql);
     const result = await resolveIdChain({ aspora_user_id: USER }, deps);
     expect(result.id_chain.hops.map((h) => [h.from, h.source, h.status])).toEqual([
       ['aspora_user_id', 'ssfb:harbor.account_forms', 'not_found'],
+      ['aspora_user_id', 'rtl:workflow.workflow_executions', 'not_found'],
     ]);
     expect(result.id_chain.ids).toEqual({ aspora_user_id: USER });
-    expect(sql.sqlOf()).toEqual([S.HARBOR_FORMS_BY_USER]);
+    expect(sql.sqlOf()).toEqual([S.HARBOR_FORMS_BY_USER, S.RTL_WORKFLOW_BY_USER]);
+    expect(result.basic_state.some((i) => i.item.startsWith('workflow_'))).toBe(false);
   });
 
   test('customer_id reads the rhythm account mappings', async () => {
@@ -279,6 +292,7 @@ describe('account hops back to the customer', () => {
       ['account_form_id', 'ssfb:harbor.account_forms', 'unreachable'],
       ['account_form_id', 'ssfb:harbor.customer', 'unreachable'],
       ['account_form_id', 'ssfb:workflow.workflow_executions', 'unreachable'],
+      ['aspora_user_id', 'rtl:workflow.workflow_executions', 'unreachable'],
       ['customer_id', 'ssfb:rhythm.customer_account_mappings', 'unreachable'],
     ]);
     expect(sql.calls.length).toBe(1);
@@ -359,6 +373,60 @@ describe('account_form_id workflow copies', () => {
   });
 });
 
+describe('aspora_user_id to RTL workflow runs', () => {
+  const RTL_RUN = { workflow_identifier: 'wf-rtl-user', status: 'RUNNING', current_step_identifier: 'persona' };
+
+  test('a user with no harbor form resolves the RTL runs keyed to the user and their workflow state', async () => {
+    const { deps, queries } = overFakePg((q) => (q.text === S.RTL_WORKFLOW_BY_USER ? { rows: [RTL_RUN], fields: [] } : undefined));
+    const result = await resolveIdChain({ aspora_user_id: USER }, deps);
+
+    expect(hopOf(result, 'ssfb:harbor.account_forms', 'aspora_user_id')[0]?.status).toBe('not_found');
+    expect(hopOf(result, 'rtl:workflow.workflow_executions', 'aspora_user_id')).toEqual([
+      { from: 'aspora_user_id', source: 'rtl:workflow.workflow_executions', status: 'resolved', taken_at: NOW.toISOString() },
+    ]);
+    expect(queries().find((q) => q.text === S.RTL_WORKFLOW_BY_USER)?.values).toEqual([USER]);
+    const wf = result.basic_state.filter((i) => i.item.startsWith('workflow_')).map((i) => [i.item, i.value, i.source]);
+    expect(wf).toEqual([
+      ['workflow_identifier', 'wf-rtl-user', 'rtl:workflow.workflow_executions'],
+      ['workflow_status', 'RUNNING', 'rtl:workflow.workflow_executions'],
+      ['workflow_current_step', 'persona', 'rtl:workflow.workflow_executions'],
+    ]);
+  });
+
+  test('when the user has a form with no runs keyed to it, the RTL runs keyed to the user fill the workflow state', async () => {
+    const { deps } = overFakePg((q) => {
+      if (q.text === S.HARBOR_FORMS_BY_USER) return { rows: [{ form_id: FORM, external_user_ref: USER }], fields: [] };
+      if (q.text === S.RTL_WORKFLOW_BY_USER) return { rows: [RTL_RUN], fields: [] };
+      return undefined;
+    });
+    const result = await resolveIdChain({ aspora_user_id: USER }, deps);
+
+    expect(result.id_chain.hops.filter((h) => h.source.endsWith('workflow.workflow_executions')).map((h) => [h.from, h.source, h.status])).toEqual([
+      ['account_form_id', 'ssfb:workflow.workflow_executions', 'not_found'],
+      ['account_form_id', 'rtl:workflow.workflow_executions', 'not_found'],
+      ['aspora_user_id', 'rtl:workflow.workflow_executions', 'resolved'],
+    ]);
+    expect(result.basic_state.find((i) => i.item === 'workflow_identifier')).toMatchObject({ value: 'wf-rtl-user', source: 'rtl:workflow.workflow_executions' });
+  });
+
+  test('when the user has a form, the form path runs and the user read does not', async () => {
+    const { deps, queries } = overFakePg((q) => {
+      if (q.text === S.HARBOR_FORMS_BY_USER) return { rows: [{ form_id: FORM, external_user_ref: USER }], fields: [] };
+      if (q.text === S.SSFB_WORKFLOW_BY_FORM) return { rows: [{ workflow_identifier: 'wf-ssfb', status: 'DONE', current_step_identifier: 'end' }], fields: [] };
+      if (q.text === S.RTL_WORKFLOW_BY_USER) return { rows: [RTL_RUN], fields: [] };
+      return undefined;
+    });
+    const result = await resolveIdChain({ aspora_user_id: USER }, deps);
+
+    expect(result.id_chain.hops.filter((h) => h.source.endsWith('workflow.workflow_executions')).map((h) => [h.from, h.source, h.status])).toEqual([
+      ['account_form_id', 'ssfb:workflow.workflow_executions', 'resolved'],
+      ['account_form_id', 'rtl:workflow.workflow_executions', 'skipped'],
+    ]);
+    expect(queries().some((q) => q.text === S.RTL_WORKFLOW_BY_USER)).toBe(false);
+    expect(result.basic_state.find((i) => i.item === 'workflow_status')).toMatchObject({ value: 'DONE', source: 'ssfb:workflow.workflow_executions' });
+  });
+});
+
 describe('unreachable databases', () => {
   test('an unreachable harbor marks that hop and dependent hops unreachable and does not throw', async () => {
     const down = (): Error => new ConnectorError('unreachable', 'ssfb:harbor: could not reach SSFB_HARBOR_DB_URL (ECONNREFUSED)');
@@ -381,11 +449,12 @@ describe('unreachable databases', () => {
       ['account_form_id', 'ssfb:harbor.account_forms', 'unreachable'],
       ['account_form_id', 'ssfb:harbor.customer', 'unreachable'],
       ['account_form_id', 'ssfb:workflow.workflow_executions', 'unreachable'],
+      ['aspora_user_id', 'rtl:workflow.workflow_executions', 'not_found'],
       ['customer_id', 'ssfb:rhythm.customer_account_mappings', 'unreachable'],
     ]);
-    // Harbor was tried once; nothing else could run.
-    expect(sql.calls.length).toBe(1);
-    expect(audit.lines.length).toBe(1);
+    // Harbor was tried once; only the RTL read by user id could run after it.
+    expect(sql.sqlOf()).toEqual([S.HARBOR_FORMS_BY_USER, S.RTL_WORKFLOW_BY_USER]);
+    expect(audit.lines.length).toBe(2);
     expect(audit.lines[0]).toMatchObject({ exit: 'unreachable', target: 'SSFB_HARBOR_DB_URL' });
     expect(result.id_chain.ids).toEqual({ aspora_user_id: USER });
     // The basic state that needed the missing ids is unreachable too.
@@ -421,7 +490,7 @@ describe('unreachable databases', () => {
     const { deps, audit } = depsOf(sql, { entities: registryOf({ SSFB_HARBOR_DB_URL: '' }) });
     const result = await resolveIdChain({ aspora_user_id: USER }, deps);
     expect(result.id_chain.hops[0]?.status).toBe('unreachable');
-    expect(sql.calls.length).toBe(0);
+    expect(sql.calls.every((c) => c.input.service !== 'harbor')).toBe(true);
     expect(audit.lines[0]).toMatchObject({ exit: 'not_configured', target: 'SSFB_HARBOR_DB_URL', transport: 'real' });
   });
 
@@ -610,20 +679,14 @@ describe('audit lines', () => {
   });
 
   test('a seeded fake DSN never appears, with the real connector over a fake pg', async () => {
-    const registry = registryOf();
-    const config = makeTestConfig({ TRIAGE_ENTITIES: 'ssfb,rtl', ...DSNS, TRIAGE_REQUIRE_READONLY_DB_ROLE: 'false' });
-    const pg = fakePg({
-      respond: (q) => {
-        if (q.text === S.HARBOR_CUSTOMER_BY_ID) return { rows: [{ customer_id: CUST, account_form_id: FORM }], fields: [] };
-        if (q.text === S.STATE_RHYTHM_ACCOUNT) {
-          const err = Object.assign(new Error(['connect failed for', DSNS.SSFB_RHYTHM_DB_URL].join(' ')), { code: 'ECONNREFUSED' });
-          throw err;
-        }
-        return undefined;
-      },
+    const { deps, audit, pg } = overFakePg((q) => {
+      if (q.text === S.HARBOR_CUSTOMER_BY_ID) return { rows: [{ customer_id: CUST, account_form_id: FORM }], fields: [] };
+      if (q.text === S.STATE_RHYTHM_ACCOUNT) {
+        const err = Object.assign(new Error(['connect failed for', DSNS.SSFB_RHYTHM_DB_URL].join(' ')), { code: 'ECONNREFUSED' });
+        throw err;
+      }
+      return undefined;
     });
-    const connector = createSqlConnector({ registry, config, pgFactory: pg.factory, roleCache: new RoleCheckCache(), retry: NO_RETRY });
-    const { deps, audit } = depsOf(connector, { entities: registry });
     const result = await resolveIdChain({ customer_id: CUST, account_form_id: FORM }, deps);
 
     expect(result.id_chain.hops[0]?.status).toBe('resolved');
@@ -665,7 +728,7 @@ describe('static checks', () => {
 
   test('every exported statement is a constant SELECT with $n placeholders only', () => {
     const sqlConstants = Object.entries(statements).filter(([, value]) => typeof value === 'string') as [string, string][];
-    expect(sqlConstants.length).toBe(12);
+    expect(sqlConstants.length).toBe(13);
     for (const [name, sql] of sqlConstants) {
       expect(sql, name).toMatch(/^SELECT /);
       expect(sql, name).toContain('$1');

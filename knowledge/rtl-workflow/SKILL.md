@@ -43,18 +43,19 @@ check after a KYC SDK closes; does not advance) and `POST /go-back`.
 
 | Table | What to look for |
 |---|---|
-| `workflow_executions` | First stop. One row per user run: `reference_id` and `reference_type`, `workflow_identifier`, `status` (RUNNING, COMPLETED, FAILED, MANUAL_REVIEW, REVERTING), `sub_status`, `current_step_identifier` and `current_step_index` (where the user is), and `step_data` (JSONB, per-step results). For a harbor form, `reference_id` = `form_id` and `reference_type` = `FORM`. |
+| `workflow_executions` | First stop. One row per user run: `reference_id` and `reference_type`, `workflow_identifier`, `status` (RUNNING, COMPLETED, FAILED, MANUAL_REVIEW, REVERTING), `sub_status`, `current_step_identifier` and `current_step_index` (where the user is), and `step_data` (JSONB, per-step results). For a harbor form, `reference_id` = `form_id` and `reference_type` = `FORM`; for a run keyed to the user, `reference_id` = the Aspora user id and `reference_type` = `USER`. |
 | `workflow_definitions` | The ordered `steps` JSONB for a `workflow_identifier`; one active row per identifier. Also `definition_settings`. |
 | `ui_templates` | The Velocity or JSON template rendered for each step. |
 | `workflow_execution_actions` | Saga and audit rows for force-step-back and go-back. Check when a revert is stuck (STARTED, COMPENSATED, then DONE or STUCK). |
 
 There is no `workflow_instances` table.
 
-`workflow_executions` is looked up by `reference_id`, which for a harbor form
-is the `form_id`. No user id column is documented for it, so do not filter on
-a guessed `user_id`: get the `form_id` first (the chain's `account_form_id`,
-or from harbor). To
-see the real columns, read `information_schema.columns` for the table:
+`workflow_executions` is looked up by `reference_id` and `reference_type`:
+the `form_id` with `FORM`, or the Aspora user id with `USER`. No user id
+column is documented, so do not filter on a guessed `user_id`. The ID chain
+already reads the `FORM` runs for the chain's `account_form_id`, then the
+`USER` runs for `aspora_user_id` when that finds none. To see the real
+columns, read `information_schema.columns` for the table:
 
 ```
 sql_select { service: 'workflow', sql: "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position", params: ['workflow_executions'] }
@@ -66,6 +67,12 @@ Where the form is:
 
 ```
 sql_select { service: 'workflow', sql: "SELECT workflow_identifier, status, sub_status, current_step_identifier, current_step_index, step_data FROM workflow_executions WHERE reference_id = $1 AND reference_type = 'FORM'", params: ['<form_id>'] }
+```
+
+Where the user is, for runs keyed to the user:
+
+```
+sql_select { service: 'workflow', sql: "SELECT workflow_identifier, status, sub_status, current_step_identifier, current_step_index, step_data FROM workflow_executions WHERE reference_id = $1 AND reference_type = 'USER'", params: ['<aspora_user_id>'] }
 ```
 
 The step list for that definition. Set-returning functions are refused, so
