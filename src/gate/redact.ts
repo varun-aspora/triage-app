@@ -25,6 +25,7 @@ import {
   credential,
   digits6,
   email,
+  flueIdSpans,
   hexTokenSpans,
   maskEmailLocal,
   name,
@@ -107,7 +108,7 @@ function overlaps(a: Span, b: Span): boolean {
 
 function guardSpans(s: string, detector: Detector): Span[] {
   if (detector.guard === 'none') return [];
-  const spans = uuidSpans(s);
+  const spans = [...uuidSpans(s), ...flueIdSpans(s)];
   return detector.guard === 'uuid+hex' ? [...spans, ...hexTokenSpans(s)] : spans;
 }
 

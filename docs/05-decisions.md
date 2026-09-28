@@ -436,6 +436,12 @@ Append-only. When a decision is reversed, add a new entry that supersedes it; do
 - **Rejected**: the first D82 build (a per-event redaction layer, root-span capture with a migration, feedback scores, and edits across ingress, run store and feedback: 65 files for a 10-line integration); a `useDecision()` lifecycle hook (hooks cannot make model calls, and decisions are called explicitly, anywhere); emitting custom decision events into Flue's stream (Flue 2.0.8 has no public API for it, and adapters ignore unknown events); routing decisions through a Flue model provider (a decision model is not a chat model, and ingress decisions run before any session).
 - **Open**: feedback verdicts as scores. OTel has nothing for it; each backend needs its own call (Braintrust `logFeedback`, Langfuse scores).
 
+### D93. Flue ids pass both redaction profiles, like UUIDs (2026-09-26; extends A11)
+- **Problem**: Flue mints ids as a lowercase prefix plus a ULID (`sub_`, `turn_`, `inv_`, `call_` and others). The ULID's leading timestamp often holds six or more digits in a row, so the persisted profile masked them: `sub_01M3EN703470…` was written to `events.jsonl` as `sub_01M3EN****3470…`. The logged dispatch id then no longer matched the stored `flue_submission_id` (D71), and `stalled.contract.ts` failed whenever the timestamp had such a run.
+- **Chosen**: `flueIdSpans` in `src/gate/redact-patterns.ts` protects any lowercase prefix, `_`, and a 26-character Crockford ULID whose first character is 0-7. It joins the UUID guard, so every detector that spares UUIDs spares Flue ids, in both profiles and in `checkEgress`. Digits next to an id, and prefixed tokens that are not a full ULID, are still masked. The same holds for span content sent by D82 tracing, which goes through `redactPersisted`.
+- **Rejected**: comparing the redacted form in the test (it hides a real mismatch in the event log); a guard for `sub_` alone (the other Flue ids carry the same timestamp and would be masked the same way); matching any `word_token` (too wide for a banking redactor).
+- **Assumptions**: a lowercase-prefixed 26-character ULID never carries customer data. Flue builds these ids with `ulidx`, whose alphabet is `0123456789ABCDEFGHJKMNPQRSTVWXYZ` (2.0.8).
+
 ### D73. Naive timestamps and dates are read as stored (2026-09-28)
 - **Chosen**: each entity pool gets its own `types` (`entityTypeParsers` in `src/connectors/sql/pg-client.ts`), passed in the pool config; the global `pg.types` is never changed.
   - `timestamp` (1114) and `timestamp[]` (1115): read in the service's zone. A new optional registry field `naive_timestamp_zone` (IANA name, default `UTC`) says which zone the service writes in. For UTC the value becomes ISO with `T` and a trailing `Z`, keeping every fractional digit Postgres sent (`2026-09-07 10:03:57.437` → `2026-09-07T10:03:57.437Z`). For any other zone it is the stored text plus a space and the zone name (`2026-09-07 10:03:57 Asia/Kolkata`). `infinity`, `-infinity`, BC values and years past 9999 are returned as stored.
@@ -653,6 +659,7 @@ Append-only. When a decision is reversed, add a new entry that supersedes it; do
 - **Rejected**: embeddings or a model call to merge gaps (not deterministic, and a network call for about 30 short lines); edit distance on characters (a changed id reads as a different gap); a new report field for the action taken (derived from `escalated` and the final tier, so no schema change); merging the added gaps too (two repos without a commit would merge into one line).
 - **Assumptions**: the report's `classification.tier_final` is the run's tier, as the model copies it from the classification; the action line reads it. Two gaps that differ only by an id are the same gap. D93 is taken on `main`; D94 is the SIM eval case.
 
+||||||| e13cb6a
 ## Assumptions (explicit; each needs your confirmation or correction)
 
 | # | Assumption | Basis | If wrong |
