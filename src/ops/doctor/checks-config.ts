@@ -18,8 +18,7 @@ import {
   type Registry,
 } from '../../config/registry.ts';
 import { EMBEDDING_KEY, parseEmbeddingSpec, type EmbeddingSpec } from '../../embed/spec.ts';
-import type { Embedder } from '../../embed/index.ts';
-import { redactPersisted } from '../../gate/redact.ts';
+import { probeEmbedder, type Embedder } from '../../embed/index.ts';
 import { loadRulesFile } from '../../gate/rules-file.ts';
 import { REFRESHABLE_PROVIDERS } from '../../model-catalog.ts';
 import { ensureConfiguredModels, type EnsureResult } from '../../model-refresh.ts';
@@ -41,9 +40,6 @@ declare module './types.ts' {
     readonly ensureModels?: (config: Config) => Promise<EnsureResult>;
   }
 }
-
-/** The fixed text the embedding probe embeds. It holds no id or name. */
-export const EMBEDDING_PROBE_TEXT = 'triage doctor embedding probe';
 
 type Row = Omit<DoctorCheck, 'id'>;
 
@@ -284,8 +280,7 @@ async function embeddingCheck(ctx: DoctorContext): Promise<DoctorCheck[]> {
     return one(row('skipped', [EMBEDDING_KEY], `${EMBEDDING_KEY} is set; no embedder given, probe skipped`));
   }
   try {
-    const vectors = await embedder.embed([redactPersisted(EMBEDDING_PROBE_TEXT)], { signal: ctx.signal });
-    const length = vectors[0]?.length ?? 0;
+    const length = await probeEmbedder(embedder, ctx.signal);
     if (length === 0) return one(row('warn', [EMBEDDING_KEY], `${embedder.model}: probe returned no vector`));
     return one(row('ok', [EMBEDDING_KEY], `${embedder.model}: vector length ${length}`));
   } catch (err) {

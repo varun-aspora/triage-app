@@ -13,6 +13,8 @@ import type { Config } from '../config/env.ts';
 import { lookupEnv } from '../config/env.ts';
 import type { Registry } from '../config/registry.ts';
 import { UnsafeArgError, assertSafeArg, type ExecResult, type ExecRunner } from '../connectors/exec.ts';
+import { EmbeddingError, probeEmbedder, type Embedder } from '../embed/index.ts';
+import { EMBEDDING_KEY } from '../embed/spec.ts';
 import type { PreflightWarning } from '../types/classification.ts';
 import type { Entity } from '../types/core.ts';
 import type { TcpProbe, TunnelDeps, TunnelResult } from './tunnel.ts';
@@ -25,7 +27,8 @@ export type StepId =
   | 'kube-context'
   | 'qw-login'
   | 'qw-transport'
-  | 'probe';
+  | 'probe'
+  | 'embedding';
 
 export type StepStatus = 'ok' | 'warn' | 'skipped';
 
@@ -48,6 +51,8 @@ export type StepContext = {
   readonly tunnel: TunnelUpFn;
   /** True when stdin is a terminal, so an interactive login can run. */
   readonly isTty: boolean;
+  /** null or absent (embeddings off, or not wired) means no embedding probe. */
+  readonly embedder?: Embedder | null;
   readonly signal?: AbortSignal;
 };
 
@@ -386,4 +391,27 @@ export async function probeSteps(ctx: StepContext, out: Outcome): Promise<void> 
       }
     });
   }
+}
+
+// --------------------------------------------------------------- embedding
+
+/**
+ * Every mode: embeds a fixed text, so a rejected embedding key shows before a
+ * run and not only as a settle gap.
+ */
+export async function embeddingStep(ctx: StepContext, out: Outcome): Promise<void> {
+  const embedder = ctx.embedder;
+  if (embedder === undefined || embedder === null) return;
+  const fix = `check the provider key for ${ph(EMBEDDING_KEY)}, then triage runs reembed --missing`;
+  let length: number;
+  try {
+    length = await probeEmbedder(embedder, ctx.signal);
+  } catch (e) {
+    // The HTTP status or the fixed reason only: a provider's 401 text can echo part of the key.
+    const why = e instanceof EmbeddingError ? ` (${e.status !== undefined ? `HTTP ${e.status}` : e.reason})` : '';
+    out.warn('embedding', undefined, `the embedding probe failed${why}; runs will not get case embeddings`, fix);
+    return;
+  }
+  if (length === 0) out.warn('embedding', undefined, 'the embedding probe returned no vector; runs will not get case embeddings', fix);
+  else out.step('embedding', undefined, 'ok');
 }

@@ -1667,6 +1667,7 @@ export function submissionDeps(options: SubmissionDepsOptions = {}): SubmissionD
     runner: options.runner ?? createExecRunner(),
     tcpProbe: options.tcpProbe ?? netTcpConnect,
     isTty: options.isTty ?? false,
+    embedder,
     signal,
   });
   return {

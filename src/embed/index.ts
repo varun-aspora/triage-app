@@ -12,7 +12,7 @@
 
 import { ConfigError } from '../config/errors.ts';
 import type { Config } from '../config/env.ts';
-import { isPersisted, type Persisted } from '../gate/redact.ts';
+import { isPersisted, redactPersisted, type Persisted } from '../gate/redact.ts';
 import { withModelSpan } from '../lib/tracing/index.ts';
 import { HASH_MODEL, createHashClient } from './hash.ts';
 import { createOllamaClient } from './ollama.ts';
@@ -77,6 +77,15 @@ export function createEmbedder(config: EmbedConfig, options: EmbedderOptions): E
   const apiKey = config.providers.openaiApiKey?.trim();
   if (!apiKey) throw ConfigError.of('OPENAI_API_KEY', `is required when ${EMBEDDING_KEY} uses openai`);
   return wrap(model, model, createOpenAiClient({ apiKey, model: spec.model, fetch: options.fetch, timeoutMs }));
+}
+
+/** The fixed text the doctor and pre-flight embedding probes embed. It holds no id or name. */
+export const EMBEDDING_PROBE_TEXT = 'triage doctor embedding probe';
+
+/** Embeds EMBEDDING_PROBE_TEXT and returns the vector length, 0 when none came back. Throws what embed() throws. */
+export async function probeEmbedder(embedder: Embedder, signal?: AbortSignal): Promise<number> {
+  const vectors = await embedder.embed([redactPersisted(EMBEDDING_PROBE_TEXT)], { signal });
+  return vectors[0]?.length ?? 0;
 }
 
 /** usageModel is the MODEL_EMBEDDING spec; it differs from model in mock mode only. */

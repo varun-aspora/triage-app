@@ -8,12 +8,15 @@
 // --json prints {mode, skipped?, steps, warnings}. Warnings name keys as
 // $KEY placeholders, never values.
 //
-// Real wiring: the ExecRunner, the node:net TCP connect as the probe and
-// tunnelUp. Tests pass fakes.
+// Real wiring: the ExecRunner, the node:net TCP connect as the probe,
+// tunnelUp and the MODEL_EMBEDDING embedder for the embedding probe. Tests
+// pass fakes.
 
 import type { Config } from '../../config/env.ts';
 import { RegistryError, loadRegistry } from '../../config/registry.ts';
 import { createExecRunner, type ExecRunner } from '../../connectors/exec.ts';
+import type { Embedder } from '../../embed/index.ts';
+import { embedderFor } from '../../ingress/submit.ts';
 import { netTcpConnect } from '../../ops/doctor/probes.ts';
 import { runPreflight, type PreflightResult, type TunnelUpFn } from '../../ops/preflight.ts';
 import type { TcpProbe } from '../../ops/tunnel.ts';
@@ -28,6 +31,8 @@ export type PreflightCommandOptions = {
   readonly tcpProbe?: TcpProbe;
   /** Defaults to tunnelUp. */
   readonly tunnel?: TunnelUpFn;
+  /** Defaults to the MODEL_EMBEDDING embedder with the real fetch; null skips the probe. */
+  readonly embedder?: Embedder | null;
 };
 
 const REGISTRY_WARNING: PreflightWarning = Object.freeze({
@@ -50,6 +55,8 @@ async function preflight(config: Config, isTty: boolean, options: PreflightComma
     runner: options.runner ?? createExecRunner(),
     tcpProbe: options.tcpProbe ?? netTcpConnect,
     ...(options.tunnel !== undefined ? { tunnel: options.tunnel } : {}),
+    // A refused MODEL_EMBEDDING is doctor's to report; embedderFor turns it into null, so no probe.
+    embedder: options.embedder !== undefined ? options.embedder : embedderFor(config, undefined),
     isTty,
   });
 }
