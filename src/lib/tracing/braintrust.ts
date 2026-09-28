@@ -8,6 +8,10 @@ import type { Config } from '../../config/env.ts';
 import { mask, maskedMessage, type Tracer } from './index.ts';
 import { BRAINTRUST_RUN_ID_KEY } from './keys.ts';
 
+// Tool calls whose start time is held for their end event. A tool still open
+// past this many later starts gets Braintrust's own end time.
+const MAX_OPEN_TOOLS = 1000;
+
 export function installBraintrust(tracing: Config['tracing']): Tracer {
   setMaskingFunction(mask);
   initLogger({ projectName: tracing.braintrustProject, apiKey: tracing.braintrustApiKey });
@@ -17,7 +21,11 @@ export function installBraintrust(tracing: Config['tracing']): Tracer {
     ...inner,
     observe: (e, ctx) => {
       let startedAt: string | undefined;
-      if (e.type === 'tool_start') toolStarts.set(e.toolCallId, e.timestamp);
+      if (e.type === 'tool_start') {
+        toolStarts.set(e.toolCallId, e.timestamp);
+        // A tool that never ends (timeout, abort) leaves its entry; the oldest go first.
+        if (toolStarts.size > MAX_OPEN_TOOLS) toolStarts.delete(toolStarts.keys().next().value as string);
+      }
       if (e.type === 'tool') {
         startedAt = toolStarts.get(e.toolCallId);
         toolStarts.delete(e.toolCallId);
