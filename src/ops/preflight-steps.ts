@@ -396,12 +396,22 @@ export async function probeSteps(ctx: StepContext, out: Outcome): Promise<void> 
 
 // --------------------------------------------------------------- embedding
 
+// Embedders that answered a probe. The server builds one embedder and runs
+// pre-flight per run, and a key rarely changes while it is up, so it pays for
+// one embed call, not one per run. A failed probe is not kept, so a bad key
+// warns on every run until it works. A key revoked later shows as the settle gap.
+const probedOk = new WeakSet<Embedder>();
+
 /**
  * Every mode: embeds a fixed text, so a rejected embedding key shows before a
  * run and not only as a settle gap.
  */
 export async function embeddingStep(ctx: StepContext, out: Outcome): Promise<void> {
   if (ctx.embedder === null) return;
+  if (probedOk.has(ctx.embedder)) {
+    out.step('embedding', undefined, 'ok');
+    return;
+  }
   const fix = `check the provider key for ${ph(EMBEDDING_KEY)}, then triage runs reembed --missing`;
   const timeout = AbortSignal.timeout(PREFLIGHT_TIMEOUTS.embeddingMs);
   let length: number;
@@ -412,5 +422,8 @@ export async function embeddingStep(ctx: StepContext, out: Outcome): Promise<voi
     return;
   }
   if (length === 0) out.warn('embedding', undefined, 'the embedding probe returned no vector; runs will not get case embeddings', fix);
-  else out.step('embedding', undefined, 'ok');
+  else {
+    probedOk.add(ctx.embedder);
+    out.step('embedding', undefined, 'ok');
+  }
 }

@@ -527,6 +527,18 @@ describe('embedding probe', () => {
     expect(embedder.calls).toHaveLength(1);
   });
 
+  test('an embedder that answered is not probed again; one that failed is', async () => {
+    const working = fakeEmbedder(8);
+    await run({ embedder: working });
+    const again = await run({ embedder: working });
+    expect(working.calls).toHaveLength(1);
+    expect(stepOf(again.result, 'embedding')).toEqual([{ id: 'embedding', status: 'ok' }]);
+    const failing = fakeEmbedder(new EmbeddingError('openai', 'status', 401));
+    await run({ embedder: failing });
+    await run({ embedder: failing });
+    expect(failing.calls).toHaveLength(2);
+  });
+
   test('an empty vector is a warning', async () => {
     const r = await run({ embedder: fakeEmbedder(0) });
     expect(warningsFor(r.result, 'embedding').map((w) => w.message)).toEqual([
