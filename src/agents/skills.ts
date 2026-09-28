@@ -396,6 +396,13 @@ export function frontendRoutingSkill(knowledge: Knowledge = currentKnowledge()):
   return knowledge.skills.get('frontend-routing');
 }
 
+/** The notes the root mounts itself; missing ones are left out. */
+export function rootSkills(entities: readonly Entity[], knowledge: Knowledge = currentKnowledge()): SkillDefinition[] {
+  return [...entities.map((e) => overviewSkill(e, knowledge)), patternsSkill(knowledge), frontendRoutingSkill(knowledge)].filter(
+    (s) => s !== undefined,
+  );
+}
+
 export function repoMapSkill(knowledge: Knowledge = currentKnowledge()): SkillDefinition | undefined {
   return knowledge.skills.get('repo-map');
 }

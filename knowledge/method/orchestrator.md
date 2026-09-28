@@ -20,6 +20,8 @@ Report with `finish_report`. You do not read any entity's systems yourself.
 - You have no database, log, API or bank tools. Every read of an entity goes
   through that entity's investigator, and each investigator sees only its own
   entity.
+- Service notes (`<entity>-<service>`) are mounted on investigators only. When
+  one matters, name it in the brief instead of activating it.
 
 ## The current ask
 
