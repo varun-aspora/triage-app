@@ -30,7 +30,8 @@ the CX team replies with.
 - `request`: the permalink when there is one, the current ask (the latest
   message) and who asked.
 - `classification`: copy it from your input as given.
-- `id_chain`: the chain after your last `resolve_identity` call.
+- `id_chain`: the chain from your input, plus hops from any
+  `resolve_identity` call you made for a new id.
 - `current_state`: point-in-time values, each with `taken_at` and `source`.
 - `timeline`: events with `at`, `entity`, `what` and `source`.
 - `root_cause`: `statement`, `code_refs` and, when a known pattern was
