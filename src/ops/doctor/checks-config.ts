@@ -18,7 +18,7 @@ import {
   type Registry,
 } from '../../config/registry.ts';
 import { EMBEDDING_KEY, parseEmbeddingSpec, type EmbeddingSpec } from '../../embed/spec.ts';
-import { probeEmbedder, type Embedder } from '../../embed/index.ts';
+import { embedErrorLabel, probeEmbedder, type Embedder } from '../../embed/index.ts';
 import { loadRulesFile } from '../../gate/rules-file.ts';
 import { REFRESHABLE_PROVIDERS } from '../../model-catalog.ts';
 import { ensureConfiguredModels, type EnsureResult } from '../../model-refresh.ts';
@@ -284,7 +284,7 @@ async function embeddingCheck(ctx: DoctorContext): Promise<DoctorCheck[]> {
     if (length === 0) return one(row('warn', [EMBEDDING_KEY], `${embedder.model}: probe returned no vector`));
     return one(row('ok', [EMBEDDING_KEY], `${embedder.model}: vector length ${length}`));
   } catch (err) {
-    return one(row('warn', [EMBEDDING_KEY], `embedding probe failed: ${describeError(err)}`));
+    return one(row('warn', [EMBEDDING_KEY], `embedding probe failed: ${embedErrorLabel(err)}`));
   }
 }
 

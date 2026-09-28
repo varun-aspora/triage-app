@@ -6,6 +6,7 @@ import { configFromRecord, type Config } from '../../src/config/env.ts';
 import { ConfigError } from '../../src/config/errors.ts';
 import { ENTITY_KEY_PATTERN, KEY_BY_NAME } from '../../src/config/keys.ts';
 import { EMBEDDING_PROBE_TEXT, type Embedder } from '../../src/embed/index.ts';
+import { fakeEmbedder } from '../support/fake-embedder.ts';
 import { createFakeModel } from '../../src/mock/fake-model.ts';
 import { configChecks } from '../../src/ops/doctor/checks-config.ts';
 import { doctorExitCode, renderDoctorTable, runDoctor } from '../../src/ops/doctor/run.ts';
@@ -63,18 +64,6 @@ const VALID_MODELS = {
   MODEL_TIER_STRONG: 'anthropic/claude-opus-4-5',
   ANTHROPIC_API_KEY: 'fake-anthropic-key-0001',
 };
-
-function fakeEmbedder(dims: number): Embedder & { calls: string[][] } {
-  const calls: string[][] = [];
-  return {
-    model: 'ollama/fake-embed',
-    calls,
-    embed: async (texts) => {
-      calls.push(texts.map((t) => t.value));
-      return texts.map(() => Array.from({ length: dims }, (_, i) => i / dims));
-    },
-  };
-}
 
 // ------------------------------------------------------------------ run.ts
 
@@ -462,7 +451,7 @@ describe('embedding check', () => {
   });
 
   test('a throwing embedder is a warning and its message is not shown', async () => {
-    const e: Embedder = { model: 'ollama/fake-embed', embed: async () => { throw new Error('ECONNREFUSED embed.fixture.invalid'); } };
+    const e = fakeEmbedder(new Error('ECONNREFUSED embed.fixture.invalid'));
     const [r] = await embedding(real, e);
     expect(r?.status).toBe('warn');
     expect(r?.message).not.toContain('fixture.invalid');

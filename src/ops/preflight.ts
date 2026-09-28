@@ -12,7 +12,7 @@
 // - server: infra owns the path. Probes only, and warns for an entity on
 //   the qw transport, since qw has no headless login (Q27 default).
 // - Any other value: a warning, then probe-only.
-// - Every mode ends with the doctor's embedding probe when an embedder is
+// - Every mode also runs the doctor's embedding probe when an embedder is
 //   given, so a rejected embedding key is a warning before the run.
 //
 // Nothing here blocks a run. Every failure, and anything thrown, becomes a
@@ -104,7 +104,7 @@ function stepContext(input: PreflightInput): StepContext {
     tcpProbe: input.tcpProbe,
     tunnel: input.tunnel ?? tunnelUp,
     isTty: input.isTty,
-    ...(input.embedder === undefined ? {} : { embedder: input.embedder }),
+    embedder: input.embedder ?? null,
     ...(input.signal === undefined ? {} : { signal: input.signal }),
   };
 }
@@ -117,6 +117,10 @@ export async function runPreflight(input: PreflightInput): Promise<PreflightResu
     if (input.config.mock.enabled) return skipped(mode);
 
     const ctx = stepContext(input);
+    // The probe needs none of the network steps, so it runs alongside them;
+    // its own Outcome keeps the step order stable.
+    const embedding = new Outcome();
+    const probe = embeddingStep(ctx, embedding);
 
     if (mode === 'local') {
       await tunnelStep(ctx, out);
@@ -128,7 +132,9 @@ export async function runPreflight(input: PreflightInput): Promise<PreflightResu
       out.warn('deploy-mode', undefined, `${DEPLOY_MODE_ENV} is neither local nor server, so pre-flight only probes hosts`, `set ${DEPLOY_MODE_ENV}=local or ${DEPLOY_MODE_ENV}=server`);
     }
     await probeSteps(ctx, out);
-    await embeddingStep(ctx, out);
+    await probe;
+    out.steps.push(...embedding.steps);
+    out.warnings.push(...embedding.warnings);
   } catch {
     // The steps guard themselves; this catches a broken config or registry.
     out.warn('preflight', undefined, 'pre-flight could not finish; the run continues without it');

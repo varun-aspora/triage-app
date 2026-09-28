@@ -29,6 +29,7 @@ import {
 
 export {
   EmbeddingError,
+  embedErrorLabel,
   parseEmbeddingSpec,
   type ClientOptions,
   type EmbedUsage,
@@ -77,6 +78,20 @@ export function createEmbedder(config: EmbedConfig, options: EmbedderOptions): E
   const apiKey = config.providers.openaiApiKey?.trim();
   if (!apiKey) throw ConfigError.of('OPENAI_API_KEY', `is required when ${EMBEDDING_KEY} uses openai`);
   return wrap(model, model, createOpenAiClient({ apiKey, model: spec.model, fetch: options.fetch, timeoutMs }));
+}
+
+/**
+ * The MODEL_EMBEDDING embedder with the given or the global fetch. A refused
+ * spec gives null like a blank one: embeddings are derived data and must not
+ * stop runs. Submit, the settle listener (D70) and pre-flight use it.
+ */
+export function embedderFor(config: EmbedConfig, fetchImpl: FetchLike | undefined): Embedder | null {
+  try {
+    return createEmbedder(config, { fetch: fetchImpl ?? ((url, reqInit) => fetch(url, reqInit)) });
+  } catch (err) {
+    if (err instanceof ConfigError) return null;
+    throw err;
+  }
 }
 
 /** The fixed text the doctor and pre-flight embedding probes embed. It holds no id or name. */

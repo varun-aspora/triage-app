@@ -4,6 +4,7 @@ import { loadRegistry, type Registry } from '../../src/config/registry.ts';
 import { createFakeRunner, type FakeRunner, type FakeStep } from '../../src/connectors/exec-fake.ts';
 import type { ExecRunner } from '../../src/connectors/exec.ts';
 import { EMBEDDING_PROBE_TEXT, EmbeddingError, type Embedder } from '../../src/embed/index.ts';
+import { fakeEmbedder } from '../support/fake-embedder.ts';
 import { hostPort, probeTargets } from '../../src/ops/preflight-steps.ts';
 import { parseDeployMode, runPreflight, runTunnelPreflight, type PreflightInput, type PreflightResult } from '../../src/ops/preflight.ts';
 import type { TcpProbe, TunnelDeps, TunnelResult } from '../../src/ops/tunnel.ts';
@@ -105,7 +106,7 @@ async function run(options: {
     tcpProbe: probe,
     tunnel,
     isTty: options.isTty ?? false,
-    ...(options.embedder === undefined ? {} : { embedder: options.embedder }),
+    embedder: options.embedder,
   };
   const result = await (options.fn ?? runPreflight)(input);
   return { result, runner, probe, tunnel };
@@ -497,30 +498,14 @@ describe('never rejects', () => {
   });
 });
 
-type FakeEmbedder = Embedder & { calls: string[][] };
-
-/** Returns one vector of `length` floats per text, or throws `error`. */
-function embedderOf(answer: number | Error): FakeEmbedder {
-  const calls: string[][] = [];
-  return {
-    model: 'openai/fake-embed',
-    calls,
-    embed: async (texts) => {
-      calls.push(texts.map((t) => t.value));
-      if (answer instanceof Error) throw answer;
-      return texts.map(() => new Array<number>(answer).fill(0.1));
-    },
-  };
-}
-
 describe('embedding probe', () => {
   test('a 401 from the provider is one warning row and a warn step, with the status and no value', async () => {
-    const embedder = embedderOf(new EmbeddingError('openai', 'status', 401));
+    const embedder = fakeEmbedder(new EmbeddingError('openai', 'status', 401));
     const r = await run({ embedder });
     expect(embedder.calls).toEqual([[EMBEDDING_PROBE_TEXT]]);
     expect(r.result.warnings).toHaveLength(1);
     const [w] = warningsFor(r.result, 'embedding');
-    expect(w?.message).toContain('HTTP 401');
+    expect(w?.message).toContain('status 401');
     expect(w?.fix).toContain('$MODEL_EMBEDDING');
     expect(w?.fix).toContain('triage runs reembed --missing');
     expect(stepOf(r.result, 'embedding')).toEqual([{ id: 'embedding', status: 'warn' }]);
@@ -528,14 +513,14 @@ describe('embedding probe', () => {
   });
 
   test('any other error text is dropped', async () => {
-    const r = await run({ embedder: embedderOf(new Error(`401 Incorrect API key provided: ${SSFB_DB}`)) });
+    const r = await run({ embedder: fakeEmbedder(new Error(`401 Incorrect API key provided: ${SSFB_DB}`)) });
     expect(warningsFor(r.result, 'embedding')).toHaveLength(1);
     expect(JSON.stringify(r.result)).not.toContain('Incorrect');
     expectNoValues(r.result);
   });
 
   test('a working embedder is an ok step and no warning', async () => {
-    const embedder = embedderOf(8);
+    const embedder = fakeEmbedder(8);
     const r = await run({ embedder });
     expect(r.result.warnings).toEqual([]);
     expect(stepOf(r.result, 'embedding')).toEqual([{ id: 'embedding', status: 'ok' }]);
@@ -543,14 +528,14 @@ describe('embedding probe', () => {
   });
 
   test('an empty vector is a warning', async () => {
-    const r = await run({ embedder: embedderOf(0) });
+    const r = await run({ embedder: fakeEmbedder(0) });
     expect(warningsFor(r.result, 'embedding').map((w) => w.message)).toEqual([
       'the embedding probe returned no vector; runs will not get case embeddings',
     ]);
   });
 
   test('mock mode makes no embed call', async () => {
-    const embedder = embedderOf(8);
+    const embedder = fakeEmbedder(8);
     const r = await run({ embedder, overrides: { TRIAGE_MOCK_MODE: 'true', TRIAGE_MOCK_STRICT: 'true' }, script: [] });
     expect(r.result.skipped).toBe('mock');
     expect(embedder.calls).toEqual([]);
@@ -562,7 +547,7 @@ describe('embedding probe', () => {
   });
 
   test('runTunnelPreflight does not probe', async () => {
-    const embedder = embedderOf(new EmbeddingError('openai', 'status', 401));
+    const embedder = fakeEmbedder(new EmbeddingError('openai', 'status', 401));
     const r = await run({ embedder, fn: runTunnelPreflight });
     expect(embedder.calls).toEqual([]);
     expect(warningsFor(r.result, 'embedding')).toEqual([]);

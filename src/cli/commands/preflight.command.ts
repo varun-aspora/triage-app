@@ -15,8 +15,7 @@
 import type { Config } from '../../config/env.ts';
 import { RegistryError, loadRegistry } from '../../config/registry.ts';
 import { createExecRunner, type ExecRunner } from '../../connectors/exec.ts';
-import type { Embedder } from '../../embed/index.ts';
-import { embedderFor } from '../../ingress/submit.ts';
+import { embedderFor, type Embedder } from '../../embed/index.ts';
 import { netTcpConnect } from '../../ops/doctor/probes.ts';
 import { runPreflight, type PreflightResult, type TunnelUpFn } from '../../ops/preflight.ts';
 import type { TcpProbe } from '../../ops/tunnel.ts';

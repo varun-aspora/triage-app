@@ -94,6 +94,13 @@ export class EmbeddingError extends Error {
   }
 }
 
+/** Text that cannot carry request data: EmbeddingError's fixed message, else the error name. */
+export function embedErrorLabel(err: unknown): string {
+  if (err instanceof EmbeddingError) return err.message;
+  if (err instanceof Error) return err.name;
+  return 'unknown error';
+}
+
 export type PostJsonRequest = {
   readonly provider: EmbeddingProvider;
   readonly fetch: FetchLike;
