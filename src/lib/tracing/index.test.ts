@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { flushTracing, installTracing, setTracerForTests, withModelSpan, withRunId, type ModelSpan, type ModelSpanResult, type Tracer } from './index.ts';
 
 afterEach(() => setTracerForTests(undefined));
@@ -43,6 +43,27 @@ describe('withModelSpan', () => {
     setTracerForTests(recorder().tracer);
     const boom = new Error('boom');
     await expect(withModelSpan({ op: 'chat', model: 'm' }, async () => Promise.reject(boom))).rejects.toBe(boom);
+  });
+});
+
+describe('installTracing', () => {
+  test('a backend that fails to start writes one line', async () => {
+    const write = spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      // installOtlp reads the endpoint before anything else, so this throws
+      // before any exporter or provider exists.
+      await installTracing({
+        mode: 'otlp',
+        braintrustProject: 'p',
+        get otlpEndpoint(): string {
+          throw new Error('bad endpoint');
+        },
+      });
+      expect(write).toHaveBeenCalledTimes(1);
+      expect(String(write.mock.calls[0]?.[0])).toBe('tracing: otlp failed to start, running untraced (bad endpoint)\n');
+    } finally {
+      write.mockRestore();
+    }
   });
 });
 
