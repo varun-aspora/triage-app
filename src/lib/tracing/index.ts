@@ -34,7 +34,13 @@ export type ModelSpan = {
   readonly runId?: string;
 };
 
-export type ModelSpanResult = { readonly output?: unknown; readonly inputTokens?: number; readonly outputTokens?: number };
+export type ModelSpanResult = {
+  readonly output?: unknown;
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  /** Provider-reported cost in USD, when it reports one. */
+  readonly costUsd?: number;
+};
 
 export type Tracer = {
   withModelSpan<T>(span: ModelSpan, fn: () => Promise<T>, result?: (r: T) => ModelSpanResult): Promise<T>;
@@ -55,6 +61,9 @@ export function withRunId<T>(runId: string, fn: () => T): T {
 /** Masks a value the way every stored copy of a run is masked. */
 export const mask = (value: unknown): unknown => redactPersisted(value).value;
 
+/** The only error text tracing lets out: the masked message, never the stack. */
+export const maskedMessage = (err: unknown): string => String(mask(err instanceof Error ? err.message : String(err)));
+
 export async function installTracing(tracing: Config['tracing']): Promise<void> {
   if (active !== undefined || tracing.mode === 'off') return;
   try {
@@ -62,9 +71,10 @@ export async function installTracing(tracing: Config['tracing']): Promise<void> 
       tracing.mode === 'otlp'
         ? (await import('./otlp.ts')).installOtlp(tracing)
         : (await import('./braintrust.ts')).installBraintrust(tracing);
-  } catch {
+  } catch (err) {
     // A backend that fails to start leaves the app untraced, not down.
     active = undefined;
+    process.stderr.write(`tracing: ${tracing.mode} failed to start, running untraced (${maskedMessage(err)})\n`);
   }
 }
 

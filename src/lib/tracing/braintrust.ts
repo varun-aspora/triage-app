@@ -3,9 +3,9 @@
 // inside a Flue tool nests under that tool's span in Braintrust.
 
 import { type FlueEvent, instrument, type PromptUsage } from '@flue/runtime';
-import { braintrustFlueInstrumentation, flush, initLogger, setMaskingFunction, traced } from 'braintrust';
+import { braintrustFlueInstrumentation, flush, initLogger, setMaskingFunction, startSpan, withCurrent } from 'braintrust';
 import type { Config } from '../../config/env.ts';
-import { mask, type Tracer } from './index.ts';
+import { mask, maskedMessage, type Tracer } from './index.ts';
 import { BRAINTRUST_RUN_ID_KEY } from './keys.ts';
 
 export function installBraintrust(tracing: Config['tracing']): Tracer {
@@ -26,32 +26,39 @@ export function installBraintrust(tracing: Config['tracing']): Tracer {
     },
   });
   return {
-    withModelSpan: (s, fn, result) =>
-      traced(
-        async (span) => {
+    // startSpan rather than traced(): traced() logs the raw error, stack
+    // included, and Braintrust does not mask the error field (D82).
+    withModelSpan: async (s, fn, result) => {
+      const span = startSpan({ name: `${s.op} ${s.name ?? s.model}`, type: 'llm' });
+      span.log({
+        input: s.input,
+        metadata: {
+          model: s.model,
+          ...(s.name === undefined ? {} : { decision: s.name }),
+          ...(s.runId === undefined ? {} : { [BRAINTRUST_RUN_ID_KEY]: s.runId }),
+        },
+      });
+      try {
+        const r = await withCurrent(span, fn);
+        const out = result?.(r);
+        if (out !== undefined) {
           span.log({
-            input: s.input,
-            metadata: {
-              model: s.model,
-              ...(s.name === undefined ? {} : { decision: s.name }),
-              ...(s.runId === undefined ? {} : { [BRAINTRUST_RUN_ID_KEY]: s.runId }),
+            output: out.output,
+            metrics: {
+              ...(out.inputTokens === undefined ? {} : { prompt_tokens: out.inputTokens }),
+              ...(out.outputTokens === undefined ? {} : { completion_tokens: out.outputTokens }),
+              ...(out.costUsd === undefined ? {} : { estimated_cost: out.costUsd }),
             },
           });
-          const r = await fn();
-          const out = result?.(r);
-          if (out !== undefined) {
-            span.log({
-              output: out.output,
-              metrics: {
-                ...(out.inputTokens === undefined ? {} : { prompt_tokens: out.inputTokens }),
-                ...(out.outputTokens === undefined ? {} : { completion_tokens: out.outputTokens }),
-              },
-            });
-          }
-          return r;
-        },
-        { name: `${s.op} ${s.name ?? s.model}`, type: 'llm' },
-      ),
+        }
+        return r;
+      } catch (err) {
+        span.log({ error: maskedMessage(err) });
+        throw err;
+      } finally {
+        span.end();
+      }
+    },
     flush: () => flush(),
   };
 }

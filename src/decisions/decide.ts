@@ -110,7 +110,7 @@ export async function decide<const Q extends DecisionQuestions>(
   const result = await withModelSpan(
     { op: 'decide', model: provider.model, input: request, ...(options.name === undefined ? {} : { name: options.name }) },
     () => withLimit(provider, request, timeoutMs, options.signal),
-    (r) => ({ output: r.answers, inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens }),
+    (r) => ({ output: r.answers, inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens, costUsd: r.usage.costUsd }),
   );
   checkAnswers(provider.id, request.questions, result);
   return result as DecisionResult<Q>;
