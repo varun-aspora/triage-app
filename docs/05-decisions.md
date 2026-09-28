@@ -660,7 +660,6 @@ Append-only. When a decision is reversed, add a new entry that supersedes it; do
 - **Rejected**: embeddings or a model call to merge gaps (not deterministic, and a network call for about 30 short lines); edit distance on characters (a changed id reads as a different gap); a new report field for the action taken (derived from `escalated` and the final tier, so no schema change); merging the added gaps too (two repos without a commit would merge into one line).
 - **Assumptions**: the report's `classification.tier_final` is the run's tier, as the model copies it from the classification; the action line reads it. Two gaps that differ only by an id are the same gap. D93 is taken on `main`; D94 is the SIM eval case.
 
-||||||| e13cb6a
 ### D86. Thinking is controlled for Ollama models (2026-09-28)
 - **Problem**: `ollamaProvider` declared every model `reasoning: false`, so pi-ai sent no thinking field and `MODEL_THINKING_*` had no effect. The local server behind `OLLAMA_BASE_URL` (Splash serving `incoai/Qwen3.8-27B-Splash`) then used the chat template's default, `xhigh`. In trace 6d4d thinking took about 85% of output tokens while the span said `reasoning: medium`.
 - **Chosen**: `reasoning: true`, `compat.thinkingFormat: 'openai'` and `thinkingLevelMap: { off: 'none' }` (`src/models.ts`). pi-ai then sends `reasoning_effort` at the configured level (`low` sends `"low"`) and `"none"` at `off`.
