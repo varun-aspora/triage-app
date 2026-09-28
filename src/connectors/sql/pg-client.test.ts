@@ -422,6 +422,15 @@ describe('pool', () => {
     expect(cfg.max).toBeLessThanOrEqual(5);
   });
 
+  test('turns on TCP keepalive and keeps the 30 s idle timeout', async () => {
+    const { pg, connector } = setup();
+    await connector.runSelect(ctxOf(), input());
+    const cfg = pg.configs[0]!;
+    expect(cfg.keepAlive).toBe(true);
+    expect(cfg.keepAliveInitialDelayMillis).toBe(10_000);
+    expect(cfg.idleTimeoutMillis).toBe(30_000);
+  });
+
   test('keeps one lazy pool per env var name', async () => {
     const { factory, connector } = setup({ ATSPL_PULSE_DB_URL: FAKE_DSN_2 });
     expect(factory).toHaveBeenCalledTimes(0);

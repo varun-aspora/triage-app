@@ -129,6 +129,8 @@ export type PgPoolConfig = {
   readonly connectionTimeoutMillis: number;
   readonly application_name: string;
   readonly allowExitOnIdle: boolean;
+  readonly keepAlive: boolean;
+  readonly keepAliveInitialDelayMillis: number;
   /** Per-pool type parsers (D73); pg falls back to its defaults for every other type. */
   readonly types: pg.CustomTypesConfig;
 };
@@ -564,6 +566,11 @@ export function createSqlConnector(options: SqlConnectorOptions): SqlConnector {
         connectionTimeoutMillis: 10_000,
         application_name: 'triage-app',
         allowExitOnIdle: true,
+        // An idle connection to a remote host was dropped after about 28 s
+        // (E5). The first probe must go out before that: pg's default delay of
+        // 0 leaves the OS default, which is usually two hours.
+        keepAlive: true,
+        keepAliveInitialDelayMillis: 10_000,
         types: entityTypeParsers(t.zone),
       }),
     );
