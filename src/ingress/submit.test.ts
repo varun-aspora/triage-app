@@ -715,6 +715,18 @@ describe('read and settle', () => {
     expect(report?.gaps[1]).toBe(NO_USAGE_GAP);
   });
 
+  test('a partial report carries the pre-flight warnings as gaps, as finish_report does (D88)', async () => {
+    const h = harness({
+      config: { mock: false },
+      preflightWarnings: [{ step: 'tunnel', message: 'the ssfb tunnel is down' }],
+      read: async () => {
+        throw timeoutError();
+      },
+    });
+    await runSubmission(prepared(), h.deps);
+    expect((await h.store.getRun(RUN_ID))?.submissions[0]?.report?.gaps).toContain('preflight tunnel: the ssfb tunnel is down');
+  });
+
   test('a failed settle that is not a timeout writes no report', async () => {
     const h = harness({
       read: async () => {

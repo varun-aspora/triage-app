@@ -205,9 +205,9 @@ import { logRunEvent, setRunRedactionNames } from '../runlog/event-log.ts';
 import { embedRun as defaultEmbedRun } from '../runstore/embed-run.ts';
 import { priorCasesFor, type PriorCasesResult } from '../runstore/prior-cases.ts';
 import { codeClaimDetail } from '../report/finding-refs.ts';
-import { mergeGaps } from '../report/gaps.ts';
+import { registryNames } from '../report/gaps.ts';
 import { writeReport } from '../report/write.ts';
-import { collectFindings, computeCost, wallMsSince } from '../tools/finish-report.tool.ts';
+import { collectFindings, reportTail } from '../tools/finish-report.tool.ts';
 import {
   type PhaseDetail,
   RunNotFoundError,
@@ -295,6 +295,8 @@ export type SettleDeps = {
   readonly stopPollMs?: number;
   /** Clock for the answer's resolution time. Defaults to the system clock. */
   readonly now?: () => Date;
+  /** registryNames() of the registry, for the partial report's gap merge (D88). Left out: none. */
+  readonly serviceNames?: ReadonlySet<string>;
   /**
    * The part of pre-flight a resume repeats (D56): the SSFB tunnel in local
    * mode. A tunnel warning refuses the resume (ResumeNotReadyError) before
@@ -1678,8 +1680,8 @@ function timeoutGap(elapsedMs: number, saved: number): string {
  * The partial report of a timed-out response (D88), from the saved findings
  * only: nothing is confirmed, so root_cause is null and the status is
  * inconclusive. Hypotheses, code claims and the delegates' own gaps go into
- * gaps, merged as finish_report merges the model's gaps, since the report has
- * no field for unconfirmed work.
+ * gaps after the timeout gap, since the report has no field for unconfirmed
+ * work; reportTail merges them as finish_report merges the model's gaps.
  */
 function partialReportDraft(
   run: RunRecord,
@@ -1724,7 +1726,7 @@ function partialReportDraft(
     confidence_reason: 'the run timed out before the investigation finished',
     evidence_ladder: EVIDENCE_LADDER_STEPS.filter((s) => steps.has(s)),
     entities_consulted: entities,
-    gaps: [gap, ...mergeGaps(unconfirmed)],
+    gaps: [gap, ...unconfirmed],
     escalated: false,
     escalation_reasons: [],
     images_seen: cls.decision.proposed.images_seen && cls.decision.images_dropped !== true,
@@ -1750,12 +1752,21 @@ async function writePartialReport(
     if (run === null || run.classification === null) return;
     const findings = collectFindings(run.evidence, []);
     const draft = partialReportDraft(run, run.classification, findings, timeoutGap(now().getTime() - startedAt, findings.length));
-    const cost = computeCost(runUsageInMemory(runId), wallMsSince(run.created_at, now()));
+    const tail = reportTail({
+      draftGaps: draft.gaps,
+      commitGaps: [],
+      warnings: run.classification.preflight_warnings ?? [],
+      usage: runUsageInMemory(runId),
+      createdAt: run.created_at,
+      now: now(),
+      serviceNames: deps.serviceNames ?? new Set(),
+      names,
+    });
     // The findings were masked when stored; the request fields and the gaps were not.
-    const safe = redactPersisted({ ...draft, gaps: [...new Set([...draft.gaps, ...cost.gaps])] }, { names }).value;
+    const safe = redactPersisted({ ...draft, gaps: tail.gaps }, { names }).value;
     const result = await writeReport({
       runId,
-      draft: { ...safe, repo_commits: [], cost: cost.cost },
+      draft: { ...safe, repo_commits: [], cost: tail.cost },
       ingressNames: names,
       store: deps.store,
       config: { display: deps.config.display ?? {} },
@@ -1834,6 +1845,7 @@ export function submissionDeps(options: SubmissionDepsOptions = {}): SubmissionD
     agent: Triage,
     dispatcher: options.dispatcher ?? { init },
     embedder,
+    serviceNames: registryNames(registry),
     ...(options.signal !== undefined ? { signal: options.signal } : {}),
     ...(options.onEvent !== undefined ? { onEvent: options.onEvent } : {}),
     preflight: ({ signal }) => runPreflight(preflightInput(signal)),
