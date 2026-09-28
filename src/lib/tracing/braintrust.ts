@@ -6,6 +6,7 @@ import { instrument } from '@flue/runtime';
 import { braintrustFlueInstrumentation, flush, initLogger, setMaskingFunction, traced } from 'braintrust';
 import type { Config } from '../../config/env.ts';
 import { mask, type Tracer } from './index.ts';
+import { BRAINTRUST_RUN_ID_KEY } from './keys.ts';
 
 export function installBraintrust(tracing: Config['tracing']): Tracer {
   setMaskingFunction(mask);
@@ -15,7 +16,14 @@ export function installBraintrust(tracing: Config['tracing']): Tracer {
     withModelSpan: (s, fn, result) =>
       traced(
         async (span) => {
-          span.log({ input: s.input, metadata: { model: s.model, ...(s.name === undefined ? {} : { decision: s.name }) } });
+          span.log({
+            input: s.input,
+            metadata: {
+              model: s.model,
+              ...(s.name === undefined ? {} : { decision: s.name }),
+              ...(s.runId === undefined ? {} : { [BRAINTRUST_RUN_ID_KEY]: s.runId }),
+            },
+          });
           const r = await fn();
           const out = result?.(r);
           if (out !== undefined) {
@@ -29,7 +37,7 @@ export function installBraintrust(tracing: Config['tracing']): Tracer {
           }
           return r;
         },
-        { name: `${s.op} ${s.model}`, type: 'llm' },
+        { name: `${s.op} ${s.name ?? s.model}`, type: 'llm' },
       ),
     flush: () => flush(),
   };

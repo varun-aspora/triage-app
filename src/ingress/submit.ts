@@ -186,6 +186,7 @@ import { decisionProviderFor } from '../decisions/registry.ts';
 import { createEmbedder, type EmbedUsage, type Embedder, type FetchLike, HASH_MODEL } from '../embed/index.ts';
 import { createJsonlAuditSink } from '../gate/audit-sink.ts';
 import { checkEgress, redactModelFacing, redactPersisted } from '../gate/redact.ts';
+import { withRunId } from '../lib/tracing/index.ts';
 import { createMockLayer } from '../mock/index.ts';
 import { acceptsImages, modelForTier } from '../models.ts';
 import { netTcpConnect } from '../ops/doctor/probes.ts';
@@ -536,7 +537,11 @@ const NO_IMAGES_REASON = 'the model for this tier does not accept images';
 
 // ------------------------------------------------------------------ submit
 
-export async function runSubmission(prepared: PreparedSubmission, deps: SubmissionDeps): Promise<SubmissionResult> {
+export function runSubmission(prepared: PreparedSubmission, deps: SubmissionDeps): Promise<SubmissionResult> {
+  return withRunId(prepared.run_id, () => submitInScope(prepared, deps));
+}
+
+async function submitInScope(prepared: PreparedSubmission, deps: SubmissionDeps): Promise<SubmissionResult> {
   const runId = prepared.run_id;
   const request = prepared.request;
   if (!v.is(RunIdSchema, runId)) throw new SubmissionInputError('run_id is not a run id');
@@ -698,7 +703,11 @@ export type AnswerInput = {
 export type AnswerDeps = SettleDeps & { readonly identity?: SubmissionDeps['identity'] };
 
 /** The answer to the question a run is waiting on: closes it and resumes the run as a new submission. */
-export async function answerRun(runId: string, input: AnswerInput, deps: AnswerDeps): Promise<SubmissionResult> {
+export function answerRun(runId: string, input: AnswerInput, deps: AnswerDeps): Promise<SubmissionResult> {
+  return withRunId(runId, () => answerInScope(runId, input, deps));
+}
+
+async function answerInScope(runId: string, input: AnswerInput, deps: AnswerDeps): Promise<SubmissionResult> {
   if (!v.is(RunIdSchema, runId)) throw new IngressInputError('run_id', 'is not a run id');
   const by = typeof input.by === 'string' ? input.by.trim() : '';
   if (by === '') throw new IngressInputError('by', 'is required');
