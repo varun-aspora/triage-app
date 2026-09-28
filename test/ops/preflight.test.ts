@@ -3,6 +3,8 @@ import { configFromRecord, type Config } from '../../src/config/env.ts';
 import { loadRegistry, type Registry } from '../../src/config/registry.ts';
 import { createFakeRunner, type FakeRunner, type FakeStep } from '../../src/connectors/exec-fake.ts';
 import type { ExecRunner } from '../../src/connectors/exec.ts';
+import { EMBEDDING_PROBE_TEXT, EmbeddingError, type Embedder } from '../../src/embed/index.ts';
+import { fakeEmbedder } from '../support/fake-embedder.ts';
 import { hostPort, probeTargets } from '../../src/ops/preflight-steps.ts';
 import { parseDeployMode, runPreflight, runTunnelPreflight, type PreflightInput, type PreflightResult } from '../../src/ops/preflight.ts';
 import type { TcpProbe, TunnelDeps, TunnelResult } from '../../src/ops/tunnel.ts';
@@ -89,6 +91,7 @@ async function run(options: {
   probe?: Probe;
   tunnel?: FakeTunnel;
   isTty?: boolean;
+  embedder?: Embedder;
   /** Defaults to runPreflight. */
   fn?: (input: PreflightInput) => Promise<PreflightResult>;
 } = {}): Promise<Run> {
@@ -103,6 +106,7 @@ async function run(options: {
     tcpProbe: probe,
     tunnel,
     isTty: options.isTty ?? false,
+    embedder: options.embedder,
   };
   const result = await (options.fn ?? runPreflight)(input);
   return { result, runner, probe, tunnel };
@@ -491,6 +495,62 @@ describe('never rejects', () => {
     const res = await runPreflight({ config: {} as Config, registry, runner: createFakeRunner([]), tcpProbe: probeOf(), isTty: false });
     expect(res.mode).toBe('unknown');
     expect(res.warnings.map((w) => w.step)).toEqual(['preflight']);
+  });
+});
+
+describe('embedding probe', () => {
+  test('a 401 from the provider is one warning row and a warn step, with the status and no value', async () => {
+    const embedder = fakeEmbedder(new EmbeddingError('openai', 'status', 401));
+    const r = await run({ embedder });
+    expect(embedder.calls).toEqual([[EMBEDDING_PROBE_TEXT]]);
+    expect(r.result.warnings).toHaveLength(1);
+    const [w] = warningsFor(r.result, 'embedding');
+    expect(w?.message).toContain('status 401');
+    expect(w?.fix).toContain('$MODEL_EMBEDDING');
+    expect(w?.fix).toContain('triage runs reembed --missing');
+    expect(stepOf(r.result, 'embedding')).toEqual([{ id: 'embedding', status: 'warn' }]);
+    expectNoValues(r.result);
+  });
+
+  test('any other error text is dropped', async () => {
+    const r = await run({ embedder: fakeEmbedder(new Error(`401 Incorrect API key provided: ${SSFB_DB}`)) });
+    expect(warningsFor(r.result, 'embedding')).toHaveLength(1);
+    expect(JSON.stringify(r.result)).not.toContain('Incorrect');
+    expectNoValues(r.result);
+  });
+
+  test('a working embedder is an ok step and no warning', async () => {
+    const embedder = fakeEmbedder(8);
+    const r = await run({ embedder });
+    expect(r.result.warnings).toEqual([]);
+    expect(stepOf(r.result, 'embedding')).toEqual([{ id: 'embedding', status: 'ok' }]);
+    expect(embedder.calls).toHaveLength(1);
+  });
+
+  test('an empty vector is a warning', async () => {
+    const r = await run({ embedder: fakeEmbedder(0) });
+    expect(warningsFor(r.result, 'embedding').map((w) => w.message)).toEqual([
+      'the embedding probe returned no vector; runs will not get case embeddings',
+    ]);
+  });
+
+  test('mock mode makes no embed call', async () => {
+    const embedder = fakeEmbedder(8);
+    const r = await run({ embedder, overrides: { TRIAGE_MOCK_MODE: 'true', TRIAGE_MOCK_STRICT: 'true' }, script: [] });
+    expect(r.result.skipped).toBe('mock');
+    expect(embedder.calls).toEqual([]);
+  });
+
+  test('no embedder means no embedding step', async () => {
+    const r = await run();
+    expect(stepOf(r.result, 'embedding')).toEqual([]);
+  });
+
+  test('runTunnelPreflight does not probe', async () => {
+    const embedder = fakeEmbedder(new EmbeddingError('openai', 'status', 401));
+    const r = await run({ embedder, fn: runTunnelPreflight });
+    expect(embedder.calls).toEqual([]);
+    expect(warningsFor(r.result, 'embedding')).toEqual([]);
   });
 });
 

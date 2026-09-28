@@ -183,7 +183,7 @@ import { ConnectorError } from '../connectors/types.ts';
 import { pidAlive } from '../cli/commands/status.command.ts';
 import { submissionLease, type SubmissionLease, type SubmissionLeaseReader } from '../db/submission-lease.ts';
 import { decisionProviderFor } from '../decisions/registry.ts';
-import { createEmbedder, type EmbedUsage, type Embedder, type FetchLike, HASH_MODEL } from '../embed/index.ts';
+import { createEmbedder, embedderFor, type EmbedUsage, type Embedder, type FetchLike, HASH_MODEL } from '../embed/index.ts';
 import { createJsonlAuditSink } from '../gate/audit-sink.ts';
 import { checkEgress, redactModelFacing, redactPersisted } from '../gate/redact.ts';
 import { createMockLayer } from '../mock/index.ts';
@@ -1667,6 +1667,7 @@ export function submissionDeps(options: SubmissionDepsOptions = {}): SubmissionD
     runner: options.runner ?? createExecRunner(),
     tcpProbe: options.tcpProbe ?? netTcpConnect,
     isTty: options.isTty ?? false,
+    embedder,
     signal,
   });
   return {
@@ -1725,16 +1726,5 @@ function infraReposToSync(config: Config, registry: Registry): readonly string[]
     return infraRepoNames(registry, loadRepos(config, registry), registry.enabledEntities());
   } catch {
     return [];
-  }
-}
-
-// A refused MODEL_EMBEDDING must not stop runs: embeddings are derived data.
-// The settle listener (D70) builds its embedder with it too.
-export function embedderFor(config: Config, fetchImpl: FetchLike | undefined): Embedder | null {
-  try {
-    return createEmbedder(config, { fetch: fetchImpl ?? ((url, reqInit) => fetch(url, reqInit)) });
-  } catch (err) {
-    if (err instanceof ConfigError) return null;
-    throw err;
   }
 }
