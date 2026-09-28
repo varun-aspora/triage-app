@@ -266,12 +266,17 @@ export function capRows(
   const kept: Record<string, unknown>[] = [];
   let bytes = 2; // the [ and ] of the array
   for (const row of rows) {
-    const size = Buffer.byteLength(serialise(row), 'utf8') + (kept.length > 0 ? 1 : 0);
+    const size = jsonBytes(row) + (kept.length > 0 ? 1 : 0);
     if (bytes + size > maxBytes) return { rows: kept, truncated: true };
     bytes += size;
     kept.push(row);
   }
   return { rows: kept, truncated: false };
+}
+
+/** UTF-8 size of the value's JSON, with bigint cells as their digits. */
+export function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(serialise(value), 'utf8');
 }
 
 function serialise(row: unknown): string {

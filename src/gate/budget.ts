@@ -118,6 +118,11 @@ export function runTimes(runId: RunId): RunTimes | undefined {
   return runTimesByRun.get(runId);
 }
 
+/** The D87 line both prompts and the time refusal share. */
+export function finishByText(ms: number): string {
+  return `Finish by ${utcTime(ms)}`;
+}
+
 export function clearRunDeadline(runId: RunId): void {
   runTimesByRun.delete(runId);
 }
@@ -227,7 +232,7 @@ export function createRunBudget(limits: RunBudgetLimits): RunBudget {
     if (times === undefined || now() < times.dataUntil) return undefined;
     return {
       ok: false,
-      message: `Finish by ${utcTime(times.finishBy)}: save what you have with note_evidence and reply`,
+      message: `${finishByText(times.finishBy)}: save what you have with note_evidence and reply`,
       reason: 'time',
     };
   };

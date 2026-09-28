@@ -167,7 +167,6 @@ import {
   init,
 } from '@flue/runtime';
 import * as v from 'valibot';
-import type { RecordedFindings } from '../agents/escalation.ts';
 import { triageRuntime, type TriageRuntime } from '../agents/triage-plan.ts';
 import { Triage } from '../agents/triage.agent.ts';
 import {
@@ -200,11 +199,11 @@ import { netTcpConnect } from '../ops/doctor/probes.ts';
 import { runPreflight, runTunnelPreflight, type PreflightInput, type PreflightResult } from '../ops/preflight.ts';
 import { syncBeforeRun } from '../ops/repos-autosync.ts';
 import type { TcpProbe } from '../ops/tunnel.ts';
-import { logRunEvent, setRunRedactionNames } from '../runlog/event-log.ts';
+import { logRunEvent, runRedactionNames, setRunRedactionNames } from '../runlog/event-log.ts';
 import { embedRun as defaultEmbedRun } from '../runstore/embed-run.ts';
 import { priorCasesFor, type PriorCasesResult } from '../runstore/prior-cases.ts';
-import { codeClaimDetail } from '../report/finding-refs.ts';
 import { registryNames } from '../report/gaps.ts';
+import { partialReportDraft } from '../report/partial.ts';
 import { writeReport } from '../report/write.ts';
 import { collectFindings, reportTail } from '../tools/finish-report.tool.ts';
 import {
@@ -226,10 +225,8 @@ import {
   TriageInitSchema,
 } from '../types/classification.ts';
 import { type Entity, type Interface, type KnownIds, RunIdSchema, type RunId, type Tier } from '../types/core.ts';
-import { EVIDENCE_LADDER_STEPS, type EvidenceLadderStep } from '../types/findings.ts';
 import type { IdChain } from '../types/id-chain.ts';
 import { INPUT_ANSWER_CHAIN_ATTR, INPUT_ANSWER_SIGNAL, type InputRequest, QuestionIdSchema } from '../types/input-request.ts';
-import type { ReportDraft } from '../types/report.ts';
 import type { Attachment, TriageRequest } from '../types/request.ts';
 import type { Stalled } from '../types/stalled.ts';
 import type { UsageRow } from '../types/usage.ts';
@@ -1166,8 +1163,7 @@ async function dispatchAndSettle(
 
     // Before the embedding, so the case text has the report. A joined steer leaves it to its host.
     if (status === 'failed' && timedOut && joined !== true) {
-      const names = (request.initialData as Partial<TriageInit> | undefined)?.redaction_names ?? [];
-      await writePartialReport(runId, seq, startedAt, names, now, deps);
+      await writePartialReport(runId, seq, startedAt, now, deps);
     }
 
     // A parked run (needs_input, blocked) is embedded when it settles for real,
@@ -1670,68 +1666,6 @@ function isRunTimeout(err: unknown): boolean {
   return (cause as { type?: unknown } | null | undefined)?.type === 'submission_timeout';
 }
 
-function timeoutGap(elapsedMs: number, saved: number): string {
-  const what = saved === 0 ? 'no findings were saved before it' : `this report holds the ${saved} saved ${saved === 1 ? 'finding' : 'findings'} only`;
-  return `the run timed out after ${Math.round(elapsedMs / 1000)} s, before the root wrote its report; ${what}`;
-}
-
-/**
- * The partial report of a timed-out response (D88), from the saved findings
- * only: nothing is confirmed, so root_cause is null and the status is
- * inconclusive. Hypotheses, code claims and the delegates' own gaps go into
- * gaps after the timeout gap, since the report has no field for unconfirmed
- * work; reportTail merges them as finish_report merges the model's gaps.
- */
-function partialReportDraft(
-  run: RunRecord,
-  cls: NonNullable<RunRecord['classification']>,
-  findings: readonly RecordedFindings[],
-  gap: string,
-): ReportDraft {
-  const steps = new Set<EvidenceLadderStep>();
-  const timeline: ReportDraft['timeline'] = [];
-  const entities: Entity[] = [];
-  const unconfirmed: string[] = [];
-  for (const r of findings) {
-    if (r.entity === 'code') {
-      steps.add('code');
-      for (const c of r.findings.claims) unconfirmed.push(`code claim, not confirmed: ${codeClaimDetail(c)}: ${c.what_it_shows}`);
-      continue;
-    }
-    entities.push(r.entity);
-    for (const e of r.findings.evidence) steps.add(e.source);
-    for (const t of r.findings.timeline) timeline.push({ ...t, entity: r.entity });
-    for (const h of r.findings.hypotheses) unconfirmed.push(`${r.entity} hypothesis, not confirmed: ${h}`);
-    for (const g of r.findings.gaps) unconfirmed.push(`${r.entity}: ${g}`);
-  }
-  const source = run.request.source;
-  return {
-    request: {
-      ...(source.kind === 'slack' ? { permalink: source.permalink } : {}),
-      current_ask: '',
-      requested_by: run.request.requested_by,
-    },
-    classification: cls.decision,
-    id_chain: cls.id_chain,
-    current_state: [],
-    timeline: timeline.sort((a, b) => a.at.localeCompare(b.at)),
-    root_cause: null,
-    scope: { kind: 'unknown' },
-    status: 'inconclusive',
-    cx_answer: { action_owner: 'unknown', money_safe: 'unknown', should_retry: 'wait', reply_text: '' },
-    actions: { cx: [], eng: [], ops_bank: [] },
-    suggested_fix: [],
-    confidence: 'low',
-    confidence_reason: 'the run timed out before the investigation finished',
-    evidence_ladder: EVIDENCE_LADDER_STEPS.filter((s) => steps.has(s)),
-    entities_consulted: entities,
-    gaps: [gap, ...unconfirmed],
-    escalated: false,
-    escalation_reasons: [],
-    images_seen: cls.decision.proposed.images_seen && cls.decision.images_dropped !== true,
-  };
-}
-
 /**
  * Writes the partial report onto submission seq (D88), from the stored
  * evidence: note_evidence stores before it records into the escalation
@@ -1741,20 +1675,22 @@ async function writePartialReport(
   runId: RunId,
   seq: number,
   startedAt: number,
-  names: readonly string[],
   now: () => Date,
   deps: SettleDeps,
 ): Promise<void> {
+  // The run's names, which a follow-up's dispatch does not carry in initialData.
+  const names = runRedactionNames(runId);
   try {
     const run = await deps.store.getRun(runId);
-    // A dispatched run is always classified.
-    if (run === null || run.classification === null) return;
+    if (run === null) return;
     const findings = collectFindings(run.evidence, []);
-    const draft = partialReportDraft(run, run.classification, findings, timeoutGap(now().getTime() - startedAt, findings.length));
+    const draft = partialReportDraft(run, findings, now().getTime() - startedAt);
+    // A dispatched run is always classified.
+    if (draft === null) return;
     const tail = reportTail({
       draftGaps: draft.gaps,
       commitGaps: [],
-      warnings: run.classification.preflight_warnings ?? [],
+      warnings: run.classification?.preflight_warnings ?? [],
       usage: runUsageInMemory(runId),
       createdAt: run.created_at,
       now: now(),

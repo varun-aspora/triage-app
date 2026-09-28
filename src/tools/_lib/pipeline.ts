@@ -96,9 +96,8 @@ export type ScopeOptions = {
   readonly observed?: ReadonlySet<string>;
   /** From the SQL parser: the $n params compared only to a device_id or verification_id column (Q13). */
   readonly sqlJourneyParams?: readonly number[];
-  /** From the SQL parser: the tables read. With sqlExemptTables, the service's scope_exempt_tables (D89). */
-  readonly sqlTables?: readonly string[];
-  readonly sqlExemptTables?: readonly string[];
+  /** The query reads only its service's scope_exempt_tables (D89). */
+  readonly sqlConfigTablesOnly?: boolean;
 };
 
 export type FixtureRef<K extends FixtureKind> = {
@@ -401,8 +400,7 @@ export async function runIoTool<K extends FixtureKind, T>(
       ...(options.logsMode !== undefined ? { logsMode: options.logsMode } : {}),
       ...(options.observed !== undefined ? { observed: options.observed } : {}),
       ...(options.sqlJourneyParams !== undefined ? { sqlJourneyParams: options.sqlJourneyParams } : {}),
-      ...(options.sqlTables !== undefined ? { sqlTables: options.sqlTables } : {}),
-      ...(options.sqlExemptTables !== undefined ? { sqlExemptTables: options.sqlExemptTables } : {}),
+      ...(options.sqlConfigTablesOnly !== undefined ? { sqlConfigTablesOnly: options.sqlConfigTablesOnly } : {}),
     });
     if (!result.ok) {
       audit({ decision: 'deny', exit: 'refused', transport: noIoTransport, reason: result.reason });

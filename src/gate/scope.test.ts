@@ -11,6 +11,7 @@ import {
   observeCorrelationIds,
   observedIds,
   observeJourneyKeys,
+  onlyExemptTables,
   releaseObservedIds,
   type ScopeCheckResult,
 } from './scope.ts';
@@ -356,7 +357,7 @@ describe('config tables exempt from the id check (D89)', () => {
   const run = (sql: string, id: string, exempt: readonly string[]): ScopeCheckResult => {
     const check = validateSelect(sql);
     if (!check.ok) throw new Error(`test SQL did not parse: ${sql}`);
-    return checkScope({ tool: 'sql_select', params: { sql, params: [id] }, scopeSet: set, sqlTables: check.tables, sqlExemptTables: exempt });
+    return checkScope({ tool: 'sql_select', params: { sql, params: [id] }, scopeSet: set, sqlConfigTablesOnly: onlyExemptTables(check.tables, exempt) });
   };
   const BY_DEFINITION = 'SELECT steps FROM workflow_definitions WHERE external_id = $1';
 
@@ -385,7 +386,7 @@ describe('config tables exempt from the id check (D89)', () => {
     expect(exemptFor('ssfb', 'workflow')).toEqual([]);
     expectDenied(run(BY_DEFINITION, FOREIGN_UUID, []));
     // Without parser facts nothing is exempt.
-    expectDenied(checkScope({ tool: 'sql_select', params: { sql: BY_DEFINITION, params: [FOREIGN_UUID] }, scopeSet: set, sqlExemptTables: ['workflow_definitions'] }));
+    expect(onlyExemptTables([], ['workflow_definitions'])).toBe(false);
   });
 });
 

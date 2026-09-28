@@ -63,10 +63,9 @@ export type ScopeCheckInput = {
   // Set by the SQL parser check: the $n params compared only to a device_id or
   // verification_id column. Only these may be journey keys (Q13).
   sqlJourneyParams?: readonly number[];
-  // Set by sql_select: the tables the parser found, and the service's
-  // scope_exempt_tables from the registry (D89).
-  sqlTables?: readonly string[];
-  sqlExemptTables?: readonly string[];
+  // Set by sql_select: every table the query reads is on its service's
+  // scope_exempt_tables (onlyExemptTables, D89).
+  sqlConfigTablesOnly?: boolean;
 };
 
 export type ScopeOffender = { kind: IdKind; masked: string };
@@ -414,17 +413,14 @@ function systemicDecision(input: ScopeCheckInput): ScopeCheckResult | undefined 
 // A query that reads only config tables the registry lists for its service
 // has no customer id to check (D89). One other table, joined or in a
 // subquery, and the ids are checked as usual.
-function onlyExemptTables(input: ScopeCheckInput): boolean {
-  if (input.tool !== 'sql_select') return false;
-  const tables = input.sqlTables ?? [];
-  const exempt = input.sqlExemptTables ?? [];
+export function onlyExemptTables(tables: readonly string[], exempt: readonly string[]): boolean {
   return tables.length > 0 && tables.every((t) => exempt.includes(t));
 }
 
 export function checkScope(input: ScopeCheckInput): ScopeCheckResult {
   const systemic = systemicDecision(input);
   if (systemic) return systemic;
-  if (onlyExemptTables(input)) return { ok: true };
+  if (input.sqlConfigTablesOnly === true) return { ok: true };
 
   const offending: ScopeOffender[] = [];
   const reported = new Set<string>();

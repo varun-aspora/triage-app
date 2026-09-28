@@ -34,8 +34,7 @@ import * as v from 'valibot';
 import type { Config } from '../../config/env.ts';
 import type { Registry } from '../../config/registry.ts';
 import { modelForTier } from '../../models.ts';
-import { runTimes } from '../../gate/budget.ts';
-import { utcTime } from '../../gate/quickwit-window.ts';
+import { finishByText, runTimes } from '../../gate/budget.ts';
 import { actionBrief, logActions } from '../../runlog/actions.ts';
 import { toolsFor } from '../../tools/index.ts';
 import type { Mount, ToolContext, ToolDeps } from '../../tools/types.ts';
@@ -161,7 +160,7 @@ export function investigatorMounts(
     `- Tools mounted: ${tools.map((t) => t.name).join(', ')}.`,
     ...(deep ? ['- You are the deep variant: use the code tools only to explain what the data and logs show.'] : []),
     // D87: data tools are refused from this time on.
-    ...(times !== undefined ? [`- Finish by ${utcTime(times.dataUntil)}`] : []),
+    ...(times !== undefined ? [`- ${finishByText(times.dataUntil)}`] : []),
     '',
     ...actionBrief(runId, entity),
   ];

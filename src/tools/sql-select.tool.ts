@@ -34,11 +34,11 @@ import type { FlueLogger } from '@flue/runtime';
 import { defineTool, type ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
 import { safeErrorText } from '../connectors/error-text.ts';
-import type { SqlConnector } from '../connectors/sql/pg-client.ts';
+import { capRows, jsonBytes, type SqlConnector } from '../connectors/sql/pg-client.ts';
 import type { MockPort } from '../connectors/mock.ts';
 import { ConnectorError, type ConnectorContext } from '../connectors/types.ts';
 import { MAX_SQL_LENGTH, type SqlCheck, type SqlRefusalCode, validateSelect } from '../gate/sql.ts';
-import { observeJourneyKeys } from '../gate/scope.ts';
+import { observeJourneyKeys, onlyExemptTables } from '../gate/scope.ts';
 import { buildReadOnlyTxn, explainStatement, wrapWithCap } from '../gate/sql-txn.ts';
 import { semanticKey, type SqlSelectFacts } from '../mock/key.ts';
 import type { Entity } from '../types/core.ts';
@@ -180,8 +180,6 @@ type Rendered = {
 // Room for staged_file, which the pipeline adds after render (a path of at most 139 characters).
 const STAGED_FILE_ROOM = 160;
 
-const jsonBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), 'utf8');
-
 // A JSON cell is previewed as its JSON text, so the model sees where it was cut.
 function previewCell(value: unknown): unknown {
   const text = typeof value === 'string' ? value : value !== null && typeof value === 'object' ? JSON.stringify(value) : undefined;
@@ -192,25 +190,18 @@ function previewCell(value: unknown): unknown {
 // The description explains the cut; the note only points at the full rows.
 const CUT_NOTE = 'Cut to fit; staged_file has every row in full.';
 
+const previewRow = (row: Row): Row => Object.fromEntries(Object.entries(row).map(([k, value]) => [k, previewCell(value)]));
+
 /** The rendered result cut to maxBytes: long cells previewed, then whole rows kept while they fit. */
 function fitModelBytes(result: Rendered, maxBytes: number): Rendered & { bytes_cut?: number; note?: string } {
   const full = jsonBytes(result);
   if (full + STAGED_FILE_ROOM <= maxBytes) return result;
   // bytes_cut is at most the full size, so its digits never outgrow this measure.
   const envelope = jsonBytes({ ...result, rows: [], row_count: result.rows.length, truncated: true, bytes_cut: full, note: CUT_NOTE });
-  const room = maxBytes - envelope - STAGED_FILE_ROOM;
-  // Rows are previewed one at a time and the first that does not fit ends the cut, so dropped rows cost nothing.
-  const rows: Row[] = [];
-  let rowBytes = 0; // the rows between the [ and ], which the envelope already has
-  for (const row of result.rows) {
-    const previewed = Object.fromEntries(Object.entries(row).map(([k, value]) => [k, previewCell(value)]));
-    const size = jsonBytes(previewed) + (rows.length > 0 ? 1 : 0);
-    if (rowBytes + size > room) break;
-    rowBytes += size;
-    rows.push(previewed);
-  }
+  // capRows counts the [ and ] itself, which the envelope already has.
+  const { rows } = capRows(result.rows.map(previewRow), maxBytes - envelope - STAGED_FILE_ROOM + 2);
   const out = { ...result, rows, row_count: rows.length, truncated: true, note: CUT_NOTE };
-  return { ...out, bytes_cut: full - jsonBytes({ ...out, rows: [] }) - rowBytes };
+  return { ...out, bytes_cut: full - jsonBytes(out) };
 }
 
 // ------------------------------------------------------------ gate
@@ -331,8 +322,8 @@ async function runSqlSelect(ctx: ToolContext, entity: Entity, services: readonly
         systemic,
         sqlAggregateOnly: check.ok && check.aggregateOnly,
         sqlJourneyParams: check.ok ? check.journeyParams : [],
-        sqlTables: check.ok ? check.tables : [],
-        sqlExemptTables: service === 'unknown' ? [] : (ctx.registry.service(entity, service).scope_exempt_tables ?? []),
+        sqlConfigTablesOnly:
+          check.ok && service !== 'unknown' && onlyExemptTables(check.tables, ctx.registry.service(entity, service).scope_exempt_tables ?? []),
         ...observedScopeOf(ctx.runId),
       },
       gate: () => {

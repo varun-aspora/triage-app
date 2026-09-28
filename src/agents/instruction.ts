@@ -9,7 +9,7 @@
 // pattern's first queries for the briefs, marked as a lead to test (D80).
 
 import { parsePatterns, type Pattern } from '../classify/patterns.ts';
-import { utcTime } from '../gate/quickwit-window.ts';
+import { finishByText } from '../gate/budget.ts';
 import { ENTITIES, KNOWN_ID_KEYS, type Entity, type KnownIds } from '../types/core.ts';
 import type { TriageInit } from '../types/classification.ts';
 import { currentKnowledge, type Knowledge } from './skills.ts';
@@ -97,7 +97,7 @@ function runSection(
     `- Classification: ${classificationLine(init)}`,
     `- Id chain: ${hopsLine(init)}`,
     // Absolute, so the text stays the same across the submission's renders and the prompt cache holds.
-    ...(finishBy !== undefined ? [`- Finish by ${utcTime(finishBy)}`] : []),
+    ...(finishBy !== undefined ? [`- ${finishByText(finishBy)}`] : []),
   ].join('\n');
 }
 
