@@ -154,6 +154,11 @@ function ollamaModelIds(config: Config): string[] {
 // openai-completions API refuses to send a request without one. Models are declared text-only:
 // Ollama does not report vision support up front, so the tier policy treats them
 // as unable to take images. Context and output sizes follow the Flue guide example.
+//
+// Thinking (D86): MODEL_THINKING_* goes out as reasoning_effort. 'off' maps to
+// 'none' because a request without the field gets the chat template's default,
+// which can be the highest effort. The qwen format's enable_thinking is ignored
+// by these servers.
 export function ollamaProvider(baseUrl: string, ids: readonly string[], apiKey: string = OLLAMA) {
   return createProvider({
     id: OLLAMA,
@@ -166,7 +171,9 @@ export function ollamaProvider(baseUrl: string, ids: readonly string[], apiKey: 
       api: 'openai-completions' as const,
       provider: OLLAMA,
       baseUrl,
-      reasoning: false,
+      reasoning: true,
+      thinkingLevelMap: { off: 'none' },
+      compat: { thinkingFormat: 'openai' as const },
       input: ['text' as const],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 128000,
