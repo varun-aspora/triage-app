@@ -68,6 +68,7 @@ const BUDGET_TARGET: Record<BudgetRefusalReason, string> = {
   tool_calls: 'TRIAGE_MAX_TOOL_CALLS_PER_RUN',
   bytes: 'TRIAGE_MAX_BYTES_PER_RUN',
   entity_calls: 'TRIAGE_MAX_TASKS_PER_RUN',
+  tool_cap: 'TRIAGE_MAX_LOG_CALLS_PER_RUN',
 };
 
 /** Run id used on audit lines when the operation carries none that fits RunIdSchema. */
@@ -144,6 +145,7 @@ export function runBudgetSource(config: Config, registry?: Registry): BudgetSour
       maxBytesPerCall: budgets.maxResponseBytesPerCall,
       maxBytesPerRun: budgets.maxBytesPerRun,
       perEntity,
+      perTool: { logs_search: { maxCalls: budgets.maxLogCallsPerRun, setting: 'TRIAGE_MAX_LOG_CALLS_PER_RUN' } },
     });
   };
 }

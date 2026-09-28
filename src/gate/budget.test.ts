@@ -76,6 +76,30 @@ describe('tool call cap', () => {
     expect(b.state()).toMatchObject({ calls: 5, exhausted: false, entityCalls: { atspl: 3, ssfb: 1 } });
   });
 
+  test('deny: a per-tool cap refuses that tool only, names the cap, and counts inside the run limit', () => {
+    const b = createRunBudget(limits({ maxToolCalls: 5, perTool: { logs_search: { maxCalls: 2, setting: 'TRIAGE_MAX_LOG_CALLS_PER_RUN' } } }));
+    expect(b.consumeToolCall('logs_search', 'ssfb')).toEqual({ ok: true });
+    expect(b.consumeToolCall('logs_search', 'ssfb')).toEqual({ ok: true });
+    const third = b.consumeToolCall('logs_search', 'ssfb');
+    expect(third).toMatchObject({ ok: false, reason: 'tool_cap' });
+    if (third.ok) throw new Error('expected a refusal');
+    expect(third.message).toBe(
+      'logs_search refused: this run has used all 2 of its logs_search calls (TRIAGE_MAX_LOG_CALLS_PER_RUN=2). ' +
+        'Other tools still work; finish with the evidence you have.',
+    );
+    // Not exhausted, the refused call is not counted, and other tools still pass.
+    expect(b.state()).toMatchObject({ calls: 2, exhausted: false, entityCalls: { ssfb: 2 }, toolCalls: { logs_search: 2 } });
+    expect(b.consumeToolCall('sql_select', 'ssfb')).toEqual({ ok: true });
+    // Capped calls use up the run limit like any other call.
+    expect(b.consumeToolCall('sql_select', 'ssfb')).toEqual({ ok: true });
+    expect(b.consumeToolCall('sql_select', 'ssfb')).toEqual({ ok: true });
+    expect(b.consumeToolCall('sql_select', 'ssfb')).toMatchObject({ ...refusal, reason: 'tool_calls' });
+  });
+
+  test('construction with a per-tool cap of 0 throws', () => {
+    expect(() => createRunBudget(limits({ perTool: { logs_search: { maxCalls: 0, setting: 'X' } } }))).toThrow(BudgetConfigError);
+  });
+
   test('deny: unknown entity throws', () => {
     const b = createRunBudget(limits());
     expect(() => b.consumeToolCall('sql_select', 'shivalik' as never)).toThrow(RangeError);

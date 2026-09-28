@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { TimeWindow } from '../types/core.ts';
-import { UPPER_BOUND_DROPPED_NOTE, parseInstant, resolveWindow, toSince } from './quickwit-window.ts';
+import { parseInstant, qwTime, resolveWindow, windowSeconds } from './quickwit-window.ts';
 
 const NOW = new Date('2026-09-23T12:00:00.000Z');
 const HOUR = 3_600_000;
@@ -134,52 +134,28 @@ describe('parseInstant', () => {
   });
 });
 
-describe('toSince', () => {
-  test('whole days use d', () => {
-    const w = { from: new Date(NOW.getTime() - 7 * DAY).toISOString(), to: NOW.toISOString() };
-    expect(toSince(w, NOW)).toEqual({ since: '7d' });
+describe('windowSeconds and qwTime', () => {
+  test('the start rounds down and the end up to whole seconds, so the window is covered', () => {
+    const w = { from: '2026-09-21T10:00:00.500Z', to: '2026-09-23T10:00:00.200Z' };
+    expect(windowSeconds(w)).toEqual({ start: Date.parse('2026-09-21T10:00:00Z') / 1000, end: Date.parse('2026-09-23T10:00:01Z') / 1000 });
   });
 
-  test('a partial hour rounds up so the start is covered', () => {
-    const w = { from: new Date(NOW.getTime() - 5 * HOUR - 60_000).toISOString(), to: NOW.toISOString() };
-    expect(toSince(w, NOW).since).toBe('6h');
+  test('whole seconds stay as they are', () => {
+    expect(windowSeconds(REQUEST)).toEqual({ start: Date.parse(REQUEST.from) / 1000, end: Date.parse(REQUEST.to) / 1000 });
   });
 
-  test('more than a day that is not whole days uses h', () => {
-    const w = { from: new Date(NOW.getTime() - 26 * HOUR).toISOString(), to: NOW.toISOString() };
-    expect(toSince(w, NOW).since).toBe('26h');
+  test('qwTime is RFC3339 in UTC with no milliseconds', () => {
+    expect(qwTime(Date.parse('2026-09-13T10:00:00Z') / 1000)).toBe('2026-09-13T10:00:00Z');
   });
 
-  test('a start minutes ago is at least 1h', () => {
-    const w = { from: new Date(NOW.getTime() - 10 * 60_000).toISOString(), to: NOW.toISOString() };
-    expect(toSince(w, NOW).since).toBe('1h');
-  });
-
-  test('the duration always reaches back to the window start', () => {
-    for (const minutes of [1, 59, 60, 61, 1439, 1440, 1441, 10_000]) {
-      const from = NOW.getTime() - minutes * 60_000;
-      const { since } = toSince({ from: new Date(from).toISOString(), to: NOW.toISOString() }, NOW);
-      const n = Number(since.slice(0, -1));
-      const ms = since.endsWith('d') ? n * DAY : n * HOUR;
-      expect(NOW.getTime() - ms).toBeLessThanOrEqual(from);
-    }
-  });
-
-  test('an upper bound before now is dropped with a note', () => {
-    const r = toSince(REQUEST, NOW);
-    expect(r.window_note).toBe(UPPER_BOUND_DROPPED_NOTE);
-    expect(r.window_note).toBe('upper bound dropped (qw --since only)');
-    // 2026-09-13T10:00Z to 2026-09-23T12:00Z is 242 hours.
-    expect(r.since).toBe('242h');
-  });
-
-  test('a window ending at now has no note', () => {
-    expect(toSince({ from: '2026-09-23T06:00:00.000Z', to: NOW.toISOString() }, NOW)).toEqual({ since: '6h' });
-  });
-
-  test('the default window resolves and converts end to end', () => {
+  test('the default window keeps both ends, with no upper bound dropped', () => {
     const r = resolveWindow(undefined, undefined, REQUEST, NOW);
     if (!r.ok) throw new Error(r.reason);
-    expect(toSince(r.window, NOW)).toEqual({ since: '242h', window_note: UPPER_BOUND_DROPPED_NOTE });
+    const { start, end } = windowSeconds(r.window);
+    expect([qwTime(start), qwTime(end)]).toEqual(['2026-09-13T10:00:00Z', '2026-09-23T11:59:00Z']);
+  });
+
+  test('an invalid window throws', () => {
+    expect(() => windowSeconds({ from: 'x', to: REQUEST.to })).toThrow(/not a valid time window/);
   });
 });

@@ -79,6 +79,8 @@ export type ScopeOptions = {
   /** From the SQL parser: true when the select list is aggregate-only. */
   readonly sqlAggregateOnly?: boolean;
   readonly logsMode?: LogsMode;
+  /** Correlation ids seen in earlier results of the run (D77); logs_search only. */
+  readonly observed?: ReadonlySet<string>;
 };
 
 export type FixtureRef<K extends FixtureKind> = {
@@ -343,7 +345,8 @@ export async function runIoTool<K extends FixtureKind, T>(
   step('budget');
   const budget = deps.budget.consumeToolCall(spec.tool, entity ?? undefined);
   if (!budget.ok) {
-    if (budget.reason !== 'entity_calls') deps.escalation.markBudgetExhausted();
+    // An entity or per-tool cap refuses that target only; the run goes on.
+    if (budget.reason !== 'entity_calls' && budget.reason !== 'tool_cap') deps.escalation.markBudgetExhausted();
     audit({ decision: 'deny', exit: 'refused', transport: noIoTransport, reason: `budget: ${budget.reason}` });
     return refuse(budget.message);
   }
@@ -359,6 +362,7 @@ export async function runIoTool<K extends FixtureKind, T>(
       ...(options.systemic !== undefined ? { systemic: options.systemic } : {}),
       ...(options.sqlAggregateOnly !== undefined ? { sqlAggregateOnly: options.sqlAggregateOnly } : {}),
       ...(options.logsMode !== undefined ? { logsMode: options.logsMode } : {}),
+      ...(options.observed !== undefined ? { observed: options.observed } : {}),
     });
     if (!result.ok) {
       audit({ decision: 'deny', exit: 'refused', transport: noIoTransport, reason: result.reason });

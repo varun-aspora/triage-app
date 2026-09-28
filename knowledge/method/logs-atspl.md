@@ -47,7 +47,8 @@ promoted to the top level, read it from `raw_message` in the hit.
 The tool accepts `x-req-id` and `x-txn-id` in `fields` and `group_by`. Note the
 hyphens: on ATSPL the correlation ids are `x-req-id` and `x-txn-id`, not the
 underscore forms. Pass them as `fields: { "x-req-id": <req_id> }`; the tool
-writes the query.
+writes the query. A UUID-shaped id is the exception: on ATSPL the tool refuses
+a UUID in any field, so search it as `terms: ["<uuid>"]`.
 
 ## Traps seen on ATSPL
 

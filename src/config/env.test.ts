@@ -132,13 +132,14 @@ describe('defaults with an empty .env', () => {
     expect(c.sandbox.python).toBe(true);
     expect(c.sandbox.timeoutMs).toBe(30000);
     expect(c.budgets.maxToolCallsPerRun).toBe(120);
+    expect(c.budgets.maxLogCallsPerRun).toBe(50);
     expect(c.budgets.maxTasksPerRun).toBe(12);
     expect(c.budgets.maxResponseBytesPerCall).toBe(1048576);
     expect(c.budgets.maxBytesPerRun).toBe(20971520);
     expect(c.budgets.runTimeoutMs).toBe(900000);
     expect(c.budgets.runMaxAttempts).toBe(2);
     expect(c.budgets.httpTimeoutMs).toBe(30000);
-    expect(c.budgets.defaultLookbackDays).toBe(7);
+    expect(c.budgets.defaultLookbackDays).toBe(30);
     expect(c.sql).toEqual({
       maxRows: 200,
       statementTimeoutMs: 30000,
@@ -294,6 +295,7 @@ describe('type refusals name the key', () => {
     ['TRIAGE_MOCK_STRICT', '1'],
     ['TRIAGE_SQL_MAX_ROWS', '12abc'],
     ['TRIAGE_MAX_TOOL_CALLS_PER_RUN', '0'],
+    ['TRIAGE_MAX_LOG_CALLS_PER_RUN', '0'],
     ['TRIAGE_MAX_RESPONSE_BYTES_PER_CALL', '1MB'],
     ['TRIAGE_MAX_BYTES_PER_RUN', '-5'],
     ['TRIAGE_HTTP_PORT', '70000'],

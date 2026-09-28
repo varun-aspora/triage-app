@@ -96,6 +96,8 @@ export const KEYS: readonly KeySpec[] = [
 
   // Per-run budgets
   { name: 'TRIAGE_MAX_TOOL_CALLS_PER_RUN', type: 'int', group: 'budgets', default: '120', min: 1 },
+  // D76: logs_search calls per run, counted inside the tool-call limit.
+  { name: 'TRIAGE_MAX_LOG_CALLS_PER_RUN', type: 'int', group: 'budgets', default: '50', min: 1 },
   { name: 'TRIAGE_MAX_TASKS_PER_RUN', type: 'int', group: 'budgets', default: '12', min: 0 },
   { name: 'TRIAGE_MAX_ASKS_PER_RUN', type: 'int', group: 'budgets', default: '10', min: 0 },
   { name: 'TRIAGE_MAX_RESPONSE_BYTES_PER_CALL', type: 'int', group: 'budgets', default: '1048576', min: 1 },
@@ -105,7 +107,7 @@ export const KEYS: readonly KeySpec[] = [
   // D71: a running run with no event for this long shows as stalled.
   { name: 'TRIAGE_STALLED_AFTER_MS', type: 'int', group: 'budgets', default: '600000', min: 1000 },
   { name: 'TRIAGE_HTTP_TIMEOUT_MS', type: 'int', group: 'budgets', default: '30000', min: 1 },
-  { name: 'TRIAGE_DEFAULT_LOOKBACK_DAYS', type: 'int', group: 'budgets', default: '7', min: 1 },
+  { name: 'TRIAGE_DEFAULT_LOOKBACK_DAYS', type: 'int', group: 'budgets', default: '30', min: 1 },
 
   // SQL (D33)
   { name: 'TRIAGE_SQL_MAX_ROWS', type: 'int', group: 'sql', default: '200', min: 1 },

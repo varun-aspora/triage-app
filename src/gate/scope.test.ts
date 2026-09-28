@@ -1,7 +1,16 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import type { IdChain } from '../types/id-chain.ts';
 import { extractIdShaped } from './id-patterns.ts';
-import { checkScope, createScopeSet, extendScopeSet, maskId, type ScopeCheckResult } from './scope.ts';
+import {
+  checkScope,
+  createScopeSet,
+  extendScopeSet,
+  maskId,
+  observeCorrelationIds,
+  observedCorrelationIds,
+  releaseObservedIds,
+  type ScopeCheckResult,
+} from './scope.ts';
 
 // Synthetic ids only.
 const RUN_CUSTOMER = '3f2b8c1e-5a47-4d9e-9b1a-0c6d2e7f8a91';
@@ -194,6 +203,55 @@ describe('checkScope denies ids outside the chain', () => {
     expectDenied(checkScope({ tool: 'logs_search', params: { message: `failed for ${FOREIGN_ACCOUNT}` }, scopeSet: set }));
   });
 
+  test('foreign id in logs any_of, exclude or contains', () => {
+    for (const params of [
+      { any_of: [{ terms: [RUN_ACCOUNT, FOREIGN_UUID] }] },
+      { any_of: [{ message: [`failed for ${FOREIGN_ACCOUNT}`] }] },
+      { exclude: [FOREIGN_UUID] },
+      { contains: FOREIGN_ACCOUNT },
+    ]) {
+      expectDenied(checkScope({ tool: 'logs_search', params, scopeSet: set, logsMode: 'search' }));
+    }
+  });
+
+  test('a foreign UUID with spaces or other separators in place of dashes is denied (D76)', () => {
+    const spaced = FOREIGN_UUID.replace(/-/g, ' ');
+    for (const params of [
+      { terms: [spaced] },
+      { terms: [FOREIGN_UUID.replace(/-/g, '_')] },
+      { exclude: [spaced] },
+      { any_of: [{ terms: [spaced] }] },
+      { message: `failed for ${spaced}` },
+      { fields: { x_req_id: spaced } },
+    ]) {
+      const deny = expectDenied(checkScope({ tool: 'logs_search', params, scopeSet: set }));
+      expect(deny.offending).toEqual([{ kind: 'uuid', masked: 'uuid:***3d47' }]);
+    }
+    // The run's own UUID with spaces passes.
+    expect(checkScope({ tool: 'logs_search', params: { terms: [RUN_CUSTOMER.replace(/-/g, ' ')] }, scopeSet: set })).toEqual({ ok: true });
+  });
+
+  test('contains is checked as a fragment: a piece of a foreign id is denied (D76)', () => {
+    for (const [contains, kind] of [
+      [FOREIGN_UUID.slice(0, -1), 'uuid'],
+      ['90000999', 'digits'],
+      ['someone.else@gmail', 'email'],
+    ] as const) {
+      const deny = expectDenied(checkScope({ tool: 'logs_search', params: { contains }, scopeSet: set }));
+      expect(deny.offending.map((o) => o.kind)).toEqual([kind]);
+      expect(deny.reason).toContain('contains is a substring match');
+      expect(deny.reason).not.toContain(contains);
+    }
+  });
+
+  test('contains passes when the fragment is part of a run id, or holds no id-like run', () => {
+    for (const contains of [RUN_CUSTOMER.slice(0, 13), RUN_ACCOUNT.slice(2, 10), 'CBS_timeout', 'error-code-42']) {
+      expect(checkScope({ tool: 'logs_search', params: { contains }, scopeSet: set })).toEqual({ ok: true });
+    }
+    const withEmail = createScopeSet(chain({ customer_id: RUN_CUSTOMER, aspora_user_id: 'someone@example.com' }));
+    expect(checkScope({ tool: 'logs_search', params: { contains: 'someone@example' }, scopeSet: withEmail })).toEqual({ ok: true });
+  });
+
   test('foreign phone in cbs body', () => {
     const deny = expectDenied(
       checkScope({ tool: 'cbs_call', params: { path: '/fi/customer', body: { mobile: FOREIGN_PHONE } }, scopeSet: set }),
@@ -261,10 +319,15 @@ describe('systemic mode', () => {
     expect(result).toEqual({ ok: true });
   });
 
-  test('systemic logs count and group_by pass', () => {
-    const params = { terms: [FOREIGN_ACCOUNT], count: true };
+  test('systemic logs count and group_by pass without a foreign id, and still check ids (D76)', () => {
+    const params = { message: 'CBS API error', count: true };
     expect(checkScope({ tool: 'logs_search', params, scopeSet: set, systemic: true, logsMode: 'count' })).toEqual({ ok: true });
     expect(checkScope({ tool: 'logs_search', params, scopeSet: set, systemic: true, logsMode: 'group_by' })).toEqual({ ok: true });
+    const grouped = { terms: [FOREIGN_UUID], group_by: ['customer_id', 'x_req_id', 'message', 'error'] };
+    for (const logsMode of ['count', 'group_by'] as const) {
+      const deny = expectDenied(checkScope({ tool: 'logs_search', params: grouped, scopeSet: set, systemic: true, logsMode }));
+      expect(deny.reason).toContain('scope "systemic" does not lift the id check for logs_search');
+    }
   });
 
   test('never widens scope for http_call or cbs_call', () => {
@@ -326,5 +389,70 @@ describe('masking', () => {
 
   test('maskId keeps at most half of a short value', () => {
     expect(maskId({ kind: 'digits', normalised: '123456' })).toBe('digits:***456');
+  });
+});
+
+describe('correlation ids seen earlier in the run (D77)', () => {
+  const REQ_ID = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+  const OTHER_REQ_ID = 'f0e1d2c3-b4a5-4968-8776-655443322110';
+  const runId = 'run-scope-correlation';
+
+  afterEach(() => void releaseObservedIds(runId));
+
+  function observed(): ReadonlySet<string> | undefined {
+    return observedCorrelationIds(runId);
+  }
+
+  test('a dashed-UUID x_req_id seen in an earlier logs_search result is allowed', () => {
+    observeCorrelationIds(runId, [{ service: 'harbor', x_req_id: REQ_ID.toUpperCase(), message: 'CBS API error' }]);
+    for (const name of ['x_req_id', 'x-req-id']) {
+      const params = { fields: { [name]: REQ_ID } };
+      expect(checkScope({ tool: 'logs_search', params, scopeSet: set, observed: observed() })).toEqual({ ok: true });
+    }
+  });
+
+  test('an x_txn_id never seen is refused, and the reason says why', () => {
+    observeCorrelationIds(runId, [{ x_txn_id: REQ_ID }]);
+    const deny = expectDenied(
+      checkScope({ tool: 'logs_search', params: { fields: { x_txn_id: OTHER_REQ_ID } }, scopeSet: set, observed: observed() }),
+    );
+    expect(deny.reason).toBe(
+      "scope: 1 id is not in the run's ID chain for logs_search (uuid:***2110); a correlation id (x_req_id, x_txn_id, x-req-id " +
+        'or x-txn-id) is allowed in fields, or as a whole terms value, only once an earlier logs_search result in this run has shown it',
+    );
+    // Nothing observed yet: refused the same way.
+    releaseObservedIds(runId);
+    expectDenied(checkScope({ tool: 'logs_search', params: { fields: { x_req_id: REQ_ID } }, scopeSet: set, observed: observed() }));
+  });
+
+  test('a seen id is allowed as a whole terms value, as RTL and ATSPL search a UUID (D76)', () => {
+    observeCorrelationIds(runId, [{ 'x-txn-id': REQ_ID }]);
+    for (const params of [{ terms: [REQ_ID] }, { terms: [` ${REQ_ID} `, RUN_ACCOUNT] }, { any_of: [{ terms: [REQ_ID, RUN_CUSTOMER] }] }]) {
+      expect(checkScope({ tool: 'logs_search', params, scopeSet: set, observed: observed() })).toEqual({ ok: true });
+    }
+    // Never seen: refused, with the correlation note.
+    const deny = expectDenied(checkScope({ tool: 'logs_search', params: { terms: [OTHER_REQ_ID] }, scopeSet: set, observed: observed() }));
+    expect(deny.reason).toContain('only once an earlier logs_search result in this run has shown it');
+  });
+
+  test('the same value in a non-correlation field, a longer term or a message is still refused', () => {
+    observeCorrelationIds(runId, [{ x_req_id: REQ_ID }]);
+    for (const params of [
+      { fields: { form_id: REQ_ID } },
+      { terms: [`req ${REQ_ID}`] },
+      { message: `failed for ${REQ_ID}` },
+      { fields: { x_req_id: REQ_ID, customer_id: REQ_ID } },
+    ]) {
+      const deny = expectDenied(checkScope({ tool: 'logs_search', params, scopeSet: set, observed: observed() }));
+      expect(deny.reason).not.toContain('earlier logs_search result');
+    }
+  });
+
+  test('ids are kept per run and dropped on release', () => {
+    observeCorrelationIds(runId, [{ x_req_id: REQ_ID }, null, 'text', { x_txn_id: 42 }]);
+    expect(observedCorrelationIds('run-scope-other')).toBeUndefined();
+    expect(releaseObservedIds(runId)).toBe(true);
+    expect(observedCorrelationIds(runId)).toBeUndefined();
+    expect(releaseObservedIds(runId)).toBe(false);
   });
 });

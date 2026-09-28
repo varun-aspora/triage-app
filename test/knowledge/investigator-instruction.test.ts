@@ -127,9 +127,9 @@ describe('logs advice', () => {
     expect('Quickwit is SSFB only').toMatch(SSFB_ONLY_LOGS);
   });
 
-  test('the UUID first-segment rule is stated once, in logs.md', () => {
+  test('no method file states the old UUID first-segment rule (D76 sends the whole UUID)', () => {
     const counts = FILES.map((file) => [file, (read(file).match(FIRST_SEGMENT) ?? []).length] as const);
-    expect(counts.filter(([, n]) => n > 0)).toEqual([['logs.md', 1]]);
+    expect(counts.filter(([, n]) => n > 0)).toEqual([]);
   });
 
   test('logs.md covers the field model, correlation reuse, zero hits and correlation by time', () => {

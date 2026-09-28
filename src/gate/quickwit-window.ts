@@ -2,18 +2,13 @@
 //
 // Every query gets a bounded window. With no from/to it is the request
 // window, which ingress anchors to the thread's first message minus
-// TRIAGE_DEFAULT_LOOKBACK_DAYS. The qw CLI takes only --since (Q28 default),
-// so toSince turns the window start into a duration and says when the upper
-// bound is dropped.
+// TRIAGE_DEFAULT_LOOKBACK_DAYS. Both ends are always sent (owner, Q6): qw
+// gets --from and --to in UTC, http gets start_timestamp and end_timestamp.
 import type { TimeWindow } from '../types/core.ts';
 
 export type WindowResolution =
   | { readonly ok: true; readonly window: TimeWindow; readonly defaulted: boolean }
   | { readonly ok: false; readonly reason: string };
-
-export type SinceResult = { readonly since: string; readonly window_note?: string };
-
-export const UPPER_BOUND_DROPPED_NOTE = 'upper bound dropped (qw --since only)';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -74,19 +69,21 @@ export function resolveWindow(
 }
 
 /**
- * Converts the window start into a qw --since duration, rounded up to whole
- * hours (whole days when it divides evenly) so the start is always covered.
- * qw has no upper bound, so when the window ends before now the result
- * carries window_note.
+ * The window in whole epoch seconds, which is what Quickwit takes on both
+ * transports: the start rounded down and the end rounded up, so the whole
+ * window is covered. Quickwit reads the start as inclusive and the end as
+ * exclusive.
  */
-export function toSince(window: TimeWindow, now: Date): SinceResult {
-  const nowMs = now.getTime();
+export function windowSeconds(window: TimeWindow): { readonly start: number; readonly end: number } {
   const fromMs = Date.parse(window.from);
   const toMs = Date.parse(window.to);
-  if (Number.isNaN(fromMs) || Number.isNaN(toMs)) throw new Error('toSince: the window is not a valid time window');
-  const hours = Math.max(1, Math.ceil((nowMs - fromMs) / HOUR));
-  const since = hours % 24 === 0 ? `${hours / 24}d` : `${hours}h`;
-  return toMs < nowMs ? { since, window_note: UPPER_BOUND_DROPPED_NOTE } : { since };
+  if (Number.isNaN(fromMs) || Number.isNaN(toMs)) throw new Error('windowSeconds: the window is not a valid time window');
+  return { start: Math.floor(fromMs / 1000), end: Math.ceil(toMs / 1000) };
+}
+
+/** An epoch second as the RFC3339 UTC text qw --from and --to take, such as 2026-09-23T10:00:00Z. */
+export function qwTime(seconds: number): string {
+  return new Date(seconds * 1000).toISOString().replace('.000Z', 'Z');
 }
 
 function toWindow(fromMs: number, toMs: number): TimeWindow {

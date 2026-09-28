@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { ConnectorError, MAX_HTTP_BODY_BYTES } from '../types.ts';
-import { GROUPS_AGG, httpSearch, searchBody, searchUrl, type FetchLike, type HttpEnvNames, type HttpSearchRequest } from './http-transport.ts';
+import { httpSearch, MAX_PAGE_END, searchBody, searchUrl, type FetchLike, type HttpEnvNames, type HttpSearchRequest } from './http-transport.ts';
 
 const NAMES: HttpEnvNames = { url: 'ATSPL_QUICKWIT_URL', auth: 'ATSPL_QUICKWIT_AUTH', token: 'ATSPL_QUICKWIT_TOKEN' };
 const BASE = 'https://quickwit.example.test/proxy/';
@@ -14,7 +14,9 @@ function req(over: Partial<HttpSearchRequest> = {}): HttpSearchRequest {
     index: 'envoy-logs',
     query: 'service:package AND x\\-req\\-id:abc',
     mode: 'search',
-    maxHits: 50,
+    maxHits: 250,
+    offset: 0,
+    order: 'newest',
     window: WINDOW,
     timeoutMs: 1000,
     signal: new AbortController().signal,
@@ -58,9 +60,9 @@ function expectNoSecrets(err: Error): void {
 }
 
 describe('request', () => {
-  test('search POSTs query, max_hits and the window in epoch seconds to /api/v1/<index>/search', async () => {
+  test('search POSTs one page: query, 250 hits, the offset, sort by timestamp and the window in epoch seconds', async () => {
     const f = fakeFetch(() => json({ num_hits: 0, hits: [] }));
-    await httpSearch(f, req(), NAMES);
+    await httpSearch(f, req({ offset: 500 }), NAMES);
     expect(f.seen).toHaveLength(1);
     const s = f.seen[0] as Seen;
     expect(s.url).toBe('https://quickwit.example.test/proxy/api/v1/envoy-logs/search');
@@ -68,22 +70,35 @@ describe('request', () => {
     expect(s.init.redirect).toBe('manual');
     expect(JSON.parse(s.init.body as string)).toEqual({
       query: 'service:package AND x\\-req\\-id:abc',
-      max_hits: 50,
-      start_timestamp: Math.floor(Date.parse(WINDOW.from) / 1000),
-      end_timestamp: Math.ceil(Date.parse(WINDOW.to) / 1000),
+      max_hits: 250,
+      start_timestamp: Date.parse('2026-09-21T10:00:00Z') / 1000,
+      end_timestamp: Date.parse('2026-09-23T10:00:01Z') / 1000,
+      start_offset: 500,
+      sort_by: 'timestamp',
     });
   });
 
-  test('count sends max_hits 0 and no aggregation', () => {
-    const body = searchBody({ ...req(), mode: 'count' });
-    expect(body.max_hits).toBe(0);
-    expect(body.aggs).toBeUndefined();
+  test('order oldest sorts ascending with -timestamp (Quickwit reads a bare field as descending)', () => {
+    expect(searchBody({ ...req(), order: 'oldest' }).sort_by).toBe('-timestamp');
+    expect(searchBody(req()).sort_by).toBe('timestamp');
   });
 
-  test('group_by sends max_hits 0 and a terms aggregation on the field', () => {
-    const body = searchBody({ ...req(), mode: 'histogram', groupBy: 'service' });
-    expect(body.max_hits).toBe(0);
-    expect(body.aggs).toEqual({ [GROUPS_AGG]: { terms: { field: 'service', size: 50 } } });
+  test('count sends max_hits 0, both ends of the window, and no paging, sort or aggregation', () => {
+    expect(searchBody({ ...req(), mode: 'count', offset: 250 })).toEqual({
+      query: 'service:package AND x\\-req\\-id:abc',
+      max_hits: 0,
+      start_timestamp: Date.parse('2026-09-21T10:00:00Z') / 1000,
+      end_timestamp: Date.parse('2026-09-23T10:00:01Z') / 1000,
+    });
+  });
+
+  test('a page ending past 10,000 hits is refused with the numbers, and nothing is fetched', async () => {
+    expect(searchBody(req({ offset: MAX_PAGE_END - 250 })).start_offset).toBe(9750);
+    const f = fakeFetch(() => json({ num_hits: 0, hits: [] }));
+    const err = await errorOf(httpSearch(f, req({ offset: 9751 }), NAMES));
+    expect(err.code).toBe('refused');
+    expect(err.message).toBe('offset 9751 is past 9750: Quickwit pages at most 10000 hits deep; narrow the window or add a filter');
+    expect(f.seen).toHaveLength(0);
   });
 
   test('the index is encoded into the path and the base keeps its path prefix', () => {
@@ -218,10 +233,13 @@ describe('response', () => {
     expect(out).toEqual({ kind: 'count', num_hits: 12 });
   });
 
-  test('group_by reads the terms buckets and flags other docs as truncated', async () => {
-    const body = { num_hits: 9, hits: [], aggregations: { [GROUPS_AGG]: { buckets: [{ key: 'a', doc_count: 2 }, { key: 'b', doc_count: 5 }], sum_other_doc_count: 2 } } };
-    const out = await httpSearch(fakeFetch(() => json(body)), req({ mode: 'histogram', groupBy: 'service' }), NAMES);
-    expect(out).toEqual({ kind: 'groups', groups: [{ key: 'b', count: 5 }, { key: 'a', count: 2 }], num_hits: 9, truncated: true });
+  test('a connection reset is unreachable with the reason, never an empty result', async () => {
+    const f = fakeFetch(() => {
+      throw new TypeError('fetch failed', { cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }) });
+    });
+    const err = await errorOf(httpSearch(f, req(), NAMES));
+    expect(err.code).toBe('unreachable');
+    expect(err.message).toBe('Quickwit at ATSPL_QUICKWIT_URL could not be reached: fetch failed: read ECONNRESET');
   });
 
   test('a 400 keeps Quickwit\'s own message, so the model can fix the query', async () => {

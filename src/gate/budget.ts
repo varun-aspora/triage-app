@@ -19,6 +19,12 @@ export interface EntityLimits {
   maxHits: number;
 }
 
+/** A cap on one tool's calls per run; setting names the config key in the refusal. */
+export interface ToolCap {
+  maxCalls: number;
+  setting: string;
+}
+
 export interface RunBudgetLimits {
   runId: RunId;
   maxToolCalls: number;
@@ -27,13 +33,15 @@ export interface RunBudgetLimits {
   maxBytesPerCall: number;
   maxBytesPerRun: number;
   perEntity?: Partial<Record<Entity, EntityLimits>>;
+  /** Per-tool caps, counted inside maxToolCalls (D76). */
+  perTool?: Readonly<Record<string, ToolCap>>;
 }
 
-export type BudgetRefusalReason = ExhaustedReason | 'entity_calls';
+export type BudgetRefusalReason = ExhaustedReason | 'entity_calls' | 'tool_cap';
 
-export type BudgetDecision =
-  | { ok: true }
-  | { ok: false; message: typeof BUDGET_EXHAUSTED_MESSAGE; reason: BudgetRefusalReason };
+// message is the fixed exhausted text, or for tool_cap a sentence that names
+// the tool, the cap and its setting.
+export type BudgetDecision = { ok: true } | { ok: false; message: string; reason: BudgetRefusalReason };
 
 // keepBytes is how much of the response the tool may keep; truncate is true
 // when a single response is larger than maxBytesPerCall.
@@ -46,6 +54,7 @@ export interface BudgetState {
   tasks: number;
   bytes: number;
   entityCalls: Partial<Record<Entity, number>>;
+  toolCalls: Record<string, number>;
   exhausted: boolean;
   exhaustedReason?: ExhaustedReason;
 }
@@ -95,6 +104,14 @@ function validateEntityLimits(perEntity: RunBudgetLimits['perEntity']): Map<Enti
   return out;
 }
 
+function validateToolCaps(perTool: RunBudgetLimits['perTool']): Map<string, ToolCap> {
+  const out = new Map<string, ToolCap>();
+  for (const [tool, cap] of Object.entries(perTool ?? {})) {
+    out.set(tool, { maxCalls: requirePositiveInt(`perTool.${tool}.maxCalls`, cap.maxCalls), setting: cap.setting });
+  }
+  return out;
+}
+
 // Builds the budget for one run and registers it. A second budget for the same
 // run_id throws, because silently replacing it would reset the counters.
 export function createRunBudget(limits: RunBudgetLimits): RunBudget {
@@ -108,12 +125,14 @@ export function createRunBudget(limits: RunBudgetLimits): RunBudget {
   const maxBytesPerCall = requirePositiveInt('maxBytesPerCall', limits.maxBytesPerCall);
   const maxBytesPerRun = requirePositiveInt('maxBytesPerRun', limits.maxBytesPerRun);
   const perEntity = validateEntityLimits(limits.perEntity);
+  const perTool = validateToolCaps(limits.perTool);
   if (registry.has(runId)) throw new BudgetConfigError(`budget already exists for run ${runId}`);
 
   let calls = 0;
   let tasks = 0;
   let bytes = 0;
   const entityCalls = new Map<Entity, number>();
+  const toolCalls = new Map<string, number>();
   let exhaustedReason: ExhaustedReason | undefined;
 
   const refuse = <R extends BudgetRefusalReason>(
@@ -139,14 +158,28 @@ export function createRunBudget(limits: RunBudgetLimits): RunBudget {
         exhaust('tool_calls');
         return refuse('tool_calls');
       }
+      let entityUsed: number | undefined;
       if (entity !== undefined) {
         if (!v.is(EntitySchema, entity)) throw new RangeError(`unknown entity: ${String(entity)}`);
         // A per-entity cap refuses that entity only; the run is not exhausted.
         const cap = perEntity.get(entity)?.maxCalls;
-        const used = entityCalls.get(entity) ?? 0;
-        if (cap !== undefined && used >= cap) return refuse('entity_calls');
-        entityCalls.set(entity, used + 1);
+        entityUsed = entityCalls.get(entity) ?? 0;
+        if (cap !== undefined && entityUsed >= cap) return refuse('entity_calls');
       }
+      // A per-tool cap refuses that tool only; the run is not exhausted.
+      const toolCap = perTool.get(tool);
+      const toolUsed = toolCalls.get(tool) ?? 0;
+      if (toolCap !== undefined && toolUsed >= toolCap.maxCalls) {
+        return {
+          ok: false,
+          message:
+            `${tool} refused: this run has used all ${toolCap.maxCalls} of its ${tool} calls ` +
+            `(${toolCap.setting}=${toolCap.maxCalls}). Other tools still work; finish with the evidence you have.`,
+          reason: 'tool_cap',
+        };
+      }
+      if (entity !== undefined) entityCalls.set(entity, (entityUsed ?? 0) + 1);
+      if (toolCap !== undefined) toolCalls.set(tool, toolUsed + 1);
       calls += 1;
       return { ok: true };
     },
@@ -192,6 +225,7 @@ export function createRunBudget(limits: RunBudgetLimits): RunBudget {
         tasks,
         bytes,
         entityCalls: Object.fromEntries(entityCalls),
+        toolCalls: Object.fromEntries(toolCalls),
         exhausted: exhaustedReason !== undefined,
       };
       if (exhaustedReason !== undefined) snapshot.exhaustedReason = exhaustedReason;
