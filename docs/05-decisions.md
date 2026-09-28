@@ -678,6 +678,18 @@ Append-only. When a decision is reversed, add a new entry that supersedes it; do
 - **Rejected**: an explicit `runId` parameter on `decide()` and the embedder. It touches `DecideOptions`, the identity and classify call sites, `ClassifyDeps` (which has no run id today), the embed options, prior cases and `embedRun`, and every future caller has to remember it. That breaks D82's "no code at the call site".
 - **Assumptions**: the Flue instance id equals the run id (ingress inits with `{ id: runId }`). The vendor keys are internal to braintrust 3.35.0 and `@flue/opentelemetry`; `src/lib/tracing/keys.ts` holds them and `keys.test.ts` reads the installed dist code and fails on a rename.
 
+### D89. Config tables outside the scope gate (2026-09-28; changes D26)
+- **Problem**: in trace 6d4d the scope gate refused two `workflow_definitions` ids read from the user's own execution rows, because `checkScope` treats every UUID as a customer id. The model worked around it with a guessed column and then a `SELECT *` that put 77,610 B into context (plan 13, E6).
+- **Chosen**: plan 13 T12, owner answer Q1.
+  - An optional per-service `scope_exempt_tables` list in the registry schema (`src/config/registry.ts`); it needs a `db` on the same service. `resources/rtl.entity.json` lists `workflow_definitions` on `workflow`.
+  - `sql_select` passes the tables the SQL parser already returns (`check.tables`) and its service's list through the pipeline's scope options into `ScopeCheckInput` (`sqlTables`, `sqlExemptTables`).
+  - `checkScope` skips the id check only when the query reads at least one table and every table it reads is on that list. A join, subquery or CTE over any other table is checked as before. The systemic rule is unchanged and runs first.
+  - The rtl-workflow skill reads a definition with `SELECT steps FROM workflow_definitions WHERE external_id = $1`, says the definition must be read in its own query, and adds `workflow_definitions` to the column lookup in place of reading a whole row.
+  - Tests: `src/gate/scope.test.ts` (an unknown UUID on `workflow_definitions` alone is allowed; a join or subquery with `workflow_executions` is refused; the list does not apply to `rtl:banking` or `ssfb:workflow`) and a probe in `test/contract/safety/scope.contract.ts` (the same query on ATSPL is refused).
+- **Why**: a definition id is config, shared by every user on that workflow, and the only way to read the definition from the user's run is by that id.
+- **Rejected**: widening W5's "seen earlier in the run" rule (D77) to every id read from a result row. It is wider: it would let referenced customer ids through, not just config ids. A global table list instead of one per service (the same table name can hold customer data in another database).
+- **Assumptions**: `workflow_definitions` holds no customer data; the owner confirms this for each table added to a list. Table names are matched as the parser returns them, so a schema-qualified `public.workflow_definitions` is not exempt and is checked as before. `ui_templates` is not on the list yet (plan 13, open question). The SSFB copy of workflow-op (`ssfb:workflow`) has no list until the owner confirms its tables.
+
 ## Assumptions (explicit; each needs your confirmation or correction)
 
 | # | Assumption | Basis | If wrong |

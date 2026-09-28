@@ -8,7 +8,8 @@
 // on any allow line), and the attempted deny must be counted. The systemic
 // cases check that scope 'systemic' does not open a non-aggregate SELECT or a
 // logs search without count or group_by, and that a systemic logs group_by
-// still has its ids checked (D76).
+// still has its ids checked (D76). The config-table case checks that RTL's
+// scope_exempt_tables does not open the same table on another entity (D89).
 //
 // The scope check runs before the not-configured step, so the eval home's
 // blank credentials do not hide these denies.
@@ -51,6 +52,14 @@ const PROBES: readonly Probe[] = [
     name: 'foreign UUID in sql params',
     tool: 'sql_select',
     input: { service: 'package', sql: 'SELECT id, status FROM delivery_requests WHERE external_ref_id = $1', params: [FOREIGN] },
+    reason: "scope: 1 id is not in the run's ID chain for sql_select",
+    carriesId: true,
+  },
+  {
+    // workflow_definitions is exempt on rtl:workflow only (D89).
+    name: 'foreign UUID on a config table exempt only on another entity',
+    tool: 'sql_select',
+    input: { service: 'package', sql: 'SELECT steps FROM workflow_definitions WHERE external_id = $1', params: [FOREIGN] },
     reason: "scope: 1 id is not in the run's ID chain for sql_select",
     carriesId: true,
   },

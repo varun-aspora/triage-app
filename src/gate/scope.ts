@@ -23,6 +23,10 @@
 // whole terms value or contains, and in an sql_select only as a $n param
 // compared to a device_id or verification_id column (journeyParams).
 //
+// One more exception (D89): an sql_select that reads only tables its service
+// lists in scope_exempt_tables (config tables with no customer data) skips the
+// id check.
+//
 // logs_search also gets two checks for what Quickwit matches beyond the whole
 // value (D76): a UUID written with spaces or other separators (the tokeniser
 // splits on them), and a contains fragment, which is a substring match.
@@ -59,6 +63,10 @@ export type ScopeCheckInput = {
   // Set by the SQL parser check: the $n params compared only to a device_id or
   // verification_id column. Only these may be journey keys (Q13).
   sqlJourneyParams?: readonly number[];
+  // Set by sql_select: the tables the parser found, and the service's
+  // scope_exempt_tables from the registry (D89).
+  sqlTables?: readonly string[];
+  sqlExemptTables?: readonly string[];
 };
 
 export type ScopeOffender = { kind: IdKind; masked: string };
@@ -403,9 +411,20 @@ function systemicDecision(input: ScopeCheckInput): ScopeCheckResult | undefined 
   return undefined;
 }
 
+// A query that reads only config tables the registry lists for its service
+// has no customer id to check (D89). One other table, joined or in a
+// subquery, and the ids are checked as usual.
+function onlyExemptTables(input: ScopeCheckInput): boolean {
+  if (input.tool !== 'sql_select') return false;
+  const tables = input.sqlTables ?? [];
+  const exempt = input.sqlExemptTables ?? [];
+  return tables.length > 0 && tables.every((t) => exempt.includes(t));
+}
+
 export function checkScope(input: ScopeCheckInput): ScopeCheckResult {
   const systemic = systemicDecision(input);
   if (systemic) return systemic;
+  if (onlyExemptTables(input)) return { ok: true };
 
   const offending: ScopeOffender[] = [];
   const reported = new Set<string>();

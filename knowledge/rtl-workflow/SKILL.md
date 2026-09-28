@@ -59,7 +59,7 @@ columns, read `information_schema.columns` for the tables you need, in one
 call:
 
 ```
-sql_select { service: 'workflow', sql: "SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_name IN ($1, $2) ORDER BY table_name, ordinal_position", params: ['workflow_executions', 'workflow_execution_actions'] }
+sql_select { service: 'workflow', sql: "SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_name IN ($1, $2, $3) ORDER BY table_name, ordinal_position", params: ['workflow_executions', 'workflow_execution_actions', 'workflow_definitions'] }
 ```
 
 ## Queries
@@ -78,17 +78,23 @@ sql_select { service: 'workflow', sql: "SELECT workflow_identifier, status, sub_
 
 The step list for that definition. Set-returning functions are refused, so
 fetch the `steps` JSONB whole and read the identifiers from the staged rows in
-the sandbox:
+the sandbox. Ask for `steps` only: `SELECT *` also returns
+`definition_settings` and other wide JSON columns.
 
 ```
-sql_select { service: 'workflow', sql: "SELECT external_id, steps FROM workflow_definitions WHERE external_id = $1", params: ['<definition_id>'] }
+sql_select { service: 'workflow', sql: "SELECT steps FROM workflow_definitions WHERE external_id = $1", params: ['<definition_id>'] }
 ```
+
+`workflow_definitions` holds no customer data, so a query that reads only this
+table may use a definition id that is not in the ID chain. Joined with
+`workflow_executions` or any other table, the ids are checked as usual, so
+read the definition in its own query.
 
 The source filters definitions by `external_id`. It does not say which
 execution column holds that id, or whether `workflow_definitions` also has a
 `workflow_identifier` column (unverified). If you only have the execution's
-`workflow_identifier`, read one `workflow_definitions` row first to find the
-matching column.
+`workflow_identifier`, find the matching column in the column lookup above
+instead of reading a whole row.
 
 Is it this form, or everyone at this step? An aggregate over the same step:
 

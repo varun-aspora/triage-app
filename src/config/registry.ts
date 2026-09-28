@@ -78,9 +78,12 @@ export const ServiceSpecSchema = v.pipe(
     field_encryption: v.optional(FieldEncryptionSchema),
     transport: v.optional(v.literal('cbs')),
     note: v.optional(v.string()),
+    /** Config tables with no customer data: an sql_select that reads only these skips the id check (D89). */
+    scope_exempt_tables: v.optional(v.array(v.pipe(v.string(), v.regex(/^[a-z_][a-z0-9_]*$/, 'must be a lowercase table name')))),
   }),
   v.check((s) => s.transport === undefined || s.api !== undefined, 'transport cbs needs an api env name'),
   v.check((s) => s.naive_timestamp_zone === undefined || s.db !== undefined, 'naive_timestamp_zone needs a db env name'),
+  v.check((s) => s.scope_exempt_tables === undefined || s.db !== undefined, 'scope_exempt_tables needs a db env name'),
 );
 export type ServiceSpec = v.InferOutput<typeof ServiceSpecSchema>;
 

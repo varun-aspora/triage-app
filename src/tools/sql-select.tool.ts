@@ -269,11 +269,14 @@ async function runSqlSelect(ctx: ToolContext, entity: Entity, services: readonly
       input: data,
       backing:
         service === 'unknown' ? { envName: 'TRIAGE_ENTITIES', status: 'disabled' } : backingFor(ctx, entity, service),
-      // A device or verification id seen earlier in the run is in scope (D77, Q13).
+      // A device or verification id seen earlier in the run is in scope (D77, Q13),
+      // and a query on the service's config tables alone skips the id check (D89).
       scope: {
         systemic,
         sqlAggregateOnly: check.ok && check.aggregateOnly,
         sqlJourneyParams: check.ok ? check.journeyParams : [],
+        sqlTables: check.ok ? check.tables : [],
+        sqlExemptTables: service === 'unknown' ? [] : (ctx.registry.service(entity, service).scope_exempt_tables ?? []),
         ...observedScopeOf(ctx.runId),
       },
       gate: () => {
