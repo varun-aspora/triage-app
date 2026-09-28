@@ -1,9 +1,9 @@
 # 11. Investigation quality plan
 
-Status: in implementation from 2026-09-28 on branch `feat/investigation-quality`, one wave
-at a time. Decisions D73 to D81, D83 to D85 and D92 are reserved for the choices below (D82 is
-Braintrust tracing; D86 to D91 are proposed by the trace 6d4d fix plan); each is written into
-`docs/05-decisions.md` when its wave lands.
+Status: implemented on 2026-09-28 on branch `feat/investigation-quality`, in six waves. The
+decisions are D73 to D81, D83 to D85, D92, D94 and D95 in `docs/05-decisions.md` (D82 is
+Braintrust tracing, D93 is Flue ids, and D86 to D91 are proposed by the trace 6d4d fix plan).
+The real-mode re-run of the SIM ticket is the owner's check after merge (section 5).
 
 ## 1. Why this plan exists
 
