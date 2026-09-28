@@ -175,7 +175,42 @@ function fakeHarness(): { harness: StagingHarness; written: Written[] } {
 
 const REAL = { TRIAGE_MOCK_MODE: 'false' };
 
-type Data = { service: string; rows: Row[]; row_count: number; truncated: boolean; columns?: string[]; staged_file?: string };
+// Synthetic rows shaped like the trace 6d4d SELECT * (11 rows x 17 columns,
+// about 77 KB, three wide JSON columns). No real data.
+const WIDE_SELECT = 'SELECT * FROM workflow_definitions WHERE external_id = $1';
+function wideRows(): Row[] {
+  const words = (n: number, seed: string): string => Array.from({ length: n }, (_, j) => `${seed}-word-${String.fromCharCode(97 + (j % 26))}`).join(' ');
+  return Array.from({ length: 11 }, (_, i) => ({
+    id: `wf-def-${i}`,
+    external_id: `ext-${i}`,
+    name: `Synthetic workflow ${i}`,
+    version: i + 1,
+    status: 'ACTIVE',
+    type: 'ONBOARDING',
+    category: 'kyc',
+    is_active: true,
+    description: words(6, 'about'),
+    steps: Array.from({ length: 24 }, (_, s) => ({ step: `step_${s}`, kind: 'task', label: words(8, `s${s}`), next: `step_${s + 1}` })),
+    config: { retries: 3, timeouts: Array.from({ length: 17 }, (_, t) => ({ name: `timer_${t}`, text: words(6, `t${t}`) })) },
+    ui_schema: { fields: Array.from({ length: 15 }, (_, f) => ({ field: `field_${f}`, hint: words(7, `f${f}`) })) },
+    tags: ['synthetic', 'fixture'],
+    created_by: 'system',
+    updated_by: 'system',
+    created_at: '2026-09-01T00:00:00.000Z',
+    updated_at: '2026-09-02T00:00:00.000Z',
+  }));
+}
+
+type Data = {
+  service: string;
+  rows: Row[];
+  row_count: number;
+  truncated: boolean;
+  columns?: string[];
+  staged_file?: string;
+  bytes_cut?: number;
+  note?: string;
+};
 const dataOf = (env: ToolEnvelope): Data => env.output.data as Data;
 
 // ------------------------------------------------------------------ schema
@@ -547,6 +582,54 @@ describe('sql_select: real mode', () => {
     expect(dataOf(env).rows).toHaveLength(3);
   });
 
+  test('a result under the model byte cap comes back whole, with no bytes_cut', async () => {
+    const h = setup({ env: REAL });
+    const data = dataOf(await call(h, { service: 'package', sql: SELECT_ONE, params: [CUSTOMER] }));
+    expect(data.truncated).toBe(false);
+    expect(data.bytes_cut).toBeUndefined();
+  });
+
+  test('a wide SELECT * is cut under the model byte cap with previews, and the staged file keeps every byte', async () => {
+    const rows = wideRows();
+    const total = Buffer.byteLength(JSON.stringify(rows));
+    expect(total).toBeGreaterThan(72_000);
+    expect(total).toBeLessThan(82_000);
+    const h = setup({ env: { ...REAL, TRIAGE_SQL_MAX_ROWS: '200' }, sql: fakeSql(rows) });
+    const { harness, written } = fakeHarness();
+    const env = await call(h, { service: 'package', sql: WIDE_SELECT, params: [CUSTOMER] }, harness);
+    const data = dataOf(env);
+    const cap = h.config.budgets.maxModelBytesPerCall;
+    expect(cap).toBe(24_576);
+    expect(Buffer.byteLength(JSON.stringify(data))).toBeLessThanOrEqual(cap);
+    expect(data.row_count).toBe(11);
+    expect(data.truncated).toBe(true);
+    expect(data.bytes_cut).toBeGreaterThan(40_000);
+    expect(data.note).toContain('staged_file');
+    expect(data.staged_file).toBe('/data/toolu_sql_1.json');
+    const steps = String(data.rows[0]!['steps']);
+    expect(steps).toMatch(/… \[\d+ chars\]$/);
+    expect(steps).toContain(`[${JSON.stringify(rows[0]!['steps']).length} chars]`);
+    expect(data.rows[0]!['name']).toBe(rows[0]!['name']);
+    expect(Object.keys(data.rows[0]!)).toHaveLength(17);
+    // The staged file is the uncut result.
+    const staged = JSON.parse(written[0]!.text) as { rows: Row[] };
+    expect(staged.rows).toEqual(rows);
+  });
+
+  test('under a small model byte cap only whole rows are kept', async () => {
+    const rows = wideRows();
+    const h = setup({ env: { ...REAL, TRIAGE_SQL_MAX_ROWS: '200', TRIAGE_MAX_MODEL_BYTES_PER_CALL: '6000' }, sql: fakeSql(rows) });
+    const data = dataOf(await call(h, { service: 'package', sql: WIDE_SELECT, params: [CUSTOMER] }, fakeHarness().harness));
+    expect(Buffer.byteLength(JSON.stringify(data))).toBeLessThanOrEqual(6000);
+    expect(data.row_count).toBeGreaterThan(0);
+    expect(data.row_count).toBeLessThan(11);
+    expect(data.rows).toHaveLength(data.row_count);
+    for (const [i, kept] of data.rows.entries()) {
+      expect(Object.keys(kept)).toEqual(Object.keys(rows[i]!));
+      expect(kept['id']).toBe(rows[i]!['id']);
+    }
+  });
+
   test('an EXPLAIN runs unwrapped in the same read-only plan, with no cap parameter', async () => {
     const plan = [{ 'QUERY PLAN': 'Index Scan using delivery_requests_ref on delivery_requests' }];
     const h = setup({ env: REAL, sql: fakeSql(plan) });
@@ -688,6 +771,9 @@ describe('sql_select: description', () => {
     expect(text).toContain('EXPLAIN ANALYZE');
     expect(text).toContain('no row cap');
     expect(text).toContain('SQLSTATE');
+    expect(text).toContain('Avoid SELECT * on tables with wide JSON columns');
+    expect(text).toContain('about 24 KB');
+    expect(text).toContain('bytes_cut');
   });
 });
 

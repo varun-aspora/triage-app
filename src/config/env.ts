@@ -72,6 +72,8 @@ export type Config = {
     readonly maxAsksPerRun: number;
     readonly maxResponseBytesPerCall: number;
     readonly maxBytesPerRun: number;
+    /** D90: bytes of one sql_select result the model sees; the full rows are staged. */
+    readonly maxModelBytesPerCall: number;
     readonly runTimeoutMs: number;
     readonly runMaxAttempts: number;
     /** D71: a running run with no event for this long shows as stalled. */
@@ -228,6 +230,7 @@ export function configFromRecord(
       maxAsksPerRun: r.requiredInt('TRIAGE_MAX_ASKS_PER_RUN'),
       maxResponseBytesPerCall: r.requiredInt('TRIAGE_MAX_RESPONSE_BYTES_PER_CALL'),
       maxBytesPerRun: r.requiredInt('TRIAGE_MAX_BYTES_PER_RUN'),
+      maxModelBytesPerCall: r.requiredInt('TRIAGE_MAX_MODEL_BYTES_PER_CALL'),
       runTimeoutMs: r.requiredInt('TRIAGE_RUN_TIMEOUT_MS'),
       runMaxAttempts: r.requiredInt('TRIAGE_RUN_MAX_ATTEMPTS'),
       stalledAfterMs: r.requiredInt('TRIAGE_STALLED_AFTER_MS'),
