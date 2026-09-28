@@ -327,6 +327,13 @@ describe('brief-template.md', () => {
     expect(field('Question')).toMatch(/Hypothesis: .+; rejected if /);
   });
 
+  test('the Question is one question plus at most two checks, existence first (plan 13 T6)', () => {
+    expect(brief.replace(/\s+/g, ' ')).toContain('plus at most two checks that follow from it. Ask first whether the record exists');
+    const asked = field('Question').split(' Hypothesis: ')[0] as string;
+    expect(asked.match(/\?/g)?.length).toBe(1);
+    expect(asked.split('?')[0]).toMatch(/created|exist/);
+  });
+
   test('the example names a real entity, its registry services and a findings return', () => {
     const entity = field('Entity') as Entity;
     expect(ENTITIES).toContain(entity);

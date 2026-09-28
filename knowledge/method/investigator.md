@@ -78,7 +78,10 @@ Take these steps in order:
    a form id, or a device id or verification id seen in this run's results.
 
 Once those steps are done, do not reword the same text or run the same key
-again.
+again. When every key lookup is still empty, stop: call `note_evidence` with
+the empty lookups as evidence and a gap that says what was not found, then
+reply. Do not widen the search to other tables, code reads or systemic counts
+the brief did not ask for.
 
 A device id or a verification id is not one of the run's ids, but the tools
 accept one once a result in this run, fetched by one of the run's ids, has
@@ -250,7 +253,12 @@ before you cite them.
 
 ## Findings
 
-Before you reply, call `note_evidence` with an `EntityFindings` object:
+Call `note_evidence` with an `EntityFindings` object after each batch of
+reads that finds something, and before you reply if anything changed since
+the last call. The run can be stopped at any time, and only saved findings
+reach the report. Each call
+replaces the one before, so send everything found so far, not only the new
+items, with the hypotheses and confidence as they stand:
 
 - `evidence`: one item per useful read: `source`, `at`, `query_or_path`, a
   one-line `summary`, and `raw_ref` when there is a `/data` file.

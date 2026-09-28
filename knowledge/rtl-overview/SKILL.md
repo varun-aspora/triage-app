@@ -20,7 +20,7 @@ logs do not show RTL rows.
 | Registry key | Repo | Role | Note |
 |---|---|---|---|
 | `workflow` | `workflow-op` | The onboarding engine. Drives every step server-side, renders the SDUI screens, and records where the user is stuck. | `rtl-workflow` |
-| `banking` | `banking-service` | Go. Part-1 data collection (modules nri, evisa, survey) and the endpoint harbor pulls the finished Part-1 form from. Mostly stateless. | `rtl-banking` |
+| `banking` | `banking-service` | Go. Onboarding Part 1 (modules nri, evisa, survey) and the endpoint harbor pulls the finished Part-1 form from. Mostly stateless. | `rtl-banking` |
 | `kyc` | `kyc-service` | Java. Persona KYC and eVisa system of record; `kyc_inquiries.status` is the verdict. | `rtl-kyc` |
 
 ### The two copies of workflow-op
