@@ -24,9 +24,10 @@ export type PatternName = (typeof PATTERN_NAMES)[number];
 export type Span = { readonly start: number; readonly end: number };
 
 /**
- * Which protected spans a detector must not touch. UUIDs pass both profiles
- * (A11). Lowercase hex tokens such as commit SHAs are kept from the digit
- * detectors, because a SHA often holds a run of six or more digits.
+ * Which protected spans a detector must not touch. UUIDs and Flue ids pass
+ * both profiles (A11, D93). Lowercase hex tokens such as commit SHAs are kept
+ * from the digit detectors, because a SHA often holds a run of six or more
+ * digits.
  */
 export type Guard = 'none' | 'uuid' | 'uuid+hex';
 
@@ -100,6 +101,16 @@ const UUID_RE = /(?<![0-9A-Fa-f])[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0
 
 export function uuidSpans(s: string): Span[] {
   return spansOf(UUID_RE, s);
+}
+
+// Flue mints its ids as a lowercase prefix and a ULID (sub_, turn_, inv_,
+// call_, ...). The ULID's leading timestamp often holds six or more digits in
+// a row, which the digit detectors would otherwise mask (D93).
+const FLUE_ID_RE = /(?<![0-9A-Za-z_])[a-z]+_[0-7][0-9A-HJKMNP-TV-Z]{25}(?![0-9A-Za-z])/g;
+
+/** Flue ids: a lowercase prefix, an underscore and a 26-character ULID. */
+export function flueIdSpans(s: string): Span[] {
+  return spansOf(FLUE_ID_RE, s);
 }
 
 const HEX_TOKEN_RE = /(?<![0-9A-Za-z])[0-9a-f]{7,64}(?![0-9A-Za-z])/g;
