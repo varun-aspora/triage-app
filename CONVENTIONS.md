@@ -15,6 +15,7 @@ changes, update this file with it.
 - src/mock/ (fixture lookup and recording, T03)
 - src/connectors/ (all real I/O: pg, http, quickwit-http, quickwit-qw, cbs, codegraph and the one exec runner; T04, T05.10, T11.1)
 - src/models.ts (provider registration side effect, T06.1)
+- src/lib/ (shared libraries used across areas; src/lib/tracing/ is the only place a tracing SDK is imported, D82)
 - src/tools/**/<name>.tool.ts (one tool per file; T05 entity, code and evidence tools, T06.9 finish_report)
 - src/agents/<name>.agent.ts (root agents with 'use agent') and src/agents/delegates/ (plain modules without the directive; T06)
 - src/classify/ (T06)

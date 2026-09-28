@@ -427,6 +427,15 @@ Append-only. When a decision is reversed, add a new entry that supersedes it; do
 - **Rejected**: a signal message for the steer (it reads like a framework event, and Flue files it as a system message); appending into a tool call in flight; moving the report to the host seq (tools cannot tell which Flue submission they serve); aborting before the stop (the aborted settle could land first and mark the run failed); holding the 409 claim until the resumed submission settles (it would block steering it); a lock row in the store for the cross-process guard (a schema change that needs expiry anyway).
 - **Assumptions**: process clocks agree to within a few seconds; `STALLED_STOP_HOLD_MS` assumes the 30 s abort wait.
 
+### D82. Tracing through one module, with a switchable backend (2026-09-27)
+- **Chosen**: `TRIAGE_TRACING=off|otlp|braintrust` (default off), all in `src/lib/tracing/`:
+  - `braintrust`: Braintrust's own Flue integration (`instrument(braintrustFlueInstrumentation())`), for its native view.
+  - `otlp`: Flue's `@flue/opentelemetry` instrumentation and an OTLP exporter, so any OTLP backend (Langfuse, Braintrust, Datadog) is a config change: `TRIAGE_OTLP_ENDPOINT`, `TRIAGE_OTLP_HEADERS`.
+  - The model calls the app makes outside Flue go through three functions: `decide()`, the embedder's `wrap()` and the classifier's `defaultComplete`. Each wraps its call in `withModelSpan`, so every decision is traced wherever it is called, with no code at the call site. Inside a Flue tool the span nests under the tool's span.
+  - Content goes out only after `redactPersisted`. The classifier's chat span carries no input, because its context can hold images. Tracing never fails a call, a command or shutdown; the CLI and server flush for at most 3 s before exit.
+- **Rejected**: the first D82 build (a per-event redaction layer, root-span capture with a migration, feedback scores, and edits across ingress, run store and feedback: 65 files for a 10-line integration); a `useDecision()` lifecycle hook (hooks cannot make model calls, and decisions are called explicitly, anywhere); emitting custom decision events into Flue's stream (Flue 2.0.8 has no public API for it, and adapters ignore unknown events); routing decisions through a Flue model provider (a decision model is not a chat model, and ingress decisions run before any session).
+- **Open**: feedback verdicts as scores. OTel has nothing for it; each backend needs its own call (Braintrust `logFeedback`, Langfuse scores).
+
 ## Assumptions (explicit; each needs your confirmation or correction)
 
 | # | Assumption | Basis | If wrong |

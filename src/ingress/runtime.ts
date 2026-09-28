@@ -44,6 +44,7 @@ import { loadConfig, type Config } from '../config/env.ts';
 import { ConfigError } from '../config/errors.ts';
 import { describeEnsure, ensureConfiguredModels } from '../model-refresh.ts';
 import { installRunEventLog } from '../runlog/event-log.ts';
+import { installTracing } from '../lib/tracing/index.ts';
 import { installUsageMeter } from '../usage/meter.ts';
 import { installSettleListener } from './settle-listener.ts';
 
@@ -82,6 +83,8 @@ async function startOnce(options: BootOptions): Promise<Flue> {
   const runsDir = options.eventLog === false ? undefined : (options.eventLog?.runsDir ?? configIfLoads()?.paths.runsDir);
   if (runsDir !== undefined) installRunEventLog({ runsDir });
   if (options.usageMeter !== false) installUsageMeter();
+  const tracing = configIfLoads()?.tracing;
+  if (tracing !== undefined) await installTracing(tracing);
   if (options.settleListener !== false) {
     installSettleListener({ store: () => triageRuntime().runStore, ...(runsDir !== undefined ? { runsDir } : {}) });
   }

@@ -5,6 +5,7 @@
 import { findModules, INDEX_SPECS, REPO_ROOT } from '../../scripts/gen-indexes.ts';
 import { loadConfig, type Config } from '../config/env.ts';
 import { closeSharedPgRunners } from '../db/pg.ts';
+import { flushTracing } from '../lib/tracing/index.ts';
 import { commands } from './command-modules.gen.ts';
 import { buildProgram, describeError, runCli } from './index.ts';
 import { EXIT, printError } from './output.ts';
@@ -42,6 +43,7 @@ export async function main(argv: readonly string[], ctx: CliContext = processCon
   try {
     return await runCli(program, argv);
   } finally {
+    await flushTracing();
     await closeSharedPgRunners();
   }
 }

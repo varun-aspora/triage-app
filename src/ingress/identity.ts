@@ -219,6 +219,7 @@ async function readIds(request: Pick<TriageRequest, 'messages' | 'hints'>, deps:
     // Nothing to ask (every field was given): no call, and the labels say what they say.
     if (built === null) return labels();
     const result = await decide(watched(deps.decision.provider(spec), call), built.request, {
+      name: 'identity',
       signal: deps.signal,
       ...(deps.decision.timeoutMs === undefined ? {} : { timeoutMs: deps.decision.timeoutMs }),
     });

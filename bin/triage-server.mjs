@@ -36,9 +36,11 @@ try {
 process.stdout.write(`triage-server: listening on port ${server.port}\n`);
 
 const { noteShutdown, flushBeforeExit } = await import('../src/server/shutdown.ts');
+const { flushTracing } = await import('../src/lib/tracing/index.ts');
 
-function exit(exitCode) {
+async function exit(exitCode) {
   flushBeforeExit();
+  await flushTracing();
   process.exit(exitCode);
 }
 

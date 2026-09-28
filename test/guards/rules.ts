@@ -255,6 +255,12 @@ export const SOURCE_RULES: readonly SourceRule[] = [
     (p) => p.startsWith('src/config/'),
   ),
   forbid(
+    'tracing-sdks-in-lib-tracing-only',
+    [/(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*)(['"`])(?:braintrust|@flue\/opentelemetry|@opentelemetry\/[^'"`]+)\1/],
+    'tracing SDKs are imported only under src/lib/tracing/ (D82)',
+    (p) => p.startsWith('src/lib/tracing/'),
+  ),
+  forbid(
     'deploy-mode-key',
     [/TRIAGE_DEPLOY_MODE/],
     'TRIAGE_DEPLOY_MODE appears only in src/config/keys.ts and src/ops/preflight.ts (D32)',

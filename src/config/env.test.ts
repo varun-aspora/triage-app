@@ -666,3 +666,15 @@ describe('provider env', () => {
     }
   });
 });
+
+describe('tracing (D82)', () => {
+  test('off by default, with the default Braintrust project', () => {
+    expect(fromRecord({}).tracing).toEqual({ mode: 'off', braintrustProject: 'triage-app' });
+  });
+
+  test('otlp needs an endpoint and braintrust needs a key', () => {
+    expect(configError(() => fromRecord({ TRIAGE_TRACING: 'otlp' })).keys).toContain('TRIAGE_OTLP_ENDPOINT');
+    expect(configError(() => fromRecord({ TRIAGE_TRACING: 'braintrust' })).keys).toContain('BRAINTRUST_API_KEY');
+    expect(fromRecord({ TRIAGE_TRACING: 'otlp', TRIAGE_OTLP_ENDPOINT: 'https://otel.example/v1/traces' }).tracing.mode).toBe('otlp');
+  });
+});

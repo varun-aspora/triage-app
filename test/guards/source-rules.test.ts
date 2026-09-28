@@ -78,6 +78,18 @@ const CASES: Record<string, Case> = {
       ['src/tools/x.ts', '// never read process.env here\nconst processEnvironment = 1;\n'],
     ],
   },
+  'tracing-sdks-in-lib-tracing-only': {
+    bad: [
+      ['src/decisions/decide.ts', "import { traced } from 'braintrust';\n", [1]],
+      ['src/embed/index.ts', "\nimport { trace } from '@opentelemetry/api';\n", [2]],
+      ['src/ingress/runtime.ts', "const m = await import('@flue/opentelemetry');\n", [1]],
+    ],
+    good: [
+      ['src/lib/tracing/braintrust.ts', "import { traced } from 'braintrust';\n"],
+      ['src/lib/tracing/otlp.ts', "import { trace } from '@opentelemetry/api';\n"],
+      ['src/config/keys.ts', "export const TRACING_MODES = ['off', 'otlp', 'braintrust'] as const;\n"],
+    ],
+  },
   'deploy-mode-key': {
     bad: [
       ['src/ops/doctor.ts', "const k = 'TRIAGE_DEPLOY_MODE';\n", [1]],

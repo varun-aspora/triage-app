@@ -104,6 +104,17 @@ The console's static files and `GET /ui/config.json` are the only routes served 
 
 For development, run `bun run serve` and `bun run dev:web` side by side and open `http://localhost:5173/ui/`.
 
+## Tracing
+
+Off by default (D82). Set `TRIAGE_TRACING` in `TRIAGE_HOME/.env`:
+
+- `braintrust`: `BRAINTRUST_API_KEY` and `BRAINTRUST_PROJECT_NAME`. This uses Braintrust's own Flue integration.
+- `otlp`: `TRIAGE_OTLP_ENDPOINT` and `TRIAGE_OTLP_HEADERS` (`k=v,k=v`) for any OTLP backend, for example:
+  - Langfuse: `https://cloud.langfuse.com/api/public/otel/v1/traces` with `Authorization=Basic <base64 pk:sk>,x-langfuse-ingestion-version=4`;
+  - Braintrust: `https://api.braintrust.dev/otel/v1/traces` with `Authorization=Bearer <key>,x-bt-parent=project_name:<name>`.
+
+Agent runs, decisions (`decide()`), classifier calls and embeddings are all traced. Content is redacted with the persisted profile first.
+
 ## Docs
 
 - [docs/README.md](docs/README.md): the design docs, in reading order

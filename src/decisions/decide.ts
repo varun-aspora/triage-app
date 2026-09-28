@@ -12,6 +12,7 @@
 //
 // The question builders (choice, yesNo, score) keep option keys as literal
 // types, so result.answers.x.choice is typed to x's option keys.
+import { withModelSpan } from '../lib/tracing/index.ts';
 import type {
   ChoiceQuestion,
   DecisionAnswer,
@@ -95,6 +96,8 @@ export type DecideOptions = {
   /** Overall limit for the call, retries included. Default DEFAULT_DECISION_TIMEOUT_MS. */
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  /** Which decision this is, for tracing (D82), e.g. 'classify'. */
+  readonly name?: string;
 };
 
 export async function decide<const Q extends DecisionQuestions>(
@@ -104,7 +107,11 @@ export async function decide<const Q extends DecisionQuestions>(
 ): Promise<DecisionResult<Q>> {
   checkQuestions(provider.id, request.questions);
   const timeoutMs = options.timeoutMs ?? DEFAULT_DECISION_TIMEOUT_MS;
-  const result = await withLimit(provider, request, timeoutMs, options.signal);
+  const result = await withModelSpan(
+    { op: 'decide', model: provider.model, input: request, ...(options.name === undefined ? {} : { name: options.name }) },
+    () => withLimit(provider, request, timeoutMs, options.signal),
+    (r) => ({ output: r.answers, inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens }),
+  );
   checkAnswers(provider.id, request.questions, result);
   return result as DecisionResult<Q>;
 }

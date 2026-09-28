@@ -59,6 +59,7 @@ import { ClassificationSchema, type Classification } from '../types/classificati
 import type { BasicStateItem, IdChain } from '../types/id-chain.ts';
 import type { ThreadMessage } from '../types/request.ts';
 import { classificationFromAnswers, classifierQuestions, issuePaths } from './decision.ts';
+import { withModelSpan } from '../lib/tracing/index.ts';
 import { buildClassifierPrompt, buildDecisionState, loadCategories, type CategoryEntry, type DecisionStateInput } from './prompt.ts';
 
 /** One screenshot, already read from the attachment store. */
@@ -206,7 +207,7 @@ async function classifyByDecision(
     const result = await decide(
       watched(decider, call),
       { state, questions },
-      { timeoutMs, ...(deps.signal === undefined ? {} : { signal: deps.signal }) },
+      { timeoutMs, name: 'classify', ...(deps.signal === undefined ? {} : { signal: deps.signal }) },
     );
     reportUsage(deps, decisionUsage(spec, false, result.usage));
     const outcome = classificationFromAnswers(result.answers);
@@ -427,7 +428,12 @@ export function defaultComplete(config: Config): CompleteFn {
     const model = models.getModel(parsed.provider, parsed.modelId);
     if (model === undefined) throw new Error(`provider ${parsed.provider} does not list model ${parsed.modelId}`);
     const { apiKey } = served;
-    return models.complete(model, context, apiKey === undefined ? { signal } : { signal, apiKey });
+    // No input on the span: the context can carry images, which redaction cannot mask.
+    return withModelSpan(
+      { op: 'chat', model: spec, name: 'classify' },
+      () => models.complete(model, context, apiKey === undefined ? { signal } : { signal, apiKey }),
+      (m) => ({ output: m.content, inputTokens: m.usage.input, outputTokens: m.usage.output }),
+    );
   };
 }
 

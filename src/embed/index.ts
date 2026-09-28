@@ -13,6 +13,7 @@
 import { ConfigError } from '../config/errors.ts';
 import type { Config } from '../config/env.ts';
 import { isPersisted, type Persisted } from '../gate/redact.ts';
+import { withModelSpan } from '../lib/tracing/index.ts';
 import { HASH_MODEL, createHashClient } from './hash.ts';
 import { createOllamaClient } from './ollama.ts';
 import { createOpenAiClient } from './openai.ts';
@@ -98,9 +99,13 @@ function wrap(model: string, usageModel: string, client: EmbedClient): Embedder 
       };
       let result: EmbedResult;
       try {
-        result = await client(
-          texts.map((t) => t.value),
-          opts.signal ? { signal: opts.signal } : {},
+        result = await withModelSpan(
+          { op: 'embeddings', model },
+          () => client(
+            texts.map((t) => t.value),
+            opts.signal ? { signal: opts.signal } : {},
+          ),
+          (r) => (r.inputTokens === null ? {} : { inputTokens: r.inputTokens }),
         );
       } catch (err) {
         report({ inputTokens: 0, failed: true });
