@@ -34,7 +34,7 @@ import type { FlueLogger } from '@flue/runtime';
 import { defineTool, type ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
 import { safeErrorText } from '../connectors/error-text.ts';
-import { capRows, type SqlConnector } from '../connectors/sql/pg-client.ts';
+import type { SqlConnector } from '../connectors/sql/pg-client.ts';
 import type { MockPort } from '../connectors/mock.ts';
 import { ConnectorError, type ConnectorContext } from '../connectors/types.ts';
 import { MAX_SQL_LENGTH, type SqlCheck, type SqlRefusalCode, validateSelect } from '../gate/sql.ts';
@@ -196,13 +196,21 @@ const CUT_NOTE = 'Cut to fit; staged_file has every row in full.';
 function fitModelBytes(result: Rendered, maxBytes: number): Rendered & { bytes_cut?: number; note?: string } {
   const full = jsonBytes(result);
   if (full + STAGED_FILE_ROOM <= maxBytes) return result;
-  const previewed = result.rows.map((row) => Object.fromEntries(Object.entries(row).map(([k, value]) => [k, previewCell(value)])));
   // bytes_cut is at most the full size, so its digits never outgrow this measure.
   const envelope = jsonBytes({ ...result, rows: [], row_count: result.rows.length, truncated: true, bytes_cut: full, note: CUT_NOTE });
-  // capRows counts the [ and ] itself, which the envelope already has.
-  const { rows } = capRows(previewed, maxBytes - envelope - STAGED_FILE_ROOM + 2);
+  const room = maxBytes - envelope - STAGED_FILE_ROOM;
+  // Rows are previewed one at a time and the first that does not fit ends the cut, so dropped rows cost nothing.
+  const rows: Row[] = [];
+  let rowBytes = 0; // the rows between the [ and ], which the envelope already has
+  for (const row of result.rows) {
+    const previewed = Object.fromEntries(Object.entries(row).map(([k, value]) => [k, previewCell(value)]));
+    const size = jsonBytes(previewed) + (rows.length > 0 ? 1 : 0);
+    if (rowBytes + size > room) break;
+    rowBytes += size;
+    rows.push(previewed);
+  }
   const out = { ...result, rows, row_count: rows.length, truncated: true, note: CUT_NOTE };
-  return { ...out, bytes_cut: full - jsonBytes(out) };
+  return { ...out, bytes_cut: full - jsonBytes({ ...out, rows: [] }) - rowBytes };
 }
 
 // ------------------------------------------------------------ gate
