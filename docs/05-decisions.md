@@ -442,6 +442,16 @@ Append-only. When a decision is reversed, add a new entry that supersedes it; do
 - **Rejected**: comparing the redacted form in the test (it hides a real mismatch in the event log); a guard for `sub_` alone (the other Flue ids carry the same timestamp and would be masked the same way); matching any `word_token` (too wide for a banking redactor).
 - **Assumptions**: a lowercase-prefixed 26-character ULID never carries customer data. Flue builds these ids with `ulidx`, whose alphabet is `0123456789ABCDEFGHJKMNPQRSTVWXYZ` (2.0.8).
 
+### D86. Thinking is controlled for Ollama models (2026-09-28)
+- **Problem**: `ollamaProvider` declared every model `reasoning: false`, so pi-ai sent no thinking field and `MODEL_THINKING_*` had no effect. The local server behind `OLLAMA_BASE_URL` (Splash serving `incoai/Qwen3.8-27B-Splash`) then used the chat template's default, `xhigh`. In trace 6d4d thinking took about 85% of output tokens while the span said `reasoning: medium`.
+- **Chosen**: `reasoning: true`, `compat.thinkingFormat: 'openai'` and `thinkingLevelMap: { off: 'none' }` (`src/models.ts`). pi-ai then sends `reasoning_effort` at the configured level (`low` sends `"low"`) and `"none"` at `off`.
+  - Splash reads only `reasoning_effort` from the body. `"none"` renders an empty think block; `low`, `medium` and `xhigh` pick the template's effort text (`high` falls back to `xhigh`, `minimal` to `low`).
+  - The `off` map is needed because the plain `openai` format sends nothing at `off`, which gives the template default, the highest effort.
+- **Evidence**: no live measurement of `reasoning_content`. The choice rests on reading pi-ai `openai-completions.js` (buildParams, detectCompat), the Splash server (`frontend.py` `_prepare_prompt`, `_render_prompt`) and the model's chat template. `src/models.test.ts` checks the payload through `onPayload`, with no network.
+- **Rejected**: leaving thinking uncapped (the timeout in trace 6d4d); `thinkingFormat: 'qwen'` (at `low` it sends the same `reasoning_effort` plus `enable_thinking`, but at `off` it sends only `enable_thinking: false`, which Splash does not read, so `off` would still think at `xhigh`); `qwen-chat-template` (Splash does not read `chat_template_kwargs`).
+- **Assumptions**: a real Ollama reads `reasoning_effort` on its OpenAI endpoint the same way, `"none"` included, and ignores a top-level `enable_thinking` (not tested here). Every Ollama-tier model is a thinking model whose server accepts `reasoning_effort` with `"none"`. A server that rejects the field fails the request instead of ignoring it (Splash answers 400 to an unknown value), so a non-thinking model on this provider would need its own entry. `low` is assumed to cut thinking well below the 85% share; the next owner run checks it (plan 13, T3).
+- **Later**: stop sending old thinking back as `reasoning_content` (pi-ai 875–880).
+
 ## Assumptions (explicit; each needs your confirmation or correction)
 
 | # | Assumption | Basis | If wrong |
