@@ -1026,6 +1026,41 @@ describe('status', () => {
     expect((jsonLine(noPid.out) as { status: string }).status).toBe('running');
   });
 
+  test('a run with a report shows its verdict and confidence next to the status (W15); one without has neither', async () => {
+    const h = home();
+    await seed(h, { phase: 'completed', report: true });
+    await seed(h, { runId: OTHER_RUN, phase: 'investigating' });
+    const cmd = createStatusCommand({ isAlive: () => true });
+    const doc = jsonLine((await cli([cmd], ['status', RUN_ID, '--json'], { config: () => h.config })).out);
+    expect(v.is(StatusOutputSchema, doc)).toBe(true);
+    expect(doc).toMatchObject({ status: 'completed', report_status: 'root_cause_confirmed', confidence: 'medium' });
+    const human = await cli([cmd], ['status', RUN_ID], { config: () => h.config });
+    expect(human.out).toContain(`run ${RUN_ID}: completed · root_cause_confirmed, medium confidence (phase completed)`);
+
+    const running = jsonLine((await cli([cmd], ['status', OTHER_RUN, '--json'], { config: () => h.config })).out);
+    expect(running).not.toHaveProperty('report_status');
+    expect(running).not.toHaveProperty('confidence');
+    expect((await cli([cmd], ['status', OTHER_RUN], { config: () => h.config })).out).toContain(
+      `run ${OTHER_RUN}: running (phase investigating, not finished)`,
+    );
+  });
+
+  test('a running or failed run that holds an earlier report shows no verdict (W15)', async () => {
+    const h = home();
+    await seed(h, { phase: 'investigating', report: true });
+    await seed(h, { runId: OTHER_RUN, phase: 'failed', reason: 'stream ended early', report: true });
+    const cmd = createStatusCommand({ isAlive: () => true });
+    for (const [id, status] of [[RUN_ID, 'running'], [OTHER_RUN, 'failed']] as const) {
+      const doc = jsonLine((await cli([cmd], ['status', id, '--json'], { config: () => h.config })).out);
+      expect(doc).toMatchObject({ status });
+      expect(doc).not.toHaveProperty('report_status');
+      expect(doc).not.toHaveProperty('confidence');
+      const human = (await cli([cmd], ['status', id], { config: () => h.config })).out;
+      expect(human).toContain(`run ${id}: ${status} (phase `);
+      expect(human).not.toContain('root_cause_confirmed');
+    }
+  });
+
   test('a failed or stopped run shows its reason, in --json and the human form', async () => {
     const h = home();
     const reason = 'AgentRunError: [flue] Agent run failed (submission sub-1).: stream ended early';

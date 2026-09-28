@@ -70,7 +70,7 @@ export type HttpCallKey = v.InferOutput<typeof HttpCallKeySchema>;
 // No transport field: the qw and http transports share one fixture (D44).
 export const LogsSearchKeySchema = v.strictObject({
   entity: EntitySchema,
-  service: Text,
+  service: v.optional(Text),
   terms: v.array(Text),
   mode: LogsModeSchema,
   group_by: v.optional(Text),

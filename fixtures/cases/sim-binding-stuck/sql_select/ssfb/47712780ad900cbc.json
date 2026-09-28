@@ -1,0 +1,228 @@
+{
+  "schema": 1,
+  "kind": "sql_select",
+  "entity": "ssfb",
+  "key": {
+    "entity": "ssfb",
+    "service": "guardian",
+    "tables": [
+      "device_auth_attempts"
+    ],
+    "params": [
+      "de71ce00-0000-4000-8000-000000000002"
+    ]
+  },
+  "key_string": "{\"entity\":\"ssfb\",\"params\":[\"de71ce00-0000-4000-8000-000000000002\"],\"service\":\"guardian\",\"tables\":[\"device_auth_attempts\"]}",
+  "result": {
+    "rows": [
+      {
+        "verification_id": "7e41f100-0000-4000-8000-000000000001",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "status": "PENDING",
+        "sim_country_code": 0,
+        "sim_card_number": null,
+        "registration_country_code": 784,
+        "polling_attempts": 9,
+        "created_at": "2026-09-07T10:04:06Z",
+        "updated_at": "2026-09-07T10:07:06Z",
+        "verification_completion_deadline": "2026-09-07T10:07:06Z"
+      },
+      {
+        "verification_id": "7e41f100-0000-4000-8000-000000000002",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "status": "PENDING",
+        "sim_country_code": 0,
+        "sim_card_number": null,
+        "registration_country_code": 784,
+        "polling_attempts": 8,
+        "created_at": "2026-09-07T10:12:40Z",
+        "updated_at": "2026-09-07T10:15:20Z",
+        "verification_completion_deadline": "2026-09-07T10:15:40Z"
+      },
+      {
+        "verification_id": "7e41f100-0000-4000-8000-000000000003",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "status": "PENDING",
+        "sim_country_code": 0,
+        "sim_card_number": null,
+        "registration_country_code": 784,
+        "polling_attempts": 9,
+        "created_at": "2026-09-07T10:31:05Z",
+        "updated_at": "2026-09-07T10:34:05Z",
+        "verification_completion_deadline": "2026-09-07T10:34:05Z"
+      },
+      {
+        "verification_id": "7e41f100-0000-4000-8000-000000000004",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "status": "PENDING",
+        "sim_country_code": 0,
+        "sim_card_number": null,
+        "registration_country_code": 784,
+        "polling_attempts": 8,
+        "created_at": "2026-09-07T11:02:18Z",
+        "updated_at": "2026-09-07T11:04:58Z",
+        "verification_completion_deadline": "2026-09-07T11:05:18Z"
+      },
+      {
+        "verification_id": "7e41f100-0000-4000-8000-000000000005",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "status": "PENDING",
+        "sim_country_code": 0,
+        "sim_card_number": null,
+        "registration_country_code": 784,
+        "polling_attempts": 9,
+        "created_at": "2026-09-07T13:45:51Z",
+        "updated_at": "2026-09-07T13:48:51Z",
+        "verification_completion_deadline": "2026-09-07T13:48:51Z"
+      },
+      {
+        "verification_id": "7e41f100-0000-4000-8000-000000000006",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "status": "PENDING",
+        "sim_country_code": 0,
+        "sim_card_number": null,
+        "registration_country_code": 784,
+        "polling_attempts": 8,
+        "created_at": "2026-09-08T10:20:33Z",
+        "updated_at": "2026-09-08T10:23:13Z",
+        "verification_completion_deadline": "2026-09-08T10:23:33Z"
+      },
+      {
+        "verification_id": "7e41f100-0000-4000-8000-000000000007",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "status": "PENDING",
+        "sim_country_code": 0,
+        "sim_card_number": null,
+        "registration_country_code": 784,
+        "polling_attempts": 9,
+        "created_at": "2026-09-08T18:07:12Z",
+        "updated_at": "2026-09-08T18:10:12Z",
+        "verification_completion_deadline": "2026-09-08T18:10:12Z"
+      },
+      {
+        "verification_id": "7e41f100-0000-4000-8000-000000000008",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "status": "PENDING",
+        "sim_country_code": 0,
+        "sim_card_number": null,
+        "registration_country_code": 784,
+        "polling_attempts": 8,
+        "created_at": "2026-09-10T08:15:44Z",
+        "updated_at": "2026-09-10T08:18:24Z",
+        "verification_completion_deadline": "2026-09-10T08:18:44Z"
+      },
+      {
+        "verification_id": "7e41f100-0000-4000-8000-000000000009",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "status": "PENDING",
+        "sim_country_code": 0,
+        "sim_card_number": null,
+        "registration_country_code": 784,
+        "polling_attempts": 9,
+        "created_at": "2026-09-11T19:30:02Z",
+        "updated_at": "2026-09-11T19:33:02Z",
+        "verification_completion_deadline": "2026-09-11T19:33:02Z"
+      },
+      {
+        "verification_id": "7e41f100-0000-4000-8000-000000000010",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "status": "PENDING",
+        "sim_country_code": 0,
+        "sim_card_number": null,
+        "registration_country_code": 784,
+        "polling_attempts": 8,
+        "created_at": "2026-09-13T07:55:29Z",
+        "updated_at": "2026-09-13T07:58:09Z",
+        "verification_completion_deadline": "2026-09-13T07:58:29Z"
+      },
+      {
+        "verification_id": "7e41f100-0000-4000-8000-000000000011",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "status": "PENDING",
+        "sim_country_code": 0,
+        "sim_card_number": null,
+        "registration_country_code": 784,
+        "polling_attempts": 9,
+        "created_at": "2026-09-14T12:41:10Z",
+        "updated_at": "2026-09-14T12:44:10Z",
+        "verification_completion_deadline": "2026-09-14T12:44:10Z"
+      },
+      {
+        "verification_id": "7e41f100-0000-4000-8000-000000000012",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "status": "PENDING",
+        "sim_country_code": 0,
+        "sim_card_number": null,
+        "registration_country_code": 784,
+        "polling_attempts": 8,
+        "created_at": "2026-09-16T09:03:37Z",
+        "updated_at": "2026-09-16T09:06:17Z",
+        "verification_completion_deadline": "2026-09-16T09:06:37Z"
+      },
+      {
+        "verification_id": "7e41f100-0000-4000-8000-000000000013",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "status": "PENDING",
+        "sim_country_code": 0,
+        "sim_card_number": null,
+        "registration_country_code": 784,
+        "polling_attempts": 9,
+        "created_at": "2026-09-17T21:18:56Z",
+        "updated_at": "2026-09-17T21:21:56Z",
+        "verification_completion_deadline": "2026-09-17T21:21:56Z"
+      },
+      {
+        "verification_id": "7e41f100-0000-4000-8000-000000000014",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "status": "PENDING",
+        "sim_country_code": 0,
+        "sim_card_number": null,
+        "registration_country_code": 784,
+        "polling_attempts": 8,
+        "created_at": "2026-09-19T06:47:21Z",
+        "updated_at": "2026-09-19T06:50:01Z",
+        "verification_completion_deadline": "2026-09-19T06:50:21Z"
+      },
+      {
+        "verification_id": "7e41f100-0000-4000-8000-000000000015",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "status": "PENDING",
+        "sim_country_code": 0,
+        "sim_card_number": null,
+        "registration_country_code": 784,
+        "polling_attempts": 9,
+        "created_at": "2026-09-21T15:22:48Z",
+        "updated_at": "2026-09-21T15:25:48Z",
+        "verification_completion_deadline": "2026-09-21T15:25:48Z"
+      },
+      {
+        "verification_id": "7e41f100-0000-4000-8000-000000000016",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "status": "PENDING",
+        "sim_country_code": 0,
+        "sim_card_number": null,
+        "registration_country_code": 784,
+        "polling_attempts": 8,
+        "created_at": "2026-09-22T17:26:14Z",
+        "updated_at": "2026-09-22T17:28:54Z",
+        "verification_completion_deadline": "2026-09-22T17:29:14Z"
+      },
+      {
+        "verification_id": "7e41f100-0000-4000-8000-000000000017",
+        "device_id": "de71ce00-0000-4000-8000-000000000002",
+        "status": "PENDING",
+        "sim_country_code": 0,
+        "sim_card_number": null,
+        "registration_country_code": 784,
+        "polling_attempts": 9,
+        "created_at": "2026-09-24T11:52:09Z",
+        "updated_at": "2026-09-24T11:55:09Z",
+        "verification_completion_deadline": "2026-09-24T11:55:09Z"
+      }
+    ]
+  },
+  "meta": {
+    "source": "hand",
+    "recorded_at": "2026-09-28T00:00:00.000Z"
+  }
+}

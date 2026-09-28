@@ -5,9 +5,9 @@
     "workflow": {
       "db": "RTL_WORKFLOW_DB_URL",
       "api": "RTL_WORKFLOW_API_URL",
-      "quickwit_service": "workflow-op",
+      "quickwit_service": "workflow-op-service",
       "repo": "workflow-op",
-      "note": "RTL copy; Shivalik copy is ssfb:workflow. The log service may be workflow-v2, confirm when investigating"
+      "note": "RTL copy; Shivalik copy is ssfb:workflow. Logs full outbound request and response bodies; never quote personal data or tokens from them"
     },
     "banking": {
       "db": "RTL_BANKING_DB_URL",
@@ -40,6 +40,18 @@
       "quickwit_service": "comms-service",
       "repo": "comms-svc",
       "note": "deployed as comms-service; log service name is unverified. The repo is Vance-Club/comms, formerly comms-svc"
+    },
+    "appserver": {
+      "quickwit_service": "app-server-service",
+      "note": "logs only. Its lines carry the device id and app headers of each app request"
+    },
+    "verification": {
+      "quickwit_service": "verification-service",
+      "note": "logs only"
+    },
+    "uservault": {
+      "quickwit_service": "user-vault-service",
+      "note": "logs only. Its lines carry phone, name and date of birth; never quote them"
     }
   },
   "quickwit_fields": ["service", "level", "message", "error", "raw_message", "timestamp"],

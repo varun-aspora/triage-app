@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "kind": "logs_search",
+  "entity": "rtl",
+  "key": {
+    "entity": "rtl",
+    "service": "appserver",
+    "terms": [
+      "5a1e0000-0000-4000-8000-000000000001",
+      "columns:x-device-id"
+    ],
+    "mode": "search"
+  },
+  "key_string": "{\"entity\":\"rtl\",\"mode\":\"search\",\"service\":\"appserver\",\"terms\":[\"5a1e0000-0000-4000-8000-000000000001\",\"columns:x-device-id\"]}",
+  "result": {
+    "hits": [
+      {
+        "timestamp": "2026-09-07T10:04:05.000Z",
+        "service": "app-server-service",
+        "level": "info",
+        "message": "HTTP request completed",
+        "method": "POST",
+        "path": "/api/v1/device-binding/register",
+        "status": 201,
+        "x-device-id": "de71ce00-0000-4000-8000-000000000002"
+      },
+      {
+        "timestamp": "2026-09-07T10:03:58.000Z",
+        "service": "app-server-service",
+        "level": "info",
+        "message": "HTTP request completed",
+        "method": "GET",
+        "path": "/api/v1/onboarding/status",
+        "status": 200,
+        "x-device-id": "de71ce00-0000-4000-8000-000000000002"
+      },
+      {
+        "timestamp": "2026-09-07T10:03:51.000Z",
+        "service": "app-server-service",
+        "level": "info",
+        "message": "HTTP request completed",
+        "method": "POST",
+        "path": "/api/v1/onboarding/part-1/submit",
+        "status": 200,
+        "x-device-id": "de71ce00-0000-4000-8000-000000000002"
+      },
+      {
+        "timestamp": "2026-09-07T09:58:20.000Z",
+        "service": "app-server-service",
+        "level": "info",
+        "message": "HTTP request completed",
+        "method": "GET",
+        "path": "/api/v1/onboarding/status",
+        "status": 200,
+        "x-device-id": "de71ce00-0000-4000-8000-000000000002"
+      }
+    ],
+    "num_hits": 4,
+    "window": {
+      "from": "2026-08-29T00:00:00.000Z",
+      "to": "2026-09-28T00:00:00.000Z"
+    },
+    "truncated": false
+  },
+  "meta": {
+    "source": "hand",
+    "recorded_at": "2026-09-28T00:00:00.000Z"
+  }
+}

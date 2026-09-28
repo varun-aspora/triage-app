@@ -29,6 +29,8 @@ export type ToolContext = {
   readonly runId: string;
   /** The investigator's entity; null for the triage and code_walker mounts. */
   readonly entity: Entity | null;
+  /** The mounting agent: 'triage' or the delegate's name. For the run action log (D79). */
+  readonly agent?: string;
   readonly config: Config;
   readonly registry: Registry;
   readonly deps: ToolDeps;

@@ -4,7 +4,6 @@ import { releaseEscalation } from '../../src/agents/escalation.ts';
 import type { ExecResult, ExecRunner } from '../../src/connectors/exec.ts';
 import {
   createQuickwitConnector,
-  START_ONLY_WINDOW_NOTE,
   type QuickwitConnector,
   type QuickwitSearchOutcome,
 } from '../../src/connectors/quickwit/client.ts';
@@ -12,10 +11,12 @@ import type { FetchLike } from '../../src/connectors/quickwit/http-transport.ts'
 import { envVarName } from '../../src/connectors/types.ts';
 import { createMemoryAuditSink, type MemoryAuditSink } from '../../src/gate/audit-sink.ts';
 import { createRunBudget, releaseRunBudget } from '../../src/gate/budget.ts';
+import { releaseObservedIds } from '../../src/gate/scope.ts';
 import { quickwitSlot, resetQuickwitSlotsForTests } from '../../src/gate/semaphore.ts';
 import { createMockLayer } from '../../src/mock/index.ts';
 import { keyString } from '../../src/mock/key.ts';
 import type { FixtureStore } from '../../src/mock/store.ts';
+import { releaseActions } from '../../src/runlog/actions.ts';
 import type { RunStore } from '../../src/runstore/types.ts';
 import { createToolDeps } from '../../src/tools/_lib/context.ts';
 import { conformanceProblems, FORBIDDEN_INPUT_KEYS } from '../../src/tools/index.ts';
@@ -78,6 +79,10 @@ type SetupOptions = {
   /** The fixture result for every lookup; null is a miss. */
   fixture?: unknown;
   requestWindow?: TimeWindow | null;
+  /** Build the run budget from the home's config (per-tool caps included). */
+  budgetFromConfig?: boolean;
+  /** The run clock; NOW by default. */
+  clock?: () => Date;
 };
 
 function setup(opts: SetupOptions = {}): Setup {
@@ -85,17 +90,22 @@ function setup(opts: SetupOptions = {}): Setup {
   const entity = opts.entity ?? 'ssfb';
   seq += 1;
   const runId = `run_logs_${seq}_${Math.random().toString(36).slice(2, 8)}`;
-  const budget = createRunBudget({
-    runId,
-    maxToolCalls: 50,
-    maxTasks: 5,
-    maxRowsPerCall: 200,
-    maxBytesPerCall: 1_000_000,
-    maxBytesPerRun: 10_000_000,
-  });
+  const budget =
+    opts.budgetFromConfig === true
+      ? undefined
+      : createRunBudget({
+          runId,
+          maxToolCalls: 50,
+          maxTasks: 5,
+          maxRowsPerCall: 200,
+          maxBytesPerCall: 1_000_000,
+          maxBytesPerRun: 10_000_000,
+        });
   cleanups.push(() => {
     releaseRunBudget(runId);
     releaseEscalation(runId);
+    releaseObservedIds(runId);
+    releaseActions(runId);
   });
   const audit = createMemoryAuditSink();
   const storeCalls: StoreCall[] = [];
@@ -126,10 +136,10 @@ function setup(opts: SetupOptions = {}): Setup {
     idChain: CHAIN,
     connectors: opts.connector !== undefined ? { quickwit: opts.connector } : {},
     runStore: {} as RunStore,
-    budget,
+    ...(budget !== undefined ? { budget } : {}),
     audit,
     fixtures: createMockLayer(mockConfig, { store }),
-    now: () => new Date(NOW),
+    now: opts.clock ?? (() => new Date(NOW)),
     ...(requestWindow !== null ? { requestWindow } : {}),
   });
   const ctx = makeToolContext({ config: h.config, registry: h.registry, entity, runId, deps });
@@ -215,10 +225,61 @@ describe('input schema', () => {
     expect(toolModule.entities).toBe('all');
   });
 
+  test('service is optional and the D76 inputs parse', () => {
+    const parsed = v.safeParse(LogsSearchInputSchema, {
+      terms: ['x'],
+      exclude: ['noise'],
+      any_of: [{ level: ['error', 'warn'], message: ['a'], terms: ['b'], service: ['harbor'] }],
+      contains: 'abc',
+      denoise: 'only',
+      order: 'oldest',
+      offset: 250,
+      columns: ['status'],
+      raw: true,
+      group_by: ['service', 'level', 'message', 'error'],
+      count_distinct: 'form_id',
+    });
+    expect(parsed.success).toBe(true);
+    for (const bad of [
+      { terms: ['x'], group_by: 'service' },
+      { terms: ['x'], group_by: ['a', 'b', 'c', 'd', 'e'] },
+      { terms: ['x'], offset: -1 },
+      { terms: ['x'], order: 'random' },
+      { terms: ['x'], denoise: 'all' },
+      { terms: ['x'], any_of: [{ query: 'a OR b' }] },
+      { terms: ['x'], query: 'service:harbor' },
+    ]) {
+      expect(v.safeParse(LogsSearchInputSchema, bad).success).toBe(false);
+    }
+  });
+
+  test('the description states the defaults and limits, from config', () => {
+    const tool = toolModule.create(makeToolContext({ entity: 'ssfb' }), 'investigator');
+    for (const text of [
+      '250 hits',
+      'newest first',
+      "request window (30 days before the thread's first message up to when the request came in)",
+      'both ends',
+      '5,000',
+      '50 logs_search calls',
+      'single quotes',
+      'denoise',
+    ]) {
+      expect(tool.description).toContain(text);
+    }
+    const env = { TRIAGE_DEFAULT_LOOKBACK_DAYS: '7', TRIAGE_MAX_LOG_CALLS_PER_RUN: '12', SSFB_QUICKWIT_MAX_HITS: '100' };
+    const tuned = toolModule.create(makeToolContext({ entity: 'ssfb', env }), 'investigator');
+    for (const text of ['one page of 100 hits', '(7 days before', 'At most 12 logs_search calls']) expect(tuned.description).toContain(text);
+    const rtl = toolModule.create(makeToolContext({ entity: 'rtl' }), 'investigator');
+    expect(rtl.description).toContain('a UUID goes in terms, never in fields');
+    expect(rtl.description).not.toContain('denoise');
+  });
+
   test('logsModeOf maps count and group_by', () => {
     expect(logsModeOf({})).toBe('search');
     expect(logsModeOf({ count: true })).toBe('count');
-    expect(logsModeOf({ group_by: 'level' })).toBe('group_by');
+    expect(logsModeOf({ group_by: ['level'] })).toBe('group_by');
+    expect(logsModeOf({ count_distinct: 'form_id' })).toBe('group_by');
   });
 });
 
@@ -229,7 +290,7 @@ describe('gate denies', () => {
     const s = setup({ fixture: HITS_FIXTURE });
     const out = await s.call({ service: 'harbor' });
     expect(out.output.status).toBe('refused');
-    expect(out.output.message).toContain('service alone is not selective enough');
+    expect(out.output.message).toContain('the query needs a selective part');
     expect(s.storeCalls).toHaveLength(0);
     expect(lastAudit(s).decision).toBe('deny');
   });
@@ -251,7 +312,7 @@ describe('gate denies', () => {
 
   test('deny: unknown group_by field and unknown service', async () => {
     const s = setup({ fixture: HITS_FIXTURE });
-    const g = await s.call({ service: 'harbor', message: 'failed', group_by: 'nope' });
+    const g = await s.call({ service: 'harbor', message: 'failed', group_by: ['nope'] });
     expect(g.output.status).toBe('refused');
     const u = await s.call({ service: 'no-such-service', message: 'failed' });
     expect(u.output.status).toBe('refused');
@@ -284,6 +345,89 @@ describe('gate denies', () => {
     expect(s.storeCalls).toHaveLength(0);
   });
 
+  test('a correlation id is allowed once an earlier result in the run showed it (D77)', async () => {
+    const REQ_ID = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+    const s = setup({ fixture: { hits: [{ ...HIT_A, x_req_id: REQ_ID }], num_hits: 1, window: REQUEST_WINDOW, truncated: false } });
+    const before = await s.call({ fields: { x_req_id: REQ_ID } });
+    expect(before.output.status).toBe('refused');
+    expect(before.output.message).toContain('only once an earlier logs_search result in this run has shown it');
+    dataOf(await s.call({ service: 'harbor', terms: [CUSTOMER] }));
+    dataOf(await s.call({ fields: { x_req_id: REQ_ID } }));
+    dataOf(await s.call({ terms: [REQ_ID] }));
+    // The same value in another field or inside a message keeps the chain rule.
+    expect((await s.call({ fields: { form_id: REQ_ID } })).output.status).toBe('refused');
+    expect((await s.call({ message: `failed for ${REQ_ID}` })).output.status).toBe('refused');
+    // Another run has not seen it.
+    expect((await setup({ fixture: HITS_FIXTURE }).call({ fields: { x_req_id: REQ_ID } })).output.status).toBe('refused');
+  });
+
+  test('an x-device-id or verification_id is allowed once a hit fetched by a chain id showed it (D77, Q13)', async () => {
+    const DEVICE_ID = 'a1b2c3d4-e5f6-4a7b-8c9d-00000000d001';
+    const VERIFICATION_ID = 'a1b2c3d4-e5f6-4a7b-8c9d-00000000e002';
+    const hit = { ...HIT_A, 'x-device-id': DEVICE_ID, verification_id: VERIFICATION_ID };
+    const s = setup({ fixture: { hits: [hit], num_hits: 1, window: REQUEST_WINDOW, truncated: false } });
+    const before = await s.call({ fields: { verification_id: VERIFICATION_ID } });
+    expect(before.output.status).toBe('refused');
+    expect(before.output.message).toContain('a device or verification id');
+    // A search by message alone returns the hit but does not tie it to the customer.
+    dataOf(await s.call({ message: 'SIM binding poll', columns: ['x-device-id', 'verification_id'] }));
+    expect((await s.call({ terms: [DEVICE_ID] })).output.status).toBe('refused');
+    dataOf(await s.call({ service: 'harbor', terms: [CUSTOMER], columns: ['x-device-id', 'verification_id'] }));
+    // On SSFB these are not filterable fields, so they are searched as terms.
+    dataOf(await s.call({ terms: [DEVICE_ID] }));
+    dataOf(await s.call({ service: 'guardian', terms: [VERIFICATION_ID] }));
+    expect((await s.call({ terms: [STRANGER] })).output.status).toBe('refused');
+  });
+
+  test('on ATSPL an x-txn-id UUID seen in a hit is searched as a term (D76, D77)', async () => {
+    const TXN_ID = 'b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e';
+    const s = setup({
+      entity: 'atspl',
+      fixture: { hits: [{ ...HIT_A, service: 'package', 'x-txn-id': TXN_ID }], num_hits: 1, window: REQUEST_WINDOW, truncated: false },
+    });
+    const before = await s.call({ terms: [TXN_ID] });
+    expect(before.output.status).toBe('refused');
+    expect(before.output.message).toContain('only once an earlier logs_search result in this run has shown it');
+    dataOf(await s.call({ terms: [CUSTOMER] }));
+    const walk = dataOf(await s.call({ terms: [TXN_ID], order: 'oldest' }));
+    expect(walk.query).toBe(`'${TXN_ID}'`);
+    // The field form is refused by the builder, which points at terms.
+    const field = await s.call({ fields: { 'x-txn-id': TXN_ID } });
+    expect(field.output.status).toBe('refused');
+    expect(field.output.message).toContain('on atspl search a UUID as a term');
+  });
+
+  test('deny: out-of-scope id in any_of, exclude or contains', async () => {
+    const s = setup({ fixture: HITS_FIXTURE });
+    for (const input of [
+      { terms: ['x'], any_of: [{ terms: [CUSTOMER, STRANGER] }] },
+      { terms: [CUSTOMER], any_of: [{ message: [`failed for ${STRANGER}`] }] },
+      { terms: [CUSTOMER], exclude: [STRANGER] },
+      { contains: STRANGER },
+    ]) {
+      const out = await s.call(input);
+      expect(out.output.status).toBe('refused');
+      expect(out.output.message).toContain('not in the run');
+    }
+    expect(s.storeCalls).toHaveLength(0);
+  });
+
+  test('deny: denoise outside ssfb, with the reason', async () => {
+    const s = setup({ entity: 'atspl', fixture: HITS_FIXTURE });
+    const out = await s.call({ denoise: 'only' });
+    expect(out.output.status).toBe('refused');
+    expect(out.output.message).toContain('denoise is for ssfb only');
+  });
+
+  test('no service and a term from the ID chain runs; the key has no service', async () => {
+    const s = setup({ fixture: HITS_FIXTURE });
+    const out = await s.call({ terms: [CUSTOMER] });
+    expect(out.output.status).toBe('ok');
+    expect(s.storeCalls).toHaveLength(1);
+    expect(s.storeCalls[0]?.key_string).not.toContain('"service"');
+    expect(lastAudit(s).summary_redacted).toContain('ssfb:all services');
+  });
+
   test('an id term from the ID chain is allowed', async () => {
     const s = setup({ fixture: HITS_FIXTURE });
     const out = await s.call({ service: 'harbor', terms: [CUSTOMER] });
@@ -299,13 +443,16 @@ describe('gate denies', () => {
     expect(s.storeCalls).toHaveLength(0);
   });
 
-  test('systemic with count or group_by passes, even with an id outside the chain', async () => {
+  test('systemic with count or group_by passes, and an id outside the chain is still refused (D76)', async () => {
     const s = setup({ fixture: { count: 7, num_hits: 7, window: REQUEST_WINDOW, truncated: false } });
-    const count = await s.call({ service: 'harbor', terms: [STRANGER], count: true, scope: 'systemic' });
+    const count = await s.call({ service: 'harbor', message: 'failed', count: true, scope: 'systemic' });
     expect(dataOf(count).count).toBe(7);
     const s2 = setup({ fixture: { groups: [{ key: 'error', count: 3 }], num_hits: 3, window: REQUEST_WINDOW, truncated: false } });
-    const grouped = await s2.call({ service: 'harbor', message: 'failed', group_by: 'level', scope: 'systemic' });
+    const grouped = await s2.call({ service: 'harbor', message: 'failed', group_by: ['level'], scope: 'systemic' });
     expect(dataOf(grouped).groups).toEqual([{ key: 'error', count: 3 }]);
+    const foreign = await s2.call({ terms: [STRANGER], group_by: ['form_id', 'x_req_id', 'message', 'error'], scope: 'systemic' });
+    expect(foreign.output.status).toBe('refused');
+    expect(foreign.output.message).toContain('scope "systemic" does not lift the id check');
   });
 
   test('deny: a to after now and from after to', async () => {
@@ -324,7 +471,7 @@ describe('max_hits and window', () => {
   test('max_hits clamp', async () => {
     const s = setup({ fixture: HITS_FIXTURE });
     const out = dataOf(await s.call({ service: 'harbor', message: 'doc fetch failed', max_hits: 100_000 }));
-    expect(out.notes).toEqual([expect.stringContaining('max_hits clamped to 500')]);
+    expect(out.notes).toEqual([expect.stringContaining('max_hits clamped to 250')]);
 
     // Real path: the clamped value is what reaches qw argv.
     const exec = qwRunner(JSON.stringify({ num_hits: 1, hits: [HIT_A] }));
@@ -332,9 +479,11 @@ describe('max_hits and window', () => {
     const connector = createQuickwitConnector({ registry: h.registry, config: h.config, exec, fetchImpl: noFetch, backoffMs: 0 });
     const real = setup({ h, mockMode: false, connector });
     const data = dataOf(await real.call({ service: 'harbor', message: 'doc fetch failed', max_hits: 100_000 }));
-    expect(data.notes).toEqual([expect.stringContaining('max_hits clamped to 500')]);
-    const argv = exec.argv[0] ?? [];
-    expect(argv[argv.indexOf('--max-hits') + 1]).toBe('500');
+    expect(data.notes).toEqual([expect.stringContaining('max_hits clamped to 250')]);
+    // A count first, then the page.
+    expect(exec.argv[0]?.[0]).toBe('count');
+    const argv = exec.argv[1] ?? [];
+    expect(argv[argv.indexOf('--max-hits') + 1]).toBe('250');
   });
 
   test('a fixture with more hits than max_hits is cut to max_hits and marked truncated', async () => {
@@ -400,7 +549,7 @@ describe('per-entity concurrency cap', () => {
           await new Promise((r) => setTimeout(r, 1000));
           events.push(`end ${id}`);
           const out: QuickwitSearchOutcome = {
-            data: { hits: [], num_hits: 0, window: requestWindow, truncated: false },
+            data: { hits: [], offset: 0, num_hits: 0, window: requestWindow, truncated: false },
             transport: 'real',
             target_env: envVarName(`${entity.toUpperCase()}_QW_CONTEXT`),
             taken_at: cctx.now().toISOString(),
@@ -500,11 +649,13 @@ describe('qw and http transports', () => {
     const input = { service: 'harbor', message: 'doc fetch failed' };
     const a = await qw.call(input);
     const b = await http.call(input);
-    expect(exec.argv).toHaveLength(1);
+    // qw counts first; the http page carries num_hits.
+    expect(exec.argv).toHaveLength(2);
     expect(fetchImpl.calls).toBe(1);
     expect(a).toEqual(b);
     const data = dataOf(a);
-    expect(Object.keys(data).sort()).toEqual(['hits', 'num_hits', 'truncated', 'window']);
+    expect(Object.keys(data).sort()).toEqual(['hits', 'num_hits', 'offset', 'query', 'truncated', 'window']);
+    expect(data.query).toBe("service:harbor AND 'doc fetch failed'");
     // The transport never reaches the model.
     expect(JSON.stringify(a)).not.toMatch(/quickwit_transport|"qw"|"http"/);
     expect(lastAudit(qw).transport).toBe('real');
@@ -540,29 +691,99 @@ describe('qw and http transports', () => {
     }
   });
 
-  test('qw upper-bound note', async () => {
+  test('a window that ends before now is sent whole, with no upper-bound note', async () => {
     const qw = setup({ fixture: HITS_FIXTURE, requestWindow: PAST_REQUEST_WINDOW });
     const out = dataOf(await qw.call({ service: 'harbor', message: 'doc fetch failed' }));
     expect(out.window).toEqual(PAST_REQUEST_WINDOW);
-    expect(out.window_note).toBe(START_ONLY_WINDOW_NOTE);
-    expect(String(out.window_note)).toContain('upper bound dropped');
+    expect(out.window_note).toBeUndefined();
 
-    const explicit = dataOf(await qw.call({ service: 'harbor', message: 'x', from: '2d', to: '1d' }));
-    expect(explicit.window_note).toBe(START_ONLY_WINDOW_NOTE);
-
-    // http takes both bounds, so there is no note.
-    const http = setup({ fixture: HITS_FIXTURE, requestWindow: PAST_REQUEST_WINDOW, h: home({ overrides: HTTP_ENV }) });
-    expect(dataOf(await http.call({ service: 'harbor', message: 'doc fetch failed' })).window_note).toBeUndefined();
-  });
-
-  test('qw upper-bound note on the real path', async () => {
     const h = home();
     const exec = qwRunner(JSON.stringify({ num_hits: 1, hits: [HIT_A] }));
     const connector = createQuickwitConnector({ registry: h.registry, config: h.config, exec, fetchImpl: noFetch, backoffMs: 0 });
     const s = setup({ h, mockMode: false, connector, requestWindow: PAST_REQUEST_WINDOW });
-    const out = dataOf(await s.call({ service: 'harbor', message: 'doc fetch failed' }));
-    expect(out.window_note).toBe(START_ONLY_WINDOW_NOTE);
-    expect(exec.argv[0]).toContain('--since');
+    const real = dataOf(await s.call({ service: 'harbor', message: 'doc fetch failed' }));
+    expect(real.window_note).toBeUndefined();
+    for (const argv of exec.argv) {
+      expect(argv).not.toContain('--since');
+      expect([argv[argv.indexOf('--from') + 1], argv[argv.indexOf('--to') + 1]]).toEqual(['2026-09-21T10:00:00Z', '2026-09-22T10:00:00Z']);
+    }
+  });
+
+  test('a connection reset reaches the model as unreachable with the reason, not as 0 hits', async () => {
+    const h = home({ overrides: HTTP_ENV });
+    const fetchImpl = (async () => {
+      throw new TypeError('fetch failed', { cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }) });
+    }) as unknown as FetchLike;
+    const s = setup({ h, mockMode: false, connector: createQuickwitConnector({ registry: h.registry, config: h.config, exec: noExec, fetchImpl, backoffMs: 0 }) });
+    const env = await s.call({ service: 'harbor', message: 'doc fetch failed' });
+    expect(env.output.status).toBe('unreachable');
+    const message = env.output.status === 'unreachable' ? env.output.message : '';
+    expect(message).toContain('read ECONNRESET');
+    expect(message).not.toContain('0 hits');
+  });
+});
+
+// ------------------------------------------------------------------ paging
+
+describe('per-run call cap', () => {
+  test('the 51st logs_search call in a run is refused with the cap; other tools are not held back', async () => {
+    const s = setup({ fixture: HITS_FIXTURE, budgetFromConfig: true });
+    expect(s.h.config.budgets.maxLogCallsPerRun).toBe(50);
+    // A different page each time, so no call is an exact repeat (D79).
+    for (let i = 0; i < 50; i++) dataOf(await s.call({ service: 'harbor', message: 'doc fetch failed', offset: i }));
+    const out = await s.call({ service: 'harbor', message: 'doc fetch failed', offset: 50 });
+    expect(out.output.status).toBe('refused');
+    expect(out.output.message).toBe(
+      'logs_search refused: this run has used all 50 of its logs_search calls (TRIAGE_MAX_LOG_CALLS_PER_RUN=50). ' +
+        'Other tools still work; finish with the evidence you have.',
+    );
+    expect(lastAudit(s)).toMatchObject({ decision: 'deny', reason: 'budget: tool_cap' });
+    expect(s.storeCalls).toHaveLength(50);
+  });
+});
+
+describe('paging and the 5,000-hit early return', () => {
+  test('a page carries offset and next_offset; the last page has no next_offset', async () => {
+    const more = setup({ fixture: { hits: [HIT_A, HIT_B], num_hits: 300, window: REQUEST_WINDOW, truncated: true } });
+    expect(dataOf(await more.call({ service: 'harbor', message: 'failed', offset: 250 }))).toMatchObject({ offset: 250, next_offset: 252, num_hits: 300 });
+    const last = setup({ fixture: { hits: [HIT_A, HIT_B], num_hits: 252, window: REQUEST_WINDOW, truncated: true } });
+    const out = dataOf(await last.call({ service: 'harbor', message: 'failed', offset: 250 }));
+    expect(out.offset).toBe(250);
+    expect(out.next_offset).toBeUndefined();
+  });
+
+  test('the result carries the query that was built', async () => {
+    const s = setup({ fixture: HITS_FIXTURE });
+    const out = dataOf(await s.call({ service: 'harbor', message: 'doc fetch failed', exclude: ['kong noise'] }));
+    expect(out.query).toBe("service:harbor AND 'doc fetch failed' AND NOT 'kong noise'");
+  });
+
+  test('over 5,000 hits: an ordinary ok result with no hits and the reason, for a search and a tally', async () => {
+    const s = setup({ fixture: { hits: [HIT_A], num_hits: 12_431, window: REQUEST_WINDOW, truncated: true } });
+    const env = await s.call({ service: 'harbor', message: 'failed' });
+    const out = dataOf(env);
+    expect(out.hits).toEqual([]);
+    expect(out.truncated).toBe(true);
+    expect(out.reason).toBe(
+      '12,431 hits for this query in 2026-09-21T10:00:00.000Z..2026-09-23T10:00:00.000Z (UTC), over the 5,000 hits a search pages through. ' +
+        'No hits were read. Narrow the window, add an id or field filter, or use count or group_by first.',
+    );
+    const g = setup({ fixture: { groups: [{ key: 'error', count: 6000 }], num_hits: 6000, window: REQUEST_WINDOW, truncated: false } });
+    const grouped = dataOf(await g.call({ service: 'harbor', message: 'failed', group_by: ['level'] }));
+    expect(grouped).toMatchObject({ groups: [], tally_base: 0, num_hits: 6000, truncated: true });
+    expect(String(grouped.reason)).toContain('6,000 hits');
+    // A count has no limit.
+    const c = setup({ fixture: { count: 9000, num_hits: 9000, window: REQUEST_WINDOW, truncated: false } });
+    expect(dataOf(await c.call({ service: 'harbor', message: 'failed', count: true })).reason).toBeUndefined();
+  });
+
+  test('a tally states its base, and count_distinct comes back as distinct', async () => {
+    const s = setup({
+      fixture: { groups: [{ key: 'error | timeout', count: 3 }], distinct: { field: 'form_id', count: 2 }, tally_base: 3, num_hits: 3, window: REQUEST_WINDOW, truncated: false },
+    });
+    const out = dataOf(await s.call({ service: 'harbor', message: 'failed', group_by: ['level', 'error'], count_distinct: 'form_id' }));
+    expect(out).toMatchObject({ groups: [{ key: 'error | timeout', count: 3 }], distinct: { field: 'form_id', count: 2 }, tally_base: 3 });
+    expect(lastAudit(s).summary_redacted).toContain('1 groups, 2 distinct form_id over 3 hits');
   });
 });
 
@@ -624,7 +845,7 @@ describe('normalize', () => {
         truncated: false,
       },
     });
-    const g = dataOf(await grouped.call({ service: 'harbor', message: 'failed', group_by: 'message', normalize: true }));
+    const g = dataOf(await grouped.call({ service: 'harbor', message: 'failed', group_by: ['message'], normalize: true }));
     expect(g.groups).toEqual([{ key: 'doc fetch failed for form <num>', count: 3 }]);
 
     const hits = setup({ fixture: { hits: [HIT_A, HIT_B, HIT_C], num_hits: 3, window: REQUEST_WINDOW, truncated: false } });
@@ -634,6 +855,61 @@ describe('normalize', () => {
       { key: 'doc fetch failed for form <num>', count: 2 },
       { key: 'timeout calling workflow', count: 1 },
     ]);
+  });
+});
+
+// ------------------------------------------------------------------ zero hits
+
+describe('zero hits', () => {
+  test('a 0-hit result says what to try next, in order', async () => {
+    const s = setup({ fixture: { hits: [], num_hits: 0, window: REQUEST_WINDOW, truncated: false } });
+    const out = dataOf(await s.call({ service: 'harbor', message: 'doc fetch failed', level: 'error' }));
+    expect(out.notes).toEqual([
+      '0 hits. Try next, in this order: drop the service filter; run group_by: ["service"] for the same terms; move from earlier; drop level.',
+    ]);
+  });
+
+  test('steps that do not apply are left out, and counts and groups get the note too', async () => {
+    const count = setup({ fixture: { count: 0, num_hits: 0, window: REQUEST_WINDOW, truncated: false } });
+    expect(dataOf(await count.call({ message: 'doc fetch failed', count: true })).notes).toEqual([
+      '0 hits. Try next, in this order: run group_by: ["service"] for the same terms; move from earlier.',
+    ]);
+    const grouped = setup({ fixture: { groups: [], num_hits: 0, window: REQUEST_WINDOW, truncated: false } });
+    expect(dataOf(await grouped.call({ message: 'doc fetch failed', group_by: ['service'] })).notes).toEqual([
+      '0 hits. Try next, in this order: move from earlier.',
+    ]);
+  });
+
+  test('a service with no lines at all in the window gets its own note', async () => {
+    const s = setup({ fixture: { hits: [], num_hits: 0, window: REQUEST_WINDOW, truncated: false, service_absent: true } });
+    const out = dataOf(await s.call({ service: 'harbor', message: 'doc fetch failed' }));
+    expect(out.notes).toContain(
+      `service harbor has no lines at all in this index in ${REQUEST_WINDOW.from}..${REQUEST_WINDOW.to}: the name may be wrong ` +
+        'or it logs elsewhere; run group_by: ["service"] without the service filter to see the names that do log',
+    );
+    expect(out.service_absent).toBeUndefined();
+  });
+
+  test('the real path counts the service alone after a 0-hit result, and only then', async () => {
+    const h = home({ overrides: HTTP_ENV });
+    const bodies: string[] = [];
+    const fetchImpl = (async (_url: string, init: RequestInit) => {
+      bodies.push(String(init.body));
+      return new Response(JSON.stringify({ num_hits: 0, hits: [] }), { status: 200 });
+    }) as FetchLike;
+    const connector = createQuickwitConnector({ registry: h.registry, config: h.config, exec: noExec, fetchImpl });
+    const s = setup({ h, mockMode: false, connector });
+    const out = dataOf(await s.call({ service: 'harbor', message: 'doc fetch failed' }));
+    expect(bodies.map((b) => (JSON.parse(b) as { query: string }).query)).toEqual(["service:harbor AND 'doc fetch failed'", 'service:harbor']);
+    expect((out.notes as string[]).some((n) => n.startsWith('service harbor has no lines at all'))).toBe(true);
+    bodies.length = 0;
+    await s.call({ message: 'doc fetch failed' });
+    expect(bodies).toHaveLength(1);
+  });
+
+  test('a result with hits has no zero-hit note', async () => {
+    const s = setup({ fixture: HITS_FIXTURE });
+    expect(dataOf(await s.call({ service: 'harbor', message: 'doc fetch failed' })).notes).toBeUndefined();
   });
 });
 
@@ -697,5 +973,36 @@ describe('envelope and staging', () => {
     ac.abort();
     await expect(s.call({ service: 'harbor', message: 'x' }, { signal: ac.signal })).rejects.toBeDefined();
     expect(s.audit.lines).toHaveLength(0);
+  });
+});
+
+describe('exact repeats (D79)', () => {
+  test('the same search is reused; another window or page runs', async () => {
+    const s = setup({ fixture: HITS_FIXTURE });
+    const q = { service: 'harbor', message: 'doc fetch failed' };
+    dataOf(await s.call(q));
+    const again = await s.call(q);
+    expect(again.output.message).toContain('result reused, nothing new was queried');
+    expect(lastAudit(s)).toMatchObject({ exit: 'reused' });
+    expect(s.storeCalls).toHaveLength(1);
+
+    // The request window resolved explicitly is the same call.
+    await s.call({ ...q, from: REQUEST_WINDOW.from, to: REQUEST_WINDOW.to });
+    expect(s.storeCalls).toHaveLength(1);
+
+    const other = await s.call({ ...q, from: '2026-09-22T00:00:00.000Z', to: NOW.toISOString() });
+    expect(other.output.message).toBeUndefined();
+    await s.call({ ...q, offset: 250 });
+    expect(s.storeCalls).toHaveLength(3);
+  });
+
+  test('a relative window repeated seconds later is reused', async () => {
+    let at = NOW.getTime() + 5_000;
+    const s = setup({ fixture: HITS_FIXTURE, clock: () => new Date(at) });
+    const q = { service: 'harbor', message: 'doc fetch failed', from: '2d' };
+    await s.call(q);
+    at += 15_000;
+    expect((await s.call(q)).output.message).toContain('result reused');
+    expect(s.storeCalls).toHaveLength(1);
   });
 });

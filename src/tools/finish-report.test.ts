@@ -464,7 +464,7 @@ describe('finish_report: escalation and strong synthesis', () => {
     expect(written.gaps).toContain('no vendor callback found');
   });
 
-  test('the same evidence on a strong run does not call synthesis', async () => {
+  test('the same evidence on a strong run does not call synthesis but records the fired reasons', async () => {
     const writer = fakeWriter();
     const s = setup({ tier: 'strong', options: { writeReport: writer.writeReport } });
     putEvidence(s.store, 'atspl', entityFindings('low'));
@@ -473,7 +473,21 @@ describe('finish_report: escalation and strong synthesis', () => {
 
     expect(out.output.status).toBe('ok');
     expect(s.harness.calls).toHaveLength(0);
+    const written = writer.spy.calls[0]!.draft;
+    expect(written.escalated).toBe(true);
+    expect(written.escalation_reasons).toEqual(['low_confidence']);
+    expect(written.gaps).not.toContain(SYNTHESIS_SKIPPED_GAP);
+  });
+
+  test('a strong run with no trigger stays not escalated', async () => {
+    const writer = fakeWriter();
+    const s = setup({ tier: 'strong', options: { writeReport: writer.writeReport } });
+    putEvidence(s.store, 'atspl', entityFindings('high'));
+
+    await call(s, baseDraft('strong'));
+
     expect(writer.spy.calls[0]!.draft.escalated).toBe(false);
+    expect(writer.spy.calls[0]!.draft.escalation_reasons).toEqual([]);
   });
 
   test('a cheap run with no trigger keeps the draft and does not call synthesis', async () => {
@@ -835,6 +849,21 @@ describe('finish_report: initialData', () => {
     expect(repos).not.toContain('1234567');
     // The draft's own gaps are kept first.
     expect(args.draft.gaps[0]).toBe('atspl package API not configured');
+  });
+
+  test("the draft's near-duplicate gaps are merged; the added gaps keep their exact-match dedupe", async () => {
+    const writer = fakeWriter();
+    const s = setup({ tier: 'strong', initialData: { preflight_warnings: warnings }, options: { writeReport: writer.writeReport } });
+
+    await call(s, {
+      ...baseDraft('strong'),
+      gaps: ['harbor form not found', 'rtl workflow rows not read', 'Harbor form not found for the device before VERIFIED.'],
+    });
+
+    const gaps = writer.spy.calls[0]!.draft.gaps;
+    expect(gaps.slice(0, 2)).toEqual(['Harbor form not found for the device before VERIFIED.', 'rtl workflow rows not read']);
+    expect(gaps).toContain('preflight ssfb tunnel: tunnel is down (fix: triage tunnel up ssfb)');
+    expect(gaps.filter((g) => g.startsWith('preflight '))).toHaveLength(2);
   });
 
   test('a preflight gap holding an ingress name is masked before the write, so the report is not refused', async () => {

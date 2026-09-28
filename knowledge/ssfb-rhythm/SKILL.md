@@ -144,6 +144,39 @@ Endpoints that change state (for example the account orchestration call above,
 and `POST /v1/limits`, which only the user can make behind an MPIN challenge)
 are refused by `http_call`. Never try to call them.
 
+## Logs
+
+Labels seen in past investigations. Search them as `message`, exactly as
+written:
+
+- CBS calls: `HTTP Request`, `HTTP Response` (the CBS body; read it with
+  `raw: true`), `HTTP request error` (often `context canceled`, the client
+  going away).
+- API: `Api execution completed` (every request; noise unless you need the
+  path), `Api ended with Error`.
+- Accounts and cards: `listing accounts for customer`, `accounts_home_v2:`,
+  `failed to get debit card`.
+- Deposits: `deposits: invalid deposit request`, `td.create_fd.failed`.
+- Transfers: `CBS disbursement status response received`,
+  `publishing disbursement status check`,
+  `[CBS API] Payment Disbursement Failed (IMPS)`. A `bank_identifier ... max
+  retries dropping` line and a `CBS submit ambiguous` line also recur; search
+  their words as `terms`.
+- CBS topic words go in `terms` next to the `account_number`:
+  `savingaccount`, `carddetail`, `channelflagandlimit`,
+  `GetStatementwithPagination`, `beneficiarynamelookupservice`, `dcms`,
+  `ListFDsByCIF`, `BenefBankIFSC`.
+- Fields: `path`, `status`, `latency`, `client-ip`, `User-Agent`,
+  `request_uuid`, `x-customer-id`. `ActionCode` and `ESBStatus` are inside
+  `raw_message`.
+
+A CBS response for an account, newest first, in a short window:
+
+```
+logs_search({ service: "rhythm", message: "HTTP Response",
+  terms: ["<account_number>", "savingaccount"], from: "<from>", to: "<to>" })
+```
+
 ## Known issues
 
 ### UTC/IST date bug breaks IMPS, NEFT and RTGS confirmation (00:00 to 05:30 IST)

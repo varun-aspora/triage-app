@@ -9,12 +9,17 @@
 // excerpt of Quickwit's own error (its JSON "message", or the body text), and
 // a failed fetch keeps its cause, both with the URL, host, token and
 // addresses taken out, so the model can see why a query was rejected.
-import type { LogsQueryMode } from '../../gate/quickwit.ts';
+//
+// One call is one request: a count (max_hits 0) or one page of hits sorted
+// by timestamp. Paging and the group_by tally are done by the client
+// (client.ts), the same way as for qw; no aggregation is sent.
+import type { LogsOrder } from '../../gate/quickwit.ts';
+import { windowSeconds } from '../../gate/quickwit-window.ts';
 import type { TimeWindow } from '../../types/core.ts';
 import { errorText, safeErrorText, scrubSecrets, stripAddresses } from '../error-text.ts';
 import { readCapped } from '../http/client.ts';
 import { ConnectorError, MAX_HTTP_BODY_BYTES } from '../types.ts';
-import type { LogGroup, LogHit, TransportResult } from './client.ts';
+import type { LogHit, TransportResult } from './client.ts';
 
 export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 
@@ -26,9 +31,13 @@ export type HttpSearchRequest = {
   readonly token?: string;
   readonly index: string;
   readonly query: string;
-  readonly mode: LogsQueryMode;
+  /** count sends max_hits 0; search asks for one page. */
+  readonly mode: 'count' | 'search';
+  /** search: hits in the page. */
   readonly maxHits: number;
-  readonly groupBy?: string;
+  /** search: index of the page's first hit. */
+  readonly offset: number;
+  readonly order: LogsOrder;
   readonly window: TimeWindow;
   readonly timeoutMs: number;
   readonly signal: AbortSignal;
@@ -41,21 +50,27 @@ export type HttpEnvNames = {
   readonly token?: string;
 };
 
-/** The name of the terms aggregation used for group_by. */
-export const GROUPS_AGG = 'groups';
+/** Quickwit v0.9 and later refuse a page that ends past this many hits. */
+export const MAX_PAGE_END = 10_000;
 
-/** The JSON body for one call. Timestamps are epoch seconds and cover the whole window. */
-export function searchBody(req: Pick<HttpSearchRequest, 'query' | 'mode' | 'maxHits' | 'groupBy' | 'window'>): Record<string, unknown> {
-  const body: Record<string, unknown> = {
-    query: req.query,
-    max_hits: req.mode === 'search' ? req.maxHits : 0,
-    start_timestamp: Math.floor(Date.parse(req.window.from) / 1000),
-    end_timestamp: Math.ceil(Date.parse(req.window.to) / 1000),
-  };
-  if (req.mode === 'histogram') {
-    if (req.groupBy === undefined) throw new ConnectorError('refused', 'group_by is missing');
-    body.aggs = { [GROUPS_AGG]: { terms: { field: req.groupBy, size: req.maxHits } } };
+/**
+ * The JSON body for one call. Timestamps are epoch seconds and cover the
+ * whole window. Quickwit reads a bare sort field as descending and a leading
+ * '-' as ascending (the reverse of Elasticsearch).
+ */
+export function searchBody(req: Pick<HttpSearchRequest, 'query' | 'mode' | 'maxHits' | 'offset' | 'order' | 'window'>): Record<string, unknown> {
+  const { start, end } = windowSeconds(req.window);
+  const body: Record<string, unknown> = { query: req.query, max_hits: 0, start_timestamp: start, end_timestamp: end };
+  if (req.mode === 'count') return body;
+  if (req.offset + req.maxHits > MAX_PAGE_END) {
+    throw new ConnectorError(
+      'refused',
+      `offset ${req.offset} is past ${MAX_PAGE_END - req.maxHits}: Quickwit pages at most ${MAX_PAGE_END} hits deep; narrow the window or add a filter`,
+    );
   }
+  body.max_hits = req.maxHits;
+  body.start_offset = req.offset;
+  body.sort_by = req.order === 'oldest' ? '-timestamp' : 'timestamp';
   return body;
 }
 
@@ -212,20 +227,7 @@ function parseResponse(text: string, req: HttpSearchRequest): TransportResult {
   if (!isObject(parsed) || !isCount(parsed.num_hits)) throw invalid();
   const num_hits = parsed.num_hits;
   if (req.mode === 'count') return { kind: 'count', num_hits };
-  if (req.mode === 'search') {
-    const hits = parsed.hits;
-    if (!Array.isArray(hits) || !hits.every(isObject)) throw invalid();
-    return { kind: 'hits', hits: hits as LogHit[], num_hits };
-  }
-  const agg = isObject(parsed.aggregations) ? parsed.aggregations[GROUPS_AGG] : undefined;
-  if (!isObject(agg) || !Array.isArray(agg.buckets)) throw invalid();
-  const groups: LogGroup[] = [];
-  for (const b of agg.buckets as unknown[]) {
-    if (!isObject(b) || !isCount(b.doc_count)) throw invalid();
-    const key = typeof b.key === 'string' ? b.key : JSON.stringify(b.key);
-    groups.push({ key, count: b.doc_count });
-  }
-  groups.sort((a, b) => b.count - a.count || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  const other = agg.sum_other_doc_count;
-  return { kind: 'groups', groups, num_hits, truncated: isCount(other) && other > 0 };
+  const hits = parsed.hits;
+  if (!Array.isArray(hits) || !hits.every(isObject)) throw invalid();
+  return { kind: 'hits', hits: hits as LogHit[], num_hits };
 }

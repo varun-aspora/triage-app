@@ -11,18 +11,20 @@ metadata:
 # Known patterns
 
 `patterns.json`, next to this note, is the index of known issues. Read it with
-`read_skill_resource`. Ingress already ran a cheap match against it, so the
-classification may carry a `matched_pattern_id`. You can also look an entry
-up yourself when a delegate's answer quotes an error text that looks familiar.
+`read_skill_resource`. Ingress already ran a cheap match against it; when an
+entry matched, your instructions carry a "Known pattern lead" section with its
+first queries. You can also look an entry up yourself when a delegate's answer
+quotes an error text that looks familiar.
 
 ## What a match means
 
 - A match is a hint about where to look first, not a conclusion. It says
   "this error text has been seen before, and this is the quickest way to check
   it". It says nothing yet about this customer.
-- Try the entry's `query_recipe` first, then investigate as usual. If the
-  recipe finds nothing, drop the pattern, say so in the report and carry on
-  with the normal evidence ladder.
+- A past case can differ from this one. Run the entry's `first_queries`
+  when it has them, otherwise try its `query_recipe` first, then investigate
+  as usual. If this run's evidence does not match, drop the pattern, add the
+  gap `pattern <id> tried and rejected: <what did not match>` and carry on.
 - A `stable` entry has a root cause that the source confirmed. It still needs
   evidence for this customer before it goes into the report. The tier policy
   may run a stable match one tier lower; that changes the model, not the
@@ -41,9 +43,11 @@ up yourself when a delegate's answer quotes an error text that looks familiar.
 | `signature.services` | Registry services (`entity:service`) the error comes from. Empty means any service. |
 | `entities` | The entities to brief. Send the recipe's part for each entity to that entity's investigator. |
 | `query_recipe` | The first checks, written as investigator tool calls. Copy them into the brief with the ids and window from the id chain. |
+| `first_queries` | Optional. The evidence to collect before any hypothesis, one `{entity, query}` per item. Put each entity's queries in that entity's brief on a `Lead:` line, marked as a lead to test, not an answer. |
 | `tier_hint` | The tier that usually settles it. `strong` means brief `investigate_<entity>_deep`, or escalate. |
 | `stable` | True only when the source records a confirmed root cause. |
 | `source_ref` | The note and heading the entry came from. Activate that note if you need the detail. |
+| `lesson` | Optional. What a reviewed case taught, from its actual root cause. It says where the answer was last time; this run still needs its own evidence. |
 
 The recipes use `<placeholder>` ids. Replace them with ids from the id chain,
 never with ids you guessed. A brief still needs everything the brief template
@@ -65,9 +69,13 @@ escalation. When a thread points at it (entry `remittance-order-out-of-reach`):
 
 - Entries come from the `## Known issues` sections of the service notes and
   from the old workspace's skills. Never from past case folders: they hold
-  customer data.
+  customer data. The one exception is an eval case a human reviewed with an
+  actual root cause and a faster path: `triage fixtures review` offers a draft
+  with the ids stripped, and an owner finishes its `signature.regex` and adds
+  it here in a reviewed change (D92).
 - Every entry names its source in `source_ref`: `knowledge/<note>/SKILL.md#<heading>`,
-  or the old workspace's skill file by its path in that workspace.
+  the old workspace's skill file by its path in that workspace, or
+  `evals/cases/<case_id>` for a reviewed case.
 - `stable` is set to true in a reviewed change, and only when the source
   records a confirmed root cause. Hedged sources ("usually", "suspect",
   "often") stay false.

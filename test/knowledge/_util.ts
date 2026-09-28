@@ -12,6 +12,7 @@
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { LOCK_FILE } from '../../scripts/check-knowledge-sources.ts';
 import { ENTITIES, type Entity } from '../../src/types/core.ts';
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -21,8 +22,8 @@ export const CATEGORIES_FILE = join(KNOWLEDGE_DIR, 'classifier', 'categories.jso
 export const SKILL_FILE = 'SKILL.md';
 /** Top-level directories that are never skills. */
 export const NON_SKILL_DIRS = ['method', 'classifier'] as const;
-/** The only file allowed directly under knowledge/. */
-export const ROOT_FILES = ['README.md'] as const;
+/** The only files allowed directly under knowledge/. */
+export const ROOT_FILES = ['README.md', LOCK_FILE] as const;
 
 // ------------------------------------------------------------------ walker
 
@@ -64,7 +65,9 @@ export type MetadataKey = (typeof METADATA_KEYS)[number];
 
 /** Skills that are not tied to one entity. Their kind equals their name. */
 export const GLOBAL_SKILLS = ['patterns', 'repo-map', 'codegraph-limits', 'frontend-routing'] as const;
-export const SKILL_KINDS = ['overview', 'service', ...GLOBAL_SKILLS] as const;
+/** An <entity>-<journey> note: one user journey across that entity's services, for its investigators. */
+export const JOURNEY_KIND = 'journey';
+export const SKILL_KINDS = ['overview', 'service', JOURNEY_KIND, ...GLOBAL_SKILLS] as const;
 /** metadata.entity of a global skill. */
 export const SHARED_ENTITY = 'shared';
 export const SKILL_STATUSES = ['ported', 'written', 'stub'] as const;
@@ -265,11 +268,14 @@ function metadataProblems(fm: Frontmatter): string[] {
   }
   if (entity === undefined) return [...out, 'metadata.entity is required'];
 
-  if (kind === 'overview' || kind === 'service') {
+  if (kind === 'overview' || kind === 'service' || kind === JOURNEY_KIND) {
     if (!(ENTITIES as readonly string[]).includes(entity)) {
       out.push(`metadata.entity '${entity}' must be one of ${ENTITIES.join(', ')} for kind ${kind}`);
     }
-    if (kind === 'overview') {
+    if (kind === JOURNEY_KIND) {
+      if (service !== undefined) out.push('a journey note has no metadata.service');
+      if (!fm.name.startsWith(`${entity}-`) || fm.name === `${entity}-overview`) out.push(`a journey note is named '${entity}-<journey>'`);
+    } else if (kind === 'overview') {
       if (service !== undefined) out.push('an overview has no metadata.service');
       if (fm.name !== `${entity}-overview`) out.push(`an overview is named '${entity}-overview'`);
     } else if (service === undefined) {
@@ -402,6 +408,8 @@ export function lintText(text: string): LintHit[] {
 export function lintTree(root: string): string[] {
   const out: string[] = [];
   for (const f of walkKnowledge(root)) {
+    // Upstream paths and hashes, checked by scripts/check-knowledge-sources.ts (D85).
+    if (f.rel === LOCK_FILE) continue;
     for (const hit of lintText(f.rel)) out.push(`${f.rel} (path) ${hit.rule} ${hit.match}`);
     for (const hit of lintText(readFileSync(f.abs, 'utf8'))) out.push(`${f.rel}:${hit.line} ${hit.rule} ${hit.match}`);
   }
@@ -433,9 +441,13 @@ export const CODE_TOOLS = [
   'code_impact',
   'repo_read',
   'repo_grep',
+  'repo_find',
+  'repo_tree',
 ] as const;
 /** The code tools both investigator variants have, scoped to their entity's repos. */
-export const REPO_TOOLS = ['repo_read', 'repo_grep'] as const;
+export const REPO_TOOLS = ['repo_read', 'repo_grep', 'repo_find', 'repo_tree'] as const;
+/** On every agent: the run action log (D79). */
+export const SHARED_TOOLS = ['run_log'] as const;
 /** Flue sandbox tools, on every agent through the one inherited sandbox (D45). */
 export const SANDBOX_TOOLS = ['read', 'write', 'edit', 'bash', 'grep', 'glob'] as const;
 /** Flue framework tools. */
@@ -446,6 +458,7 @@ export const KNOWN_TOOLS: ReadonlySet<string> = new Set([
   ...INVESTIGATOR_TOOLS,
   ...SSFB_EXTRA_TOOLS,
   ...CODE_TOOLS,
+  ...SHARED_TOOLS,
   ...SANDBOX_TOOLS,
   ...FRAMEWORK_TOOLS,
 ]);
@@ -462,7 +475,7 @@ const SKILL_TOOLS = ['activate_skill', 'read_skill_resource'] as const;
  * one adds the rest of the code tools.
  */
 export function allowedTools(agent: AgentKind, entity?: Entity): ReadonlySet<string> {
-  const base: string[] = [...SANDBOX_TOOLS, ...SKILL_TOOLS];
+  const base: string[] = [...SANDBOX_TOOLS, ...SKILL_TOOLS, ...SHARED_TOOLS];
   switch (agent) {
     case 'triage':
       return new Set([...base, ...TRIAGE_TOOLS, 'task']);

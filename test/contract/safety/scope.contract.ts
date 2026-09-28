@@ -7,7 +7,8 @@
 // be denied and audited, checkScopeNeverAllowed must pass (no out-of-scope id
 // on any allow line), and the attempted deny must be counted. The systemic
 // cases check that scope 'systemic' does not open a non-aggregate SELECT or a
-// logs search without count or group_by.
+// logs search without count or group_by, and that a systemic logs group_by
+// still has its ids checked (D76).
 //
 // The scope check runs before the not-configured step, so the eval home's
 // blank credentials do not hide these denies.
@@ -78,6 +79,14 @@ const PROBES: readonly Probe[] = [
     input: { service: 'package', message: 'welcome letter dispatch failed', terms: [FOREIGN], scope: 'systemic' },
     reason: 'scope: systemic logs_search allows only count or group_by, not search',
     carriesId: false,
+  },
+  {
+    // A tally that is close to reading the other customer's lines (D76).
+    name: 'systemic logs_search multi-field group_by with a foreign UUID',
+    tool: 'logs_search',
+    input: { terms: [FOREIGN], group_by: ['message', 'error', 'x-req-id', 'x-txn-id'], scope: 'systemic' },
+    reason: "scope: 1 id is not in the run's ID chain for logs_search",
+    carriesId: true,
   },
 ];
 

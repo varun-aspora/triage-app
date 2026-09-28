@@ -11,9 +11,24 @@
 // 3. Mock mode answers from the fixture store with a transport-neutral key,
 //    so the qw and http configs of one entity share fixtures. Nothing is
 //    run and nothing is fetched.
-// 4. A real call holds the entity's slot from quickwitSlot() for the whole
-//    call, retry included. This is the only place the cap is held. A timeout
-//    is retried once after a backoff; nothing else is retried.
+// 4. A real call is one or more transport requests (D76):
+//    - count: one count;
+//    - search: one page of hits. On http the page carries num_hits. On qw a
+//      count runs first, because qw's JSON may not carry num_hits and qw
+//      sorts newest first only, so an "oldest" page is read from the far end
+//      of the newest-first order and reversed;
+//    - group_by and count_distinct: a count, then pages of 250 hits projected
+//      to the tally fields, tallied here. Exact, needs no fast fields, and
+//      the same on Quickwit 0.8 and 0.9. http sends no projection, so a page
+//      that passes the response cap is halved, down to MIN_TALLY_PAGE;
+//    - after a 0-hit result with a service filter, one count of that service
+//      alone in the same window, so a wrong service name is flagged.
+//    Over HIT_LIMIT hits a search or tally stops after the first request and
+//    returns no hits and the reason. Each request holds the entity's slot
+//    from quickwitSlot() on its own, retry included, and the signal is
+//    checked between requests, so a long tally does not keep other calls
+//    waiting for its whole length. This is the only place the cap is held. A
+//    timeout is retried once after a backoff; nothing else is retried.
 //
 // The data shape is the same for both transports. The transport kind goes
 // only in meta, for the audit line. No run_id is sent to qw (Q29): infra's
@@ -21,14 +36,32 @@
 import type { Config } from '../../config/env.ts';
 import { RegistryError, type Registry } from '../../config/registry.ts';
 import { sleep } from '../../db/pg-retry.ts';
-import { buildLogsQuery, quickwitGateConfig, type LogsQueryInput, type QuickwitGateConfig } from '../../gate/quickwit.ts';
-import { resolveWindow, toSince } from '../../gate/quickwit-window.ts';
+import {
+  buildLogsQuery,
+  escapeTerm,
+  HIT_LIMIT,
+  PAGE_SIZE,
+  quickwitGateConfig,
+  type LogsOrder,
+  type LogsQuery,
+  type LogsQueryInput,
+  type LogsQueryMode,
+  type QuickwitGateConfig,
+} from '../../gate/quickwit.ts';
+import { resolveWindow } from '../../gate/quickwit-window.ts';
 import { quickwitSlot } from '../../gate/semaphore.ts';
 import type { LogsSearchFacts } from '../../mock/key.ts';
 import type { Entity, TimeWindow } from '../../types/core.ts';
 import { createExecRunner, type ExecRunner } from '../exec.ts';
 import { withMock } from '../mock.ts';
-import { ConnectorError, isConnectorError, type ConnectorContext, type ConnectorOutcome } from '../types.ts';
+import {
+  ConnectorError,
+  isConnectorError,
+  MAX_EXEC_OUTPUT_BYTES,
+  MAX_HTTP_BODY_BYTES,
+  type ConnectorContext,
+  type ConnectorOutcome,
+} from '../types.ts';
 import { httpSearch, type FetchLike } from './http-transport.ts';
 import { qwSearch } from './qw-transport.ts';
 
@@ -37,34 +70,50 @@ export type QuickwitTransportKind = 'qw' | 'http';
 export type LogHit = Readonly<Record<string, unknown>>;
 export type LogGroup = { readonly key: string; readonly count: number };
 
-/** What a transport hands back before the client shapes it. */
+export type DistinctCount = { readonly field: string; readonly count: number };
+
+/** What one transport request hands back before the client shapes it. */
 export type TransportResult =
   | { readonly kind: 'hits'; readonly hits: readonly LogHit[]; readonly num_hits: number }
-  | { readonly kind: 'count'; readonly num_hits: number }
-  | { readonly kind: 'groups'; readonly groups: readonly LogGroup[]; readonly num_hits: number; readonly truncated: boolean };
+  | { readonly kind: 'count'; readonly num_hits: number };
 
 type DataCommon = {
   readonly num_hits: number;
   readonly window: TimeWindow;
-  /** Set when the window could not be applied as asked (qw has --since only, Q28). */
-  readonly window_note?: string;
   readonly truncated: boolean;
   /** Notes from the query builder, such as a clamped max_hits. */
   readonly notes?: readonly string[];
+  /** Set when the call stopped early: more than HIT_LIMIT hits. */
+  readonly reason?: string;
+  /** Set on a 0-hit result with a service filter when that service has no lines at all in the window. */
+  readonly service_absent?: boolean;
 };
 
 /** The one data shape logs_search gets, whichever transport ran. */
 export type LogsSearchData =
-  | (DataCommon & { readonly hits: readonly LogHit[] })
+  | (DataCommon & {
+      readonly hits: readonly LogHit[];
+      /** Index of the page's first hit. */
+      readonly offset: number;
+      /** Where the next page starts; absent on the last page. */
+      readonly next_offset?: number;
+    })
   | (DataCommon & { readonly count: number })
-  | (DataCommon & { readonly groups: readonly LogGroup[] });
+  | (DataCommon & {
+      /** With group_by: one group per tuple of values, largest first. */
+      readonly groups?: readonly LogGroup[];
+      /** With count_distinct. */
+      readonly distinct?: DistinctCount;
+      /** The hits the groups and distinct count were counted over. */
+      readonly tally_base: number;
+    });
 
 /** For the audit line only. Never part of data. */
 export type QuickwitMeta = {
   readonly quickwit_transport: QuickwitTransportKind;
   /** When the call started. Used to line up with infra's qw_audit (Q29). */
   readonly started_at: string;
-  /** Transport attempts made: 0 in mock mode, 2 after a retried timeout. */
+  /** Transport requests made, retries included: 0 in mock mode. */
   readonly attempts: number;
 };
 
@@ -89,11 +138,8 @@ export type QuickwitConnector = {
 
 export const RETRY_BACKOFF_MS = 500;
 
-/**
- * window_note when the entity's log source takes a start time only (Q28).
- * It says what happened without naming the transport, which stays out of data.
- */
-export const START_ONLY_WINDOW_NOTE = 'upper bound dropped: this log source takes a start time only, so results run up to now';
+/** The smallest tally page: a page over the response cap is halved down to this. */
+export const MIN_TALLY_PAGE = 50;
 
 type Resolved =
   | { readonly transport: 'qw'; readonly index: string; readonly maxConcurrency: number; readonly context: string; readonly targetEnv: string }
@@ -154,18 +200,33 @@ export function resolveQuickwit(registry: Registry, entity: Entity): Resolved {
  * The fixture key facts for a call. It holds what the call is about and
  * nothing about how it is sent: no transport, index, URL or context.
  */
-export function logsKeyInput(cfg: QuickwitGateConfig, input: LogsQueryInput, mode: LogsSearchFacts['mode'], groupBy?: string): LogsSearchFacts {
+export function logsKeyInput(
+  cfg: QuickwitGateConfig,
+  input: LogsQueryInput,
+  mode: LogsSearchFacts['mode'],
+  groupBy?: readonly string[],
+): LogsSearchFacts {
   const terms: string[] = [...(input.terms ?? []).map((t) => t.trim())];
   if (input.message !== undefined) terms.push(`message:${input.message.trim()}`);
   if (input.error !== undefined) terms.push(`error:${input.error.trim()}`);
   for (const [name, value] of Object.entries(input.fields ?? {})) terms.push(`${name}:${value.trim()}`);
   if (input.level !== undefined) terms.push(`level:${input.level.toLowerCase()}`);
+  // The D76 inputs join the key only when set, so older fixtures keep their keys.
+  for (const x of input.exclude ?? []) terms.push(`exclude:${x.trim()}`);
+  if (input.any_of !== undefined) terms.push(`any_of:${JSON.stringify(input.any_of)}`);
+  if (input.contains !== undefined) terms.push(`contains:${input.contains.trim()}`);
+  if (input.denoise !== undefined) terms.push(`denoise:${input.denoise}`);
+  if (input.count_distinct !== undefined) terms.push(`count_distinct:${input.count_distinct}`);
+  if (input.columns !== undefined && input.columns.length > 0) terms.push(`columns:${input.columns.join(',')}`);
+  if (input.raw === true) terms.push('raw:true');
+  if (input.order === 'oldest') terms.push('order:oldest');
+  if (input.offset !== undefined && input.offset > 0) terms.push(`offset:${input.offset}`);
   return {
     entity: cfg.entity,
-    service: registryServiceName(cfg, input.service),
+    ...(input.service !== undefined ? { service: registryServiceName(cfg, input.service) } : {}),
     terms,
     mode,
-    ...(groupBy !== undefined ? { group_by: groupBy } : {}),
+    ...(groupBy !== undefined ? { group_by: groupBy.join(',') } : {}),
   };
 }
 
@@ -197,24 +258,86 @@ export function projectHit(hit: LogHit, fields: readonly string[]): LogHit {
   return Object.freeze(out);
 }
 
-function shapeData(
-  result: TransportResult,
-  fields: readonly string[],
-  window: TimeWindow,
-  windowNote: string | undefined,
-  notes: readonly string[],
-): LogsSearchData {
-  const common = {
-    num_hits: result.num_hits,
-    window,
-    ...(windowNote !== undefined ? { window_note: windowNote } : {}),
-    ...(notes.length > 0 ? { notes } : {}),
-  };
-  if (result.kind === 'count') return { count: result.num_hits, ...common, truncated: false };
-  if (result.kind === 'groups') return { groups: result.groups, ...common, truncated: result.truncated };
-  const hits = result.hits.map((h) => projectHit(h, fields));
-  return { hits, ...common, truncated: result.num_hits > hits.length };
+/** Where the next page starts, or undefined on the last page. */
+export function nextOffset(offset: number, returned: number, numHits: number): number | undefined {
+  const next = offset + returned;
+  return returned > 0 && next < numHits && next < HIT_LIMIT ? next : undefined;
 }
+
+/** The early-return reason for a query over HIT_LIMIT hits (D76). The model reads it as an ordinary result. */
+export function overLimitReason(numHits: number, window: TimeWindow, mode: LogsQueryMode): string {
+  const what = mode === 'histogram' ? 'group_by and count_distinct tally' : 'a search pages through';
+  const next = mode === 'histogram' ? 'count gives the total with no limit' : 'or use count or group_by first';
+  return (
+    `${numHits.toLocaleString('en-US')} hits for this query in ${window.from}..${window.to} (UTC), over the ` +
+    `${HIT_LIMIT.toLocaleString('en-US')} hits ${what}. No hits were read. Narrow the window, add an id or field filter, ${next}.`
+  );
+}
+
+/** Group key for a hit without a group_by field. */
+export const MISSING_VALUE = '(none)';
+
+function valueText(value: unknown): string {
+  if (value === undefined || value === null) return MISSING_VALUE;
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
+/**
+ * Counts hits per tuple of field values, largest group first; ties sort by
+ * key. The key is the values joined with ' | ' in field order, and a missing
+ * value is MISSING_VALUE, so the counts add up to the hits tallied.
+ */
+export function tallyGroups(hits: readonly LogHit[], fields: readonly string[]): LogGroup[] {
+  const counts = new Map<string, number>();
+  for (const hit of hits) {
+    const key = fields.map((f) => valueText(fieldValue(hit, f))).join(' | ');
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([key, count]) => ({ key, count }))
+    .sort((a, b) => b.count - a.count || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+}
+
+/** Number of distinct values of one field; hits without it are not counted. */
+export function countDistinct(hits: readonly LogHit[], field: string): number {
+  const seen = new Set<string>();
+  for (const hit of hits) {
+    const value = fieldValue(hit, field);
+    if (value !== undefined && value !== null) seen.add(valueText(value));
+  }
+  return seen.size;
+}
+
+function timeOf(hit: LogHit): number | undefined {
+  const t = hit.timestamp;
+  if (typeof t === 'number') return t;
+  if (typeof t !== 'string') return undefined;
+  const ms = Date.parse(t);
+  return Number.isNaN(ms) ? undefined : ms;
+}
+
+/** Sorts a page by timestamp in the asked order when every hit has one; otherwise keeps the order given. */
+export function orderHits(hits: readonly LogHit[], order: LogsOrder): LogHit[] {
+  const out = [...hits];
+  if (!out.every((h) => timeOf(h) !== undefined)) return out;
+  const sign = order === 'oldest' ? 1 : -1;
+  return out.sort((a, b) => sign * ((timeOf(a) as number) - (timeOf(b) as number)));
+}
+
+/** A whole document. Quickwit 0.8 echoes every field again under _source; the copy is dropped. */
+function wholeHit(hit: LogHit): LogHit {
+  const { _source: source, ...flat } = hit;
+  if (Object.keys(flat).length > 0 || typeof source !== 'object' || source === null) return Object.freeze(flat);
+  return Object.freeze({ ...(source as Record<string, unknown>) });
+}
+
+type PageRequest = {
+  readonly offset: number;
+  readonly size: number;
+  readonly order: LogsOrder;
+  /** Absent for whole documents. */
+  readonly fields?: readonly string[];
+};
 
 export function createQuickwitConnector(deps: QuickwitConnectorDeps): QuickwitConnector {
   const { registry, config } = deps;
@@ -236,62 +359,39 @@ export function createQuickwitConnector(deps: QuickwitConnectorDeps): QuickwitCo
 
     const q = buildLogsQuery(cfg, input);
     if (!q.ok) throw new ConnectorError('refused', q.reason);
-    const now = ctx.now();
-    const w = resolveWindow(input.from, input.to, requestWindow, now);
+    const w = resolveWindow(input.from, input.to, requestWindow, ctx.now());
     if (!w.ok) throw new ConnectorError('refused', w.reason);
+    // Fixed when the call starts, so new lines do not move the offsets between pages.
     const window = w.window;
-    const since = target.transport === 'qw' ? toSince(window, now) : undefined;
-    const windowNote = since?.window_note !== undefined ? START_ONLY_WINDOW_NOTE : undefined;
     const timeoutMs = config.budgets.httpTimeoutMs;
+    const pageSize = Math.min(PAGE_SIZE, cfg.maxHits);
 
-    const runOnce = (signal: AbortSignal): Promise<TransportResult> => {
+    // One transport request: a count, or one page.
+    const send = (page: PageRequest | undefined, signal: AbortSignal, query: string): Promise<TransportResult> => {
+      const mode: 'count' | 'search' = page === undefined ? 'count' : 'search';
+      const req = { index: target.index, query, mode, maxHits: page?.size ?? 0, offset: page?.offset ?? 0, window, timeoutMs, signal };
       if (target.transport === 'qw') {
-        return qwSearch(execRunner(), {
-          bin: config.code.qwBin,
-          context: target.context,
-          index: target.index,
-          query: q.query,
-          mode: q.mode,
-          fields: q.fields,
-          maxHits: q.maxHits,
-          ...(q.groupBy !== undefined ? { groupBy: q.groupBy } : {}),
-          since: (since as { since: string }).since,
-          timeoutMs,
-          signal,
-        });
+        const fields = page?.fields !== undefined ? { fields: page.fields } : {};
+        return qwSearch(execRunner(), { bin: config.code.qwBin, context: target.context, ...req, ...fields });
       }
-      return httpSearch(
-        fetchImpl,
-        {
-          url: target.url,
-          auth: target.auth,
-          ...(target.token !== undefined ? { token: target.token } : {}),
-          index: target.index,
-          query: q.query,
-          mode: q.mode,
-          maxHits: q.maxHits,
-          ...(q.groupBy !== undefined ? { groupBy: q.groupBy } : {}),
-          window,
-          timeoutMs,
-          signal,
-        },
-        target.names,
-      );
+      const token = target.token !== undefined ? { token: target.token } : {};
+      return httpSearch(fetchImpl, { url: target.url, auth: target.auth, ...token, ...req, order: page?.order ?? 'newest' }, target.names);
     };
 
     let attempts = 0;
     let startedAt: string | undefined;
-    const real = (signal: AbortSignal) =>
-      quickwitSlot(entity, target.maxConcurrency).run(async () => {
-        startedAt = ctx.now().toISOString();
-        for (;;) {
+
+    // Holds the slot for this one request only, retry included.
+    const request = (page: PageRequest | undefined, signal: AbortSignal, query: string = q.query): Promise<TransportResult> => {
+      signal.throwIfAborted();
+      return quickwitSlot(entity, target.maxConcurrency).run(async () => {
+        startedAt ??= ctx.now().toISOString();
+        for (let tries = 1; ; tries++) {
           attempts += 1;
           try {
-            const result = await runOnce(signal);
-            const data = shapeData(result, q.fields, window, windowNote, q.notes);
-            return { data, ...(data.truncated ? { truncated: true } : {}) };
+            return await send(page, signal, query);
           } catch (err) {
-            if (attempts === 1 && isConnectorError(err, 'timeout') && !signal.aborted) {
+            if (tries === 1 && isConnectorError(err, 'timeout') && !signal.aborted) {
               await sleep(backoffMs, signal);
               continue;
             }
@@ -299,6 +399,111 @@ export function createQuickwitConnector(deps: QuickwitConnectorDeps): QuickwitCo
           }
         }
       }, signal);
+    };
+    const count = async (signal: AbortSignal, query?: string): Promise<number> => (await request(undefined, signal, query)).num_hits;
+    const hitsOf = async (page: PageRequest, signal: AbortSignal): Promise<TransportResult & { kind: 'hits' }> => {
+      const r = await request(page, signal);
+      if (r.kind !== 'hits') throw new ConnectorError('unreachable', 'the log source answered a page request with a count');
+      return r;
+    };
+
+    const common = { window, ...(q.notes.length > 0 ? { notes: q.notes } : {}) };
+    const overLimit = (n: number) => ({ num_hits: n, ...common, reason: overLimitReason(n, window, q.mode), truncated: true });
+
+    const searchPage = async (signal: AbortSignal): Promise<LogsSearchData> => {
+      const projection = q.raw ? {} : { fields: q.fields };
+      let numHits: number;
+      let hits: readonly LogHit[];
+      if (target.transport === 'http') {
+        const r = await hitsOf({ offset: q.offset, size: q.maxHits, order: q.order, ...projection }, signal);
+        numHits = r.num_hits;
+        hits = r.hits;
+      } else {
+        numHits = await count(signal);
+        hits = [];
+        if (numHits <= HIT_LIMIT && q.offset < numHits) {
+          // qw sorts newest first only: the oldest page N is the newest-first slice at the far end.
+          const size = q.order === 'oldest' ? Math.min(q.maxHits, numHits - q.offset) : q.maxHits;
+          const offset = q.order === 'oldest' ? numHits - q.offset - size : q.offset;
+          const r = await hitsOf({ offset, size, order: 'newest', ...projection }, signal);
+          hits = q.order === 'oldest' ? [...r.hits].reverse() : r.hits;
+        }
+      }
+      if (numHits > HIT_LIMIT) return { hits: [], offset: q.offset, ...overLimit(numHits) };
+      const page = orderHits(
+        hits.map((h) => (q.raw ? wholeHit(h) : projectHit(h, q.fields))),
+        q.order,
+      );
+      const next = nextOffset(q.offset, page.length, numHits);
+      return {
+        hits: page,
+        offset: q.offset,
+        ...(next !== undefined ? { next_offset: next } : {}),
+        num_hits: numHits,
+        ...common,
+        truncated: numHits > page.length,
+      };
+    };
+
+    const tally = async (signal: AbortSignal): Promise<LogsSearchData> => {
+      const numHits = await count(signal);
+      if (numHits > HIT_LIMIT) return { ...(q.groupBy !== undefined ? { groups: [] } : {}), tally_base: 0, ...overLimit(numHits) };
+      const fields = [...new Set([...(q.groupBy ?? []), ...(q.countDistinct !== undefined ? [q.countDistinct] : [])])];
+      const hits: LogHit[] = [];
+      let size = pageSize;
+      // Serial pages, newest first; a short page is the end even if new lines arrived.
+      for (let offset = 0; offset < numHits; ) {
+        let r: TransportResult & { kind: 'hits' };
+        try {
+          r = await hitsOf({ offset, size, order: 'newest', fields }, signal);
+        } catch (err) {
+          // http sends no projection, so a page of whole documents can pass the cap: halve it and try again.
+          if (!isConnectorError(err, 'cap_exceeded')) throw err;
+          if (size <= MIN_TALLY_PAGE) throw tallyCapError(offset, size, numHits);
+          size = Math.max(MIN_TALLY_PAGE, Math.floor(size / 2));
+          continue;
+        }
+        hits.push(...r.hits);
+        if (r.hits.length < size) break;
+        offset += size;
+      }
+      return {
+        ...(q.groupBy !== undefined ? { groups: tallyGroups(hits, q.groupBy) } : {}),
+        ...(q.countDistinct !== undefined ? { distinct: { field: q.countDistinct, count: countDistinct(hits, q.countDistinct) } } : {}),
+        tally_base: hits.length,
+        num_hits: numHits,
+        ...common,
+        truncated: false,
+      };
+    };
+
+    const tallyCapError = (offset: number, size: number, numHits: number): ConnectorError => {
+      const cap = target.transport === 'http' ? MAX_HTTP_BODY_BYTES : MAX_EXEC_OUTPUT_BYTES;
+      return new ConnectorError(
+        'cap_exceeded',
+        `a page of ${size} hits (hits ${offset + 1} to ${Math.min(offset + size, numHits)} of ${numHits}) passed the ${cap} byte response cap ` +
+          `while tallying group_by or count_distinct, even at ${MIN_TALLY_PAGE} hits a page. Narrow the window or add a filter so fewer ` +
+          'hits are tallied, or use count, which reads no documents.',
+      );
+    };
+
+    // After a 0-hit result with a service filter: does the service log anything in this window?
+    const serviceAbsent = async (total: number, signal: AbortSignal): Promise<boolean> => {
+      if (total !== 0 || q.service === undefined) return false;
+      return (await count(signal, `service:${escapeTerm(q.service)}`)) === 0;
+    };
+
+    const real = async (signal: AbortSignal) => {
+      let data: LogsSearchData;
+      if (q.mode === 'count') {
+        const n = await count(signal);
+        data = { count: n, num_hits: n, ...common, truncated: false };
+      } else {
+        data = q.mode === 'search' ? await searchPage(signal) : await tally(signal);
+      }
+      if (await serviceAbsent(data.num_hits, signal)) data = { ...data, service_absent: true };
+      return { data, ...(data.truncated ? { truncated: true } : {}) };
+    };
 
     const keyInput = logsKeyInput(cfg, input, q.mode, q.groupBy);
     const outcome = await withMock(ctx, 'logs_search', keyInput, real, { target_env: target.targetEnv });
@@ -307,7 +512,7 @@ export function createQuickwitConnector(deps: QuickwitConnectorDeps): QuickwitCo
     if (outcome.transport === 'mock' && data !== null && typeof data === 'object') {
       // A fixture's window is the one it was recorded with; the caller needs this call's window.
       const { window_note: _dropped, ...rest } = data as LogsSearchData & { window_note?: string };
-      data = { ...rest, window, ...(windowNote !== undefined ? { window_note: windowNote } : {}) } as LogsSearchData;
+      data = { ...rest, window } as LogsSearchData;
     }
     const meta: QuickwitMeta = Object.freeze({
       quickwit_transport: target.transport,

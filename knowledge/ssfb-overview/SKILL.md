@@ -64,8 +64,10 @@ parameterised statement.
 | `account_form_id` | `workflow_op.workflow_executions WHERE reference_id = $1 AND reference_type = 'FORM'` on the SSFB copy; if empty, the RTL copy | `status`, `current_step_identifier`, `workflow_identifier` | the two copies of workflow-op hold different forms |
 
 `phone_number` and `country` have no hop: they reach you as the thread gave
-them. There is no device hop; for a device or SIM case, go from the user to
-guardian as the ssfb-guardian note says.
+them. There is no device hop. For a device or SIM case of a user who never
+verified, the device id comes from the RTL app-server logs (see
+`rtl-overview`), not from guardian; for a user who verified once, go from the
+user to guardian as the ssfb-guardian note says.
 
 Basic state read with the chain: harbor customer `state` and `sub_state`,
 `account_forms.status_v2`, and the rhythm account status and debit flag. Each

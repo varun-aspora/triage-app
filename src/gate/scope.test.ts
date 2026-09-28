@@ -1,7 +1,18 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import type { IdChain } from '../types/id-chain.ts';
 import { extractIdShaped } from './id-patterns.ts';
-import { checkScope, createScopeSet, extendScopeSet, maskId, type ScopeCheckResult } from './scope.ts';
+import {
+  checkScope,
+  createScopeSet,
+  extendScopeSet,
+  maskId,
+  observeCorrelationIds,
+  observedIds,
+  observeJourneyKeys,
+  releaseObservedIds,
+  type ScopeCheckResult,
+} from './scope.ts';
+import { validateSelect } from './sql.ts';
 
 // Synthetic ids only.
 const RUN_CUSTOMER = '3f2b8c1e-5a47-4d9e-9b1a-0c6d2e7f8a91';
@@ -194,6 +205,55 @@ describe('checkScope denies ids outside the chain', () => {
     expectDenied(checkScope({ tool: 'logs_search', params: { message: `failed for ${FOREIGN_ACCOUNT}` }, scopeSet: set }));
   });
 
+  test('foreign id in logs any_of, exclude or contains', () => {
+    for (const params of [
+      { any_of: [{ terms: [RUN_ACCOUNT, FOREIGN_UUID] }] },
+      { any_of: [{ message: [`failed for ${FOREIGN_ACCOUNT}`] }] },
+      { exclude: [FOREIGN_UUID] },
+      { contains: FOREIGN_ACCOUNT },
+    ]) {
+      expectDenied(checkScope({ tool: 'logs_search', params, scopeSet: set, logsMode: 'search' }));
+    }
+  });
+
+  test('a foreign UUID with spaces or other separators in place of dashes is denied (D76)', () => {
+    const spaced = FOREIGN_UUID.replace(/-/g, ' ');
+    for (const params of [
+      { terms: [spaced] },
+      { terms: [FOREIGN_UUID.replace(/-/g, '_')] },
+      { exclude: [spaced] },
+      { any_of: [{ terms: [spaced] }] },
+      { message: `failed for ${spaced}` },
+      { fields: { x_req_id: spaced } },
+    ]) {
+      const deny = expectDenied(checkScope({ tool: 'logs_search', params, scopeSet: set }));
+      expect(deny.offending).toEqual([{ kind: 'uuid', masked: 'uuid:***3d47' }]);
+    }
+    // The run's own UUID with spaces passes.
+    expect(checkScope({ tool: 'logs_search', params: { terms: [RUN_CUSTOMER.replace(/-/g, ' ')] }, scopeSet: set })).toEqual({ ok: true });
+  });
+
+  test('contains is checked as a fragment: a piece of a foreign id is denied (D76)', () => {
+    for (const [contains, kind] of [
+      [FOREIGN_UUID.slice(0, -1), 'uuid'],
+      ['90000999', 'digits'],
+      ['someone.else@gmail', 'email'],
+    ] as const) {
+      const deny = expectDenied(checkScope({ tool: 'logs_search', params: { contains }, scopeSet: set }));
+      expect(deny.offending.map((o) => o.kind)).toEqual([kind]);
+      expect(deny.reason).toContain('contains is a substring match');
+      expect(deny.reason).not.toContain(contains);
+    }
+  });
+
+  test('contains passes when the fragment is part of a run id, or holds no id-like run', () => {
+    for (const contains of [RUN_CUSTOMER.slice(0, 13), RUN_ACCOUNT.slice(2, 10), 'CBS_timeout', 'error-code-42']) {
+      expect(checkScope({ tool: 'logs_search', params: { contains }, scopeSet: set })).toEqual({ ok: true });
+    }
+    const withEmail = createScopeSet(chain({ customer_id: RUN_CUSTOMER, aspora_user_id: 'someone@example.com' }));
+    expect(checkScope({ tool: 'logs_search', params: { contains: 'someone@example' }, scopeSet: withEmail })).toEqual({ ok: true });
+  });
+
   test('foreign phone in cbs body', () => {
     const deny = expectDenied(
       checkScope({ tool: 'cbs_call', params: { path: '/fi/customer', body: { mobile: FOREIGN_PHONE } }, scopeSet: set }),
@@ -261,10 +321,15 @@ describe('systemic mode', () => {
     expect(result).toEqual({ ok: true });
   });
 
-  test('systemic logs count and group_by pass', () => {
-    const params = { terms: [FOREIGN_ACCOUNT], count: true };
+  test('systemic logs count and group_by pass without a foreign id, and still check ids (D76)', () => {
+    const params = { message: 'CBS API error', count: true };
     expect(checkScope({ tool: 'logs_search', params, scopeSet: set, systemic: true, logsMode: 'count' })).toEqual({ ok: true });
     expect(checkScope({ tool: 'logs_search', params, scopeSet: set, systemic: true, logsMode: 'group_by' })).toEqual({ ok: true });
+    const grouped = { terms: [FOREIGN_UUID], group_by: ['customer_id', 'x_req_id', 'message', 'error'] };
+    for (const logsMode of ['count', 'group_by'] as const) {
+      const deny = expectDenied(checkScope({ tool: 'logs_search', params: grouped, scopeSet: set, systemic: true, logsMode }));
+      expect(deny.reason).toContain('scope "systemic" does not lift the id check for logs_search');
+    }
   });
 
   test('never widens scope for http_call or cbs_call', () => {
@@ -326,5 +391,204 @@ describe('masking', () => {
 
   test('maskId keeps at most half of a short value', () => {
     expect(maskId({ kind: 'digits', normalised: '123456' })).toBe('digits:***456');
+  });
+});
+
+describe('correlation ids seen earlier in the run (D77)', () => {
+  const REQ_ID = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+  const OTHER_REQ_ID = 'f0e1d2c3-b4a5-4968-8776-655443322110';
+  const runId = 'run-scope-correlation';
+
+  afterEach(() => void releaseObservedIds(runId));
+
+  function observed(): ReadonlySet<string> | undefined {
+    return observedIds(runId);
+  }
+
+  test('a dashed-UUID x_req_id seen in an earlier logs_search result is allowed', () => {
+    observeCorrelationIds(runId, [{ service: 'harbor', x_req_id: REQ_ID.toUpperCase(), message: 'CBS API error' }]);
+    for (const name of ['x_req_id', 'x-req-id']) {
+      const params = { fields: { [name]: REQ_ID } };
+      expect(checkScope({ tool: 'logs_search', params, scopeSet: set, observed: observed() })).toEqual({ ok: true });
+    }
+  });
+
+  test('an x_txn_id never seen is refused, and the reason says why', () => {
+    observeCorrelationIds(runId, [{ x_txn_id: REQ_ID }]);
+    const deny = expectDenied(
+      checkScope({ tool: 'logs_search', params: { fields: { x_txn_id: OTHER_REQ_ID } }, scopeSet: set, observed: observed() }),
+    );
+    expect(deny.reason).toBe(
+      "scope: 1 id is not in the run's ID chain for logs_search (uuid:***2110); a correlation id (x_req_id, x_txn_id, x-req-id " +
+        'or x-txn-id) is allowed in fields, or as a whole terms value, only once an earlier logs_search result in this run has shown it',
+    );
+    // Nothing observed yet: refused the same way.
+    releaseObservedIds(runId);
+    expectDenied(checkScope({ tool: 'logs_search', params: { fields: { x_req_id: REQ_ID } }, scopeSet: set, observed: observed() }));
+  });
+
+  test('a seen id is allowed as a whole terms value, as RTL and ATSPL search a UUID (D76)', () => {
+    observeCorrelationIds(runId, [{ 'x-txn-id': REQ_ID }]);
+    for (const params of [{ terms: [REQ_ID] }, { terms: [` ${REQ_ID} `, RUN_ACCOUNT] }, { any_of: [{ terms: [REQ_ID, RUN_CUSTOMER] }] }]) {
+      expect(checkScope({ tool: 'logs_search', params, scopeSet: set, observed: observed() })).toEqual({ ok: true });
+    }
+    // Never seen: refused, with the correlation note.
+    const deny = expectDenied(checkScope({ tool: 'logs_search', params: { terms: [OTHER_REQ_ID] }, scopeSet: set, observed: observed() }));
+    expect(deny.reason).toContain('only once an earlier logs_search result in this run has shown it');
+  });
+
+  test('the same value in a non-correlation field, a longer term or a message is still refused', () => {
+    observeCorrelationIds(runId, [{ x_req_id: REQ_ID }]);
+    for (const params of [
+      { fields: { form_id: REQ_ID } },
+      { terms: [`req ${REQ_ID}`] },
+      { message: `failed for ${REQ_ID}` },
+      { fields: { x_req_id: REQ_ID, customer_id: REQ_ID } },
+    ]) {
+      const deny = expectDenied(checkScope({ tool: 'logs_search', params, scopeSet: set, observed: observed() }));
+      expect(deny.reason).not.toContain('earlier logs_search result');
+    }
+  });
+
+  test('ids are kept per run and dropped on release', () => {
+    observeCorrelationIds(runId, [{ x_req_id: REQ_ID }, null, 'text', { x_txn_id: 42 }]);
+    expect(observedIds('run-scope-other')).toBeUndefined();
+    expect(releaseObservedIds(runId)).toBe(true);
+    expect(observedIds(runId)).toBeUndefined();
+    expect(releaseObservedIds(runId)).toBe(false);
+  });
+});
+
+describe('device and verification ids seen earlier in the run (D77, Q13)', () => {
+  const DEVICE_ID = 'c0ffee00-1234-4abc-8def-00000000d001';
+  const VERIFICATION_ID = 'c0ffee00-1234-4abc-8def-00000000e002';
+  const OTHER_DEVICE_ID = 'c0ffee00-1234-4abc-8def-00000000d003';
+  const BY_DEVICE = 'SELECT * FROM device_auth_attempts WHERE device_id = $1';
+  const runId = 'run-scope-journey';
+
+  afterEach(() => void releaseObservedIds(runId));
+
+  // The SQL facts come from the parser, as sql_select passes them.
+  const sqlCheck = (tool: string, params: unknown) =>
+    tool === 'sql_select' ? validateSelect(String((params as { sql?: unknown }).sql)) : undefined;
+  const allowed = (tool: string, params: unknown): ScopeCheckResult => {
+    const check = sqlCheck(tool, params);
+    return checkScope({
+      tool,
+      params,
+      scopeSet: set,
+      observed: observedIds(runId),
+      ...(check?.ok === true ? { sqlJourneyParams: check.journeyParams } : {}),
+    });
+  };
+  const observe = (tool: string, params: unknown, records: readonly unknown[]): void => {
+    const check = sqlCheck(tool, params);
+    observeJourneyKeys(runId, tool, params, set, records, check?.ok === true ? check.rowKeys : undefined);
+  };
+  const byCustomer = { fields: { 'x-customer-id': RUN_CUSTOMER } };
+  const JOURNEY_NOTE =
+    'a device or verification id (device_id, x-device-id or verification_id) is allowed only once an earlier logs_search or ' +
+    'sql_select result in this run, fetched by an id from the chain, has shown it under one of those keys, and then only in a ' +
+    'logs_search field of those names, a whole terms value or contains, or as an sql_select $n param compared to a device_id or ' +
+    'verification_id column';
+
+  test('a device_id from a hit fetched by a chain id is allowed in sql_select and logs_search', () => {
+    observe('logs_search', byCustomer, [{ service: 'app-server', 'x-device-id': DEVICE_ID }]);
+    expect(allowed('sql_select', { service: 'guardian', sql: BY_DEVICE, params: [DEVICE_ID] })).toEqual({ ok: true });
+    for (const params of [
+      { fields: { 'x-device-id': DEVICE_ID } },
+      { fields: { device_id: DEVICE_ID } },
+      { terms: [DEVICE_ID] },
+      { message: 'checking verification status', contains: DEVICE_ID },
+    ]) {
+      expect(allowed('logs_search', params)).toEqual({ ok: true });
+    }
+  });
+
+  test('a verification_id from rows fetched by a chain id is allowed as a param, not in the SQL text', () => {
+    const sql = { service: 'guardian', sql: 'SELECT verification_id FROM refresh_tokens WHERE subject = $1::text', params: [RUN_CUSTOMER] };
+    observe('sql_select', sql, [{ verification_id: VERIFICATION_ID }]);
+    expect(allowed('logs_search', { service: 'guardian', fields: { verification_id: VERIFICATION_ID } })).toEqual({ ok: true });
+    const byVerification = 'SELECT * FROM device_auth_attempts WHERE verification_id = $1';
+    expect(allowed('sql_select', { sql: byVerification, params: [VERIFICATION_ID] })).toEqual({ ok: true });
+    const literal = expectDenied(allowed('sql_select', { sql: `SELECT * FROM device_auth_attempts WHERE verification_id = '${VERIFICATION_ID}'` }));
+    expect(literal.reason).toContain(JOURNEY_NOTE);
+    // Compared to another column, or also used as another column's value, it is not a journey key.
+    expectDenied(allowed('sql_select', { sql: 'SELECT * FROM refresh_tokens WHERE subject = $1', params: [VERIFICATION_ID] }));
+    expectDenied(allowed('sql_select', { sql: `${byVerification} OR subject = $1`, params: [VERIFICATION_ID] }));
+  });
+
+  test('rows of a join on id columns, tied by a chain id, count', () => {
+    const sql =
+      'SELECT daa.* FROM refresh_tokens rt JOIN device_auth_attempts daa ON daa.verification_id = rt.verification_id ' +
+      'WHERE rt.subject = $1 ORDER BY daa.created_at';
+    observe('sql_select', { sql, params: [RUN_CUSTOMER] }, [{ device_id: DEVICE_ID }]);
+    expect(allowed('sql_select', { sql: BY_DEVICE, params: [DEVICE_ID] })).toEqual({ ok: true });
+  });
+
+  test('an unseen device id is refused, and the reason says where it may be used', () => {
+    observe('logs_search', byCustomer, [{ 'x-device-id': DEVICE_ID }]);
+    for (const [tool, params] of [
+      ['logs_search', { fields: { 'x-device-id': OTHER_DEVICE_ID } }],
+      ['logs_search', { fields: { verification_id: OTHER_DEVICE_ID } }],
+      ['sql_select', { sql: BY_DEVICE, params: [OTHER_DEVICE_ID] }],
+    ] as const) {
+      const deny = expectDenied(allowed(tool, params));
+      expect(deny.reason).toBe(`scope: 1 id is not in the run's ID chain for ${tool} (uuid:***d003); ${JOURNEY_NOTE}`);
+    }
+  });
+
+  test('a foreign customer id gets the plain reason, without the device note', () => {
+    const sql = expectDenied(allowed('sql_select', { sql: 'SELECT * FROM refresh_tokens WHERE subject = $1', params: [FOREIGN_UUID] }));
+    expect(sql.reason).toBe(`scope: 1 id is not in the run's ID chain for sql_select (uuid:***3d47)`);
+    const terms = expectDenied(allowed('logs_search', { terms: [FOREIGN_UUID] }));
+    expect(terms.reason).toContain('a correlation id');
+    expect(terms.reason).not.toContain('a device or verification id');
+  });
+
+  test('ids in a result not fetched by a chain id do not count', () => {
+    const hits = [{ 'x-device-id': DEVICE_ID, verification_id: VERIFICATION_ID, device_id: DEVICE_ID }];
+    observeCorrelationIds(runId, [{ x_req_id: OTHER_DEVICE_ID }]);
+    const since = "created_at > (SELECT min(created_at) FROM refresh_tokens WHERE subject = $1)";
+    for (const [tool, params] of [
+      // No id at all, a correlation id, a foreign id only in exclude, a contains fragment.
+      ['logs_search', { message: 'SIM binding poll' }],
+      ['logs_search', { fields: { x_req_id: OTHER_DEVICE_ID } }],
+      ['logs_search', { message: 'poll', exclude: [RUN_CUSTOMER] }],
+      ['logs_search', { contains: RUN_CUSTOMER.slice(0, 8) }],
+      // An any_of group that matches without the chain id.
+      ['logs_search', { any_of: [{ terms: [RUN_CUSTOMER, 'poll'] }] }],
+      ['logs_search', { terms: [RUN_CUSTOMER], count: true, scope: 'systemic' }],
+      // SQL whose rows are not all tied to the chain id.
+      ['sql_select', { sql: 'SELECT device_id FROM device_auth_attempts LIMIT 5' }],
+      ['sql_select', { sql: 'SELECT device_id FROM refresh_tokens WHERE subject <> $1', params: [RUN_CUSTOMER] }],
+      ['sql_select', { sql: `SELECT device_id FROM refresh_tokens -- ${RUN_CUSTOMER}` }],
+      ['sql_select', { sql: 'SELECT device_id FROM refresh_tokens WHERE subject = $1 OR true', params: [RUN_CUSTOMER] }],
+      ['sql_select', { sql: 'SELECT device_id FROM refresh_tokens WHERE NOT (subject = $1)', params: [RUN_CUSTOMER] }],
+      ['sql_select', { sql: `SELECT device_id FROM device_auth_attempts WHERE ${since}`, params: [RUN_CUSTOMER] }],
+      ['sql_select', { sql: 'SELECT subject AS device_id FROM refresh_tokens WHERE verification_id = $1', params: [RUN_CUSTOMER] }],
+      ['sql_select', { sql: 'SELECT d.device_id FROM refresh_tokens r, device_auth_attempts d WHERE r.subject = $1', params: [RUN_CUSTOMER] }],
+      ['sql_select', { sql: 'SELECT d.device_id FROM refresh_tokens r JOIN device_auth_attempts d ON r.status = d.status WHERE r.subject = $1', params: [RUN_CUSTOMER] }],
+      ['sql_select', { sql: 'SELECT device_id FROM refresh_tokens WHERE subject = $1 UNION SELECT device_id FROM device_auth_attempts', params: [RUN_CUSTOMER] }],
+    ] as const) {
+      observe(tool, params, hits);
+    }
+    for (const id of [DEVICE_ID, VERIFICATION_ID]) {
+      expectDenied(allowed('logs_search', { fields: { 'x-device-id': id } }));
+      expectDenied(allowed('sql_select', { sql: BY_DEVICE, params: [id] }));
+    }
+    // An any_of group of chain ids only does restrict the hits.
+    observe('logs_search', { any_of: [{ terms: [RUN_CUSTOMER, RUN_FORM] }] }, hits);
+    expect(allowed('logs_search', { fields: { 'x-device-id': DEVICE_ID } })).toEqual({ ok: true });
+  });
+
+  test('a journey key is not a correlation id, and only its own keys are read', () => {
+    observe('logs_search', byCustomer, [{ message: DEVICE_ID, deviceId: OTHER_DEVICE_ID, 'x-device-id': VERIFICATION_ID }]);
+    expectDenied(allowed('logs_search', { fields: { x_req_id: VERIFICATION_ID } }));
+    expectDenied(allowed('logs_search', { terms: [DEVICE_ID] }));
+    expectDenied(allowed('logs_search', { terms: [OTHER_DEVICE_ID] }));
+    // A correlation id seen earlier is still not usable in sql_select.
+    observeCorrelationIds(runId, [{ x_req_id: OTHER_DEVICE_ID }]);
+    expectDenied(allowed('sql_select', { sql: BY_DEVICE, params: [OTHER_DEVICE_ID] }));
   });
 });

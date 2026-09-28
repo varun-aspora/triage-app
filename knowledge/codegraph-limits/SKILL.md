@@ -24,6 +24,8 @@ run.
 | `code_impact` | What a change to a given symbol would reach. | A list of affected symbols and files. |
 | `repo_read` | A file, or a line range of it. | Text. |
 | `repo_grep` | A pattern across a repo, optionally narrowed by a path glob. | Matches with file and line. |
+| `repo_find` | File paths matching a glob, before you guess one. | Paths, paged. |
+| `repo_tree` | The directories and files under a path, to a depth (depth 1 is ls). | Paths, with counts per directory. |
 
 Use `repo_read` and `repo_grep` for anything the graph does not index (see
 below), and to confirm a graph answer against the source before you cite it.

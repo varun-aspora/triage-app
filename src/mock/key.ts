@@ -42,7 +42,8 @@ export type HttpCallFacts = {
 
 export type LogsSearchFacts = {
   readonly entity: Entity;
-  readonly service: string;
+  /** Absent when the query has no service clause (D76). */
+  readonly service?: string;
   readonly terms: readonly string[];
   readonly mode: LogsMode;
   readonly group_by?: string;
@@ -136,7 +137,7 @@ const BUILDERS: { [K in FixtureKind]: (facts: SemanticKeyFacts[K]) => unknown } 
   }),
   logs_search: (f) => ({
     entity: f.entity,
-    service: trim(f.service),
+    service: optionalTrim(f.service),
     terms: sortedSet(f.terms.map(trim).filter((t) => t !== '')),
     mode: f.mode,
     group_by: optionalTrim(f.group_by),

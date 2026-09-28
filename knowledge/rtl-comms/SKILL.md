@@ -50,12 +50,12 @@ sql_select {
 }
 ```
 
-Then list the columns of the one you pick:
+Then list the columns of the tables you need, all in one call:
 
 ```
 sql_select {
   service: "comms",
-  sql: "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position",
-  params: ["<table_name>"]
+  sql: "SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_name IN ($1, $2) ORDER BY table_name, ordinal_position",
+  params: ["<table_a>", "<table_b>"]
 }
 ```

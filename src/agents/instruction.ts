@@ -4,7 +4,10 @@
 // short fixed rule block and the run's own data: run id, window, enabled
 // entities, the entities the request names, known ids and a brief skeleton pre-filled with them. It is pure
 // and reads only the knowledge cached at boot, so it is safe in a render.
+// When ingress matched a known pattern, a lead section carries that
+// pattern's first queries for the briefs, marked as a lead to test (D80).
 
+import { parsePatterns, type Pattern } from '../classify/patterns.ts';
 import { ENTITIES, KNOWN_ID_KEYS, type Entity, type KnownIds } from '../types/core.ts';
 import type { TriageInit } from '../types/classification.ts';
 import { currentKnowledge, type Knowledge } from './skills.ts';
@@ -33,7 +36,7 @@ export type MethodOptions = {
 
 const FIXED_RULES = `## Fixed rules
 
-- Evidence ladder: admin API (when configured), then DB, then logs, then CBS (SSFB only). Read logs before anything else that would repeat a call, and never replay a call to reproduce an issue.
+- Evidence: no fixed order of sources. Logs and DB reads first, with code alongside to learn table, field and log message names; an admin API only for live state the DB does not hold, and only where one is configured; CBS on SSFB only. Read logs before anything else that would repeat a call, and never replay a call to reproduce an issue.
 - Confidence: high when two independent sources agree and nothing contradicts them; medium when one source supports the claim and nothing contradicts it; low when the claim rests on inference or sources disagree. Say which it is and why.
 - Label every point-in-time read (balances, statuses, current state) with its taken_at timestamp. Current state may have changed since it was read.
 - The current ask is the latest message in the thread, not the first.
@@ -55,6 +58,7 @@ export function methodText(init: TriageInit, options: MethodOptions = {}): strin
     ...docs,
     FIXED_RULES,
     runSection(init, entities, focus, ids, window, options.deployManifests ?? []),
+    ...leadSection(init, knowledge, entities),
     briefSection(focus.length > 0 ? focus : entities, ids, window, options.services),
   ];
   return `${sections.join('\n\n')}\n`;
@@ -87,6 +91,58 @@ function runSection(
     `- Known ids: ${ids}`,
     `- Tier: ${init.classification.tier_final}`,
   ].join('\n');
+}
+
+// patterns.json from the loaded patterns skill, parsed once per knowledge
+// tree. A string is the reason it could not be read.
+const parsedPatterns = new WeakMap<Knowledge, readonly Pattern[] | string>();
+
+function knownPatterns(knowledge: Knowledge): readonly Pattern[] | string {
+  let out = parsedPatterns.get(knowledge);
+  if (out === undefined) {
+    const raw = knowledge.skills.get('patterns')?.files?.['patterns.json'];
+    try {
+      out = typeof raw === 'string' ? parsePatterns(JSON.parse(raw)) : 'patterns/patterns.json is not loaded';
+    } catch (err) {
+      out = (err as Error).message;
+    }
+    parsedPatterns.set(knowledge, out);
+  }
+  return out;
+}
+
+// The pattern ingress matched (category, services and thread text; see
+// src/classify/patterns.ts), with its first queries for the briefs. Past
+// patterns are leads, never answers (owner answer Q2). Empty without a match.
+function leadSection(init: TriageInit, knowledge: Knowledge, entities: readonly Entity[]): string[] {
+  const id = init.classification.proposed.matched_pattern_id;
+  if (id === undefined) return [];
+  const patterns = knownPatterns(knowledge);
+  const pattern = typeof patterns === 'string' ? undefined : patterns.find((p) => p.id === id);
+  const head = ['## Known pattern lead', ''];
+  if (pattern === undefined) {
+    const why = typeof patterns === 'string' ? patterns : 'no entry in patterns.json has that id';
+    return [[...head, `Ingress matched \`${clean(id)}\`, but its entry could not be read: ${clean(why)}. Investigate as usual.`].join('\n')];
+  }
+  const queries = (pattern.first_queries ?? []).map((q) => {
+    const off = entities.includes(q.entity) ? '' : ' (entity not enabled in this run; list it as a gap)';
+    return `- ${q.entity}: ${oneLine(q.query)}${off}`;
+  });
+  return [
+    [
+      ...head,
+      `The thread matches known pattern \`${pattern.id}\` (${pattern.category}, from ${pattern.source_ref}). It is a lead to test, not an answer: this run can differ.`,
+      '',
+      `- In the brief of each entity below, add a line after Question: \`Lead: known pattern ${pattern.id}, to test, not an answer. First queries: <that entity's queries>\`.`,
+      "- Keep the pattern only when this run's evidence matches it. Otherwise leave `matched_pattern_id` out of the report and add a gap:",
+      `  \`pattern ${pattern.id} tried and rejected: <what did not match>\`.`,
+      '',
+      ...(queries.length > 0
+        ? ['First queries:', ...queries]
+        : [`First check (query_recipe, for ${pattern.entities.join(', ')}): ${oneLine(pattern.query_recipe)}`]),
+      ...(pattern.lesson !== undefined ? ['', `Lesson from a reviewed case: ${oneLine(pattern.lesson)}`] : []),
+    ].join('\n'),
+  ];
 }
 
 function briefSection(
@@ -137,4 +193,9 @@ function knownIds(init: TriageInit): string {
 function clean(value: string): string {
   const flat = value.replace(/[\u0000-\u001f\u007f`]+/g, ' ').replace(/\s+/g, ' ').trim();
   return flat.length > 200 ? `${flat.slice(0, 200)}…` : flat;
+}
+
+// Pattern text is curated in the repo, so it is only kept on one line.
+function oneLine(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
 }

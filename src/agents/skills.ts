@@ -383,6 +383,11 @@ export function serviceSkills(
   return Object.freeze({ skills: Object.freeze(skills), missing: Object.freeze(missing) });
 }
 
+/** The entity's journey notes (metadata kind 'journey'), such as rtl-nri-onboarding, for its investigators. */
+export function journeySkills(entity: Entity, knowledge: Knowledge = currentKnowledge()): readonly SkillDefinition[] {
+  return [...knowledge.skills.values()].filter((s) => s.metadata?.['kind'] === 'journey' && s.metadata['entity'] === entity);
+}
+
 export function patternsSkill(knowledge: Knowledge = currentKnowledge()): SkillDefinition | undefined {
   return knowledge.skills.get('patterns');
 }

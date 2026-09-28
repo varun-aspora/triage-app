@@ -3,20 +3,22 @@ import { qwSafeProblem } from '../../gate/quickwit.ts';
 import type { ExecOptions, ExecResult, ExecRunner } from '../exec.ts';
 import { createFakeRunner, type FakeStep } from '../exec-fake.ts';
 import { ConnectorError, MAX_EXEC_OUTPUT_BYTES } from '../types.ts';
-import { groupHits, QW_FLAGS, qwArgv, qwSearch, type QwSearchRequest } from './qw-transport.ts';
+import { QW_FLAGS, qwArgv, qwSearch, type QwSearchRequest } from './qw-transport.ts';
 
 const FIELDS = ['service', 'level', 'message', 'timestamp'];
+const WINDOW = { from: '2026-09-21T10:00:00.500Z', to: '2026-09-23T10:00:00.200Z' };
 
 function req(over: Partial<QwSearchRequest> = {}): QwSearchRequest {
   return {
     bin: 'qw',
     context: 'ssfb-prod',
     index: 'logs-v1',
-    query: 'service:harbor AND message:"doc fetch failed"',
+    query: "service:harbor AND 'doc fetch failed'",
     mode: 'search',
     fields: FIELDS,
-    maxHits: 50,
-    since: '2d',
+    maxHits: 250,
+    offset: 0,
+    window: WINDOW,
     timeoutMs: 1000,
     signal: new AbortController().signal,
     ...over,
@@ -63,23 +65,29 @@ function expectSafeArgv(argv: readonly string[]): void {
 
 describe('qwArgv', () => {
   test('every mode passes --context with the entity context, exactly once', () => {
-    for (const r of [req(), req({ mode: 'count' }), req({ mode: 'histogram', groupBy: 'service' }), req({ context: 'core-prod-london' })]) {
+    for (const r of [req(), req({ mode: 'count' }), req({ context: 'core-prod-london' })]) {
       const argv = qwArgv(r);
       expect(argv.filter((a) => a === '--context')).toHaveLength(1);
       expect(argv[argv.indexOf('--context') + 1]).toBe(r.context);
     }
   });
 
-  test('search: subcommand, index, query, since, max hits, json, fields, context', () => {
-    const argv = qwArgv(req());
+  test('search: sort by timestamp, 250 hits from the offset, both ends of the window in UTC, json, fields, context', () => {
+    const argv = qwArgv(req({ offset: 500 }));
     expect(argv).toEqual([
       'search',
       'logs-v1',
-      'service:harbor AND message:"doc fetch failed"',
-      '--since',
-      '2d',
+      "service:harbor AND 'doc fetch failed'",
+      '--sort-by',
+      'timestamp',
       '--max-hits',
-      '50',
+      '250',
+      '--offset',
+      '500',
+      '--from',
+      '2026-09-21T10:00:00Z',
+      '--to',
+      '2026-09-23T10:00:01Z',
       '-o',
       'json',
       '--fields',
@@ -90,27 +98,49 @@ describe('qwArgv', () => {
     expectSafeArgv(argv);
   });
 
-  test('count: no projection and no max hits', () => {
+  test('search for whole documents sends no --fields', () => {
+    const { fields: _f, ...rest } = req();
+    const argv = qwArgv(rest);
+    expect(argv).not.toContain('--fields');
+    expectSafeArgv(argv);
+  });
+
+  test('count: both ends of the window, no projection, no paging', () => {
     const argv = qwArgv(req({ mode: 'count' }));
-    expect(argv).toEqual(['count', 'logs-v1', 'service:harbor AND message:"doc fetch failed"', '--since', '2d', '-o', 'json', '--context', 'ssfb-prod']);
+    expect(argv).toEqual([
+      'count',
+      'logs-v1',
+      "service:harbor AND 'doc fetch failed'",
+      '--from',
+      '2026-09-21T10:00:00Z',
+      '--to',
+      '2026-09-23T10:00:01Z',
+      '-o',
+      'json',
+      '--context',
+      'ssfb-prod',
+    ]);
     expectSafeArgv(argv);
   });
 
-  test('group_by: search projected to the group field (qw histogram is a date histogram)', () => {
-    const argv = qwArgv(req({ mode: 'histogram', groupBy: 'error' }));
-    expect(argv[0]).toBe('search');
-    expect(argv[argv.indexOf('--fields') + 1]).toBe('error');
-    expect(argv[argv.indexOf('--max-hits') + 1]).toBe('50');
-    expectSafeArgv(argv);
+  test('no --since anywhere: the upper bound is always sent', () => {
+    for (const r of [req(), req({ mode: 'count' })]) {
+      const argv = qwArgv(r);
+      expect(argv).not.toContain('--since');
+      expect(argv).toContain('--to');
+    }
+    expect(QW_FLAGS.has('--since')).toBe(false);
   });
 
-  test('group_by mode without a field is refused', () => {
-    expect(() => qwArgv(req({ mode: 'histogram' }))).toThrow(/group_by/);
+  test('a bad max hits or offset is refused', () => {
+    expect(() => qwArgv(req({ maxHits: 0 }))).toThrow(/max hits/);
+    expect(() => qwArgv(req({ offset: -1 }))).toThrow(/offset/);
+    expect(() => qwArgv(req({ offset: 1.5 }))).toThrow(/offset/);
   });
 });
 
 describe('qwSearch argv and charset', () => {
-  test('the runner gets QW_BIN and an argv array with --context, -o json and --since, never a shell option', async () => {
+  test('the runner gets QW_BIN and an argv array with --context, -o json, --from and --to, never a shell option', async () => {
     const r = req({ bin: '/usr/local/bin/qw' });
     const fake = createFakeRunner([step(r, { stdout: '{"num_hits":0,"hits":[]}' })]);
     const runner = spyOptions(fake);
@@ -122,7 +152,8 @@ describe('qwSearch argv and charset', () => {
     expect(Array.isArray(argv)).toBe(true);
     expect(argv[argv.indexOf('--context') + 1]).toBe('ssfb-prod');
     expect(argv[argv.indexOf('-o') + 1]).toBe('json');
-    expect(argv).toContain('--since');
+    expect(argv).toContain('--from');
+    expect(argv).toContain('--to');
     expectSafeArgv(argv);
     const opts = runner.opts[0] as ExecOptions & { shell?: unknown };
     expect('shell' in opts).toBe(false);
@@ -152,8 +183,8 @@ describe('qwSearch argv and charset', () => {
     });
   }
 
-  test('an unsafe context, index, since or bin is refused before exec', async () => {
-    for (const over of [{ context: 'ssfb-prod;id' }, { context: '-x' }, { index: 'logs|x' }, { since: '-1d' }, { bin: '-qw' }]) {
+  test('an unsafe context, index, field list or bin is refused before exec', async () => {
+    for (const over of [{ context: 'ssfb-prod;id' }, { context: '-x' }, { index: 'logs|x' }, { fields: ['-x'] }, { bin: '-qw' }]) {
       const fake = createFakeRunner([]);
       const err = await errorOf(qwSearch(fake, req(over)));
       expect(err.code).toBe('refused');
@@ -195,15 +226,6 @@ describe('qwSearch output parsing', () => {
       const out = await qwSearch(createFakeRunner([step(r, { stdout })]), r);
       expect(out).toEqual({ kind: 'count', num_hits: 42 });
     }
-  });
-
-  test('group_by counts the returned hits per value and flags partial groups', async () => {
-    const r = req({ mode: 'histogram', groupBy: 'error' });
-    const hits = [{ error: 'b' }, { error: 'a' }, { error: 'b' }, {}];
-    const full = await qwSearch(createFakeRunner([step(r, { stdout: JSON.stringify({ num_hits: 4, hits }) })]), r);
-    expect(full).toEqual({ kind: 'groups', groups: [{ key: 'b', count: 2 }, { key: 'a', count: 1 }], num_hits: 4, truncated: false });
-    const partial = await qwSearch(createFakeRunner([step(r, { stdout: JSON.stringify({ num_hits: 900, hits }) })]), r);
-    expect(partial.kind === 'groups' && partial.truncated).toBe(true);
   });
 
   test('output that is not the expected JSON is unreachable', async () => {
@@ -330,15 +352,5 @@ describe('qwSearch failures', () => {
       },
     };
     await expect(qwSearch(runner, req({ signal: ac.signal }))).rejects.toThrow('stopped mid-run');
-  });
-});
-
-describe('groupHits', () => {
-  test('non-string values are keyed by their JSON text; ties sort by key', () => {
-    expect(groupHits([{ s: 500 }, { s: 200 }, { s: 500 }, { s: null }, { s: 404 }], 's')).toEqual([
-      { key: '500', count: 2 },
-      { key: '200', count: 1 },
-      { key: '404', count: 1 },
-    ]);
   });
 });

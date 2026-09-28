@@ -1,8 +1,17 @@
 // The one wrapper every I/O tool runs through, so the order of checks is fixed
 // in one place (HLD 02 §2 and §3, D2, D19, D20, D26, D27, D42, D45):
 //
-//   signal -> budget -> scope -> gate -> not configured -> mock or real
-//   -> audit -> stage to /data -> model-facing redaction -> envelope
+//   signal -> repeat -> budget -> scope -> gate -> not configured
+//   -> mock or real -> audit -> stage to /data -> model-facing redaction
+//   -> envelope
+//
+// Repeat (D79): a tool that sets spec.repeat opts into the run's repeat
+// cache (src/runlog/actions.ts). An exact repeat of an earlier ok call in the
+// same run gets that result back with a note naming who ran it and when,
+// writes one audit line with exit 'reused' and uses no budget. The earlier
+// call passed scope and the gate with the same input, and scope only grows
+// during a run, so the lookup can come first. Refusals and errors are never
+// kept, so they run again.
 //
 // Every decision writes exactly one audit line, refusals included. Refusals
 // come back as short model-facing text and the run continues. Two things
@@ -27,7 +36,9 @@ import { checkScope, type LogsMode } from '../../gate/scope.ts';
 import { classifySqlState, isSqlState, maskSqlValues, sqlErrorMessage, type SqlStateInfo } from '../../gate/sql-errors.ts';
 import { redactModelFacing, redactPersisted } from '../../gate/redact.ts';
 import { FixtureMissError } from '../../mock/errors.ts';
+import { keyString } from '../../mock/key.ts';
 import type { FixtureEntity, FixtureKind, SemanticKey } from '../../mock/types.ts';
+import { findRepeat, rememberRepeat } from '../../runlog/actions.ts';
 import type { AuditDecision, AuditTransport } from '../../types/audit.ts';
 import type { Entity } from '../../types/core.ts';
 import { notConfigured, ok, refused, type ToolEnvelope, unreachable } from '../../types/tool-result.ts';
@@ -40,6 +51,7 @@ import { scopeSetOf } from './context.ts';
 /** The steps of runIoTool, in order. onStep reports each one as it starts. */
 export const PIPELINE_STEPS = [
   'signal',
+  'repeat',
   'budget',
   'scope',
   'gate',
@@ -79,6 +91,10 @@ export type ScopeOptions = {
   /** From the SQL parser: true when the select list is aggregate-only. */
   readonly sqlAggregateOnly?: boolean;
   readonly logsMode?: LogsMode;
+  /** Correlation ids and journey keys seen in earlier results of the run (D77). */
+  readonly observed?: ReadonlySet<string>;
+  /** From the SQL parser: the $n params compared only to a device_id or verification_id column (Q13). */
+  readonly sqlJourneyParams?: readonly number[];
 };
 
 export type FixtureRef<K extends FixtureKind> = {
@@ -115,6 +131,13 @@ export type IoToolSpec<K extends FixtureKind, T> = {
   readonly count?: number;
   /** Overrides the context entity, for the few tools that act across entities. */
   readonly entity?: Entity | null;
+  /**
+   * Opts the call into the run's repeat cache (D79). Returns what makes two
+   * calls the same (the validated input, plus the window the tool resolved
+   * when the model gave none), or false when this call must run again (a
+   * read of "now", a write). Leave it out for tools with side effects.
+   */
+  readonly repeat?: () => unknown;
 };
 
 /** The sandbox surface staging needs: a harness tool's harness. */
@@ -339,16 +362,29 @@ export async function runIoTool<K extends FixtureKind, T>(
       ? refuse(`not configured for ${spec.service}`)
       : finish(() => notConfigured(entity, spec.service, now), '');
 
-  // 1. Budget.
+  // 1. Repeat: an exact repeat of an earlier ok call in this run. A spent run
+  // budget skips it, so the model reads the budget message instead.
+  const repeatKey = repeatKeyOf(spec.tool, where, spec.repeat);
+  if (repeatKey !== undefined) {
+    step('repeat');
+    const earlier = deps.budget.state().exhausted ? undefined : findRepeat(toolContext.runId, repeatKey, now());
+    if (earlier !== undefined) {
+      audit({ decision: 'allow', exit: 'reused', transport: noIoTransport, summary: `${spec.tool} ${where}: result reused` });
+      return earlier;
+    }
+  }
+
+  // 2. Budget.
   step('budget');
   const budget = deps.budget.consumeToolCall(spec.tool, entity ?? undefined);
   if (!budget.ok) {
-    if (budget.reason !== 'entity_calls') deps.escalation.markBudgetExhausted();
+    // An entity or per-tool cap refuses that target only; the run goes on.
+    if (budget.reason !== 'entity_calls' && budget.reason !== 'tool_cap') deps.escalation.markBudgetExhausted();
     audit({ decision: 'deny', exit: 'refused', transport: noIoTransport, reason: `budget: ${budget.reason}` });
     return refuse(budget.message);
   }
 
-  // 2. Scope: every id-shaped value must be in the run's IdChain (D26).
+  // 3. Scope: every id-shaped value must be in the run's IdChain (D26).
   if (spec.scope !== 'skip') {
     step('scope');
     const options = spec.scope;
@@ -359,6 +395,8 @@ export async function runIoTool<K extends FixtureKind, T>(
       ...(options.systemic !== undefined ? { systemic: options.systemic } : {}),
       ...(options.sqlAggregateOnly !== undefined ? { sqlAggregateOnly: options.sqlAggregateOnly } : {}),
       ...(options.logsMode !== undefined ? { logsMode: options.logsMode } : {}),
+      ...(options.observed !== undefined ? { observed: options.observed } : {}),
+      ...(options.sqlJourneyParams !== undefined ? { sqlJourneyParams: options.sqlJourneyParams } : {}),
     });
     if (!result.ok) {
       audit({ decision: 'deny', exit: 'refused', transport: noIoTransport, reason: result.reason });
@@ -369,7 +407,7 @@ export async function runIoTool<K extends FixtureKind, T>(
     }
   }
 
-  // 3. Tool-specific gate.
+  // 4. Tool-specific gate.
   let gate: GateDecision = { ok: true };
   if (spec.gate !== undefined) {
     step('gate');
@@ -380,7 +418,7 @@ export async function runIoTool<K extends FixtureKind, T>(
     }
   }
 
-  // 4. Not configured: the backing env var is blank or missing.
+  // 5. Not configured: the backing env var is blank or missing.
   step('not_configured');
   if (spec.backing.status !== 'ok') {
     audit({
@@ -393,7 +431,7 @@ export async function runIoTool<K extends FixtureKind, T>(
     return notConfiguredEnvelope();
   }
 
-  // 5. Mock or real. resolveIo never calls real() in mock mode (D19).
+  // 6. Mock or real. resolveIo never calls real() in mock mode (D19).
   step('io');
   const fixture = spec.fixture();
   const signal = ctx.signal ?? new AbortController().signal;
@@ -505,7 +543,7 @@ export async function runIoTool<K extends FixtureKind, T>(
     return refuse(`No ${fixture.kind} fixture for this call (mock mode). Treat it as no data and record the gap.`);
   }
 
-  // 6. Audit the allowed call.
+  // 7. Audit the allowed call.
   const value = outcome.value;
   audit({
     decision: 'allow',
@@ -515,7 +553,7 @@ export async function runIoTool<K extends FixtureKind, T>(
     gate,
   });
 
-  // 7. Stage the full result. A failure is logged and does not fail the call.
+  // 8. Stage the full result. A failure is logged and does not fail the call.
   let stagedPath: string | undefined;
   if (spec.stage !== undefined) {
     step('stage');
@@ -526,10 +564,28 @@ export async function runIoTool<K extends FixtureKind, T>(
     if (staged.staged) stagedPath = staged.path;
   }
 
-  // 8. Model-facing redaction, then 9. the envelope.
+  // 9. Model-facing redaction, then 10. the envelope.
   const rendered = spec.render(value);
   const data = stagedPath !== undefined && isPlainObject(rendered) ? { ...rendered, staged_file: stagedPath } : rendered;
-  return finish((safe) => ok(asJson(safe), now), data);
+  const envelope = finish((safe) => ok(asJson(safe), now), data);
+  if (repeatKey !== undefined) {
+    rememberRepeat(toolContext.runId, repeatKey, envelope, toolContext.agent ?? 'an earlier call', now().toISOString());
+  }
+  return envelope;
+}
+
+// The repeat cache key: tool, target and the facts spec.repeat returns, as
+// canonical JSON (src/mock/key.ts). Not the fixture's semantic key: that one
+// leaves out the SQL text and the logs window and paging, so different
+// questions would share it.
+function repeatKeyOf(tool: string, where: string, repeat: (() => unknown) | undefined): string | undefined {
+  if (repeat === undefined) return undefined;
+  try {
+    const facts = repeat();
+    return facts === false ? undefined : keyString({ tool, where, facts });
+  } catch {
+    return undefined;
+  }
 }
 
 // Flue JSON-stringifies tool output; round-tripping here makes the envelope

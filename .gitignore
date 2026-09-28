@@ -6,6 +6,8 @@ tmp
 # recorded fixtures and eval cases that no human has reviewed yet
 fixtures/_unreviewed/
 evals/_unreviewed/
+# pattern note drafts from reviewed cases, until an owner merges one (D92)
+patterns/_unreviewed/
 # import lists written by bun run gen
 *.gen.ts
 

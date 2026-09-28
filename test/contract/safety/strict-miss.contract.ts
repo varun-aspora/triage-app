@@ -47,7 +47,7 @@ vi.mock('../../../src/config/registry.ts', async (importOriginal) => {
       ...registry,
       serviceDb: (entity, service) => {
         const cap = registry.serviceDb(entity, service);
-        return entity === 'atspl' && cap?.status === 'disabled' ? ok({ envName: cap.envName }, PLACEHOLDER) : cap;
+        return entity === 'atspl' && cap?.status === 'disabled' ? ok({ envName: cap.envName, naiveTimestampZone: cap.naiveTimestampZone }, PLACEHOLDER) : cap;
       },
       serviceApi: (entity, service) => {
         const cap = registry.serviceApi(entity, service);

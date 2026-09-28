@@ -48,7 +48,7 @@ calls" are the extra requests a step makes to render or check input.
 | Step | `screen_type` | `workflowOwner` | Submit | Data calls |
 |---|---|---|---|---|
 | journey | `nri_journey_stepper` | `ASPORA_RTL` | `rtl:workflow` | none |
-| user basics | `nri_onboarding_user_basics_page` | `ASPORA_RTL` | `rtl:workflow` | `rtl:banking`; email identity through user-vault (no registry key) |
+| user basics | `nri_onboarding_user_basics_page` | `ASPORA_RTL` | `rtl:workflow` | `rtl:banking`; email identity through user-vault (logs only: `rtl:uservault`) |
 | user details | `nri_onboarding_user_details_page` | `ASPORA_RTL` | `rtl:workflow` | none |
 | PAN and name | `nri_onboarding_pan_details_page` | `SHIVALIK_BANK` | `ssfb:workflow` | `ssfb:harbor` PAN dedupe and document verification |
 | address | `nri_onboarding_address_page` | `ASPORA_RTL` | `rtl:workflow` | `ssfb:harbor` address lookup |
@@ -151,6 +151,14 @@ transfer OTP step (guardian `api/v1/auth/challenges/generate`, only shown if
   bank search, waitlist) use the Aspora user token instead.
 
 ## Client code to read
+
+Read the app code when the backend is clean and the client cannot report
+what happened. The backend never sees some steps: whether the app sent the
+SIM-binding SMS (no vendor callback reached `ssfb:guardian`), whether a push
+arrived, or what the app did with a response it got. For those, the code is
+the only evidence. For SIM binding, read `vance-android`
+`app/.../ui/nre_nro_accounts/security/device_binding/`. Cite it as what the
+app does, not what this user's device did.
 
 - Android (`vance-android`, Kotlin): the modules that matter are `app`,
   `banking-sdk`, `data-layer`, `forex` and `analytics`. Routing lives in

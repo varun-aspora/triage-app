@@ -43,9 +43,11 @@ import { createHttpConnector } from '../connectors/http/client.ts';
 import { createQuickwitConnector } from '../connectors/quickwit/client.ts';
 import { createSqlConnector } from '../connectors/sql/pg-client.ts';
 import { type AuditSink, createJsonlAuditSink } from '../gate/audit-sink.ts';
+import { releaseObservedIds } from '../gate/scope.ts';
 import { modelForTier, thinkingForTier } from '../models.ts';
 import { netTcpConnect } from '../ops/doctor/probes.ts';
 import { runTunnelPreflight } from '../ops/preflight.ts';
+import { releaseActions, ROOT_AGENT } from '../runlog/actions.ts';
 import { getRunStore } from '../runstore/index.ts';
 import type { RunStore } from '../runstore/types.ts';
 import { releaseConnectorFailures } from '../tools/_lib/connector-failures.ts';
@@ -550,16 +552,17 @@ export function runDepsFor(runId: RunId, init: TriageInit, rt: TriageRuntime = t
 
 /** The ToolContext of the triage mount: no entity, the run id by closure. */
 export function triageToolContext(runId: RunId, deps: ToolDeps, rt: TriageRuntime = triageRuntime()): ToolContext {
-  return Object.freeze({ runId, entity: null, config: rt.config, registry: rt.registry, deps });
+  return Object.freeze({ runId, entity: null, agent: ROOT_AGENT, config: rt.config, registry: rt.registry, deps });
 }
 
 /**
  * Drops the run's in-process state once a response settles: its deps, the
  * escalation store, the connector failure record, the synthesis count, the
- * written-report, opened-question and opened-block marks and the tripwire's
- * pending task decisions. The metered usage is dropped by the settle code
- * after it is stored (D59). Persistent state and the run store keep what
- * matters.
+ * written-report, opened-question and opened-block marks, the correlation ids
+ * seen in logs results, the run action log and repeat cache (D79) and the
+ * tripwire's pending task decisions. The metered usage is dropped by the
+ * settle code after it is stored (D59). Persistent state and the run store
+ * keep what matters.
  */
 export function settleRun(runId: RunId): void {
   runDeps.delete(runId);
@@ -570,5 +573,7 @@ export function settleRun(runId: RunId): void {
   releaseEscalation(runId);
   releaseConnectorFailures(runId);
   releaseFinishReport(runId);
+  releaseObservedIds(runId);
+  releaseActions(runId);
   installedTripwire()?.forgetRun(runId);
 }

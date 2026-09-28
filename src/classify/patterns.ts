@@ -5,7 +5,11 @@
 //
 // File shape: a JSON array of entries
 //   {id, category, signature: {regex[], services[]}, entities[], query_recipe,
-//    tier_hint, stable, source_ref}
+//    tier_hint, stable, source_ref, first_queries?, lesson?}
+// first_queries (D80) is the evidence to collect before hypothesising, one
+// query per item with the entity whose investigator runs it. The orchestrator
+// gets it as a lead to test, not an answer (instruction.ts). lesson (D92) is
+// what a reviewed case taught, from its actual root cause.
 // Entries are matched in file order and the first match wins, so curators put
 // the more specific entries first.
 import { readFile } from 'node:fs/promises';
@@ -42,6 +46,12 @@ export const PatternSignatureSchema = v.strictObject({
 });
 export type PatternSignature = v.InferOutput<typeof PatternSignatureSchema>;
 
+export const FirstQuerySchema = v.strictObject({
+  entity: EntitySchema,
+  query: NonEmptyStringSchema,
+});
+export type FirstQuery = v.InferOutput<typeof FirstQuerySchema>;
+
 export const PatternSchema = v.strictObject({
   id: v.pipe(v.string(), v.regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'id must be kebab-case')),
   category: CategorySchema,
@@ -53,6 +63,8 @@ export const PatternSchema = v.strictObject({
   // lower the tier (rule 5).
   stable: v.boolean(),
   source_ref: NonEmptyStringSchema,
+  first_queries: v.optional(v.pipe(v.array(FirstQuerySchema), v.minLength(1, 'first_queries needs at least one entry'))),
+  lesson: v.optional(NonEmptyStringSchema),
 });
 export type Pattern = v.InferOutput<typeof PatternSchema>;
 

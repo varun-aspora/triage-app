@@ -14,11 +14,13 @@ imported as a module (HLD §1.1, D42).
 
 ```
 knowledge/
-  README.md                 this contract; the only file at the top level
+  README.md                 this contract
+  sources.lock.json         hashes of the Shivalik notes the skills were written from (D85)
   method/*.md               always-on instruction text, never a skill
   classifier/categories.json
   <entity>-overview/SKILL.md
   <entity>-<service>/SKILL.md
+  <entity>-<journey>/SKILL.md
   patterns/SKILL.md + patterns.json
   repo-map/SKILL.md
   codegraph-limits/SKILL.md
@@ -34,6 +36,9 @@ knowledge/
   - `<entity>-<service>` for a service note, where `<service>` is the service
     key in `resources/<entity>.entity.json` (for example `ssfb-harbor`,
     `atspl-package`, `rtl-workflow`).
+  - `<entity>-<journey>` for a journey note: one user journey across the
+    entity's services, with `metadata.kind: journey` (for example
+    `rtl-nri-onboarding`).
   - one of the global names `patterns`, `repo-map`, `codegraph-limits`,
     `frontend-routing`.
 - `<entity>` is `ssfb`, `atspl` or `rtl`. Names are lowercase letters, digits
@@ -44,12 +49,23 @@ knowledge/
 - `method/` holds flat `*.md` files only. `classifier/` holds data files for
   the classifier.
 
+## Shivalik sources (D85)
+
+- `sources.lock.json` lists every `AGENTS.md` and `NRI_ONBOARDING.md` under
+  `atspl/`, `rtl/`, `shivalik/` and `frontend/` of the Shivalik workspace:
+  its path, the SHA-256 of the file and the skills written from it. No copies
+  of the notes are kept here.
+- `bun scripts/check-knowledge-sources.ts` with `TRIAGE_SHIVALIK_DIR` set lists
+  the files that changed, went missing or are new, with the skills that port
+  them, and exits 1. Without the variable it skips; CI runs it that way. After
+  updating the skills, run it with `--update` to rewrite the hashes.
+
 ## Which agent gets what
 
 | Agent | Instruction (`method/`, always on) | Skills (on demand) |
 |---|---|---|
 | `Triage` | `orchestrator.md`, `brief-template.md`, `report-format.md` | `<entity>-overview` for each enabled entity, `patterns`, `frontend-routing` |
-| `investigate_<entity>` and `investigate_<entity>_deep` | `investigator.md`, `logs.md`, `logs-<entity>.md` | `<entity>-<service>` for the registry's services, `repo-map`; `codegraph-limits` on the deep variant only |
+| `investigate_<entity>` and `investigate_<entity>_deep` | `investigator.md`, `logs.md`, `logs-<entity>.md` | `<entity>-<service>` for the registry's services, the entity's journey notes, `repo-map`; `codegraph-limits` on the deep variant only |
 | `code_walker` | `code-walker.md` | `repo-map`, `codegraph-limits`, `frontend-routing` |
 
 Instruction text is for what an agent always needs. Skills are for knowledge
@@ -80,10 +96,10 @@ The note, in markdown.
   characters. It is the only text the model sees before it activates the
   skill, so it says what the note covers and when to use it.
 - `metadata` is a flat map of strings, indented by two spaces. Its keys are:
-  - `kind` (required): `overview`, `service`, or the global name itself
+  - `kind` (required): `overview`, `service`, `journey`, or the global name itself
     (`patterns`, `repo-map`, `codegraph-limits`, `frontend-routing`).
-  - `entity` (required): `ssfb`, `atspl` or `rtl` for an overview or a service
-    note; `shared` for a global skill.
+  - `entity` (required): `ssfb`, `atspl` or `rtl` for an overview, a service
+    note or a journey note; `shared` for a global skill.
   - `service`: required for a service note and absent otherwise. It is the
     registry service key, and the name is `<entity>-<service>`.
   - `sources`: the files the note was ported from, comma separated.
@@ -110,6 +126,10 @@ The note, in markdown.
   (`sql_select`, `http_call`, `logs_search` and so on) with placeholder
   parameters. Notes never name wrapper scripts, local paths, CLI flags or
   environment variables.
+- **Schema.** A note lists the columns of the tables it knows, taken from its
+  sources. A column lookup example asks for every table the note has no list
+  for in one call (`WHERE table_name IN ($1, $2, $3)`). No generated schema
+  files (D84).
 - **No environment names.** One deployment has one configuration, so a note
   never names an environment, a host, a port, a URL or a connection string.
   The service and the tool are enough. The deploy manifests repo names that
@@ -117,7 +137,7 @@ The note, in markdown.
   repo-map names them.
 - **No customer data.** Nothing under `knowledge/` is copied from past case
   folders of the old workspace. Notes come from its `AGENTS.md` files and
-  skills, and from the design docs.
+  skills, from the design docs, and from eval cases a human reviewed (D92).
 
 ## Classifier categories
 

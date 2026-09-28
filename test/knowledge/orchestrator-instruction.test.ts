@@ -44,6 +44,7 @@ const ORCHESTRATOR_NAMES = [
   'note_evidence',
   'finish_report',
   'ask_requester',
+  'run_log',
   'task',
   'activate_skill',
   'investigate_<entity>',
@@ -232,7 +233,17 @@ describe('orchestrator.md', () => {
 
   test('covers the method rules', () => {
     const text = orchestrator.replace(/\s+/g, ' ');
-    expect(text).toContain('admin API (when the service has one configured), then DB, then logs, then CBS (SSFB only)');
+    expect(text).toContain('There is no fixed order of sources. Investigators start with logs and DB reads');
+    expect(text).toContain('An admin API is only for live state the DB does not hold');
+    expect(text).not.toContain('then DB, then logs, then CBS');
+    expect(text).toContain('Each brief\'s Question says which hypothesis it tests and what result would reject it');
+    expect(text).toMatch(/An empty lookup by the known id is a question, not an answer/);
+    expect(text).toMatch(/never the same key reworded/);
+    expect(text).toMatch(/device id or a verification id is not one of the seven id keys and is never resolved/);
+    expect(text).toContain('carries it on a `Journey keys:` line');
+    expect(text).not.toMatch(/cannot be resolved or briefed/);
+    expect(text).toContain("The run's default window is the Window line under This run");
+    expect(text).toMatch(/remaining leg is the device .* ask `code_walker` to read the app code/);
     expect(text).toMatch(/logs come first/);
     expect(text).toMatch(/Nobody replays the call/);
     expect(text).toContain('`taken_at`');
@@ -302,6 +313,18 @@ describe('brief-template.md', () => {
       expect(value).toMatch(new RegExp(`^${PLACEHOLDER.source}$`));
     }
     expect(field('Window')).toMatch(new RegExp(`^${PLACEHOLDER.source} \\.\\. ${PLACEHOLDER.source}$`));
+  });
+
+  test('an optional Journey keys line carries device and verification ids seen in the run (D77, Q13)', () => {
+    const flat = brief.replace(/\s+/g, ' ');
+    expect(flat).toContain('add a `Journey keys:` line after Ids');
+    for (const key of ['device_id', 'x-device-id', 'verification_id']) expect(flat).toContain(`\`${key}\``);
+    expect(example).not.toContain('Journey keys');
+  });
+
+  test('the Question states a hypothesis and what would reject it (D81)', () => {
+    expect(brief.replace(/\s+/g, ' ')).toContain('which hypothesis it tests and what result would reject it');
+    expect(field('Question')).toMatch(/Hypothesis: .+; rejected if /);
   });
 
   test('the example names a real entity, its registry services and a findings return', () => {

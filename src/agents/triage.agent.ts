@@ -41,6 +41,7 @@ import {
   useSubagent,
   useTool,
 } from '@flue/runtime';
+import { logActions } from '../runlog/actions.ts';
 import { mergeIdChains, widenIdChain } from '../tools/_lib/context.ts';
 import { toolsFor } from '../tools/index.ts';
 import { type TriageInit, TriageInitSchema } from '../types/classification.ts';
@@ -93,7 +94,8 @@ export function Triage({ id }: AgentProps): string {
   const deps = runDepsFor(id, init, rt, savedChain ?? undefined);
   const answered = answerChainOf(useDelivery());
   if (answered !== null) widenIdChain(deps, mergeIdChains(deps.idChain(), answered));
-  for (const tool of toolsFor('triage', triageToolContext(id, deps, rt))) useTool(watchFinishReport(id, tool));
+  const rootCtx = triageToolContext(id, deps, rt);
+  for (const tool of logActions(toolsFor('triage', rootCtx), rootCtx)) useTool(watchFinishReport(id, tool));
 
   const env: DelegateEnv = { config: rt.config, registry: rt.registry, deps, knowledge: rt.knowledge };
   for (const entity of plan.entities) {

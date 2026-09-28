@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { defineTool, type ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
 import { FakeDepsAccessError, makeToolContext } from '../../test/support/fake-tool-context.ts';
+import { CODE_TOOLS } from '../gate/budget.ts';
 import type { Entity } from '../types/core.ts';
 import { ok } from '../types/tool-result.ts';
 import {
@@ -234,6 +235,12 @@ describe('conformanceProblems', () => {
 });
 
 describe('generated tool list', () => {
+  test('every repo_* and code_* tool is in CODE_TOOLS (D78)', () => {
+    const code = allToolNames().filter((n) => /^(repo|code)_/.test(n));
+    expect(code.length).toBeGreaterThan(0);
+    for (const name of code) expect(CODE_TOOLS).toContain(name);
+  });
+
   test('exports match the generated list', () => {
     expect(allToolNames()).toEqual([...new Set(allToolModules.map((m) => m.name))].sort());
     expect(generatedToolSources().length).toBe(allToolModules.length);

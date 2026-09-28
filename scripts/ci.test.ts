@@ -18,7 +18,7 @@ const quiet = () => {};
 const env = { TRIAGE_HOME: '/tmp/eval-home' };
 
 describe('scripts/ci.ts', () => {
-  test('runs typecheck, unit tests, the contract suite and the faux classifier suite, in that order', async () => {
+  test('runs typecheck, unit tests, the contract suite, the faux classifier suite and the knowledge sources check, in that order', async () => {
     const { ran, run } = recorder();
     const code = await runCi(CI_STEPS, run, env, quiet);
     expect(code).toBe(0);
@@ -29,6 +29,7 @@ describe('scripts/ci.ts', () => {
       'bun run test',
       'node bin/triage.mjs evals contract',
       'node bin/triage.mjs evals classifier',
+      'bun scripts/check-knowledge-sources.ts',
     ]);
   });
 
@@ -48,7 +49,7 @@ describe('scripts/ci.ts', () => {
   });
 
   test('a failure in the last step is still reported', async () => {
-    const { ran, run } = recorder({ 'classifier suite (faux, judge off)': 1 });
+    const { ran, run } = recorder({ [(CI_STEPS.at(-1) as CiStep).name]: 1 });
     expect(await runCi(CI_STEPS, run, env, quiet)).toBe(1);
     expect(ran).toHaveLength(CI_STEPS.length);
   });

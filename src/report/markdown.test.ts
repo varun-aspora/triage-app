@@ -234,6 +234,20 @@ describe('variants', () => {
     expect(body).toContain('- Images seen: no');
   });
 
+  test('an escalated strong run says synthesis was not run; other runs have no action line', () => {
+    const r = sample();
+    r.escalated = true;
+    r.escalation_reasons = ['low_confidence'];
+    r.classification = { ...r.classification, tier_final: 'strong' };
+    expect(section(renderReportMarkdown(r), 'Escalation record')).toContain('- Action: already on strong; synthesis not run');
+    r.classification = { ...r.classification, tier_final: 'mid' };
+    expect(section(renderReportMarkdown(r), 'Escalation record')).not.toContain('- Action:');
+    r.classification = { ...r.classification, tier_final: 'strong' };
+    r.escalated = false;
+    r.escalation_reasons = [];
+    expect(section(renderReportMarkdown(r), 'Escalation record')).not.toContain('- Action:');
+  });
+
   test('escalation record appears when escalated is false', () => {
     const r = sample();
     r.escalated = false;

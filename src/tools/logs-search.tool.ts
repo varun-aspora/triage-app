@@ -6,24 +6,26 @@
 // transport (qw or http) from the registry and .env. Every call goes through
 // runIoTool:
 //
-//   budget -> scope (id-shaped terms; systemic only with count or group_by)
+//   budget -> scope (id-shaped terms; systemic only with count or group_by,
+//   ids still checked; correlation ids seen in an earlier result, D76, D77)
 //   -> gate (buildLogsQuery and resolveWindow from src/gate) -> not configured
 //   -> fixture (transport-neutral key) or the Quickwit connector -> envelope
 //
 // This tool holds no limiter. The connector takes the entity's slot from
-// quickwitSlot() for the whole real call, so the per-entity cap
+// quickwitSlot() for each request it sends, so the per-entity cap
 // (<ENTITY>_QUICKWIT_MAX_CONCURRENCY, default 1) is enforced in one place.
 //
-// The window defaults to the request window and is always returned. When the
-// entity uses the qw transport and the window ends before now, the output
-// says the upper bound was dropped (Q28), without naming the transport.
+// The window defaults to the request window, both ends are always sent, and
+// it is returned with the query that was built (D76).
 
 import { defineTool, type ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
 import {
   logsKeyInput,
+  nextOffset,
+  overLimitReason,
   resolveQuickwit,
-  START_ONLY_WINDOW_NOTE,
+  type DistinctCount,
   type LogGroup,
   type LogHit,
   type LogsSearchData,
@@ -32,15 +34,23 @@ import {
   type QuickwitTransportKind,
 } from '../connectors/quickwit/client.ts';
 import { ConnectorError, isConnectorError, type ConnectorContext } from '../connectors/types.ts';
-import { buildLogsQuery, normalizeMessage, quickwitGateConfig, type LogsQuery, type QuickwitGateConfig } from '../gate/quickwit.ts';
-import { resolveWindow, toSince } from '../gate/quickwit-window.ts';
-import type { LogsMode } from '../gate/scope.ts';
+import {
+  buildLogsQuery,
+  HIT_LIMIT,
+  normalizeMessage,
+  PAGE_SIZE,
+  quickwitGateConfig,
+  type LogsQuery,
+  type QuickwitGateConfig,
+} from '../gate/quickwit.ts';
+import { resolveWindow } from '../gate/quickwit-window.ts';
+import { observeCorrelationIds, observeJourneyKeys, type LogsMode } from '../gate/scope.ts';
 import { semanticKey } from '../mock/key.ts';
 import type { Entity, TimeWindow } from '../types/core.ts';
 import type { ToolEnvelope } from '../types/tool-result.ts';
 import { type GateDecision, runIoTool, type BackingRef, type StagingHarness } from './_lib/pipeline.ts';
 import type { ToolContext, ToolModule } from './types.ts';
-import type {} from './_lib/context.ts';
+import { observedScopeOf, scopeSetOf } from './_lib/context.ts';
 
 declare module './_lib/context.ts' {
   interface ToolConnectors {
@@ -57,99 +67,165 @@ export const LOGS_SERVICE = 'logs';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const Text = v.pipe(v.string(), v.minLength(1), v.maxLength(512));
+const FieldName = v.pipe(v.string(), v.minLength(1), v.maxLength(64));
+const TextList = v.pipe(v.array(Text), v.maxLength(20));
+
+/** One OR group: its values are ORed, the groups are ANDed with the rest. */
+const AnyOfGroup = v.strictObject({
+  level: v.optional(v.pipe(v.array(v.pipe(v.string(), v.maxLength(16))), v.maxLength(20), v.description('Levels, such as ["error", "warn"].'))),
+  message: v.optional(v.pipe(TextList, v.description('Message labels.'))),
+  terms: v.optional(v.pipe(TextList, v.description('Terms, such as several id tokens.'))),
+  service: v.optional(v.pipe(v.array(FieldName), v.maxLength(20), v.description('Registry service names.'))),
+});
 
 /** The model-facing input. No transport, index, entity or run_id (D3, D44). */
 export const LogsSearchInputSchema = v.strictObject({
-  service: v.pipe(
-    v.string(),
-    v.minLength(1),
-    v.maxLength(64),
-    v.description('Registry service name, such as harbor. The name the service logs under also works.'),
-  ),
-  message: v.optional(v.pipe(Text, v.description('Phrase to match in the message field.'))),
-  error: v.optional(v.pipe(Text, v.description('Words that must all appear in the error field.'))),
-  terms: v.optional(
-    v.pipe(v.array(Text), v.maxLength(20), v.description('Bare terms, such as an id from the brief. All must match.')),
-  ),
-  fields: v.optional(
+  service: v.optional(
     v.pipe(
-      v.record(v.pipe(v.string(), v.minLength(1), v.maxLength(64)), Text),
-      v.description('Exact field filters, name to value. Names must be in the entity field list.'),
+      v.string(),
+      v.minLength(1),
+      v.maxLength(64),
+      v.description('Registry service name, such as harbor (the name it logs under also works). Leave it out to search every service.'),
     ),
   ),
-  from: v.optional(v.pipe(v.string(), v.maxLength(40), v.description('Window start: ISO date or time, or a duration such as 6h or 2d.'))),
-  to: v.optional(v.pipe(v.string(), v.maxLength(40), v.description('Window end: ISO date or time, or a duration. Defaults to now.'))),
-  level: v.optional(v.pipe(v.string(), v.maxLength(16), v.description('Log level, such as error or warn.'))),
-  max_hits: v.optional(
-    v.pipe(v.number(), v.integer(), v.minValue(1), v.description('Most hits to return. Clamped to the entity cap.')),
+  terms: v.optional(
+    v.pipe(
+      TextList,
+      v.description(
+        'Values that must all appear anywhere in the line, such as an id from the brief. A value with a space or a dash is sent whole in single quotes.',
+      ),
+    ),
   ),
-  group_by: v.optional(v.pipe(v.string(), v.maxLength(64), v.description('Field to group by. Returns counts per value.'))),
+  message: v.optional(v.pipe(Text, v.description('The exact log label from the code, such as "Api execution completed".'))),
+  error: v.optional(v.pipe(Text, v.description('Words that must all appear in the error field (the text users quote).'))),
+  fields: v.optional(
+    v.pipe(
+      v.record(FieldName, Text),
+      v.description('Exact field filters, name to value, such as {"x-device-id": "..."}. A numeric range is written "[400 TO 599]".'),
+    ),
+  ),
+  any_of: v.optional(
+    v.pipe(
+      v.array(AnyOfGroup),
+      v.maxLength(5),
+      v.description('OR groups: each group matches when any of its values does; every group must match.'),
+    ),
+  ),
+  exclude: v.optional(v.pipe(TextList, v.description('Values that must not appear in the line.'))),
+  contains: v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(128), v.description('One word with no spaces, matched as a substring of raw_message.'))),
+  level: v.optional(v.pipe(v.string(), v.maxLength(16), v.description('Log level, such as error or warn.'))),
+  denoise: v.optional(
+    v.pipe(
+      v.picklist(['with_message', 'only']),
+      v.description('SSFB only. Drops kong, kafka and "Api execution completed" lines unless they are errors. "with_message" keeps the message\'s own lines.'),
+    ),
+  ),
+  from: v.optional(v.pipe(v.string(), v.maxLength(40), v.description('Window start: ISO date or time (UTC), or a duration ago such as 6h or 2d.'))),
+  to: v.optional(v.pipe(v.string(), v.maxLength(40), v.description('Window end: ISO date or time (UTC), or a duration ago. Defaults to now.'))),
+  order: v.optional(v.pipe(v.picklist(['newest', 'oldest']), v.description('Hit order. Default newest.'))),
+  offset: v.optional(
+    v.pipe(v.number(), v.integer(), v.minValue(0), v.description('First hit of the page, for the next page: the next_offset of the last result.')),
+  ),
+  max_hits: v.optional(
+    v.pipe(v.number(), v.integer(), v.minValue(1), v.description('Most hits to return. Clamped to the page size.')),
+  ),
+  columns: v.optional(v.pipe(v.array(FieldName), v.maxLength(10), v.description('Extra fields to show in each hit, such as status or User-Agent.'))),
+  raw: v.optional(v.pipe(v.boolean(), v.description('Return whole log documents instead of the listed fields.'))),
+  count: v.optional(v.pipe(v.boolean(), v.description('Return the number of matching lines only.'))),
+  group_by: v.optional(
+    v.pipe(
+      v.array(FieldName),
+      v.minLength(1),
+      v.maxLength(4),
+      v.description('1 to 4 fields to group by, such as ["service"] or ["message", "error"]. Returns counts per value.'),
+    ),
+  ),
+  count_distinct: v.optional(v.pipe(FieldName, v.description('Field whose distinct values are counted, such as customer_id.'))),
   normalize: v.optional(
     v.pipe(v.boolean(), v.description('Fold messages that differ only by ids and numbers into one group.')),
   ),
-  count: v.optional(v.pipe(v.boolean(), v.description('Return the number of matching lines only.'))),
   scope: v.optional(
-    v.pipe(v.literal('systemic'), v.description('For counts across customers. Allowed only with count or group_by.')),
+    v.pipe(v.literal('systemic'), v.description('For counts across customers. Allowed only with count, group_by or count_distinct; ids are still checked.')),
   ),
 });
 export type LogsSearchInput = v.InferOutput<typeof LogsSearchInputSchema>;
 
 /** What the model gets back in data. */
 export type LogsSearchOutput = LogsSearchData & {
+  /** The Quickwit query that was built for this call. */
+  readonly query: string;
   /** With normalize on a hits search: the hits folded by normalised error or message. */
   readonly message_groups?: readonly LogGroup[];
 };
 
 function description(ctx: ToolContext, entity: Entity): string {
+  let cfg: QuickwitGateConfig | undefined;
+  try {
+    cfg = quickwitGateConfig(ctx.registry, entity);
+  } catch {
+    // A registry that cannot answer leaves the lists out; run() reports not configured.
+  }
+  const { defaultLookbackDays, maxLogCallsPerRun } = ctx.config.budgets;
+  const pageSize = Math.min(PAGE_SIZE, cfg?.maxHits ?? PAGE_SIZE);
+  const limit = HIT_LIMIT.toLocaleString('en-US');
   const lines = [
-    `Search the ${entity} service logs (Quickwit). Give service plus at least one of message, error, terms or fields; ` +
-      'service alone is refused.',
-    'Every query has a time window: without from/to it is the request window, and the window used is returned.',
-    'Id-shaped terms must come from the brief or the ID chain. For counts across customers set scope: "systemic" ' +
-      'together with count or group_by.',
-    'Returns hits (only listed fields), a count, or groups with counts, plus num_hits, window, truncated and taken_at. ' +
-      'The full result is also written to /data/<call id>.json in the sandbox.',
+    `Search the ${entity} service logs (Quickwit).`,
+    'Give at least one of terms, fields, message, error, contains or an any_of group of messages or terms; ' +
+      'service, level and exclude narrow a query but are not enough on their own. Leave service out to search every service.',
+    'terms, exclude and any_of values with a space or a dash are sent whole in single quotes; a single quote inside a value is refused. ' +
+      'message is the exact label from the code. error ANDs its words on the error field. contains is one word matched inside raw_message. ' +
+      'fields are exact filters by name.' +
+      (entity === 'ssfb' ? ' denoise drops kong, kafka and access-log noise.' : ' On this entity a UUID goes in terms, never in fields.'),
+    `Each call returns one page of ${pageSize} hits, newest first (order: "oldest" to reverse), with num_hits and next_offset when more remain; ` +
+      'pass offset for the next page. The tool never fetches the next page itself.',
+    'Every query sends both ends of its window: without from/to it is the request window ' +
+      `(${defaultLookbackDays} days before the thread's first message up to when the request came in), and the window used is returned. Times are UTC.`,
+    `Over ${limit} hits the call returns early with the count and no hits: narrow the window or add a filter, or use count or group_by first. ` +
+      `group_by (up to 4 fields) and count_distinct tally at most ${limit} hits. At most ${maxLogCallsPerRun} logs_search calls per run.`,
+    'Id-shaped values must come from the brief or the ID chain. ' +
+      'For counts across customers set scope: "systemic" together with count, group_by or count_distinct; ids are still checked.',
+    'Returns hits (the listed fields plus columns, or whole documents with raw) with offset and next_offset, a count, or groups ' +
+      '(key is the group_by values joined with " | ") and distinct with tally_base, plus num_hits, window, the query sent, truncated and notes. ' +
+      'The full result is also written to /data/<call id>.json in the sandbox. A 0-hit result says what to try next.',
     '"Refused" means the query was not run or Quickwit rejected it: fix what the message says and retry. ' +
       '"did not answer" carries the reason: retry once or narrow the window. "not configured" means logs are not set up ' +
       `for ${entity}: record the gap and use another source.`,
   ];
-  try {
-    const cfg = quickwitGateConfig(ctx.registry, entity);
-    if (cfg !== undefined) {
-      const services = Object.entries(cfg.services)
-        .filter(([, logName]) => logName !== undefined)
-        .map(([name]) => name);
-      if (services.length > 0) lines.push(`Services: ${services.join(', ')}.`);
-      lines.push(`Fields: ${cfg.fields.join(', ')}. At most ${cfg.maxHits} hits per call.`);
-    }
-  } catch {
-    // A registry that cannot answer leaves the lists out; run() reports not configured.
+  if (cfg !== undefined) {
+    const services = Object.entries(cfg.services)
+      .filter(([, logName]) => logName !== undefined)
+      .map(([name]) => name);
+    if (services.length > 0) lines.push(`Services: ${services.join(', ')}.`);
+    lines.push(`Fields: ${cfg.fields.join(', ')}.`);
   }
   return lines.join(' ');
 }
 
-/** count and group_by are the only modes a systemic call may use. */
-export function logsModeOf(input: Pick<LogsSearchInput, 'count' | 'group_by'>): LogsMode {
-  if (input.group_by !== undefined) return 'group_by';
+/** count, group_by and count_distinct are the only modes a systemic call may use. */
+export function logsModeOf(input: Pick<LogsSearchInput, 'count' | 'group_by' | 'count_distinct'>): LogsMode {
+  if (input.group_by !== undefined || input.count_distinct !== undefined) return 'group_by';
   if (input.count === true) return 'count';
   return 'search';
 }
 
 /** The part of the input the query builder and the connector read. */
 function queryInputOf(data: LogsSearchInput): QuickwitSearchInput {
-  return {
-    service: data.service,
-    ...(data.message !== undefined ? { message: data.message } : {}),
-    ...(data.error !== undefined ? { error: data.error } : {}),
-    ...(data.terms !== undefined ? { terms: data.terms } : {}),
-    ...(data.fields !== undefined ? { fields: data.fields } : {}),
-    ...(data.level !== undefined ? { level: data.level } : {}),
-    ...(data.max_hits !== undefined ? { max_hits: data.max_hits } : {}),
-    ...(data.group_by !== undefined ? { group_by: data.group_by } : {}),
-    ...(data.count !== undefined ? { count: data.count } : {}),
-    ...(data.from !== undefined ? { from: data.from } : {}),
-    ...(data.to !== undefined ? { to: data.to } : {}),
-  };
+  const { normalize: _n, scope: _s, ...rest } = data;
+  return rest;
+}
+
+/**
+ * The next-step note on a 0-hit result, in the order the old investigations
+ * followed (D76): drop service, group by service, move from earlier, drop level.
+ */
+export function zeroHitsNote(input: Pick<LogsSearchInput, 'service' | 'group_by' | 'level'>): string {
+  const steps = [
+    ...(input.service !== undefined ? ['drop the service filter'] : []),
+    ...(input.group_by?.includes('service') === true ? [] : ['run group_by: ["service"] for the same terms']),
+    'move from earlier',
+    ...(input.level !== undefined ? ['drop level'] : []),
+  ];
+  return `0 hits. Try next, in this order: ${steps.join('; ')}.`;
 }
 
 /** The request window from ingress, or the lookback days up to now when the run has none. */
@@ -231,49 +307,74 @@ function messageGroups(hits: readonly LogHit[]): LogGroup[] {
 type Shape = {
   readonly query: LogsQuery;
   readonly window: TimeWindow;
-  readonly windowNote?: string;
   readonly normalize: boolean;
+  /** Added to notes when the result has 0 hits. */
+  readonly zeroNote: string;
 };
 
-// The same shaping for a fixture and a real result: this call's window, note,
-// builder notes and hit cap, so a fixture recorded under another window or cap
-// still answers this call correctly.
+// The same shaping for a fixture and a real result: this call's window,
+// query, builder notes, hit cap, paging and the over-limit return, so a
+// fixture recorded under another window or cap still answers this call
+// correctly.
 function shape(value: unknown, s: Shape): LogsSearchOutput {
   const src = isObject(value) ? value : {};
   const { window: _w, window_note: _n, notes: _notes, ...rest } = src;
-  const common = {
-    window: s.window,
-    ...(s.windowNote !== undefined ? { window_note: s.windowNote } : {}),
-    ...(s.query.notes.length > 0 ? { notes: [...s.query.notes] } : {}),
+  const absent =
+    rest.service_absent === true && s.query.service !== undefined
+      ? [
+          `service ${s.query.service} has no lines at all in this index in ${s.window.from}..${s.window.to}: the name may be wrong ` +
+            'or it logs elsewhere; run group_by: ["service"] without the service filter to see the names that do log',
+        ]
+      : [];
+  const common = (total: number) => {
+    const notes = [...s.query.notes, ...(total === 0 ? [s.zeroNote, ...absent] : [])];
+    return { query: s.query.query, window: s.window, ...(notes.length > 0 ? { notes } : {}) };
   };
   const numHits = typeof rest.num_hits === 'number' ? rest.num_hits : 0;
 
   if (s.query.mode === 'count') {
     const count = typeof rest.count === 'number' ? rest.count : numHits;
-    return { count, num_hits: typeof rest.num_hits === 'number' ? numHits : count, ...common, truncated: false };
+    return { count, num_hits: typeof rest.num_hits === 'number' ? numHits : count, ...common(count), truncated: false };
   }
+  const over = numHits > HIT_LIMIT ? { reason: overLimitReason(numHits, s.window, s.query.mode), truncated: true } : undefined;
   if (s.query.mode === 'histogram') {
     const raw = Array.isArray(rest.groups) ? (rest.groups as LogGroup[]) : [];
-    const groups = s.normalize ? foldGroups(raw) : raw;
-    return { groups, num_hits: numHits, ...common, truncated: rest.truncated === true };
+    const groups = over !== undefined ? [] : s.normalize ? foldGroups(raw) : raw;
+    const distinct = over === undefined && isObject(rest.distinct) ? (rest.distinct as DistinctCount) : undefined;
+    return {
+      ...(s.query.groupBy !== undefined ? { groups } : {}),
+      ...(distinct !== undefined ? { distinct } : {}),
+      tally_base: over !== undefined ? 0 : typeof rest.tally_base === 'number' ? rest.tally_base : numHits,
+      num_hits: numHits,
+      ...common(Math.max(numHits, groups.length)),
+      ...(over ?? { truncated: rest.truncated === true }),
+    };
   }
+  const offset = s.query.offset;
+  if (over !== undefined) return { hits: [], offset, num_hits: numHits, ...common(numHits), ...over };
   const all = Array.isArray(rest.hits) ? (rest.hits as LogHit[]) : [];
   const hits = all.slice(0, s.query.maxHits);
   const truncated = rest.truncated === true || hits.length < all.length || numHits > hits.length;
+  const total = Math.max(numHits, all.length);
+  const next = nextOffset(offset, hits.length, total);
   return {
     hits,
-    num_hits: Math.max(numHits, all.length),
-    ...common,
+    offset,
+    ...(next !== undefined ? { next_offset: next } : {}),
+    num_hits: total,
+    ...common(total),
     truncated,
     ...(s.normalize ? { message_groups: messageGroups(hits) } : {}),
   };
 }
 
-function summaryOf(entity: Entity, service: string, out: LogsSearchOutput, transport: QuickwitTransportKind | undefined): string {
+function summaryOf(entity: Entity, service: string | undefined, out: LogsSearchOutput, transport: QuickwitTransportKind | undefined): string {
   const via = transport === undefined ? '' : ` via ${transport}`;
-  if ('count' in out) return `logs_search ${entity}:${service} count ${out.count}${via}`;
-  if ('groups' in out) return `logs_search ${entity}:${service} ${out.groups.length} groups${via}`;
-  return `logs_search ${entity}:${service} ${out.hits.length} of ${out.num_hits} hits${via}`;
+  const target = `${entity}:${service ?? 'all services'}`;
+  if ('count' in out) return `logs_search ${target} count ${out.count}${via}`;
+  if ('hits' in out) return `logs_search ${target} ${out.hits.length} of ${out.num_hits} hits${via}`;
+  const distinct = out.distinct !== undefined ? `, ${out.distinct.count} distinct ${out.distinct.field}` : '';
+  return `logs_search ${target} ${out.groups?.length ?? 0} groups${distinct} over ${out.tally_base} hits${via}`;
 }
 
 type RunArgs = {
@@ -295,7 +396,6 @@ async function runLogsSearch(ctx: ToolContext, entity: Entity, args: RunArgs): P
 
   let query: LogsQuery | undefined;
   let window: TimeWindow | undefined;
-  let windowNote: string | undefined;
   let transportUsed: QuickwitTransportKind | undefined;
 
   const gate = (): GateDecision => {
@@ -307,7 +407,6 @@ async function runLogsSearch(ctx: ToolContext, entity: Entity, args: RunArgs): P
     if (!w.ok) return refusal(w.reason);
     query = q;
     window = w.window;
-    if (target.transport === 'qw' && toSince(w.window, now).window_note !== undefined) windowNote = START_ONLY_WINDOW_NOTE;
     return { ok: true };
   };
 
@@ -321,7 +420,7 @@ async function runLogsSearch(ctx: ToolContext, entity: Entity, args: RunArgs): P
 
   const shapeOf = (value: unknown): LogsSearchOutput => {
     const r = ready();
-    return shape(value, { query: r.query, window: r.window, ...(windowNote !== undefined ? { windowNote } : {}), normalize });
+    return shape(value, { query: r.query, window: r.window, normalize, zeroNote: zeroHitsNote(data) });
   };
 
   return runIoTool<'logs_search', unknown>(
@@ -333,6 +432,7 @@ async function runLogsSearch(ctx: ToolContext, entity: Entity, args: RunArgs): P
       scope: {
         ...(data.scope === 'systemic' ? { systemic: true } : {}),
         logsMode: logsModeOf(data),
+        ...observedScopeOf(ctx.runId),
       },
       gate,
       fixture: () => {
@@ -341,6 +441,13 @@ async function runLogsSearch(ctx: ToolContext, entity: Entity, args: RunArgs): P
           kind: 'logs_search',
           key: semanticKey('logs_search', logsKeyInput(r.cfg, queryInput, r.query.mode, r.query.groupBy)),
         };
+      },
+      // The input with the window this call resolves to, to the minute, so a
+      // relative or default window repeated seconds later is the same key;
+      // offset and limit keep pages apart (D79).
+      repeat: () => {
+        const w = resolveWindow(data.from, data.to, requestWindow, now);
+        return w.ok && { ...data, from: w.window.from.slice(0, 16), to: w.window.to.slice(0, 16) };
       },
       real: async (signal) => {
         const connector = deps.connectors.quickwit;
@@ -357,7 +464,15 @@ async function runLogsSearch(ctx: ToolContext, entity: Entity, args: RunArgs): P
         transportUsed = out.meta.quickwit_transport;
         return out.data;
       },
-      render: shapeOf,
+      render: (value) => {
+        const out = shapeOf(value);
+        // Correlation ids and journey keys in these hits may be searched later in the run (D77).
+        if ('hits' in out) {
+          observeCorrelationIds(ctx.runId, out.hits);
+          observeJourneyKeys(ctx.runId, LOGS_SEARCH, data, scopeSetOf(deps), out.hits);
+        }
+        return out;
+      },
       stage: shapeOf,
       summary: (value) => summaryOf(entity, data.service, shapeOf(value), transportUsed),
     },

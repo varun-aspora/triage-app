@@ -1,4 +1,4 @@
-// The path jail for repo_read and repo_grep (HLD 02 §2, D2, D11).
+// The path jail for the repo_* tools (HLD 02 §2, D2, D11).
 //
 // A path from the model is checked as text first (no NUL, not absolute, no
 // '..', no segment starting with '.'), then resolved with realpath, and the
@@ -65,10 +65,10 @@ const MESSAGES: Readonly<Record<JailRefusal, string>> = Object.freeze({
   absolute: 'path must be relative to the repo root, not absolute',
   escape: "path must not contain '..'",
   dotfile: 'paths starting with a dot (.git, .env and other dotfiles) are not readable',
-  not_found: 'no such file in the repo',
+  not_found: 'no such file in the repo; find the real path with repo_find or list the directory with repo_tree',
   outside: 'path resolves outside the repo',
-  not_file: 'path is a directory; use repo_grep with path_glob to list matches under it',
-  not_dir: 'path is not a directory',
+  not_file: 'path is a directory; list it with repo_tree, or find files under it with repo_find',
+  not_dir: 'path is a file, not a directory; read it with repo_read',
   too_large: 'file is larger than the read cap; use repo_grep to find the lines you need',
 });
 
@@ -86,6 +86,17 @@ export function isWithin(root: string, path: string): boolean {
 /** `path` relative to `root`, with '/' separators; '' for the root itself. */
 export function relFromRoot(root: string, path: string): string {
   return relative(root, path).split(sep).join('/');
+}
+
+/** `name` inside the repo-relative directory `dir`; '' is the root. */
+export function childRel(dir: string, name: string): string {
+  return dir === '' ? name : `${dir}/${name}`;
+}
+
+/** The repo-relative directory holding `rel`; '' for a file at the root. */
+export function parentRel(rel: string): string {
+  const i = rel.lastIndexOf('/');
+  return i < 0 ? '' : rel.slice(0, i);
 }
 
 /** True when some segment of a '/'-separated relative path starts with '.'. */

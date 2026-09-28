@@ -97,10 +97,12 @@ describe('tool names per agent', () => {
     expect(mentionedTools(read('code-walker.md')).filter((t) => !allowed.has(t))).toEqual([]);
   });
 
-  test('investigator.md names no orchestrator tool and covers the ladder tools', () => {
+  test('investigator.md names no orchestrator tool and covers the source tools', () => {
     const tools = mentionedTools(read('investigator.md'));
     for (const t of TRIAGE_TOOLS.filter((x) => x !== 'note_evidence')) expect(tools).not.toContain(t);
-    for (const t of ['logs_search', 'sql_select', 'http_call', 'note_evidence', 'cbs_call']) expect(tools).toContain(t);
+    for (const t of ['logs_search', 'sql_select', 'http_call', 'note_evidence', 'cbs_call', 'repo_grep', 'repo_read', 'run_log']) {
+      expect(tools).toContain(t);
+    }
     for (const t of ['encrypt_lookup_value', 'decrypt_fields']) expect(tools).toContain(t);
   });
 
@@ -127,9 +129,9 @@ describe('logs advice', () => {
     expect('Quickwit is SSFB only').toMatch(SSFB_ONLY_LOGS);
   });
 
-  test('the UUID first-segment rule is stated once, in logs.md', () => {
+  test('no method file states the old UUID first-segment rule (D76 sends the whole UUID)', () => {
     const counts = FILES.map((file) => [file, (read(file).match(FIRST_SEGMENT) ?? []).length] as const);
-    expect(counts.filter(([, n]) => n > 0)).toEqual([['logs.md', 1]]);
+    expect(counts.filter(([, n]) => n > 0)).toEqual([]);
   });
 
   test('logs.md covers the field model, correlation reuse, zero hits and correlation by time', () => {
@@ -140,6 +142,38 @@ describe('logs advice', () => {
     expect(text).toMatch(/Zero hits is not an answer/);
     expect(text).toMatch(/no run id/);
     expect(text).toMatch(/window is set by the tool/i);
+  });
+
+  test('logs.md carries the logs-finder port: free-form start, query forms, limits, paging, traps and ten templates (W12)', () => {
+    const flat = read('logs.md').replace(/\s+/g, ' ');
+    expect(flat).toContain('## Start free-form');
+    expect(flat).toContain("`NOT 'a' AND NOT 'b'`");
+    expect(flat).toContain('does not yet ask Quickwit for the query it actually ran');
+    expect(flat).toContain('Over 5,000 hits the call returns early');
+    expect(flat).toContain('at most 50 `logs_search` calls');
+    expect(flat).toContain('## Paging and counting');
+    expect(flat).toMatch(/tokenizer splits words on `_` and `\.`/);
+    expect(flat).toContain('columns: ["User-Agent"]');
+    const templates = read('logs.md').split('## Query templates')[1] ?? '';
+    expect([...templates.matchAll(/^\d+\. /gm)].length).toBe(10);
+  });
+
+  test("logs.md's zero-hit ladder follows the tool's 0-hit note", () => {
+    const text = read('logs.md');
+    const ladder = text.slice(text.indexOf('## Zero hits is not an answer'));
+    const order = ['Drop `service`', '`group_by: ["service"]`', 'Move `from` earlier', 'Drop `level`'].map((s) => ladder.indexOf(s));
+    expect(order.every((i) => i > 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+
+  test('logs-ssfb.md covers the noise filter, recurring labels and guardian redaction (W12)', () => {
+    const flat = read('logs-ssfb.md').replace(/\s+/g, ' ');
+    expect(flat).toContain('`denoise: "only"`');
+    expect(flat).toContain('`denoise: "with_message"`');
+    // The labels live in the service skills only.
+    expect(flat).toContain('Logs sections of `ssfb-harbor`, `ssfb-rhythm` and `ssfb-guardian`');
+    expect(flat).not.toContain('`checking verification status`');
+    expect(flat).toMatch(/guardian writes `from`, `to`, `sim_card_number`, `token` and `message_sid` as `\[REDACTED\]`/);
   });
 
   test('entity notes keep the exact ATSPL service strings', () => {
@@ -177,15 +211,35 @@ describe('investigator.md', () => {
     for (const level of ['`high`', '`medium`', '`low`']) expect(text).toContain(level);
   });
 
-  test('covers the brief, the ladder, gaps, scope, /data and a short reply', () => {
+  test('covers the brief, the sources, gaps, scope, /data and a short reply', () => {
     expect(text).toMatch(/brief is the whole context/i);
-    expect(text).toMatch(/Admin API[\s\S]*DB[\s\S]*Logs[\s\S]*CBS/);
+    expect(text).toMatch(/\*\*Logs\*\*[\s\S]*\*\*DB\*\*[\s\S]*\*\*Code\*\*[\s\S]*\*\*Admin API\*\*[\s\S]*\*\*CBS\*\*/);
     expect(text).toContain('not configured for <entity>:<service>');
     expect(text).toContain('unreachable');
     expect(text).toContain("scope: 'systemic'");
     expect(text).toContain('/data/<call_id>.json');
     expect(text).toMatch(/never guess a plaintext/i);
     expect(text).toMatch(/Reply to the parent/);
+  });
+
+  test('has no fixed ladder, and covers hypotheses, empty lookups, log text, the window and client code (D81)', () => {
+    const flat = text.replace(/\s+/g, ' ');
+    expect(flat).not.toMatch(/evidence ladder|\brungs?\b/i);
+    expect(flat).toContain('There is no fixed order of sources');
+    expect(flat).toContain('only for live state the DB does not hold, and only when it is mounted');
+    expect(flat).toContain('say which hypothesis it tests and what result would reject it');
+    expect(flat).toContain('## Empty means ask why');
+    expect(flat).toMatch(/first make sure the query itself is sound[\s\S]*read the code that writes that row or log line/);
+    expect(flat).toContain('do not reword the same text or run the same key again');
+    expect(flat).toContain('or a device id or verification id seen in this run\'s results');
+    expect(flat).toMatch(/A device id or a verification id is not one of the run's ids, but the tools accept one once a result in this run, fetched by one of the run's ids/);
+    expect(flat).toContain('`Journey keys:`');
+    expect(flat).not.toMatch(/scope check refuses it: do not query it/);
+    expect(flat).toContain('## Where log text comes from');
+    expect(flat).toMatch(/`aspora_user_id`[\s\S]*"x-customer-id"[\s\S]*`group_by: \["message"\]`/);
+    expect(flat).toMatch(/the run's default window[\s\S]*set `from` to that time/);
+    expect(flat).not.toContain('30 days');
+    expect(flat).toContain('read the app code that sends or receives on that leg');
   });
 });
 

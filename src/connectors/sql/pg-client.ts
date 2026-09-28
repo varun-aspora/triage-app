@@ -31,6 +31,15 @@
 // string is never edited. A DSN that carries its own options parameter would
 // override that field inside pg, so it is refused.
 //
+// Dates and naive timestamps (D73): pg's default parsers read `date` and
+// `timestamp without time zone` as local time of this process, so on an IST
+// laptop they come out 5h30 early. Each pool carries its own `types`, and the
+// global pg.types is never changed. `date` stays 'YYYY-MM-DD' as stored. A
+// `timestamp` becomes ISO with a trailing Z when the service's
+// naive_timestamp_zone is UTC (the default), or the stored text plus the zone
+// name otherwise, with every fractional digit Postgres sent. `timestamptz`
+// keeps pg's parser: it carries its offset, so it is already right.
+//
 // Nothing here puts the DSN, or any part of it, into an error, result or
 // callback. Errors name the entity, service and env var name, plus the
 // server's own words: the Postgres message, detail and hint, or the network
@@ -42,7 +51,7 @@
 // data never reaches the model, the audit line or the run log.
 import pg from 'pg';
 import type { Config } from '../../config/env.ts';
-import type { Capability, Registry } from '../../config/registry.ts';
+import type { DbCapability, Registry } from '../../config/registry.ts';
 import {
   errorCode,
   isConnectionLoss,
@@ -89,7 +98,7 @@ export type PgQuery = {
 
 export type PgQueryResult = {
   readonly rows: readonly Record<string, unknown>[];
-  readonly fields?: readonly { readonly name: string }[];
+  readonly fields?: readonly { readonly name: string; readonly dataTypeID?: number }[];
 };
 
 /** The part of a pg PoolClient the connector uses. */
@@ -120,6 +129,8 @@ export type PgPoolConfig = {
   readonly connectionTimeoutMillis: number;
   readonly application_name: string;
   readonly allowExitOnIdle: boolean;
+  /** Per-pool type parsers (D73); pg falls back to its defaults for every other type. */
+  readonly types: pg.CustomTypesConfig;
 };
 
 export type PgPoolFactory = (config: PgPoolConfig) => PgPoolLike;
@@ -147,6 +158,40 @@ export const defaultPgFactory: PgPoolFactory = (config) => {
     },
   };
 };
+
+// ------------------------------------------------------------ type parsers
+
+const DATE = 1082;
+const DATE_ARRAY = 1182;
+const TIMESTAMP = 1114;
+const TIMESTAMP_ARRAY = 1115;
+const TEXT_ARRAY = 1009;
+
+// What Postgres prints under DateStyle ISO. infinity, BC and years past 9999
+// do not match and are returned as stored.
+const PLAIN_TIMESTAMP = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?$/;
+
+/** A stored `timestamp without time zone`, read in the service's zone. */
+export function naiveTimestampText(stored: string, zone: string): string {
+  if (!PLAIN_TIMESTAMP.test(stored)) return stored;
+  return zone === 'UTC' ? `${stored.replace(' ', 'T')}Z` : `${stored} ${zone}`;
+}
+
+type Nested = string | null | readonly Nested[];
+
+/** The type parsers for one pool: dates and naive timestamps as text, everything else pg's default. */
+export function entityTypeParsers(zone: string): pg.CustomTypesConfig {
+  const types = new pg.TypeOverrides();
+  // pg's text[] parser splits an array literal into strings, NULL kept as null.
+  const splitArray = types.getTypeParser(TEXT_ARRAY, 'text') as unknown as (value: string) => Nested;
+  const each = (value: Nested, fn: (s: string) => string): Nested =>
+    value === null ? null : typeof value === 'string' ? fn(value) : value.map((v) => each(v, fn));
+  types.setTypeParser(DATE, 'text', (value: string) => value);
+  types.setTypeParser(DATE_ARRAY, 'text', (value: string) => splitArray(value));
+  types.setTypeParser(TIMESTAMP, 'text', (value: string) => naiveTimestampText(value, zone));
+  types.setTypeParser(TIMESTAMP_ARRAY, 'text', (value: string) => each(splitArray(value), (s) => naiveTimestampText(s, zone)));
+  return types;
+}
 
 // ------------------------------------------------------------ plan checks
 
@@ -465,7 +510,7 @@ export type SqlConnector = {
   close(): Promise<void>;
 };
 
-type Target = { readonly envName: EnvVarName; readonly dsn: string | null };
+type Target = { readonly envName: EnvVarName; readonly dsn: string | null; readonly zone: string };
 
 const OWN_OPTIONS = /(?:^|[?&\s])options\s*=/i;
 
@@ -478,7 +523,7 @@ export function createSqlConnector(options: SqlConnectorOptions): SqlConnector {
   const random = options.random ?? Math.random;
   const pools = new Map<string, PgPoolLike>();
 
-  function lookup(entity: Entity, service: string): { cap: Capability | undefined; where: string } {
+  function lookup(entity: Entity, service: string): { cap: DbCapability | undefined; where: string } {
     const where = `${entity}:${service}`;
     try {
       return { cap: registry.serviceDb(entity, service), where };
@@ -494,10 +539,10 @@ export function createSqlConnector(options: SqlConnectorOptions): SqlConnector {
     if (cap === undefined) throw new ConnectorError('not_configured', `sql is not configured for ${where}: the service has no database`);
     const envName = envVarName(cap.envName);
     if (cap.status !== 'ok') {
-      if (mock) return { envName, dsn: null };
+      if (mock) return { envName, dsn: null, zone: cap.naiveTimestampZone };
       throw new ConnectorError('not_configured', `sql is not configured for ${where}: ${envName} is blank`);
     }
-    return { envName, dsn: cap.value };
+    return { envName, dsn: cap.value, zone: cap.naiveTimestampZone };
   }
 
   function poolFor(t: Target, where: string): PgPoolLike {
@@ -519,6 +564,7 @@ export function createSqlConnector(options: SqlConnectorOptions): SqlConnector {
         connectionTimeoutMillis: 10_000,
         application_name: 'triage-app',
         allowExitOnIdle: true,
+        types: entityTypeParsers(t.zone),
       }),
     );
     pool.on?.('error', (err) => {

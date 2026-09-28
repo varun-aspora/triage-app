@@ -1,0 +1,220 @@
+[
+  {
+    "source": "atspl/AGENTS.md",
+    "sha256": "4dd6bdf618e9ee36e9de76a2cad1d879a846c2b689309376ba619b7ad4470611",
+    "skills": [
+      "atspl-overview"
+    ]
+  },
+  {
+    "source": "atspl/NRI_ONBOARDING.md",
+    "sha256": "c881c7bbc45242c6f961cacdfcd29355fa2a3b7535f3b21f8d9536aca6673d1e",
+    "skills": [
+      "atspl-overview",
+      "atspl-package",
+      "atspl-pulse"
+    ]
+  },
+  {
+    "source": "atspl/package-svc/AGENTS.md",
+    "sha256": "e746cebc9954acc3178aba5567e2b65760fc893722500b3a75c8779ea663b39e",
+    "skills": [
+      "atspl-package"
+    ]
+  },
+  {
+    "source": "atspl/pulse/AGENTS.md",
+    "sha256": "990c7901c055401cdc14317bc7297d8ea64e6a59e9c6a00cce2e7e9cc6bbe0ef",
+    "skills": [
+      "atspl-pulse"
+    ]
+  },
+  {
+    "source": "frontend/AGENTS.md",
+    "sha256": "3db334ff06a5d3a54435613e1c54a65e0130c9432752a5a7d079b7526f229061",
+    "skills": [
+      "frontend-routing",
+      "repo-map"
+    ]
+  },
+  {
+    "source": "frontend/NRI_ONBOARDING.md",
+    "sha256": "665274b4c7f13690ac9d8e63dec9fc21b8ffbee00a322168301e0b5719cc55c6",
+    "skills": [
+      "frontend-routing"
+    ]
+  },
+  {
+    "source": "frontend/android/AGENTS.md",
+    "sha256": "441fbaee45fda47339ec930a92f047ca287fcfe28a0251cf1017889e0e47e764",
+    "skills": [
+      "frontend-routing"
+    ]
+  },
+  {
+    "source": "frontend/ios/AGENTS.md",
+    "sha256": "7be4da7ee350c8f96cd3208f425d2856d6222ad14fe99b832a51ba5c2839c576",
+    "skills": [
+      "frontend-routing"
+    ]
+  },
+  {
+    "source": "rtl/AGENTS.md",
+    "sha256": "1eb893a3229306066cc1f48030965b2faff8da79a012d72e49ce06abc2eb1abd",
+    "skills": [
+      "rtl-overview",
+      "rtl-workflow"
+    ]
+  },
+  {
+    "source": "rtl/NRI_ONBOARDING.md",
+    "sha256": "c35d3bc846005b6ff9fda651cbd1a09d5722326c757c4e4c98ea193630b674d6",
+    "skills": [
+      "rtl-banking",
+      "rtl-kyc",
+      "rtl-nri-onboarding",
+      "rtl-overview",
+      "rtl-workflow"
+    ]
+  },
+  {
+    "source": "rtl/banking-service/AGENTS.md",
+    "sha256": "445d23718a756896e268c40cf5c020ff12ae5a01bf044e7e4b17ae40e85cd2f0",
+    "skills": [
+      "rtl-banking"
+    ]
+  },
+  {
+    "source": "rtl/eventbus/AGENTS.md",
+    "sha256": "d648ca905c191164060f92f16233804f0dddb9eae0f323df310c55c683fa6730",
+    "skills": []
+  },
+  {
+    "source": "rtl/kyc-service/AGENTS.md",
+    "sha256": "2166fbe82785c9ec6c2b0755bd5f1811967f0b74d4dc0ab2ad800e5c526c8287",
+    "skills": [
+      "rtl-kyc"
+    ]
+  },
+  {
+    "source": "rtl/pdf-generator/AGENTS.md",
+    "sha256": "1f229e738a16fadf84d6ac9ef4b16fa22cde8018be4c3d0ecd36bdbab87b323e",
+    "skills": []
+  },
+  {
+    "source": "rtl/reminder-service/AGENTS.md",
+    "sha256": "ebd8e0059a6c359347c649840494ee7ef4db78d9ae1d6258c3385baa7314fb34",
+    "skills": []
+  },
+  {
+    "source": "rtl/workflow/AGENTS.md",
+    "sha256": "fcf3c02c9c9f46a6aa4a8b5c02d1ffab26af4eb2c754ff1c2308d4b809b0ded7",
+    "skills": [
+      "rtl-workflow",
+      "ssfb-cohort",
+      "ssfb-workflow"
+    ]
+  },
+  {
+    "source": "shivalik/AGENTS.md",
+    "sha256": "08400fc3234c2aebd93efd877f26da9657f85cce0ef420d1f25915ba627a2545",
+    "skills": [
+      "repo-map",
+      "ssfb-audit",
+      "ssfb-bro",
+      "ssfb-comms",
+      "ssfb-eventbus",
+      "ssfb-finacle",
+      "ssfb-guardian",
+      "ssfb-harbor",
+      "ssfb-overview",
+      "ssfb-pdfgen",
+      "ssfb-reminder",
+      "ssfb-rhythm",
+      "ssfb-workflow"
+    ]
+  },
+  {
+    "source": "shivalik/NRI_ONBOARDING.md",
+    "sha256": "c0048f82b6a2bcda0cef46fea9486e35b8cc6fb19e41f9dcfe09f90cc2ce9892",
+    "skills": [
+      "ssfb-guardian",
+      "ssfb-harbor",
+      "ssfb-overview",
+      "ssfb-rhythm"
+    ]
+  },
+  {
+    "source": "shivalik/audit/AGENTS.md",
+    "sha256": "822cafb4ce829c084929a26781ded97a4d7dc0385127457117be35898bb9b641",
+    "skills": [
+      "ssfb-audit",
+      "ssfb-overview"
+    ]
+  },
+  {
+    "source": "shivalik/bro/AGENTS.md",
+    "sha256": "2ed5b547044d42fc4bfe9fbeadd202107bfd2dca42dacc7dabf1a1b2ac3d06d6",
+    "skills": [
+      "ssfb-bro"
+    ]
+  },
+  {
+    "source": "shivalik/cbs-go/AGENTS.md",
+    "sha256": "6293ec54119d17dcf883109db8d3dccfe6314ca16cb9f41e82eeac68ce38a171",
+    "skills": [
+      "ssfb-finacle"
+    ]
+  },
+  {
+    "source": "shivalik/comms/AGENTS.md",
+    "sha256": "d4ad9f251866bf929ce44b92802a9f2d947a30610da973571e9d8a35992e23b7",
+    "skills": [
+      "ssfb-comms"
+    ]
+  },
+  {
+    "source": "shivalik/eventbus/AGENTS.md",
+    "sha256": "3688a066fc5776d1f6aeb111d62025e10885997cec8fb5dcde30acfac810560d",
+    "skills": [
+      "ssfb-eventbus",
+      "ssfb-finacle",
+      "ssfb-overview"
+    ]
+  },
+  {
+    "source": "shivalik/guardian/AGENTS.md",
+    "sha256": "a0f530325644c63a5480b3e23f6c8f493cc40eccf181de94abc4345b2d11b258",
+    "skills": [
+      "ssfb-guardian"
+    ]
+  },
+  {
+    "source": "shivalik/harbor/AGENTS.md",
+    "sha256": "5839e27d86e583b7509667c7aeccd7482b4feba323c3131cd12effd1d9ff6103",
+    "skills": [
+      "ssfb-harbor"
+    ]
+  },
+  {
+    "source": "shivalik/pdf-generator/AGENTS.md",
+    "sha256": "a961f9c01c04ac5d9e954898822e152fd12d125dc8e319b0ebb368c02aeda060",
+    "skills": [
+      "ssfb-pdfgen"
+    ]
+  },
+  {
+    "source": "shivalik/reminder-service/AGENTS.md",
+    "sha256": "577969eac8f45d2478599ede7eb3d98490e7259935cb4a35bedf2dc76457d003",
+    "skills": [
+      "ssfb-reminder"
+    ]
+  },
+  {
+    "source": "shivalik/rhythm/AGENTS.md",
+    "sha256": "95badbed022bc20ea8bde7244614621a9fdeb8c1082eda0d9f95c5bbfc648a78",
+    "skills": [
+      "ssfb-rhythm"
+    ]
+  }
+]

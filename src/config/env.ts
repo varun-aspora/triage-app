@@ -63,6 +63,10 @@ export type Config = {
   readonly mock: { readonly enabled: boolean; readonly strict: boolean; readonly record: boolean };
   readonly budgets: {
     readonly maxToolCallsPerRun: number;
+    /** D76: logs_search calls per run, inside maxToolCallsPerRun. */
+    readonly maxLogCallsPerRun: number;
+    /** D78: code tool calls per run, outside maxToolCallsPerRun. */
+    readonly maxCodeCallsPerRun: number;
     readonly maxTasksPerRun: number;
     /** Questions to the requester per run (ask_requester); 0 leaves the tool unmounted. */
     readonly maxAsksPerRun: number;
@@ -218,6 +222,8 @@ export function configFromRecord(
     },
     budgets: {
       maxToolCallsPerRun: r.requiredInt('TRIAGE_MAX_TOOL_CALLS_PER_RUN'),
+      maxLogCallsPerRun: r.requiredInt('TRIAGE_MAX_LOG_CALLS_PER_RUN'),
+      maxCodeCallsPerRun: r.requiredInt('TRIAGE_MAX_CODE_CALLS_PER_RUN'),
       maxTasksPerRun: r.requiredInt('TRIAGE_MAX_TASKS_PER_RUN'),
       maxAsksPerRun: r.requiredInt('TRIAGE_MAX_ASKS_PER_RUN'),
       maxResponseBytesPerCall: r.requiredInt('TRIAGE_MAX_RESPONSE_BYTES_PER_CALL'),

@@ -4,7 +4,7 @@
 // without a test failing.
 import * as v from 'valibot';
 import { PreflightWarningSchema } from '../../types/classification.ts';
-import { ReportStatusSchema, RunIdSchema, TierSchema } from '../../types/core.ts';
+import { ConfidenceSchema, ReportStatusSchema, RunIdSchema, TierSchema } from '../../types/core.ts';
 import { RunPhaseSchema } from '../../runstore/types.ts';
 import { InputRequestSchema, QuestionIdSchema } from '../../types/input-request.ts';
 import { BlockRecordSchema } from '../../types/block.ts';
@@ -108,6 +108,9 @@ export const StatusOutputSchema = v.strictObject({
   stalled: v.optional(v.strictObject(StalledSchema.entries)),
   /** The run's usage, when any is recorded. Absent for a run from before D59. */
   usage: v.optional(UsageViewSchema),
+  /** The verdict and confidence of the report (W15). Present only on a completed run with a report. */
+  report_status: v.optional(ReportStatusSchema),
+  confidence: v.optional(ConfidenceSchema),
 });
 export type StatusOutput = v.InferOutput<typeof StatusOutputSchema>;
 

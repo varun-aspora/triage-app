@@ -54,10 +54,11 @@ There is no `workflow_instances` table.
 is the `form_id`. No user id column is documented for it, so do not filter on
 a guessed `user_id`: get the `form_id` first (the chain's `account_form_id`,
 or from harbor). To
-see the real columns, read `information_schema.columns` for the table:
+see the real columns, read `information_schema.columns` for the tables you
+need, in one call:
 
 ```
-sql_select { service: 'workflow', sql: "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position", params: ['workflow_executions'] }
+sql_select { service: 'workflow', sql: "SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_name IN ($1, $2) ORDER BY table_name, ordinal_position", params: ['workflow_executions', 'workflow_execution_actions'] }
 ```
 
 ## Queries
@@ -127,10 +128,10 @@ refused or returns nothing.
 
 ## Logs
 
-The registry maps `workflow` to the log service `workflow-op`. It may log as
-`workflow-v2` instead (unverified: the source says to confirm when
-investigating). If `workflow-op` returns nothing for a window where the form
-clearly moved, record that as a gap.
+The registry maps `workflow` to the log service `workflow-op-service`. It logs
+full outbound request and response bodies; never quote personal data or
+tokens from them. If it returns nothing for a window where the form clearly
+moved, record that as a gap.
 
 ## Known issues
 
@@ -138,7 +139,7 @@ clearly moved, record that as a gap.
   template, not the step handler. Look for `JsonTemplateHandler` errors:
 
   ```
-  logs_search { service: 'workflow', fields: { raw_message: 'JsonTemplateHandler' }, terms: ['Illegal', 'unquoted'] }
+  logs_search { service: 'workflow', contains: 'JsonTemplateHandler', terms: ['Illegal', 'unquoted'] }
   ```
 
   `Illegal unquoted character ((CTRL-CHAR, code 9|10))` means a raw tab or

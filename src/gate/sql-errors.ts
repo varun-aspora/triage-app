@@ -169,7 +169,7 @@ export function maskSqlValues(sqlstate: string, text: string): string {
 
 // What to do next, per code, for the query errors the model can fix.
 const ADVICE: ReadonlyMap<string, string> = new Map([
-  ['42703', 'Check the column names (SELECT column_name, data_type FROM information_schema.columns WHERE table_name = $1), or the model or entity class in the service code, and retry.'],
+  ['42703', 'Check the column names (SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_name IN ($1, $2), one param per table), or the model or entity class in the service code, and retry.'],
   ['42P01', 'Check the table name and schema (SELECT table_schema, table_name FROM information_schema.tables) and retry.'],
   ['3F000', 'Check the schema name (SELECT table_schema, table_name FROM information_schema.tables) and retry.'],
   ['42883', 'No function or operator matches these argument types. Check the types in information_schema.columns, add a cast, and retry.'],

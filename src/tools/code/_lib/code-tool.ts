@@ -13,6 +13,7 @@ import type { AuditTransport } from '../../../types/audit.ts';
 import type { Entity } from '../../../types/core.ts';
 import { ok, refused, type ToolEnvelope } from '../../../types/tool-result.ts';
 import type { ToolContext, ToolEnabled } from '../../types.ts';
+import { type DocsTarget, repoDocsFor } from './repo-docs.ts';
 // Brings in the ToolDeps fields (budget, audit, fixtures, ...).
 import type {} from '../../_lib/context.ts';
 
@@ -61,7 +62,13 @@ export function codeToolEnabled(ctx: ToolContext): ToolEnabled {
 }
 
 export type CodeOutcome =
-  | { readonly ok: true; readonly data: unknown; readonly summary: string }
+  | {
+      readonly ok: true;
+      readonly data: unknown;
+      readonly summary: string;
+      /** The path touched, for the repo AGENTS.md / CLAUDE.md files (W11, D83). */
+      readonly docs?: DocsTarget;
+    }
   | { readonly ok: false; readonly message: string; readonly reason: string };
 
 export type CodeRunSpec = {
@@ -110,7 +117,8 @@ export async function runCodeTool(spec: CodeRunSpec): Promise<ToolEnvelope> {
 
   const budget = deps.budget.consumeToolCall(spec.tool, ctx.entity ?? undefined);
   if (!budget.ok) {
-    if (budget.reason !== 'entity_calls') deps.escalation.markBudgetExhausted();
+    // The code cap (tool_cap) refuses code tools only; the run goes on.
+    if (budget.reason !== 'entity_calls' && budget.reason !== 'tool_cap') deps.escalation.markBudgetExhausted();
     audit('deny', 'refused', spec.tool, `budget: ${budget.reason}`);
     return refuse(budget.message);
   }
@@ -121,15 +129,24 @@ export async function runCodeTool(spec: CodeRunSpec): Promise<ToolEnvelope> {
     return refuse(outcome.message);
   }
 
-  const safe = asJson(redactModelFacing(outcome.data));
+  // Repo docs go in before redaction and byte accounting, and count as sent
+  // only when the result goes out.
+  const docs = outcome.docs !== undefined ? await repoDocsFor(ctx, outcome.docs, spec.signal) : undefined;
+  const data = docs !== undefined && isRecord(outcome.data) ? { ...outcome.data, ...docs.fields } : outcome.data;
+  const safe = asJson(redactModelFacing(data));
   const bytes = deps.budget.accountBytes(Math.max(1, Buffer.byteLength(JSON.stringify(safe))));
   if (!bytes.ok) {
     deps.escalation.markBudgetExhausted();
     audit('deny', 'refused', outcome.summary, `budget: ${bytes.reason}`);
     return refuse(bytes.message);
   }
+  docs?.commit();
   audit('allow', 'ok', outcome.summary);
   return ok(safe, now);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function asJson(value: unknown): unknown {

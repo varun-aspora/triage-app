@@ -1,0 +1,57 @@
+# From a rejected run (docs/11 §5): a user stuck on SIM binding. The structure
+# and the expected answer come from that run's eval draft. Every id here and in
+# the fixtures is a made-up placeholder. Other facts are the source run's: the
+# Part 1 completion time, the attempt count, date span and first-day count, and
+# the poll total; the notes reword the reviewer's expected answer. None of
+# these names a person. Never copy a real id into this case. The
+# fixtures are under fixtures/cases/sim-binding-stuck/ and the pass criteria in
+# test/contract/sim/sim-binding.contract.ts.
+id: sim-binding-stuck
+taxonomy_version: v1
+label_source: triager_findings
+request:
+  text: |-
+    Aspora user 5a1e0000-0000-4000-8000-000000000001 cannot complete SIM verification. They finished
+    Part 1 and have tried many times since, but the app stays stuck on the SMS step. What is going on?
+ids:
+  aspora_user_id: 5a1e0000-0000-4000-8000-000000000001
+id_chain:
+  ids:
+    aspora_user_id: 5a1e0000-0000-4000-8000-000000000001
+  hops:
+    # Harbor writes the form only after SIM binding is VERIFIED, so no form is expected here.
+    - from: aspora_user_id
+      source: ssfb:harbor.account_forms
+      status: not_found
+      taken_at: "2026-09-26T05:00:00.000Z"
+basic_state: []
+expected:
+  category: auth
+  tier: mid
+  money_moved: false
+  entities: [ssfb, rtl]
+  # Root cause found: status pending_user or root_cause_confirmed (D94).
+  current_ask: Find out why the user cannot complete SIM verification after many attempts.
+faux_classification:
+  category: auth
+  subcategory: device
+  entities_likely: [ssfb, rtl]
+  money_moved: false
+  misdirected_funds: false
+  tier_proposed: mid
+  confidence: 0.8
+  images_seen: false
+provenance:
+  origin: run
+  ref: 01M3DZKZKYS4YYQEHS5BB2VQYA
+  created_at: "2026-09-28T00:00:00.000Z"
+  notes: >-
+    Rejected run. Expected answer from the reviewer: guardian has 17 SIM-binding attempts for the
+    user's one device from 2026-09-07 to 2026-09-24, all PENDING with sim_country_code 0, so no
+    inbound SMS ever matched; harbor logged 145 status polls for the device, all PENDING; no
+    vendor callback and no kong-vendor webhook came in any attempt window; the 5-per-24h
+    registration limit was hit on 2026-09-07; RTL Part 1 completed at 2026-09-07T10:03:57Z, just
+    before the first attempt. The SMS is not leaving the phone or the carrier does not deliver it;
+    the backend behaved correctly. The CX reply gives the user steps: retry once and stay on the
+    screen, check Messages shows Sent, check the registered SIM is the default for messages and
+    can text a UK number.

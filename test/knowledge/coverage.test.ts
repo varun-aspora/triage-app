@@ -12,6 +12,7 @@ import { ENTITIES, type Entity } from '../../src/types/core.ts';
 import {
   AGENTS,
   GLOBAL_SKILLS,
+  JOURNEY_KIND,
   KNOWLEDGE_DIR,
   methodFilesFor,
   NON_SKILL_DIRS,
@@ -46,12 +47,20 @@ function servicesWithoutNotes(root: string, registry: Registry): string[] {
   return out;
 }
 
-/** Skill directories that are neither a global skill, an overview nor a registry service. */
+/** A skill directory whose SKILL.md says kind journey. */
+function isJourney(root: string, dir: string): boolean {
+  const file = join(root, dir, SKILL_FILE);
+  if (!existsSync(file)) return false;
+  const parsed = parseFrontmatter(readFileSync(file, 'utf8'));
+  return !('error' in parsed) && parsed.frontmatter.metadata.kind === JOURNEY_KIND;
+}
+
+/** Skill directories that are neither a global skill, an overview, a journey note nor a registry service. */
 function notesWithoutServices(root: string, registry: Registry): string[] {
   const out: string[] = [];
   for (const dir of topLevelDirs(root)) {
     if ((NON_SKILL_DIRS as readonly string[]).includes(dir)) continue;
-    if ((GLOBAL_SKILLS as readonly string[]).includes(dir)) continue;
+    if ((GLOBAL_SKILLS as readonly string[]).includes(dir) || isJourney(root, dir)) continue;
     const m = /^([a-z0-9]+)-(.+)$/.exec(dir);
     const entity = m?.[1] as Entity | undefined;
     const rest = m?.[2];

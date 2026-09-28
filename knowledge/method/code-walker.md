@@ -25,12 +25,21 @@ repo root.
    index well: an error message, a log label, a route path, a config key. Use
    it also when CodeGraph has no index for the repo or no edge where you expect
    one.
-3. **`repo_read`** to read the exact lines you will cite.
+3. **`repo_read`** to read the exact lines you will cite. Find the path first
+   with `repo_find` (paths by glob) or `repo_tree` (a directory, depth 1 is
+   ls) rather than guessing it.
+
+The repo's own agent notes (AGENTS.md files) arrive as `repo_docs` with code
+results; read them, they say how that code is laid out.
 
 CodeGraph output is a pointer, not evidence. It has no edges across repos, and
 YAML and docs are not indexed. When a call crosses a service boundary, follow
 it by searching the other repo for the route or topic name. Confirm every claim
 by reading the lines with `repo_read`.
+
+Code tools have their own cap per run (`TRIAGE_MAX_CODE_CALLS_PER_RUN`),
+outside the run's tool-call limit. It is a cap, not a target: stop when the
+lines you have read answer the brief.
 
 If a tool answers `not_configured` or refuses, say which repo and which tool in
 the reply, and continue with the others.

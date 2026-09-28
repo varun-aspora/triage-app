@@ -1,7 +1,8 @@
 // triage status <run_id> [--json]
 //
 // Prints {run_id, status, phase, tier_final, submissions, preflight_warnings,
-// input_request?, block?, reason?, stalled?, usage?} from the run store. status is the phase
+// input_request?, block?, reason?, stalled?, usage?, report_status?,
+// confidence?} from the run store. status is the phase
 // folded into running, completed, failed or stopped, plus 'needs_input'
 // (parked on a question for the requester; the worker is gone by design, P6 §4.5),
 // 'blocked' (parked on a system that did not answer, D55; `triage resume`
@@ -17,6 +18,12 @@
 // worker died is status 'stalled' with stalled.reason no_owner, as before.
 // The lease is read from the Flue database with openSubmissionLeases, since
 // this process runs no runtime; the worker pid is checked once for both.
+//
+// report_status and confidence (W15) are the verdict of the run's report,
+// present only when the run is completed. A running, failed or stopped run
+// may hold the report of an earlier submission (after a resume or a steer),
+// which is not this run's verdict. The human form puts them next to the
+// status: 'run X: completed · inconclusive, low confidence (phase completed)'.
 //
 // usage (D59) is the run's token and cost totals from src/usage/summary.ts,
 // present in --json only when something was counted. The human form prints
@@ -183,7 +190,13 @@ export function statusOutput(run: RunRecord, isAlive: PidChecker, stalled: Stall
     ...reasonField(run, status),
     ...(stalled !== null ? { stalled: { reason: stalled.reason, since: stalled.since } } : {}),
     ...usageField(usageViewOf(run, status)),
+    ...(status === 'completed' && run.report !== null ? { report_status: run.report.status, confidence: run.report.confidence } : {}),
   };
+}
+
+/** ' · inconclusive, low confidence' for a completed run with a report, else ''. */
+function verdictText(out: StatusOutput): string {
+  return out.report_status === undefined ? '' : ` · ${out.report_status}, ${out.confidence} confidence`;
 }
 
 /** The human line for a stalled run (D71). */
@@ -291,7 +304,7 @@ export function createStatusCommand(options: StatusCommandOptions = {}): CliComm
         emitJson(io, StatusOutputSchema, out);
       } else {
         printHuman(io, [
-          `run ${out.run_id}: ${out.status} (phase ${out.phase}${isTerminalPhase(out.phase) ? '' : ', not finished'})`,
+          `run ${out.run_id}: ${out.status}${verdictText(out)} (phase ${out.phase}${isTerminalPhase(out.phase) ? '' : ', not finished'})`,
           ...(out.reason !== undefined ? [`reason: ${out.reason}`] : []),
           ...(out.stalled !== undefined ? [stalledLine(out.stalled)] : []),
           `tier: ${out.tier_final ?? 'not decided yet'}`,

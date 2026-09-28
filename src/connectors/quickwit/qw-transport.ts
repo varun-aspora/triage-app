@@ -7,21 +7,27 @@
 // Every value that goes into argv passes assertQwSafe. The flags themselves
 // are fixed literals from QW_FLAGS.
 //
-// qw has no terms aggregation (its `histogram` is a date histogram), so a
-// group_by runs `qw search` projected to the group field and the groups are
-// counted here. When Quickwit matched more hits than qw returned, the groups
-// are partial and truncated is set.
+// One call here is one qw run: `qw count`, or `qw search` for one page
+// (--sort-by timestamp, --max-hits, --offset). Both send the window as
+// --from and --to in UTC. Paging, the tally and the order are done by the
+// client (client.ts), since qw has no terms aggregation (its `histogram` is a
+// date histogram) and takes no sort direction.
+//
+// --explain (owner, Q5) is not sent until a hand run shows whether it breaks
+// -o json (D76 part 2); the client returns the query it built instead.
 //
 // A failed qw call keeps an excerpt of its stderr, with URLs and addresses
 // taken out, so the model sees why. stderr that says the login or its token
 // refresh failed is an outage (checked first: a token refresh answered with
 // '400 Bad Request: invalid_grant' is not a bad query); stderr that says the
 // query was rejected makes the error a refusal the model can fix.
-import { assertQwSafe, QwArgError, type LogsQueryMode } from '../../gate/quickwit.ts';
+import { assertQwSafe, QwArgError } from '../../gate/quickwit.ts';
+import { qwTime, windowSeconds } from '../../gate/quickwit-window.ts';
+import type { TimeWindow } from '../../types/core.ts';
 import type { ExecResult, ExecRunner } from '../exec.ts';
 import { safeErrorText, scrubSecrets, stripAddresses } from '../error-text.ts';
 import { ConnectorError, MAX_EXEC_OUTPUT_BYTES } from '../types.ts';
-import type { LogGroup, LogHit, TransportResult } from './client.ts';
+import type { LogHit, TransportResult } from './client.ts';
 
 export type QwSearchRequest = {
   /** QW_BIN. */
@@ -30,19 +36,21 @@ export type QwSearchRequest = {
   readonly context: string;
   readonly index: string;
   readonly query: string;
-  readonly mode: LogsQueryMode;
-  /** Output projection for search mode. */
-  readonly fields: readonly string[];
+  /** count runs `qw count`; search runs `qw search` for one page. */
+  readonly mode: 'count' | 'search';
+  /** search: the output projection. Absent for whole documents. */
+  readonly fields?: readonly string[];
+  /** search: hits in the page. */
   readonly maxHits: number;
-  readonly groupBy?: string;
-  /** From toSince() in src/gate/quickwit-window.ts. */
-  readonly since: string;
+  /** search: index of the page's first hit, newest first. */
+  readonly offset: number;
+  readonly window: TimeWindow;
   readonly timeoutMs: number;
   readonly signal: AbortSignal;
 };
 
 /** Every flag the qw transport may put into argv. Anything else in argv is a value. */
-export const QW_FLAGS: ReadonlySet<string> = new Set(['--since', '--max-hits', '-o', '--fields', '--context']);
+export const QW_FLAGS: ReadonlySet<string> = new Set(['--sort-by', '--max-hits', '--offset', '--from', '--to', '-o', '--fields', '--context']);
 
 /** Where stderr says Quickwit rejected the query itself, so the model can fix it. */
 const QUERY_REJECTED = /\b(?:http|status(?: code)?):? ?400\b|bad request|failed to parse|parse error|syntax error|invalid query|query parser|unknown field|field .{0,80}does not exist|no field named/i;
@@ -81,27 +89,28 @@ function val(value: string): string {
  * assertQwSafe, so nothing unsafe reaches the runner.
  */
 export function qwArgv(req: QwSearchRequest): string[] {
+  const { start, end } = windowSeconds(req.window);
+  const window = ['--from', val(qwTime(start)), '--to', val(qwTime(end))];
   if (req.mode === 'count') {
-    return ['count', val(req.index), val(req.query), '--since', val(req.since), '-o', 'json', '--context', val(req.context)];
+    return ['count', val(req.index), val(req.query), ...window, '-o', 'json', '--context', val(req.context)];
   }
   if (!Number.isInteger(req.maxHits) || req.maxHits < 1) throw new QwArgError('qw argument refused: max hits must be a whole number of at least 1');
-  let fields: readonly string[] = req.fields;
-  if (req.mode === 'histogram') {
-    if (req.groupBy === undefined) throw new QwArgError('qw argument refused: group_by is missing');
-    fields = [req.groupBy];
-  }
+  if (!Number.isInteger(req.offset) || req.offset < 0) throw new QwArgError('qw argument refused: offset must be a whole number of at least 0');
   return [
     'search',
     val(req.index),
     val(req.query),
-    '--since',
-    val(req.since),
+    // The owner's form: newest first. The client reads "oldest" pages from the far end.
+    '--sort-by',
+    'timestamp',
     '--max-hits',
     val(String(req.maxHits)),
+    '--offset',
+    val(String(req.offset)),
+    ...window,
     '-o',
     'json',
-    '--fields',
-    val(fields.join(',')),
+    ...(req.fields === undefined ? [] : ['--fields', val(req.fields.join(','))]),
     '--context',
     val(req.context),
   ];
@@ -218,25 +227,5 @@ function parseOutput(stdout: string, req: QwSearchRequest): TransportResult {
     return { kind: 'count', num_hits: parseCount(parsed) };
   }
   const { hits, num_hits } = parseHits(parseJson(stdout));
-  if (req.mode === 'search') return { kind: 'hits', hits, num_hits };
-  return {
-    kind: 'groups',
-    groups: groupHits(hits, req.groupBy as string),
-    num_hits,
-    truncated: num_hits > hits.length,
-  };
-}
-
-/** Counts hits per value of one field, largest group first. Hits without the field are skipped, as a terms aggregation does. */
-export function groupHits(hits: readonly LogHit[], field: string): LogGroup[] {
-  const counts = new Map<string, number>();
-  for (const hit of hits) {
-    const value = hit[field];
-    if (value === undefined || value === null) continue;
-    const key = typeof value === 'string' ? value : JSON.stringify(value);
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  return [...counts.entries()]
-    .map(([key, count]) => ({ key, count }))
-    .sort((a, b) => b.count - a.count || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  return { kind: 'hits', hits, num_hits };
 }
