@@ -17,6 +17,9 @@ customer state machine and MPIN. It creates the CIF and then asks rhythm to
 create the NRE and NRO accounts.
 
 Device and SIM binding belong to guardian, not harbor (see ssfb-guardian).
+harbor creates the form, and writes `external_user_ref`, only after SIM
+binding is VERIFIED. For a user stuck at SIM binding, an empty form lookup by
+the user id is expected, not the fault.
 harbor's `/v1/device/register` stores the app's FCM push token and does not
 bind a device (unverified: stated by the onboarding notes only, the handler
 was not read). harbor calls guardian for the session's phone and to reset a
@@ -211,13 +214,54 @@ CBS error codes mapped by harbor (`shivalik-cbs-go` `pkg/errors/error_codes.go`)
 | Stuck at CBS customer creation | `customer.state`, `sub_state` and `has_cif`; the CBS response in logs (Known issues) |
 | AML pending or rejected | `customer.state` = `AML_WAIT` (DLQ) or `AML_REJECTED`; check the CBS response before believing it |
 | Account not created after the CIF | `customer.state` should go `AML_VERIFIED` to `MPIN_SET`; then rhythm (see ssfb-rhythm) |
-| SIM binding stuck | guardian (see ssfb-guardian); harbor only holds the form and session |
+| SIM binding stuck | guardian (see ssfb-guardian). No form before VERIFIED is expected; harbor's poll lines by the device id (Logs below) give the timeline |
 | MPIN setup blocked | `mpin_attempt_trackers` and `customer.mpin_setup_status`; the guardian token scope (see ssfb-guardian) |
 
 Endpoints that change state exist, for example
 `POST /admin/v1/forms/<form_id>/trigger-customer-creation`, which re-runs CBS
 customer creation for a stuck form. `http_call` refuses them. Name them as a
 possible fix in the findings; never try to call them.
+
+## Logs
+
+Labels seen in past investigations. Search them as `message`, exactly as
+written:
+
+- SIM binding polls: `checking verification status`,
+  `verification status check completed successfully`. The first carries
+  `device_id`, `verification_id` and `has_data_token`; harbor logs only
+  whether a data token was sent, never the user id, so search these lines by
+  the device id.
+- Challenge and MPIN: `generating challenge`,
+  `failed to generate challenge for forget MPIN`,
+  `failed to generate challenge for token refresh`,
+  `rate limit exceeded for phone number`,
+  `refresh access token request completed successfully`,
+  `MPIN attempt counter reset`, `record MPIN fail`.
+- CBS: `calling CBS API to create customer`, `CBS API error`,
+  `[CBS API] Unknown Error - Raw Response`,
+  `==== XML PAYLOAD (before encryption) ====`,
+  `failed to create accounts in rhythm`.
+- Forms and vendors: `get customer by form ID`,
+  `package delivery created successfully`, `package webhook received`,
+  `package delivery failed`, `admin trigger delivery request received`,
+  `notarylive webhook received`, `notarylive id preupload http error`,
+  `review step handler status check`, `review step handler submit`,
+  `reference data request received`, `get personal details request received`,
+  `HTTP request started`, `HTTP request completed`.
+- Fields: `form_id`, `customer_id`, `x-customer-id` (the form id before the
+  customer exists), `x-device-id`, `document_type`, `status_code`,
+  `requires_verification`, `flow`, `delivery_id`, `provider_order_id`.
+
+SIM binding polls for a device seen in this run:
+
+```
+logs_search({ service: "harbor", message: "checking verification status",
+  terms: ["<device_id>"], from: "<from>", to: "<to>" })
+```
+
+A low count here is a floor, not a sign the app stopped polling; the SSFB logs
+note has the `contains` check for a device id.
 
 ## Known issues
 

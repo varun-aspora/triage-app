@@ -11,6 +11,7 @@ import { FixtureMissError } from '../../src/mock/errors.ts';
 import { createMockLayer } from '../../src/mock/index.ts';
 import { keyString, semanticKey } from '../../src/mock/key.ts';
 import type { FixtureStore } from '../../src/mock/store.ts';
+import { releaseObservedIds } from '../../src/gate/scope.ts';
 import { releaseActions } from '../../src/runlog/actions.ts';
 import type { RunStore } from '../../src/runstore/types.ts';
 import { createToolDeps } from '../../src/tools/_lib/context.ts';
@@ -105,6 +106,7 @@ function setup(opts: Setup = {}): H {
     releaseRunBudget(runId);
     releaseEscalation(runId);
     releaseActions(runId);
+    releaseObservedIds(runId);
   });
   const storeKeys: H['storeKeys'] = [];
   const store: FixtureStore = {
@@ -370,6 +372,29 @@ describe('sql_select: scope', () => {
     expect(allowed.sql.calls).toHaveLength(1);
     expect(allowed.audit.lines[0]!.decision).toBe('allow');
     expect(allowed.audit.lines[0]!.summary_redacted).toContain('systemic');
+  });
+});
+
+describe('sql_select: device and verification ids (D77, Q13)', () => {
+  const DEVICE_ID = 'c0ffee00-1111-4222-8333-00000000d001';
+  const BY_DEVICE = 'SELECT id, status FROM delivery_requests WHERE device_id = $1';
+
+  test('a device_id from rows fetched by a chain id is allowed in a later call; an unseen one is refused', async () => {
+    const h = setup({ env: REAL, sql: fakeSql([{ id: 'row-1', device_id: DEVICE_ID }]) });
+    const before = await call(h, { service: 'package', sql: BY_DEVICE, params: [DEVICE_ID] });
+    expect(before.output.status).toBe('refused');
+    expect(before.output.message).toContain('as an sql_select $n param compared to a device_id or verification_id column');
+    expect((await call(h, { service: 'package', sql: SELECT_ONE, params: [CUSTOMER] })).output.status).toBe('ok');
+    expect((await call(h, { service: 'package', sql: BY_DEVICE, params: [DEVICE_ID] })).output.status).toBe('ok');
+    expect((await call(h, { service: 'package', sql: BY_DEVICE, params: [STRANGER] })).output.status).toBe('refused');
+    // Compared to a column that is not a device or verification id, it is refused.
+    expect((await call(h, { service: 'package', sql: SELECT_ONE, params: [DEVICE_ID] })).output.status).toBe('refused');
+  });
+
+  test('rows fetched without a chain id do not count', async () => {
+    const h = setup({ env: REAL, sql: fakeSql([{ id: 'row-1', device_id: DEVICE_ID }]) });
+    expect((await call(h, { service: 'package', sql: 'SELECT id, device_id FROM delivery_requests LIMIT 5' })).output.status).toBe('ok');
+    expect((await call(h, { service: 'package', sql: BY_DEVICE, params: [DEVICE_ID] })).output.status).toBe('refused');
   });
 });
 

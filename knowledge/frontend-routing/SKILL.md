@@ -152,6 +152,14 @@ transfer OTP step (guardian `api/v1/auth/challenges/generate`, only shown if
 
 ## Client code to read
 
+Read the app code when the backend is clean and the client cannot report
+what happened. The backend never sees some steps: whether the app sent the
+SIM-binding SMS (no vendor callback reached `ssfb:guardian`), whether a push
+arrived, or what the app did with a response it got. For those, the code is
+the only evidence. For SIM binding, read `vance-android`
+`app/.../ui/nre_nro_accounts/security/device_binding/`. Cite it as what the
+app does, not what this user's device did.
+
 - Android (`vance-android`, Kotlin): the modules that matter are `app`,
   `banking-sdk`, `data-layer`, `forex` and `analytics`. Routing lives in
   `WorkflowSubmitterImpl.kt`, `WorkflowOwner.kt`, `OnboardingScreenData.kt`

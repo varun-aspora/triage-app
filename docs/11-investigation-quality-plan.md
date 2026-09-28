@@ -447,19 +447,13 @@ How Flue allows it (checked against the Flue references):
 
 #### W14. Keep knowledge in step with the Shivalik workspace, and learn from reviewed cases (fixes C12, C14, D85, D92)
 
-- **Shivalik AGENTS.md files, verbatim.** Copy every `AGENTS.md` and `NRI_ONBOARDING.md`
-  under `atspl/`, `rtl/`, `shivalik/` and `frontend/` into the skill that ports it, as a
-  resource (`knowledge/<skill>/sources/<original path>`), read with `read_skill_resource`.
-  Each skill gets one line pointing to its sources and a shared note that maps Shivalik's
-  tools to ours (`safe_sql.sh` → `sql_select`, `qw` → `logs_search`, `\d` →
-  `information_schema`, `refs/` → not available).
-- **Scan before copy.** Run the persisted redaction profile over each file; any customer
-  identifier blocks the copy until it is removed. `refs/` links are kept as text but marked
-  "not available here".
-- **Sync check.** `knowledge/sources.lock.json` records the source path and SHA-256 of every
-  copied file. `bun scripts/check-knowledge-sources.ts` compares them with the Shivalik
-  workspace when `TRIAGE_SHIVALIK_DIR` is set, lists changed files and the skills that port
-  them, and exits non-zero on drift. CI skips it when the variable is unset.
+- **Sync check, no copies.** `knowledge/sources.lock.json` records, for every `AGENTS.md` and
+  `NRI_ONBOARDING.md` under `atspl/`, `rtl/`, `shivalik/` and `frontend/`, the upstream path,
+  the SHA-256 of the file and the skills written from it. `bun scripts/check-knowledge-sources.ts`
+  compares them with the Shivalik workspace when `TRIAGE_SHIVALIK_DIR` is set, lists changed,
+  missing and new files with the skills that port them, and exits non-zero on drift;
+  `--update` rewrites the hashes after the skills are updated. CI skips it when the variable
+  is unset. Verbatim copies as skill resources were dropped by the owner on 2026-09-28 (D85).
 - **Learning from reviewed cases.** When a run is reviewed with `--actual-root-cause` and
   `--faster-path`, `triage fixtures review` offers a pattern note draft (category, trigger,
   first queries, lesson) with ids stripped. An owner accepts it into
@@ -533,7 +527,7 @@ rejected and why.
 | D81 | Method order (W6) | No fixed ladder; logs and DB first; empty → why → new key |
 | D83 | Repo docs (W11) | Attached from root to path, once per conversation, capped |
 | D84 | Schema lookups (W13) | Skills' column lists first; multi-table lookups; no generated files |
-| D85 | Shivalik sources (W14) | Verbatim as skill resources, scanned, drift-checked |
+| D85 | Shivalik sources (W14) | Lock of upstream hashes and a drift check; no copies |
 | D92 | Learning from reviews (W14) | Faster path → reviewed pattern note |
 
 D82 is Braintrust tracing (on `main`). D86 to D91 are proposed by the trace 6d4d fix plan, so

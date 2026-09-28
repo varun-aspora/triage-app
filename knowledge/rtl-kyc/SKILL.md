@@ -33,12 +33,13 @@ The verdict of record is `kyc_inquiries.status`.
 
 Which `kyc_inquiries` column holds the Aspora userId is not documented
 (unverified: the source does not name it). The request context carries it as
-`x-user-id`. Do not filter on a guessed column name: read
-`information_schema.columns` for the table (or one row) first and use the
-column it shows. A guessed column fails with undefined column (42703).
+`x-user-id`. Do not filter on a guessed column name: first read
+`information_schema.columns` for every table you need in one call (or read one
+row), and use the column it shows. A guessed column fails with undefined
+column (42703).
 
 ```
-sql_select { service: 'kyc', sql: "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position", params: ['kyc_inquiries'] }
+sql_select { service: 'kyc', sql: "SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_name IN ($1, $2) ORDER BY table_name, ordinal_position", params: ['kyc_inquiries', 'kyc_sync_audit'] }
 ```
 
 The Persona inquiry id is a safe join when banking-service or the logs give it:

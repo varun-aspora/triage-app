@@ -47,6 +47,7 @@ quotes an error text that looks familiar.
 | `tier_hint` | The tier that usually settles it. `strong` means brief `investigate_<entity>_deep`, or escalate. |
 | `stable` | True only when the source records a confirmed root cause. |
 | `source_ref` | The note and heading the entry came from. Activate that note if you need the detail. |
+| `lesson` | Optional. What a reviewed case taught, from its actual root cause. It says where the answer was last time; this run still needs its own evidence. |
 
 The recipes use `<placeholder>` ids. Replace them with ids from the id chain,
 never with ids you guessed. A brief still needs everything the brief template
@@ -68,9 +69,13 @@ escalation. When a thread points at it (entry `remittance-order-out-of-reach`):
 
 - Entries come from the `## Known issues` sections of the service notes and
   from the old workspace's skills. Never from past case folders: they hold
-  customer data.
+  customer data. The one exception is an eval case a human reviewed with an
+  actual root cause and a faster path: `triage fixtures review` offers a draft
+  with the ids stripped, and an owner finishes its `signature.regex` and adds
+  it here in a reviewed change (D92).
 - Every entry names its source in `source_ref`: `knowledge/<note>/SKILL.md#<heading>`,
-  or the old workspace's skill file by its path in that workspace.
+  the old workspace's skill file by its path in that workspace, or
+  `evals/cases/<case_id>` for a reviewed case.
 - `stable` is set to true in a reviewed change, and only when the source
   records a confirmed root cause. Hedged sources ("usually", "suspect",
   "often") stay false.

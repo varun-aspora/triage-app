@@ -239,7 +239,9 @@ describe('orchestrator.md', () => {
     expect(text).toContain('Each brief\'s Question says which hypothesis it tests and what result would reject it');
     expect(text).toMatch(/An empty lookup by the known id is a question, not an answer/);
     expect(text).toMatch(/never the same key reworded/);
-    expect(text).toMatch(/device id or a verification id is not one of the seven id keys/);
+    expect(text).toMatch(/device id or a verification id is not one of the seven id keys and is never resolved/);
+    expect(text).toContain('carries it on a `Journey keys:` line');
+    expect(text).not.toMatch(/cannot be resolved or briefed/);
     expect(text).toContain("The run's default window is the Window line under This run");
     expect(text).toMatch(/remaining leg is the device .* ask `code_walker` to read the app code/);
     expect(text).toMatch(/logs come first/);
@@ -311,6 +313,13 @@ describe('brief-template.md', () => {
       expect(value).toMatch(new RegExp(`^${PLACEHOLDER.source}$`));
     }
     expect(field('Window')).toMatch(new RegExp(`^${PLACEHOLDER.source} \\.\\. ${PLACEHOLDER.source}$`));
+  });
+
+  test('an optional Journey keys line carries device and verification ids seen in the run (D77, Q13)', () => {
+    const flat = brief.replace(/\s+/g, ' ');
+    expect(flat).toContain('add a `Journey keys:` line after Ids');
+    for (const key of ['device_id', 'x-device-id', 'verification_id']) expect(flat).toContain(`\`${key}\``);
+    expect(example).not.toContain('Journey keys');
   });
 
   test('the Question states a hypothesis and what would reject it (D81)', () => {

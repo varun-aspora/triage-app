@@ -73,13 +73,25 @@ Take these steps in order:
    code that writes that row or log line (`repo_grep` for the insert or the
    logger call, then `repo_read`) to learn when in the journey it is written.
 3. If it is written only at a later step than the user reached, the empty
-   result is expected. Say so in the evidence, and pick another of the run's
-   ids that the journey already has, such as the phone number or a form id.
+   result is expected. Say so in the evidence, and pick another key that the
+   journey already has: another of the run's ids, such as the phone number or
+   a form id, or a device id or verification id seen in this run's results.
 
 Once those steps are done, do not reword the same text or run the same key
-again. A device id or a verification id is not one of the run's ids, so the
-scope check refuses it: do not query it. Put it under `gaps` with where you saw
-it, and name it in your reply.
+again.
+
+A device id or a verification id is not one of the run's ids, but the tools
+accept one once a result in this run, fetched by one of the run's ids, has
+shown it under `device_id`, `x-device-id` or `verification_id`. The brief's
+`Journey keys:` line lists those the parent already knows. To see one, ask for
+the column: `columns: ["x-device-id"]` (or `raw: true`) on a `logs_search` by
+the run's id, or the column in the select list of a `sql_select` whose WHERE
+has `<column> = $1` bound to the run's id (not under OR or NOT, with no
+subquery). Then search by it: as a whole `terms` value in `logs_search` (or a
+field of that name where the logs notes list it), or as a bound param compared
+to `device_id` or `verification_id` in `sql_select`. Any other device
+or verification id is refused. Name each one you used in your reply, with
+where you saw it.
 
 ## Where log text comes from
 
@@ -146,8 +158,10 @@ ask why" above. Try these in order:
 
 1. Read the error and fix what it names. A `Query failed` message carries the
    database's own text and says what to check. Retry once.
-2. Look it up in the code or the schema. For a table or column, run
-   `sql_select` on `information_schema.columns` or `information_schema.tables`
+2. Look it up in the code or the schema. For a table or column, first use
+   the column list in the service's skill. Only for a table it does not list,
+   run `sql_select` on `information_schema.columns` (every table you need in
+   one call, `WHERE table_name IN ($1, $2, $3)`) or `information_schema.tables`
    for that service. In your entity's repos, `repo_grep` and `repo_read` show
    migrations (columns and tables), models (field names), handlers
    (endpoints and log labels) and config (what is switched on). The
@@ -164,7 +178,8 @@ ask why" above. Try these in order:
   CIF id), `account_form_id` (harbor `form_id`), `account_id` (the rhythm
   account UUID, not the bank account number) and `account_number` (the bank
   account number). Any other id is refused and the refusal is
-  audited.
+  audited, apart from the correlation ids in the logs notes and the device
+  and verification ids under "Empty means ask why".
 - If you find a new id that matters (for example a second customer or account),
   do not query it. Put it in your findings and your reply, so the parent can
   resolve it and send a new brief.

@@ -33,10 +33,12 @@ import type { SqlConnector } from '../connectors/sql/pg-client.ts';
 import type { MockPort } from '../connectors/mock.ts';
 import { ConnectorError, type ConnectorContext } from '../connectors/types.ts';
 import { MAX_SQL_LENGTH, type SqlCheck, type SqlRefusalCode, validateSelect } from '../gate/sql.ts';
+import { observeJourneyKeys } from '../gate/scope.ts';
 import { buildReadOnlyTxn, explainStatement, wrapWithCap } from '../gate/sql-txn.ts';
 import { semanticKey, type SqlSelectFacts } from '../mock/key.ts';
 import type { Entity } from '../types/core.ts';
 import type { ToolEnvelope } from '../types/tool-result.ts';
+import { observedScopeOf, scopeSetOf } from './_lib/context.ts';
 import { type BackingRef, type GateDecision, runIoTool, type StagingHarness } from './_lib/pipeline.ts';
 import type { ToolContext, ToolModule } from './types.ts';
 
@@ -83,7 +85,8 @@ const description = (maxRows: number): string =>
   "Run one read-only SELECT against one of this entity's service databases. " +
   'Send exactly one SELECT (WITH ... SELECT is fine); writes, SET/RESET/SHOW and more than one statement are ' +
   `refused. Put every value in params and refer to it as $1, $2, ... in order; never write ids into the SQL text. ` +
-  'Unsure of a column? Read information_schema.columns (column_name, data_type WHERE table_name = $1) first; ' +
+  'Unsure of a column the skill does not list? Read information_schema.columns first, every table in one call ' +
+  '(table_name, column_name, data_type WHERE table_name IN ($1, $2, ...)); ' +
   'pg_catalog stays refused. EXPLAIN or EXPLAIN ANALYZE of a SELECT returns its plan as rows. ' +
   'ANALYZE runs the whole query on production with no row cap, so use it only on a query already narrowed by ids or time. ' +
   'Ids must come from the brief or the ID chain. For counts across customers set scope to "systemic" and select ' +
@@ -266,7 +269,13 @@ async function runSqlSelect(ctx: ToolContext, entity: Entity, services: readonly
       input: data,
       backing:
         service === 'unknown' ? { envName: 'TRIAGE_ENTITIES', status: 'disabled' } : backingFor(ctx, entity, service),
-      scope: { systemic, sqlAggregateOnly: check.ok && check.aggregateOnly },
+      // A device or verification id seen earlier in the run is in scope (D77, Q13).
+      scope: {
+        systemic,
+        sqlAggregateOnly: check.ok && check.aggregateOnly,
+        sqlJourneyParams: check.ok ? check.journeyParams : [],
+        ...observedScopeOf(ctx.runId),
+      },
       gate: () => {
         if (service === 'unknown') {
           return {
@@ -314,6 +323,7 @@ async function runSqlSelect(ctx: ToolContext, entity: Entity, services: readonly
       render: (value) => {
         const answer = parseAnswer(value);
         const rows = answer.rows.slice(0, cap);
+        observeJourneyKeys(ctx.runId, SQL_SELECT, data, scopeSetOf(deps), rows, check.ok ? check.rowKeys : undefined);
         return {
           service,
           ...(answer.columns !== undefined ? { columns: answer.columns } : {}),

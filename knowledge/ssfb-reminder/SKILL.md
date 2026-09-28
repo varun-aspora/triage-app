@@ -36,13 +36,13 @@ data. This note covers the Shivalik copy only.
 | `job_execution` | One record per attempt, including `external_identifier`. Start here. |
 
 The join columns between `job` and `job_execution` are not written down. List
-the columns before you join:
+the columns of both in one call before you join:
 
 ```
 sql_select {
   service: "reminder",
-  sql: "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position",
-  params: ["job_execution"]
+  sql: "SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_name IN ($1, $2) ORDER BY table_name, ordinal_position",
+  params: ["job", "job_execution"]
 }
 ```
 

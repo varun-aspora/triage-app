@@ -44,13 +44,13 @@ import {
   type QuickwitGateConfig,
 } from '../gate/quickwit.ts';
 import { resolveWindow } from '../gate/quickwit-window.ts';
-import { observeCorrelationIds, observedCorrelationIds, type LogsMode } from '../gate/scope.ts';
+import { observeCorrelationIds, observeJourneyKeys, type LogsMode } from '../gate/scope.ts';
 import { semanticKey } from '../mock/key.ts';
 import type { Entity, TimeWindow } from '../types/core.ts';
 import type { ToolEnvelope } from '../types/tool-result.ts';
 import { type GateDecision, runIoTool, type BackingRef, type StagingHarness } from './_lib/pipeline.ts';
 import type { ToolContext, ToolModule } from './types.ts';
-import type {} from './_lib/context.ts';
+import { observedScopeOf, scopeSetOf } from './_lib/context.ts';
 
 declare module './_lib/context.ts' {
   interface ToolConnectors {
@@ -377,11 +377,6 @@ function summaryOf(entity: Entity, service: string | undefined, out: LogsSearchO
   return `logs_search ${target} ${out.groups?.length ?? 0} groups${distinct} over ${out.tally_base} hits${via}`;
 }
 
-function observedScope(ctx: ToolContext): { observed?: ReadonlySet<string> } {
-  const observed = observedCorrelationIds(ctx.runId);
-  return observed !== undefined ? { observed } : {};
-}
-
 type RunArgs = {
   readonly data: LogsSearchInput;
   readonly toolCallId: string;
@@ -437,7 +432,7 @@ async function runLogsSearch(ctx: ToolContext, entity: Entity, args: RunArgs): P
       scope: {
         ...(data.scope === 'systemic' ? { systemic: true } : {}),
         logsMode: logsModeOf(data),
-        ...observedScope(ctx),
+        ...observedScopeOf(ctx.runId),
       },
       gate,
       fixture: () => {
@@ -471,8 +466,11 @@ async function runLogsSearch(ctx: ToolContext, entity: Entity, args: RunArgs): P
       },
       render: (value) => {
         const out = shapeOf(value);
-        // Correlation ids in these hits may be searched later in the run (D77).
-        if ('hits' in out) observeCorrelationIds(ctx.runId, out.hits);
+        // Correlation ids and journey keys in these hits may be searched later in the run (D77).
+        if ('hits' in out) {
+          observeCorrelationIds(ctx.runId, out.hits);
+          observeJourneyKeys(ctx.runId, LOGS_SEARCH, data, scopeSetOf(deps), out.hits);
+        }
         return out;
       },
       stage: shapeOf,

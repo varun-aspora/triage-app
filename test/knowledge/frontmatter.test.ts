@@ -167,6 +167,9 @@ describe('fixture trees', () => {
       [{ name: 'ssfb-overview', metadata: { kind: 'overview', entity: 'ssfb', service: 'harbor' } }, 'an overview has no metadata.service'],
       [{ name: 'repo-map', metadata: { kind: 'repo-map', entity: 'ssfb' } }, "metadata.entity of a repo-map skill is 'shared'"],
       [{ name: 'repo-map', metadata: { kind: 'patterns', entity: 'shared' } }, "a patterns skill is named 'patterns'"],
+      [{ name: 'rtl-onboarding', metadata: { kind: 'journey', entity: 'rtl', service: 'workflow' } }, 'a journey note has no metadata.service'],
+      [{ name: 'ssfb-onboarding', metadata: { kind: 'journey', entity: 'rtl' } }, "a journey note is named 'rtl-<journey>'"],
+      [{ name: 'rtl-overview', metadata: { kind: 'journey', entity: 'rtl' } }, "a journey note is named 'rtl-<journey>'"],
     ];
     for (const [spec, expected] of cases) {
       const name = spec.name ?? 'ssfb-harbor';
@@ -183,7 +186,7 @@ describe('fixture trees', () => {
       'method/data.json': '{}\n',
     });
     const text = reasons(checkSkillTree(root)).join('\n');
-    expect(text).toContain('notes.md: only README.md may sit directly under knowledge/');
+    expect(text).toContain('notes.md: only README.md, sources.lock.json may sit directly under knowledge/');
     expect(text).toContain('ssfb-harbor: a skill directory must hold SKILL.md');
     expect(text).toContain('method/sub/extra.md: knowledge/method/ holds flat *.md files only');
     expect(text).toContain('method/data.json: knowledge/method/ holds flat *.md files only');

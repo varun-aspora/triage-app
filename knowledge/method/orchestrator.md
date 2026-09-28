@@ -68,8 +68,11 @@ Report with `finish_report`. You do not read any entity's systems yourself.
   may be written only at a later step of the journey. When an investigator
   says so, the next brief asks for another id from the chain that the journey
   already has (the phone number or a form id), never the same key reworded. A
-  device id or a verification id is not one of the seven id keys: it cannot be
-  resolved or briefed, so record it as a gap.
+  device id or a verification id is not one of the seven id keys and is never
+  resolved, but when an investigator reports one it saw in this run's results,
+  the next brief to the entity that looks it up carries it on a `Journey
+  keys:` line and asks for the lookup by it. For example, a device id seen on
+  RTL goes on the SSFB brief's Journey keys line.
 - The run's default window is the Window line under This run. Once a
   delegate finds when the relevant journey started, start the next briefs'
   Window there and give the reason.
@@ -94,6 +97,10 @@ Report with `finish_report`. You do not read any entity's systems yourself.
 - Send one `task` per entity, all in the same turn, so they run in parallel.
   Do not brief entities one after another when their questions do not depend
   on each other.
+- When an entity's first queries need a journey key that another entity
+  finds (the SSFB device queries need the device id from RTL), brief the
+  finding entity first, or send the other entity only the queries it can run
+  now and send the keyed ones once the key comes back.
 - Every brief follows the brief template: delegates inherit nothing from you,
   so the brief is all they know.
 - When an answer points at another entity (`suggested_next_entity`) or brings

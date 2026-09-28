@@ -15,10 +15,16 @@
 // promote() drops the cost key from an eval case draft's report.json before
 // it checks and moves the draft (D59), so drafts written before feedback.ts
 // stopped copying it do not carry token counts or spend into evals/cases.
+//
+// When a promoted eval case has an actual root cause and a faster path, the
+// command also offers a pattern note draft (D92, src/classify/pattern-draft.ts)
+// and writes it to <TRIAGE_HOME>/patterns/_unreviewed/<case_id>.json on y. An
+// owner finishes it and adds it to knowledge/patterns/patterns.json in a PR.
 
 import { userInfo } from 'node:os';
-import { relative } from 'node:path';
+import { basename, relative } from 'node:path';
 import { createInterface } from 'node:readline';
+import { buildPatternDraft, writePatternDraft } from '../../classify/pattern-draft.ts';
 import { checkEgress } from '../../gate/redact.ts';
 import {
   decline,
@@ -60,6 +66,7 @@ type Counts = { promoted: number; unchanged: number; declined: number; refused: 
 const CASE_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 
 const QUESTION = 'promote? [y/N/skip] ';
+const DRAFT_QUESTION = 'draft a pattern note from this case? [y/N] ';
 
 /** Maps an answer to a decision, or null when it is not one of the choices. */
 export function parseAnswer(answer: string): Decision | null {
@@ -142,7 +149,12 @@ export function createFixturesReviewCommand(options: FixturesReviewOptions = {})
               }
             }
             counts[outcome.status]++;
-            report.push(reportEntry(item, outcome, home));
+            const entry = reportEntry(item, outcome, home);
+            if (item.type === 'eval_case' && outcome.status === 'promoted') {
+              const draft = await offerPatternDraft(outcome.to, home, prompt, say);
+              if (draft !== null) entry.pattern_draft = rel(home, draft);
+            }
+            report.push(entry);
           }
         } finally {
           prompt.close();
@@ -187,6 +199,26 @@ async function apply(item: ReviewItem, decision: Decision, reviewer: string, cas
   const result: PromoteResult = await promote(item, caseId !== undefined ? { reviewer, caseId } : { reviewer });
   if (result.status === 'refused') return { status: 'refused', reason: result.reason };
   return { status: result.status, to: result.to };
+}
+
+/** Offers a pattern note draft for a promoted eval case; returns the written path, or null. */
+async function offerPatternDraft(caseDir: string, home: string, prompt: ReviewPrompt, say: (lines: string | readonly string[]) => void): Promise<string | null> {
+  const caseId = basename(caseDir);
+  const built = await buildPatternDraft(caseDir, caseId);
+  if (built.status === 'none') return null;
+  if (built.status === 'refused') {
+    say(`  no pattern draft: ${built.reason}`);
+    return null;
+  }
+  const answer = (await prompt.ask(DRAFT_QUESTION))?.trim().toLowerCase();
+  if (answer !== 'y' && answer !== 'yes') return null;
+  const path = await writePatternDraft(home, caseId, built.draft);
+  say([
+    `  pattern draft written to ${rel(home, path)}`,
+    '  write signature.regex, check first_queries and lesson, then add the entry to knowledge/patterns/patterns.json in a PR',
+    ...(built.draft.matched_pattern_id !== undefined ? [`  the run matched ${built.draft.matched_pattern_id}: editing that entry may be better`] : []),
+  ]);
+  return path;
 }
 
 function describeItem(item: ReviewItem, index: number, total: number, home: string): string[] {

@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Readable } from 'node:stream';
 import { makeTestHome, type TestHome } from '../../../test/support/home.ts';
+import { parsePatterns } from '../../classify/patterns.ts';
 import { redactPersisted } from '../../gate/redact.ts';
 import { keyHash, keyString, semanticKey } from '../../mock/key.ts';
 import { listUnreviewed, reviewDirsFrom, type EvalCaseReviewItem } from '../../mock/promote.ts';
@@ -470,5 +471,52 @@ describe('eval draft cost', () => {
       const left = join(h.home, 'evals', '_unreviewed', runId, 'report.json');
       expect(readFileSync(existsSync(moved) ? moved : left, 'utf8')).toBe(text);
     }
+  });
+});
+
+describe('pattern note draft (D92)', () => {
+  // A valid ULID with no run of 6+ digits, so the persisted profile leaves it alone.
+  const RUN = '01J8ZQ7XK3PSEDRMNABCDEFGH2';
+  const customer = (sampleReport as { id_chain: { ids: { customer_id: string } } }).id_chain.ids.customer_id;
+
+  async function reviewedRun(h: TestHome, feedback: { actual_root_cause?: string; faster_path?: string }): Promise<void> {
+    const store = createFolderRunStore({ runsDir: h.config.paths.runsDir, dataDir: h.config.paths.dataDir });
+    await store.createRun(RUN, redactPersisted(sampleRequest(RUN)));
+    await store.addSubmission(RUN, redactPersisted({ kind: 'initial' as const }));
+    const rep: Report = { ...(sampleReport as unknown as Report), run_id: RUN };
+    await store.putReport(RUN, 1, redactPersisted(rep), redactPersisted('# report\n'));
+    await recordFeedback(RUN, { verdict: 'wrong', given_by: 'reviewer-a', interface: 'cli', ...feedback }, { store, home: h.home });
+  }
+  const draftPath = (h: TestHome) => join(h.home, 'patterns', '_unreviewed', `${RUN}.json`);
+
+  test('y after the promotion writes a schema-valid draft with the ids stripped', async () => {
+    const h = home();
+    await reviewedRun(h, {
+      actual_root_cause: `The user ${customer} never verified the SIM, so harbor had no form.`,
+      faster_path: `logs_search on rtl app-server for ${customer} with the x-device-id column; sql_select on guardian device_auth_attempts by device id`,
+    });
+    const r = await review(h, ['--json'], { answers: ['y', 'y'] });
+    expect(r.asked).toEqual(['promote? [y/N/skip] ', 'draft a pattern note from this case? [y/N] ']);
+    expect(r.err).toContain(`pattern draft written to patterns/_unreviewed/${RUN}.json`);
+    const draft = readJson(draftPath(h));
+    expect(parsePatterns([draft.pattern])).toHaveLength(1);
+    expect(JSON.stringify(draft)).not.toContain(customer);
+    expect(draft.pattern.lesson).toBe('The user <customer_id> never verified the SIM, so harbor had no form.');
+    expect(draft.pattern.first_queries.map((q: { entity: string }) => q.entity)).toEqual(['rtl', 'ssfb']);
+    expect(draft.pattern.source_ref).toBe(`evals/cases/${RUN}`);
+    expect(JSON.parse(r.out).items[0].pattern_draft).toBe(`patterns/_unreviewed/${RUN}.json`);
+    expect(existsSync(join(h.home, 'knowledge', 'patterns', '_unreviewed'))).toBe(false);
+  });
+
+  test('an empty answer writes nothing, and a case without both fields is not offered one', async () => {
+    const h = home();
+    await reviewedRun(h, { actual_root_cause: 'x', faster_path: 'y' });
+    await review(h, [], { answers: ['y', ''] });
+    expect(existsSync(draftPath(h))).toBe(false);
+
+    const h2 = home();
+    await reviewedRun(h2, { actual_root_cause: 'only the cause' });
+    const r = await review(h2, [], { answers: ['y'] });
+    expect(r.asked).toEqual(['promote? [y/N/skip] ']);
   });
 });

@@ -22,10 +22,13 @@ is usually in the worker lines. The registry does not list the workers as
 services, so if the tool refuses them, record the gap and say the worker logs
 were not searched (unverified: whether the registry will add them).
 
-Other services in these logs are not registry services here: `canopy`,
-`comms`, `comms-consumer`, `comms-ui` (a different comms from SSFB's),
-`engage`, `horus`, the gateways `kong`, `kong-internal` and `kong-vendor`, and
-`kafka-connect`. The gateways dominate any query without a service filter.
+The registry also has `canopy`, `comms` (a different comms from SSFB's) and
+`engage`, mapped to `canopy-service`, `comms-service` and `engage-service`
+(unverified: an earlier survey saw them log as `canopy`, `comms` and
+`engage`). Other services in these logs are not registry services, so
+`service` refuses them: `comms-consumer`, `comms-ui`, `horus`, the gateways
+`kong`, `kong-internal` and `kong-vendor`, and `kafka-connect`. The gateways
+dominate any query without a service filter.
 
 A line with service `harbor` in these logs is an unrelated container, not SSFB
 harbor.

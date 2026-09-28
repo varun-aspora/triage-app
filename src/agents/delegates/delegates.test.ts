@@ -339,6 +339,16 @@ describe('delegate body', () => {
     }
   });
 
+  test('the RTL investigators, and only they, mount the rtl-nri-onboarding journey note', () => {
+    const env = envOf(home());
+    for (const e of ENTITIES) {
+      for (const deep of [false, true]) {
+        const names = investigatorMounts(e, RUN, { env, deep }).skills.map((s) => s.name);
+        expect(names.includes('rtl-nri-onboarding')).toBe(e === 'rtl');
+      }
+    }
+  });
+
   test('the deep variant also mounts codegraph-limits; both carry the fallback order', () => {
     const env = envOf(home());
     const deep = investigatorMounts('rtl', RUN, { env, deep: true });

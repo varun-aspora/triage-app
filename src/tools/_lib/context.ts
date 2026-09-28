@@ -16,7 +16,7 @@ import type { Registry } from '../../config/registry.ts';
 import type { AuditSink } from '../../gate/audit-sink.ts';
 import { createJsonlAuditSink } from '../../gate/audit-sink.ts';
 import { createRunBudget, type EntityLimits, getRunBudget, type RunBudget } from '../../gate/budget.ts';
-import { createScopeSet, extendScopeSet, type ScopeSet } from '../../gate/scope.ts';
+import { createScopeSet, extendScopeSet, observedIds, type ScopeSet } from '../../gate/scope.ts';
 import { createMockLayer, type MockLayer } from '../../mock/index.ts';
 import type { RunStore } from '../../runstore/types.ts';
 import type { Entity, Interface, RunId, TimeWindow } from '../../types/core.ts';
@@ -209,4 +209,10 @@ export function scopeSetOf(deps: ToolDeps): ScopeSet {
   const holder = holders.get(deps);
   if (holder !== undefined && holder.chain === chain) return holder.scope;
   return createScopeSet(chain);
+}
+
+/** The ids seen in the run's earlier results (D77), as the pipeline's scope option. */
+export function observedScopeOf(runId: RunId): { observed?: ReadonlySet<string> } {
+  const observed = observedIds(runId);
+  return observed !== undefined ? { observed } : {};
 }

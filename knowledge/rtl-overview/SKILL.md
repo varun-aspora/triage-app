@@ -45,20 +45,16 @@ searched as the `uservault`, `appserver` and `verification` services.
 verification-service is still referenced by the `NRI_ONBOARDING_V4` step
 definitions for some KYC steps, but kyc-service replaces it for NRE/NRO.
 
-## Who calls whom
+## Handoff to SSFB
 
-```
-mobile app -> workflow-op (engine; each step asks an external step handler over HTTP)
-                |- banking-service  (Part-1 data: basics, income, eVisa, survey)
-                |- kyc-service      (Persona KYC and eVisa verdicts)
-                |- verification-service (older KYC steps in some definitions)
-                |- user-vault       (Aspora core)
-                '- harbor           (Part-2 device binding and account creation, SSFB)
-```
-
-The handoff to CBS is a pull: harbor calls banking-service's
-`form-submission-data` endpoint to fetch the assembled Part-1 form, then
-starts CBS account creation.
+Harbor pulls the finished Part-1 form from banking-service's
+`form-submission-data` endpoint, then starts CBS account creation. Before
+that, guardian (SSFB) runs device and SIM binding. Until SIM binding is
+VERIFIED, harbor has no form with the user's id, so an empty harbor lookup for
+a user stuck there is expected; the device id is the key to follow. It is in
+the app-server logs (`x-device-id`), found by the `aspora_user_id`.
+investigate_rtl has the `rtl-nri-onboarding` note for the whole journey and
+its first queries.
 
 ## Data access
 

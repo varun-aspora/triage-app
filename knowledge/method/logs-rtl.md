@@ -4,15 +4,16 @@ Notes for `logs_search` on RTL. The general rules are in the logs note above.
 
 ## What is known
 
-- RTL logs are the London cluster's production app logs. The tool picks the
-  cluster and index from config. If `logs_search` answers `not_configured`,
-  add the gap `rtl logs not configured`, say so in the reply, and work from
-  the DB and code.
+- RTL logs are the London cluster's app logs, a different index from SSFB.
+  The tool picks the cluster and index from config. If `logs_search` answers
+  `not_configured`, add the gap `rtl logs not configured`, say so in the
+  reply, and work from the DB and code.
 - RTL log service names end in `-service`. A name without the suffix returns
   0 hits.
 - The tool accepts only `service`, `level`, `message`, `error`, `raw_message`
   and `timestamp` as fields. No correlation id field is configured for RTL, so
-  search the run's ids as `terms`.
+  search the run's ids as `terms`. Other fields, such as `x-device-id`, show
+  in hits: ask for them with `columns` or `raw: true`.
 
 ## Services
 
@@ -29,15 +30,17 @@ Notes for `logs_search` on RTL. The general rules are in the logs note above.
 | `uservault` | `user-vault-service` |
 
 `appserver`, `verification` and `uservault` have logs only: no DB or API.
-The banking, kyc, canopy, cohort and comms names follow the suffix but have
-not returned a hit yet (unverified: `banking-service` returned 0 hits for one
-user).
+`app-server-service` lines carry the device id and app headers of each app
+request. The banking, kyc, canopy, cohort and comms names follow the suffix
+but have not returned a hit yet (unverified: `banking-service` and
+`banking-service-service` both returned 0 hits on 2026-09-25).
 
 ## Personal data
 
-- `workflow-op-service` logs full outbound request and response bodies. Never
-  quote personal data or tokens from them; cite the field name and the line's
-  timestamp instead.
+- `workflow-op-service` logs full outbound request and response bodies,
+  including the user-vault user details and admin tokens. Never quote personal
+  data or tokens from them; cite the field name and the line's timestamp
+  instead.
 - `user-vault-service` lines carry phone, name and date of birth. Never quote
   them.
 
@@ -51,7 +54,9 @@ user).
 
 ## First queries
 
-Start with bare `terms` for one of the run's ids, with `service` set and a
-small `max_hits`. Read one full hit and note the field names you see. Put the
-field names, and the service strings that returned hits, in the findings, so
-this note can be filled in.
+Start free-form, as the logs note says, with the run's `aspora_user_id`. Put
+the service strings and field names you see in the findings, so this note can
+be filled in. To get the device id, run the same search with
+`service: "appserver"`, `columns: ["x-device-id"]` and a one-day window
+around the last app activity or the ticket time; on an over-limit answer,
+narrow the window.

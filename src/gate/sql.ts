@@ -97,10 +97,15 @@ export type SqlAllowed = {
   aggregateOnly: boolean;
   // Highest $n used; the caller must bind exactly this many params.
   paramCount: number;
+  // The $n params and literals every row is tied to (D77, Q13). See rowKeys.
+  rowKeys?: RowKeys;
+  // The $n params used only as `device_id = $n` or `verification_id = $n` (Q13).
+  journeyParams: number[];
   // Set when the statement is EXPLAIN of a SELECT. The caller must run the
   // text as it is: a row-cap wrapper around EXPLAIN is not valid SQL.
   explain?: { analyze: boolean };
 };
+export type RowKeys = { params: number[]; literals: string[] };
 export type SqlRefused = { ok: false; code: SqlRefusalCode; message: string };
 export type SqlCheck = SqlAllowed | SqlRefused;
 
@@ -229,6 +234,8 @@ function checkSelect(select: JsonObject): SqlAllowed {
     functions: [...walker.functions].sort(),
     aggregateOnly: isAggregateOnly(select),
     paramCount,
+    ...rowKeysOf(select),
+    journeyParams: journeyParams(select),
   };
 }
 
@@ -564,4 +571,131 @@ function children(body: JsonObject): Json[] {
     }
   }
   return out;
+}
+
+// ---- row keys and journey params (D77, Q13) ------------------------------
+//
+// A device or verification id in a row may be used later in the run only when
+// every row is tied to a chain id. rowKeys are the values in a top-level
+// `column = value` of WHERE (ANDed, not under OR, NOT or a subquery). There
+// are none when the query can widen its rows past them or rename a column:
+// a CTE, a set operation, VALUES, a subquery anywhere, more than one FROM
+// item, a join not on an id-like column of each side (or NATURAL), or a
+// select-list alias device_id, x-device-id or verification_id on another
+// column. A join on a low-cardinality id-like column (tenant_id) can still
+// widen; the parser cannot know the column's values.
+
+const JOURNEY_COLUMNS: ReadonlySet<string> = new Set(['device_id', 'x-device-id', 'verification_id']);
+
+function stripCast(value: Json | undefined): Json | undefined {
+  const node = unwrap(value);
+  return node?.[0] === 'TypeCast' ? stripCast(node[1].arg) : value;
+}
+
+// The lowercase name parts of a column reference, or undefined.
+function columnParts(value: Json | undefined): string[] | undefined {
+  const node = unwrap(stripCast(value));
+  if (node?.[0] !== 'ColumnRef') return undefined;
+  return names(node[1].fields).map((p) => p.toLowerCase());
+}
+
+function paramNumber(value: Json | undefined): number | undefined {
+  const node = unwrap(stripCast(value));
+  return node?.[0] === 'ParamRef' && typeof node[1].number === 'number' ? node[1].number : undefined;
+}
+
+// The two sides of `a = b`, or undefined.
+function equalitySides(expr: Json | undefined): [Json | undefined, Json | undefined] | undefined {
+  const node = unwrap(expr);
+  if (node?.[0] !== 'A_Expr' || node[1].kind !== 'AEXPR_OP' || names(node[1].name).join('.') !== '=') return undefined;
+  return [node[1].lexpr, node[1].rexpr];
+}
+
+function conjuncts(expr: Json | undefined): Json[] {
+  const node = unwrap(expr);
+  if (node?.[0] === 'BoolExpr' && node[1].boolop === 'AND_EXPR' && Array.isArray(node[1].args)) {
+    return node[1].args.flatMap(conjuncts);
+  }
+  return expr === undefined ? [] : [expr];
+}
+
+function eachNode(value: Json | undefined, fn: (kind: string, body: JsonObject) => void): void {
+  if (Array.isArray(value)) return value.forEach((v) => eachNode(v, fn));
+  if (!isObject(value)) return;
+  const node = unwrap(value);
+  if (node) fn(node[0], node[1]);
+  for (const child of Object.values(value)) eachNode(child, fn);
+}
+
+// The names a FROM item's columns are qualified by, or undefined when it is
+// not plain tables joined on an id-like column of each side.
+function joinedTables(item: Json | undefined): Set<string> | undefined {
+  const node = unwrap(item);
+  if (node?.[0] === 'RangeVar') {
+    const alias = isObject(node[1].alias) ? node[1].alias.aliasname : undefined;
+    const name = typeof alias === 'string' ? alias : node[1].relname;
+    return typeof name === 'string' ? new Set([name.toLowerCase()]) : undefined;
+  }
+  if (node?.[0] !== 'JoinExpr' || node[1].isNatural === true) return undefined;
+  const left = joinedTables(node[1].larg);
+  const right = joinedTables(node[1].rarg);
+  if (left === undefined || right === undefined) return undefined;
+  const using = names(Array.isArray(node[1].usingClause) ? node[1].usingClause : []);
+  const linked =
+    using.some(isIdLikeColumn) ||
+    conjuncts(node[1].quals).some((q) => {
+      const [a, b] = (equalitySides(q) ?? []).map(columnParts);
+      if (a === undefined || b === undefined || a.length < 2 || b.length < 2) return false;
+      if (!isIdLikeColumn(a.at(-1)!) || !isIdLikeColumn(b.at(-1)!)) return false;
+      const [qa, qb] = [a.at(-2)!, b.at(-2)!];
+      return (left.has(qa) && right.has(qb)) || (left.has(qb) && right.has(qa));
+    });
+  return linked ? new Set([...left, ...right]) : undefined;
+}
+
+function keepsJourneyNames(targets: Json[]): boolean {
+  return targets.every((entry) => {
+    const rt = unwrap(entry);
+    const name = rt?.[0] === 'ResTarget' && typeof rt[1].name === 'string' ? rt[1].name.toLowerCase() : undefined;
+    return name === undefined || !JOURNEY_COLUMNS.has(name) || columnParts(rt![1].val)?.at(-1) === name;
+  });
+}
+
+function rowKeysOf(select: JsonObject): { rowKeys?: RowKeys } {
+  if (select.withClause !== undefined || select.valuesLists !== undefined) return {};
+  if (typeof select.op === 'string' && select.op !== 'SETOP_NONE') return {};
+  const from = Array.isArray(select.fromClause) ? select.fromClause : [];
+  if (from.length !== 1 || joinedTables(from[0]) === undefined) return {};
+  let subquery = false;
+  eachNode(select, (kind) => void (subquery ||= kind === 'SubLink'));
+  if (subquery || !keepsJourneyNames(Array.isArray(select.targetList) ? select.targetList : [])) return {};
+  const keys: RowKeys = { params: [], literals: [] };
+  for (const expr of conjuncts(select.whereClause)) {
+    const [l, r] = equalitySides(expr) ?? [];
+    const value = columnParts(l) !== undefined ? r : columnParts(r) !== undefined ? l : undefined;
+    const n = paramNumber(value);
+    if (n !== undefined) keys.params.push(n);
+    const c = unwrap(stripCast(value));
+    if (c?.[0] !== 'A_Const') continue;
+    const literal = isObject(c[1].sval) ? c[1].sval.sval : isObject(c[1].ival) ? c[1].ival.ival : isObject(c[1].fval) ? c[1].fval.fval : undefined;
+    if (typeof literal === 'string' || typeof literal === 'number') keys.literals.push(String(literal));
+  }
+  return keys.params.length + keys.literals.length > 0 ? { rowKeys: keys } : {};
+}
+
+function journeyParams(select: JsonObject): number[] {
+  const uses = new Map<number, number>();
+  const journey = new Map<number, number>();
+  const bump = (m: Map<number, number>, n: number): void => void m.set(n, (m.get(n) ?? 0) + 1);
+  eachNode(select, (kind, body) => {
+    if (kind === 'ParamRef' && typeof body.number === 'number') bump(uses, body.number);
+    const sides = kind === 'A_Expr' ? equalitySides({ A_Expr: body }) : undefined;
+    if (sides === undefined) return;
+    for (const [p, c] of [sides, [sides[1], sides[0]]] as const) {
+      const n = paramNumber(p);
+      const column = columnParts(c)?.at(-1);
+      if (n !== undefined && column !== undefined && JOURNEY_COLUMNS.has(column)) bump(journey, n);
+    }
+  });
+  return [...uses].filter(([n, count]) => journey.get(n) === count).map(([n]) => n).sort((a, b) => a - b);
 }

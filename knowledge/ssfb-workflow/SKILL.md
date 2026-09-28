@@ -120,7 +120,7 @@ user report.
   ```
   logs_search {
     service: "workflow",
-    fields: { raw_message: "JsonTemplateHandler" },
+    contains: "JsonTemplateHandler",
     terms: ["Illegal", "unquoted"]
   }
   ```

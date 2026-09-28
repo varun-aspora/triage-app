@@ -36,13 +36,13 @@ in bro.
 | `bro_use_case`, `bro_use_case_check` | Use case to check mapping (soft-deletable). |
 
 Column names beyond the table names are not written down. List them before
-you filter:
+you filter, for all the tables you need in one call:
 
 ```
 sql_select {
   service: "bro",
-  sql: "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position",
-  params: ["form_stp_checks"]
+  sql: "SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_name IN ($1, $2) ORDER BY table_name, ordinal_position",
+  params: ["form_stp_checks", "stp_check_config"]
 }
 ```
 

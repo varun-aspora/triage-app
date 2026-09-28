@@ -347,14 +347,48 @@
     "id": "sim-binding-no-vendor-callback",
     "category": "auth",
     "signature": {
-      "regex": ["sim_country_code\\W{0,5}0\\b", "sim[ _-]?binding[^\\n]{0,80}(sms|otp)[^\\n]{0,40}(never|not) (arrived|received|came)"],
-      "services": ["ssfb:guardian"]
+      "regex": ["sim_country_code\\W{0,5}0\\b", "sim[ _-]?binding[^\\n]{0,80}(sms|otp)[^\\n]{0,40}(never|not) (arrived|received|came)", "sim[ _-]?(binding|verification)[^\\n]{0,40}(stuck|pending)", "(stuck|pending)[^\\n]{0,40}sim[ _-]?(binding|verification)"],
+      "services": ["ssfb:guardian", "ssfb:harbor"]
     },
-    "entities": ["ssfb"],
-    "query_recipe": "sql_select on guardian for the user's SIM binding attempts; sim_country_code = 0 means no vendor callback came. Check the SIM's country against the supported ones, then logs_search on guardian with the <verification_id> as a term for the vendor webhook handling. sim_card_number has no country code; add the dial code before comparing it to the registered phone.",
+    "entities": ["ssfb", "rtl"],
+    "query_recipe": "On rtl: logs_search on appserver by the <aspora_user_id> with columns x-device-id, for the device id. On ssfb: sql_select on guardian for the attempts on that device, or the refresh_tokens.subject join for a user who verified once; sim_country_code = 0 means no vendor callback came and an old PENDING row is an abandoned attempt. Then read the vendor callbacks over the span of the attempts in one logs_search on guardian by message, match their times to each attempt's window, and compare other attempts from the same country in that span. sim_card_number has no country code; add the dial code before comparing it to the registered phone.",
     "tier_hint": "mid",
     "stable": false,
-    "source_ref": "knowledge/ssfb-guardian/SKILL.md#Known issues"
+    "source_ref": "knowledge/ssfb-guardian/SKILL.md#Known issues",
+    "first_queries": [
+      {
+        "entity": "rtl",
+        "query": "logs_search on appserver with terms [<aspora_user_id>] and columns [\"x-device-id\"] over one day around the last Part-1 activity or the ticket time (narrow it on an over-limit answer; one page is enough): the device id of a user who never verified (no refresh token or harbor form yet). Hand it to ssfb on the brief's Journey keys line."
+      },
+      {
+        "entity": "ssfb",
+        "query": "Device attempts: sql_select on guardian, device_auth_attempts WHERE device_id = <device_id> ORDER BY created_at, reading status, sim_country_code, registration_country_code, polling_attempts, created_at and verification_completion_deadline (for a user who verified once, the refresh_tokens.subject join by <aspora_user_id>). sim_country_code = 0 means no vendor callback came; an old PENDING row is an abandoned attempt, not one in progress."
+      },
+      {
+        "entity": "ssfb",
+        "query": "Registration limit: sql_select on guardian, the same rows; count the attempts on the device in any 24 hours. guardian allows 5 per device per 24 hours and refuses the next one with no row and no log line, so 5 attempts and then nothing means the device hit the limit."
+      },
+      {
+        "entity": "ssfb",
+        "query": "Harbor polls: logs_search on harbor, message \"checking verification status\", terms [<device_id>], over the attempts' windows: one line per app poll, with device_id and verification_id. No harbor form before VERIFIED is expected."
+      },
+      {
+        "entity": "ssfb",
+        "query": "Guardian callbacks: one logs_search on guardian, message \"Processing Twilio callback\", columns [\"iso_country_code\"], order \"oldest\", from the first attempt's created_at to the last attempt's verification_completion_deadline. Match the hit times to each attempt's window yourself; one call per attempt would use up the logs budget. If the span returns more hits than one page, check the first, the last and one middle attempt's window only. Phone fields are redacted, so this shows whether a callback arrived in a window and from which country, not whose it was."
+      },
+      {
+        "entity": "ssfb",
+        "query": "Vendor webhook count: one logs_search with no service, message \"POST /guardian/api/v1/callbacks/vendors/twilio/sms\", count, over the same span (kong-vendor access lines), compared with guardian's callbacks in that span. Webhooks at kong-vendor with no matching guardian callbacks point at the gateway; none at either in the window means no SMS reached the vendor then."
+      },
+      {
+        "entity": "ssfb",
+        "query": "UAE baseline: sql_select on guardian with scope systemic, SELECT status, sim_country_code, count(*) FROM device_auth_attempts WHERE registration_country_code = 784 AND created_at in the same window GROUP BY status, sim_country_code. Other UAE attempts verifying in that window means the vendor path worked and the fault is on this user's SIM or phone."
+      },
+      {
+        "entity": "ssfb",
+        "query": "App side: when all of the above is clean, the backend cannot tell whether the phone sent the SMS and the app cannot report it. Use repo_grep and repo_read on vance-android device_binding/ to see how the app sends it and what it shows when nothing comes back."
+      }
+    ]
   },
   {
     "id": "rhythm-utc-ist-inquiry-date",

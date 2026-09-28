@@ -39,7 +39,7 @@ import { toolsFor } from '../../tools/index.ts';
 import type { Mount, ToolContext, ToolDeps } from '../../tools/types.ts';
 import { EntitySchema, RunIdSchema, type Entity, type RunId } from '../../types/core.ts';
 import { deployManifestLines } from '../deploy-manifests.ts';
-import { codegraphLimitsSkill, currentKnowledge, methodDoc, repoMapSkill, serviceSkills, type Knowledge } from '../skills.ts';
+import { codegraphLimitsSkill, currentKnowledge, journeySkills, methodDoc, repoMapSkill, serviceSkills, type Knowledge } from '../skills.ts';
 
 /** Thinking level of the deep variant (HLD §1.3). */
 export const DEEP_THINKING = 'high' as const;
@@ -141,7 +141,12 @@ export function investigatorMounts(
   const services = env.registry.services(entity);
   const notes = serviceSkills(entity, services, knowledge);
   const tools = logActions(toolsFor(mount, ctx), ctx);
-  const skills = [...notes.skills, repoMapSkill(knowledge), ...(deep ? [codegraphLimitsSkill(knowledge)] : [])];
+  const skills = [
+    ...notes.skills,
+    ...journeySkills(entity, knowledge),
+    repoMapSkill(knowledge),
+    ...(deep ? [codegraphLimitsSkill(knowledge)] : []),
+  ];
   const docs = investigatorDocs(entity).map((file) => methodDoc(file, knowledge));
   const footer = [
     '## This delegate',

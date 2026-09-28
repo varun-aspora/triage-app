@@ -91,8 +91,10 @@ export type ScopeOptions = {
   /** From the SQL parser: true when the select list is aggregate-only. */
   readonly sqlAggregateOnly?: boolean;
   readonly logsMode?: LogsMode;
-  /** Correlation ids seen in earlier results of the run (D77); logs_search only. */
+  /** Correlation ids and journey keys seen in earlier results of the run (D77). */
   readonly observed?: ReadonlySet<string>;
+  /** From the SQL parser: the $n params compared only to a device_id or verification_id column (Q13). */
+  readonly sqlJourneyParams?: readonly number[];
 };
 
 export type FixtureRef<K extends FixtureKind> = {
@@ -394,6 +396,7 @@ export async function runIoTool<K extends FixtureKind, T>(
       ...(options.sqlAggregateOnly !== undefined ? { sqlAggregateOnly: options.sqlAggregateOnly } : {}),
       ...(options.logsMode !== undefined ? { logsMode: options.logsMode } : {}),
       ...(options.observed !== undefined ? { observed: options.observed } : {}),
+      ...(options.sqlJourneyParams !== undefined ? { sqlJourneyParams: options.sqlJourneyParams } : {}),
     });
     if (!result.ok) {
       audit({ decision: 'deny', exit: 'refused', transport: noIoTransport, reason: result.reason });

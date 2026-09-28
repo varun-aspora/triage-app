@@ -309,6 +309,12 @@ export const ALLOW_CASES: readonly SqlAllowCase[] = [
     paramCount: 1,
   },
   {
+    name: 'information_schema.columns for several tables in one call (D84)',
+    sql: 'SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_name IN ($1, $2, $3) ORDER BY table_name, ordinal_position',
+    tables: ['information_schema.columns'],
+    paramCount: 3,
+  },
+  {
     name: 'information_schema.tables',
     sql: "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name",
     tables: ['information_schema.tables'],

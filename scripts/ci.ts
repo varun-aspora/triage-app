@@ -6,6 +6,8 @@
 //   2. unit tests       bun run test
 //   3. contract suite   node bin/triage.mjs evals contract
 //   4. classifier suite node bin/triage.mjs evals classifier (faux providers, judge off)
+//   5. knowledge sources bun scripts/check-knowledge-sources.ts (one line and exit 0
+//                        unless TRIAGE_SHIVALIK_DIR is set; D85)
 // It stops at the first step that fails and exits with that step's code.
 //
 // It needs no VPN, no credentials and no model keys: the eval home has every
@@ -29,6 +31,7 @@ export const CI_STEPS: readonly CiStep[] = Object.freeze([
   { name: 'unit tests', bin: 'bun', argv: ['run', 'test'] },
   { name: 'contract suite', bin: 'node', argv: ['bin/triage.mjs', 'evals', 'contract'] },
   { name: 'classifier suite (faux, judge off)', bin: 'node', argv: ['bin/triage.mjs', 'evals', 'classifier'] },
+  { name: 'knowledge sources (skipped without TRIAGE_SHIVALIK_DIR)', bin: 'bun', argv: ['scripts/check-knowledge-sources.ts'] },
 ]);
 
 /** Keys removed from every child's env so no step can reach a real model or Slack. */

@@ -14,12 +14,22 @@
 // (Q8, D76). Those values are kept in a process-level registry keyed by
 // run_id, like the run budgets, and dropped when the run settles.
 //
+// The same registry holds journey keys (D77, owner answer Q13): a value under
+// device_id, x-device-id or verification_id in a logs_search hit or an
+// sql_select row. They belong to one customer, so they are recorded only from
+// a result fetched by a chain id; for sql_select, only when the parser found a
+// chain id in a WHERE equality that ties every row (rowKeys in sql.ts). Once
+// recorded, such a value is in scope in a logs_search field of those names, a
+// whole terms value or contains, and in an sql_select only as a $n param
+// compared to a device_id or verification_id column (journeyParams).
+//
 // logs_search also gets two checks for what Quickwit matches beyond the whole
 // value (D76): a UUID written with spaces or other separators (the tokeniser
 // splits on them), and a contains fragment, which is a substring match.
 // No I/O, no config.
 import type { KnownIdKey, RunId } from '../types/core.ts';
 import type { IdChain } from '../types/id-chain.ts';
+import type { RowKeys } from './sql.ts';
 import { extractIdShaped, lastDigits, PHONE_DIGITS, type IdKind, type IdShaped } from './id-patterns.ts';
 
 // Values are grouped by how they compare: UUIDs, emails, and numbers (digit
@@ -44,8 +54,11 @@ export type ScopeCheckInput = {
   // Set by the SQL parser check: true when the select list is aggregate-only.
   sqlAggregateOnly?: boolean;
   logsMode?: LogsMode;
-  // Correlation ids seen in earlier results of the run (observedCorrelationIds).
+  // Correlation ids and journey keys seen in earlier results of the run (observedIds).
   observed?: ReadonlySet<string>;
+  // Set by the SQL parser check: the $n params compared only to a device_id or
+  // verification_id column. Only these may be journey keys (Q13).
+  sqlJourneyParams?: readonly number[];
 };
 
 export type ScopeOffender = { kind: IdKind; masked: string };
@@ -119,6 +132,12 @@ function observedKey(id: IdShaped): string {
   return `${groupOf(id.kind)}:${id.normalised}`;
 }
 
+function remember(runId: RunId, key: string): void {
+  let set = observedByRun.get(runId);
+  if (set === undefined) observedByRun.set(runId, (set = new Set()));
+  set.add(key);
+}
+
 /** Records the id-shaped values in the correlation fields of these hits for the run. */
 export function observeCorrelationIds(runId: RunId, hits: readonly unknown[]): void {
   for (const hit of hits) {
@@ -126,16 +145,79 @@ export function observeCorrelationIds(runId: RunId, hits: readonly unknown[]): v
     for (const name of CORRELATION_FIELDS) {
       const value = (hit as Record<string, unknown>)[name];
       if (typeof value !== 'string') continue;
-      for (const id of extractIdShaped(value)) {
-        let set = observedByRun.get(runId);
-        if (set === undefined) observedByRun.set(runId, (set = new Set()));
-        set.add(observedKey(id));
-      }
+      for (const id of extractIdShaped(value)) remember(runId, observedKey(id));
     }
   }
 }
 
-export function observedCorrelationIds(runId: RunId): ReadonlySet<string> | undefined {
+const CORRELATION_NOTE =
+  `a correlation id (${CORRELATION_FIELDS.slice(0, -1).join(', ')} or ${CORRELATION_FIELDS.at(-1)}) is allowed in fields, ` +
+  'or as a whole terms value, only once an earlier logs_search result in this run has shown it';
+
+// ------------------------------------------------------ journey keys (D77, Q13)
+
+export const JOURNEY_FIELDS: readonly string[] = ['device_id', 'x-device-id', 'verification_id'];
+
+const JOURNEY_NOTE =
+  `a device or verification id (${JOURNEY_FIELDS.slice(0, -1).join(', ')} or ${JOURNEY_FIELDS.at(-1)}) is allowed only once ` +
+  'an earlier logs_search or sql_select result in this run, fetched by an id from the chain, has shown it under one of those keys, ' +
+  'and then only in a logs_search field of those names, a whole terms value or contains, or as an sql_select $n param ' +
+  'compared to a device_id or verification_id column';
+
+function journeyKey(id: IdShaped): string {
+  return `journey:${observedKey(id)}`;
+}
+
+function hasChainId(value: unknown, set: ScopeSet): boolean {
+  return extractIdShaped(value).some((id) => inScope(set, id));
+}
+
+// True when every result of the call is tied to a chain id: for sql_select a
+// row key (a WHERE equality the parser found) bound to a chain id, for
+// logs_search a chain id in a part that all hits must match (terms, fields,
+// message, error, or an any_of group whose every value is a chain id).
+// exclude, contains and systemic calls do not count.
+function fetchedByChainId(tool: string, params: unknown, set: ScopeSet, rowKeys: RowKeys | undefined): boolean {
+  if (field(params, 'scope') === 'systemic') return false;
+  if (tool === 'sql_select') {
+    if (rowKeys === undefined) return false;
+    const bound = field(params, 'params');
+    return hasChainId([...rowKeys.params.map((n) => (Array.isArray(bound) ? bound[n - 1] : undefined)), ...rowKeys.literals], set);
+  }
+  if (tool !== 'logs_search') return false;
+  if (['terms', 'fields', 'message', 'error'].some((name) => hasChainId(field(params, name), set))) return true;
+  const anyOf = field(params, 'any_of');
+  if (!Array.isArray(anyOf)) return false;
+  return anyOf.some((group) => {
+    const values = strings([field(group, 'message'), field(group, 'terms')]);
+    return values.length > 0 && values.every((s) => hasChainId(s, set));
+  });
+}
+
+/**
+ * Records the device and verification ids in these hits or rows for the run,
+ * when the call that fetched them was tied to a chain id (Q13). rowKeys is the
+ * SQL parser's rowKeys for an sql_select.
+ */
+export function observeJourneyKeys(
+  runId: RunId,
+  tool: string,
+  params: unknown,
+  set: ScopeSet,
+  records: readonly unknown[],
+  rowKeys?: RowKeys,
+): void {
+  if (!fetchedByChainId(tool, params, set, rowKeys)) return;
+  for (const record of records) {
+    if (record === null || typeof record !== 'object' || Array.isArray(record)) continue;
+    for (const name of JOURNEY_FIELDS) {
+      for (const id of extractIdShaped((record as Record<string, unknown>)[name])) remember(runId, journeyKey(id));
+    }
+  }
+}
+
+/** The correlation ids and journey keys seen so far in the run's results. */
+export function observedIds(runId: RunId): ReadonlySet<string> | undefined {
   return observedByRun.get(runId);
 }
 
@@ -168,9 +250,6 @@ function pathParts(path: unknown): unknown[] {
 // The parts of each tool's input that are checked for ids; logs_search uses logsParts.
 function checkedValues(tool: string, params: unknown): unknown[] {
   switch (tool) {
-    case 'sql_select':
-      // Bound $n params and literals written into the SQL text.
-      return [field(params, 'params'), field(params, 'sql')];
     case 'http_call':
       return [...pathParts(field(params, 'path')), field(params, 'query'), field(params, 'body')];
     case 'cbs_call':
@@ -194,33 +273,66 @@ function wholeId(value: unknown): boolean {
   return ids.length === 1 && ids[0]?.raw === value.trim();
 }
 
+// Which observed ids a value may be: a correlation id, a journey key, or
+// either (a whole terms value).
+type SeenAs = 'correlation' | 'journey' | 'either';
+
+// One checked input value. An id in it is in scope when it is in the chain, or
+// when accepts is set and an earlier result showed it as that. note is added to
+// the refusal when an id in it is refused.
+type Part = { value: unknown; accepts?: SeenAs; note?: string };
+
 // Every logs_search input that holds a searched value, free text included
-// (D76). correlation holds the values that may also be observed ids (D77):
-// the correlation fields, and terms values (any_of terms too) that are exactly
-// one id.
-function logsParts(params: unknown): { checked: unknown[]; correlation: unknown[] } {
-  const checked: unknown[] = ['message', 'error', 'exclude', 'contains'].map((name) => field(params, name));
-  const correlation: unknown[] = [];
+// (D76). Values that may also be observed ids (D77): the correlation and
+// journey fields, terms values (any_of terms too) that are exactly one id, and
+// a whole journey key in contains.
+function logsParts(params: unknown): Part[] {
+  const parts: Part[] = ['message', 'error', 'exclude'].map((name) => ({ value: field(params, name) }));
+  parts.push({ value: field(params, 'contains'), accepts: 'journey' });
   const sortTerms = (terms: unknown): void => {
-    if (!Array.isArray(terms)) return void checked.push(terms);
-    for (const t of terms) (wholeId(t) ? correlation : checked).push(t);
+    if (!Array.isArray(terms)) return void parts.push({ value: terms });
+    for (const t of terms) parts.push(wholeId(t) ? { value: t, accepts: 'either', note: CORRELATION_NOTE } : { value: t });
   };
   sortTerms(field(params, 'terms'));
   const anyOf = field(params, 'any_of');
-  if (!Array.isArray(anyOf)) checked.push(anyOf);
+  if (!Array.isArray(anyOf)) parts.push({ value: anyOf });
   else {
     for (const group of anyOf) {
       if (group === null || typeof group !== 'object' || Array.isArray(group)) {
-        checked.push(group);
+        parts.push({ value: group });
         continue;
       }
       const { terms, ...rest } = group as Record<string, unknown>;
-      checked.push(rest);
+      parts.push({ value: rest });
       sortTerms(terms);
     }
   }
-  for (const [name, value] of fieldEntries(params)) (CORRELATION_FIELDS.includes(name) ? correlation : checked).push(value);
-  return { checked, correlation };
+  for (const [name, value] of fieldEntries(params)) {
+    if (CORRELATION_FIELDS.includes(name)) parts.push({ value, accepts: 'correlation', note: CORRELATION_NOTE });
+    else if (JOURNEY_FIELDS.includes(name)) parts.push({ value, accepts: 'journey', note: JOURNEY_NOTE });
+    else parts.push({ value });
+  }
+  return parts;
+}
+
+// sql_select: the SQL text and the bound params. Only a param the parser
+// found compared to a device_id or verification_id column may be a journey key
+// (Q13). The journey note is given for such a param, or for an id in a query
+// that names one of those columns.
+function sqlParts(input: ScopeCheckInput): Part[] {
+  const sql = field(input.params, 'sql');
+  const params = field(input.params, 'params');
+  const journey = new Set(input.sqlJourneyParams ?? []);
+  const parts: Part[] = [typeof sql === 'string' && /device_id|verification_id/i.test(sql) ? { value: sql, note: JOURNEY_NOTE } : { value: sql }];
+  if (!Array.isArray(params)) parts.push({ value: params });
+  else params.forEach((value, i) => parts.push(journey.has(i + 1) ? { value, accepts: 'journey', note: JOURNEY_NOTE } : { value }));
+  return parts;
+}
+
+function wasSeen(observed: ReadonlySet<string> | undefined, id: IdShaped, as: SeenAs): boolean {
+  if (observed === undefined) return false;
+  const correlation = as !== 'journey' && observed.has(observedKey(id));
+  return correlation || (as !== 'correlation' && observed.has(journeyKey(id)));
 }
 
 function strings(value: unknown, out: string[] = []): string[] {
@@ -240,7 +352,7 @@ function rejoinedUuids(value: unknown): IdShaped[] {
 // contains is a substring match on raw_message, so a piece of an id finds the
 // lines that hold the whole id. A run of 6 or more digits, of 8 or more hex
 // characters and dashes, or an @ is an id fragment; it is in scope only as
-// part of an id in the chain or an observed correlation id.
+// part of an id in the chain or an observed id.
 const FRAGMENTS: readonly [RegExp, IdKind][] = [
   [/\d{6,}/g, 'digits'],
   [/[0-9a-f-]{8,}/gi, 'uuid'],
@@ -263,7 +375,7 @@ function containsFragments(params: unknown): IdShaped[] {
 
 function partOfKnownId(fragment: string, set: ScopeSet, observed: ReadonlySet<string> | undefined): boolean {
   for (const group of [set.uuid, set.num, set.email]) for (const id of group) if (id.includes(fragment)) return true;
-  for (const key of observed ?? []) if (key.slice(key.indexOf(':') + 1).includes(fragment)) return true;
+  for (const key of observed ?? []) if (key.slice(key.lastIndexOf(':') + 1).includes(fragment)) return true;
   return false;
 }
 
@@ -296,37 +408,35 @@ export function checkScope(input: ScopeCheckInput): ScopeCheckResult {
   if (systemic) return systemic;
 
   const offending: ScopeOffender[] = [];
-  const seen = new Set<string>();
+  const reported = new Set<string>();
   const offend = (id: IdShaped): void => {
     const key = observedKey(id);
-    if (seen.has(key)) return;
-    seen.add(key);
+    if (reported.has(key)) return;
+    reported.add(key);
     offending.push({ kind: id.kind, masked: maskId(id) });
   };
   const logs = input.tool === 'logs_search';
-  const { checked, correlation } = logs
+  const parts = logs
     ? logsParts(input.params)
-    : { checked: checkedValues(input.tool, input.params), correlation: [] };
+    : input.tool === 'sql_select'
+      ? sqlParts(input)
+      : checkedValues(input.tool, input.params).map((value): Part => ({ value }));
   const idsOf = (value: unknown): IdShaped[] => (logs ? [...extractIdShaped(value), ...rejoinedUuids(value)] : extractIdShaped(value));
-  for (const value of checked) for (const id of idsOf(value)) if (!inScope(input.scopeSet, id)) offend(id);
-  const notes: string[] = [];
-  const unseen = correlation
-    .flatMap(idsOf)
-    .filter((id) => !inScope(input.scopeSet, id) && input.observed?.has(observedKey(id)) !== true);
-  for (const id of unseen) offend(id);
-  if (unseen.length > 0) {
-    notes.push(
-      `a correlation id (${CORRELATION_FIELDS.slice(0, -1).join(', ')} or ${CORRELATION_FIELDS.at(-1)}) is allowed in fields, ` +
-        'or as a whole terms value, only once an earlier logs_search result in this run has shown it',
-    );
+  const notes = new Set<string>();
+  for (const part of parts) {
+    for (const id of idsOf(part.value)) {
+      if (inScope(input.scopeSet, id) || (part.accepts !== undefined && wasSeen(input.observed, id, part.accepts))) continue;
+      offend(id);
+      if (part.note !== undefined) notes.add(part.note);
+    }
   }
   if (logs) {
     const fragments = containsFragments(input.params).filter((piece) => !partOfKnownId(piece.normalised, input.scopeSet, input.observed));
     for (const piece of fragments) offend(piece);
     if (fragments.length > 0) {
-      notes.push('contains is a substring match, so a run of 6 or more digits, 8 or more hex characters, or an @ in it must be part of an id in the chain');
+      notes.add('contains is a substring match, so a run of 6 or more digits, 8 or more hex characters, or an @ in it must be part of an id in the chain');
     }
-    if (input.systemic === true) notes.push('scope "systemic" does not lift the id check for logs_search');
+    if (input.systemic === true) notes.add('scope "systemic" does not lift the id check for logs_search');
   }
   if (offending.length === 0) return { ok: true };
   const noun = offending.length === 1 ? 'id is' : 'ids are';
@@ -334,7 +444,7 @@ export function checkScope(input: ScopeCheckInput): ScopeCheckResult {
     ok: false,
     reason: `scope: ${offending.length} ${noun} not in the run's ID chain for ${input.tool} (${offending
       .map((o) => o.masked)
-      .join(', ')})${notes.map((n) => `; ${n}`).join('')}`,
+      .join(', ')})${[...notes].map((n) => `; ${n}`).join('')}`,
     offending,
   };
 }

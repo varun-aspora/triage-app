@@ -36,6 +36,13 @@ Return: EntityFindings. Quote the exact vendor event text. Count distinct custom
 When your instructions have a "Known pattern lead" section, add the `Lead:`
 line it shows after Question in that entity's brief.
 
+When an investigator has reported a device id or a verification id seen in
+this run's results, add a `Journey keys:` line after Ids, written `key = value`
+with where it was seen, for example `Journey keys: x-device-id = <device_id>
+(app-server logs by aspora_user_id)`. The keys are `device_id`, `x-device-id`
+and `verification_id`. Only values a delegate reported from this run; the tools
+refuse any other.
+
 A brief such as "check the delivery for this user" is not enough: it has no
 ids, no window and no expected return, so the delegate has to guess all
 three.

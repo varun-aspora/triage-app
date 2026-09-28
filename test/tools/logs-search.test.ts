@@ -361,6 +361,24 @@ describe('gate denies', () => {
     expect((await setup({ fixture: HITS_FIXTURE }).call({ fields: { x_req_id: REQ_ID } })).output.status).toBe('refused');
   });
 
+  test('an x-device-id or verification_id is allowed once a hit fetched by a chain id showed it (D77, Q13)', async () => {
+    const DEVICE_ID = 'a1b2c3d4-e5f6-4a7b-8c9d-00000000d001';
+    const VERIFICATION_ID = 'a1b2c3d4-e5f6-4a7b-8c9d-00000000e002';
+    const hit = { ...HIT_A, 'x-device-id': DEVICE_ID, verification_id: VERIFICATION_ID };
+    const s = setup({ fixture: { hits: [hit], num_hits: 1, window: REQUEST_WINDOW, truncated: false } });
+    const before = await s.call({ fields: { verification_id: VERIFICATION_ID } });
+    expect(before.output.status).toBe('refused');
+    expect(before.output.message).toContain('a device or verification id');
+    // A search by message alone returns the hit but does not tie it to the customer.
+    dataOf(await s.call({ message: 'SIM binding poll', columns: ['x-device-id', 'verification_id'] }));
+    expect((await s.call({ terms: [DEVICE_ID] })).output.status).toBe('refused');
+    dataOf(await s.call({ service: 'harbor', terms: [CUSTOMER], columns: ['x-device-id', 'verification_id'] }));
+    // On SSFB these are not filterable fields, so they are searched as terms.
+    dataOf(await s.call({ terms: [DEVICE_ID] }));
+    dataOf(await s.call({ service: 'guardian', terms: [VERIFICATION_ID] }));
+    expect((await s.call({ terms: [STRANGER] })).output.status).toBe('refused');
+  });
+
   test('on ATSPL an x-txn-id UUID seen in a hit is searched as a term (D76, D77)', async () => {
     const TXN_ID = 'b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e';
     const s = setup({

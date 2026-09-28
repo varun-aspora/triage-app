@@ -140,6 +140,7 @@ function leadSection(init: TriageInit, knowledge: Knowledge, entities: readonly 
       ...(queries.length > 0
         ? ['First queries:', ...queries]
         : [`First check (query_recipe, for ${pattern.entities.join(', ')}): ${oneLine(pattern.query_recipe)}`]),
+      ...(pattern.lesson !== undefined ? ['', `Lesson from a reviewed case: ${oneLine(pattern.lesson)}`] : []),
     ].join('\n'),
   ];
 }

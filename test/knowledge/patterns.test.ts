@@ -19,6 +19,7 @@ import {
   parseFrontmatter,
   PLACEHOLDER,
   REPO_ROOT,
+  REPO_TOOLS,
   SHARED_ENTITY,
   SSFB_EXTRA_TOOLS,
   toolsOutside,
@@ -56,9 +57,9 @@ function realContext(): Context {
 
 // ------------------------------------------------------------------ rules
 
-/** Typed investigator tools an entry's recipe may name, given its entities. */
+/** Typed investigator tools an entry's recipe may name, given its entities. Both variants have the repo tools. */
 function recipeTools(entities: readonly string[]): Set<string> {
-  const tools = new Set<string>(INVESTIGATOR_TOOLS);
+  const tools = new Set<string>([...INVESTIGATOR_TOOLS, ...REPO_TOOLS]);
   if (entities.includes('ssfb')) for (const t of SSFB_EXTRA_TOOLS) tools.add(t);
   return tools;
 }
@@ -82,7 +83,10 @@ function sourceRefProblems(ref: string, knowledgeDir: string): string[] {
     return [];
   }
   if (/^triage-shivalik [A-Za-z0-9_./-]+\/(?:AGENTS|SKILL)\.md$/.test(ref)) return [];
-  return [`source_ref must be knowledge/<note>/SKILL.md#<heading> or a triage-shivalik AGENTS.md or SKILL.md: ${ref}`];
+  // A reviewed eval case (D92), committed under evals/cases/.
+  const reviewed = /^evals\/cases\/([A-Za-z0-9][A-Za-z0-9_.-]*)$/.exec(ref);
+  if (reviewed) return existsSync(join(REPO_ROOT, ref)) ? [] : [`source_ref names a missing eval case: ${reviewed[1]}`];
+  return [`source_ref must be knowledge/<note>/SKILL.md#<heading>, a triage-shivalik AGENTS.md or SKILL.md, or evals/cases/<case_id>: ${ref}`];
 }
 
 /**
@@ -222,6 +226,28 @@ describe('patterns.json', () => {
     expect(loaded().some((p) => p.source_ref === SIM_BINDING_REF)).toBe(true);
   });
 
+  test('the SIM-binding entry carries its first queries (W13)', () => {
+    const p = loaded().find((e) => e.id === 'sim-binding-no-vendor-callback');
+    expect(p?.entities).toEqual(['ssfb', 'rtl']);
+    const queries = p?.first_queries ?? [];
+    const text = queries.map((q) => q.query).join('\n');
+    expect(queries.find((q) => q.entity === 'rtl')?.query).toContain('x-device-id');
+    for (const part of [
+      'device_auth_attempts WHERE device_id = <device_id>',
+      'message "checking verification status"',
+      "from the first attempt's created_at to the last attempt's verification_completion_deadline",
+      '/guardian/api/v1/callbacks/vendors/twilio/sms',
+      'registration_country_code = 784',
+      '5 per device per 24 hours',
+      'vance-android device_binding/',
+    ]) {
+      expect(text).toContain(part);
+    }
+    expect(matchPattern('user stuck on SIM binding since yesterday', ['ssfb:guardian'], 'auth', loaded())?.matched_pattern_id).toBe(
+      'sim-binding-no-vendor-callback',
+    );
+  });
+
   test('no source_ref points into refs/', () => {
     for (const p of loaded()) expect(p.source_ref).not.toContain('refs/');
   });
@@ -322,6 +348,7 @@ describe('the curation rules refuse bad entries', () => {
     ['a source_ref to a missing note', { source_ref: 'knowledge/ssfb-ledger/SKILL.md#Known issues' }, 'missing note'],
     ['a source_ref to a missing heading', { source_ref: 'knowledge/ssfb-harbor/SKILL.md#No such heading' }, 'heading'],
     ['a source_ref to some other file', { source_ref: 'docs/02-hld-detailed.md' }, 'source_ref must be'],
+    ['a source_ref to a missing eval case', { source_ref: 'evals/cases/no-such-case' }, 'missing eval case'],
     ['a stable entry from the sim-binding skill', { source_ref: SIM_BINDING_REF }, 'cannot be stable'],
     ['a recipe with no tool', { query_recipe: 'check harbor for the form' }, 'names no tool'],
     ['an empty recipe', { query_recipe: '' }, 'query_recipe'],
@@ -337,6 +364,10 @@ describe('the curation rules refuse bad entries', () => {
     ['a first query with an extra field', { first_queries: [{ entity: 'ssfb', query: 'logs_search', why: 'x' }] }, 'first_queries'],
   ])('rejects %s', (_label, patch, reason) => {
     expect(problems(patch).join('\n')).toContain(reason);
+  });
+
+  test('accepts a reviewed eval case as source_ref, and a lesson (D92)', () => {
+    expect(problems({ source_ref: 'evals/cases/syn-money-moved', lesson: 'Correlate by the device id.' })).toEqual([]);
   });
 
   test('rejects a valid category id that categories.json does not list', () => {

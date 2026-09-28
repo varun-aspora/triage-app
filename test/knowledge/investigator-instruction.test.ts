@@ -144,6 +144,38 @@ describe('logs advice', () => {
     expect(text).toMatch(/window is set by the tool/i);
   });
 
+  test('logs.md carries the logs-finder port: free-form start, query forms, limits, paging, traps and ten templates (W12)', () => {
+    const flat = read('logs.md').replace(/\s+/g, ' ');
+    expect(flat).toContain('## Start free-form');
+    expect(flat).toContain("`NOT 'a' AND NOT 'b'`");
+    expect(flat).toContain('does not yet ask Quickwit for the query it actually ran');
+    expect(flat).toContain('Over 5,000 hits the call returns early');
+    expect(flat).toContain('at most 50 `logs_search` calls');
+    expect(flat).toContain('## Paging and counting');
+    expect(flat).toMatch(/tokenizer splits words on `_` and `\.`/);
+    expect(flat).toContain('columns: ["User-Agent"]');
+    const templates = read('logs.md').split('## Query templates')[1] ?? '';
+    expect([...templates.matchAll(/^\d+\. /gm)].length).toBe(10);
+  });
+
+  test("logs.md's zero-hit ladder follows the tool's 0-hit note", () => {
+    const text = read('logs.md');
+    const ladder = text.slice(text.indexOf('## Zero hits is not an answer'));
+    const order = ['Drop `service`', '`group_by: ["service"]`', 'Move `from` earlier', 'Drop `level`'].map((s) => ladder.indexOf(s));
+    expect(order.every((i) => i > 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+
+  test('logs-ssfb.md covers the noise filter, recurring labels and guardian redaction (W12)', () => {
+    const flat = read('logs-ssfb.md').replace(/\s+/g, ' ');
+    expect(flat).toContain('`denoise: "only"`');
+    expect(flat).toContain('`denoise: "with_message"`');
+    // The labels live in the service skills only.
+    expect(flat).toContain('Logs sections of `ssfb-harbor`, `ssfb-rhythm` and `ssfb-guardian`');
+    expect(flat).not.toContain('`checking verification status`');
+    expect(flat).toMatch(/guardian writes `from`, `to`, `sim_card_number`, `token` and `message_sid` as `\[REDACTED\]`/);
+  });
+
   test('entity notes keep the exact ATSPL service strings', () => {
     const atspl = read('logs-atspl.md');
     for (const s of ['`package`', '`package-worker-sync`', '`package-worker-queue`', '`pulse-backend`']) {
@@ -199,7 +231,10 @@ describe('investigator.md', () => {
     expect(flat).toContain('## Empty means ask why');
     expect(flat).toMatch(/first make sure the query itself is sound[\s\S]*read the code that writes that row or log line/);
     expect(flat).toContain('do not reword the same text or run the same key again');
-    expect(flat).toMatch(/A device id or a verification id is not one of the run's ids[\s\S]*Put it under `gaps`/);
+    expect(flat).toContain('or a device id or verification id seen in this run\'s results');
+    expect(flat).toMatch(/A device id or a verification id is not one of the run's ids, but the tools accept one once a result in this run, fetched by one of the run's ids/);
+    expect(flat).toContain('`Journey keys:`');
+    expect(flat).not.toMatch(/scope check refuses it: do not query it/);
     expect(flat).toContain('## Where log text comes from');
     expect(flat).toMatch(/`aspora_user_id`[\s\S]*"x-customer-id"[\s\S]*`group_by: \["message"\]`/);
     expect(flat).toMatch(/the run's default window[\s\S]*set `from` to that time/);

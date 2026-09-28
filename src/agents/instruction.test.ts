@@ -243,6 +243,14 @@ describe('known pattern lead (D80)', () => {
     expect(text.indexOf('## Known pattern lead')).toBeGreaterThan(text.indexOf('## This run'));
   });
 
+  test('a lesson from a reviewed case is shown after the first queries (D92)', () => {
+    const k = withPatterns(JSON.stringify([entry({ lesson: 'The user never verified, so correlate by the device id.' })]));
+    const section = lead(methodText(init({ matched: 'fixture-vendor-fail' }), { knowledge: k, entities: ['atspl', 'ssfb'] }));
+    expect(section).toContain('WelcomeLetterDeliveryRequested\n\nLesson from a reviewed case: The user never verified, so correlate by the device id.');
+    const plain = lead(methodText(init({ matched: 'fixture-vendor-fail' }), { knowledge: withPatterns(JSON.stringify([entry()])), entities: ['atspl'] }));
+    expect(plain).not.toContain('Lesson from a reviewed case');
+  });
+
   test('a first query for an entity not enabled says to list it as a gap', () => {
     const k = withPatterns(JSON.stringify([entry()]));
     const section = lead(methodText(init({ matched: 'fixture-vendor-fail' }), { knowledge: k, entities: ['atspl'] }));
