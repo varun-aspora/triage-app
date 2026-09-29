@@ -35,6 +35,7 @@ function home(record: Record<string, string> = {}): Config {
 
 const NEW_OPENAI = 'gpt-t9-new';
 const NEW_ANTHROPIC = 'claude-t9-new';
+const NEW_OPENROUTER = 'google/gemini-t9-new';
 
 function modelEntry(id: string, provider: string, api: string, baseUrl: string) {
   return {
@@ -64,6 +65,13 @@ function catalogFor(provider: string): unknown {
         [NEW_OPENAI]: modelEntry(NEW_OPENAI, 'openai', 'openai-responses', 'https://api.openai.com/v1'),
       },
       'openai-realtime': { 'rt-t9': modelEntry('rt-t9', 'openai', 'openai-realtime', 'https://api.openai.com/v1') },
+    };
+  }
+  if (provider === 'openrouter') {
+    return {
+      'openai-completions': {
+        [NEW_OPENROUTER]: modelEntry(NEW_OPENROUTER, 'openrouter', 'openai-completions', 'https://openrouter.ai/api/v1'),
+      },
     };
   }
   return {
@@ -101,11 +109,13 @@ describe('refreshCatalog', () => {
     const config = home();
     const calls: string[] = [];
     const results = await refreshCatalog(config, { fetch: fakeFetch(calls) });
-    expect(calls.sort()).toEqual([`${PI_AI_CATALOG_BASE}anthropic.json`, `${PI_AI_CATALOG_BASE}openai.json`]);
+    expect(calls.sort()).toEqual(['anthropic', 'openai', 'openrouter'].map((p) => `${PI_AI_CATALOG_BASE}${p}.json`));
     expect(results).toEqual([
       { provider: 'anthropic', ok: true, added: [NEW_ANTHROPIC] },
       { provider: 'openai', ok: true, added: [NEW_OPENAI] },
+      { provider: 'openrouter', ok: true, added: [NEW_OPENROUTER] },
     ]);
+    expect(resolveModel(`openrouter/${NEW_OPENROUTER}`).input).toEqual(['text', 'image']);
     expect(readCachedModels(config, 'openai').map((m) => m.id)).toEqual([NEW_OPENAI]);
     expect(resolveModel(`openai/${NEW_OPENAI}`).contextWindow).toBe(272000);
     expect(resolveModel(`anthropic/${NEW_ANTHROPIC}`).input).toEqual(['text', 'image']);
@@ -171,9 +181,9 @@ describe('ensureConfiguredModels', () => {
     expect(result.missing).toEqual([{ key: 'MODEL_TIER_STRONG', spec: 'openai/gpt-t9-never' }]);
   });
 
-  test('ignores providers it cannot refresh', async () => {
+  test('ignores providers it cannot refresh, and TypeSafe decision models on openrouter', async () => {
     const calls: string[] = [];
-    const config = home({ MODEL_DECISION: 'openrouter/x/y' });
+    const config = home({ MODEL_DECISION: 'openrouter/typesafe/jev-1.13' });
     expect(await ensureConfiguredModels(config, { fetch: fakeFetch(calls), lookup: lookupNone })).toEqual({
       refreshed: [],
       missing: [],

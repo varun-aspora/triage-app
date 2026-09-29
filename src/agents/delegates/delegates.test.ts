@@ -157,8 +157,8 @@ describe('model and thinking', () => {
     expect(codeWalkerFor(RUN, { env: envOf(home({ codeWalker: CODE_WALKER_SPEC })) }).model).toBe(CODE_WALKER_SPEC);
   });
 
-  test('code_walker refuses a MODEL_CODE_WALKER on openrouter', () => {
-    const env = envOf(home({ codeWalker: 'openrouter/vendor/model' }));
+  test('code_walker refuses a TypeSafe decision model as MODEL_CODE_WALKER', () => {
+    const env = envOf(home({ codeWalker: 'openrouter/typesafe/jev-1.13' }));
     expect(() => codeWalkerFor(RUN, { env })).toThrow(ConfigError);
   });
 });

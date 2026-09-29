@@ -11,6 +11,7 @@
 
 import type { Config } from './config/env.ts';
 import { REFRESHABLE_PROVIDERS, refreshCatalog, type FetchFn, type RefreshResult } from './model-catalog.ts';
+import { isDecisionSpec } from './decisions/registry.ts';
 import { lookupModel, parseSpec, type ModelLookup } from './models.ts';
 
 /** Model keys and their specs, blank keys left out. */
@@ -34,11 +35,17 @@ export type EnsureResult = {
   readonly missing: readonly { key: string; spec: string }[];
 };
 
+/**
+ * Whether a spec should be in a refreshable provider's catalog. A TypeSafe
+ * decision model through OpenRouter is not a chat model, so no catalog lists it.
+ */
+export function inRefreshableCatalog(spec: string): boolean {
+  const provider = parseSpec(spec)?.provider;
+  return provider !== undefined && REFRESHABLE_PROVIDERS.includes(provider) && !isDecisionSpec(spec);
+}
+
 function missingModels(config: Config, lookup: ModelLookup): { key: string; spec: string }[] {
-  return configuredModels(config).filter(({ spec }) => {
-    const provider = parseSpec(spec)?.provider;
-    return provider !== undefined && REFRESHABLE_PROVIDERS.includes(provider) && lookup(spec) === undefined;
-  });
+  return configuredModels(config).filter(({ spec }) => inRefreshableCatalog(spec) && lookup(spec) === undefined);
 }
 
 /** Refreshes the providers of any configured model that is not found. No network when all are found. */

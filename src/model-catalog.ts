@@ -1,4 +1,4 @@
-// Model catalog refresh for the pi-ai built-in providers (anthropic, openai).
+// Model catalog refresh for the pi-ai built-in providers (anthropic, openai, openrouter).
 //
 // pi-ai's built-in providers are static: their catalog is the one bundled
 // with the installed pi-ai, and Models.refresh() skips them. Flue pins pi-ai,
@@ -22,6 +22,7 @@ import { join } from 'node:path';
 import { createProvider, type Api, type Model, type Provider, type ProviderModelsStore } from '@earendil-works/pi-ai';
 import { anthropicProvider } from '@earendil-works/pi-ai/providers/anthropic';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
+import { openrouterProvider } from '@earendil-works/pi-ai/providers/openrouter';
 import { setProvider } from '@flue/runtime';
 import type { Config } from './config/env.ts';
 
@@ -29,9 +30,11 @@ import type { Config } from './config/env.ts';
 export const PI_AI_CATALOG_BASE = 'https://cdn.jsdelivr.net/npm/@earendil-works/pi-ai/dist/providers/data/';
 
 type BuiltinFactory = () => Provider;
-const BUILTINS: ReadonlyMap<string, BuiltinFactory> = new Map<string, BuiltinFactory>([
+/** The pi-ai built-in providers this project uses, by id. */
+export const BUILTINS: ReadonlyMap<string, BuiltinFactory> = new Map<string, BuiltinFactory>([
   ['anthropic', anthropicProvider],
   ['openai', openaiProvider],
+  ['openrouter', openrouterProvider],
 ]);
 
 /** Providers whose catalog can be refreshed. */
