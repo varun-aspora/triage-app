@@ -4,6 +4,7 @@
 import type {
   Entity,
   EvidenceKey,
+  IdChain,
   KnownIdKey,
   ReportStatus,
   RequestMessage,
@@ -21,6 +22,7 @@ import { ENTITY_LABELS } from '../../lib/constants.ts';
 import { formatDateTime, formatRelative, formatTokens } from '../../lib/format.ts';
 import { runStatusOf, runStatusTone, type StatusLook } from '../../lib/status.ts';
 import { resolveTimeExpr } from './time-expr.ts';
+import type { AgentActivity } from './verdict-logic.ts';
 
 // ------------------------------------------------------------------ list
 
@@ -278,17 +280,35 @@ export type FailureGuess = {
   steps: Record<StepperPhase, StepState>;
 };
 
+const FAILED_AT_HINTS: Record<Exclude<StepperPhase, 'completed'>, string> = {
+  preflight: 'Preflight checks the tools and credentials the run needs. Doctor shows which one is off.',
+  identity: 'The run could not work out who or what the request is about. Doctor shows whether a tool or credential is off.',
+  classifying: 'The classifier did not finish. Doctor shows whether a tool or credential is off.',
+  dispatched: 'The run was classified but the investigators did not start. Doctor shows whether a tool or credential is off.',
+  investigating: 'An investigator was running when the run stopped. Doctor shows whether a tool or credential is off.',
+};
+
 /**
- * Where a failed run most likely stopped. The store records only a reason on
- * failure, not the phase, so this reads what the run left behind: no
- * classification means it never got past preflight or identity, and no
- * evidence means no investigator stored findings.
+ * Where a failed run stopped. The server reads the last phase from the event
+ * log (failed_phase). Without it the store records only a reason, so this
+ * falls back to what the run left behind: no classification means it never
+ * got past preflight or identity, and no evidence means no investigator
+ * stored findings.
  */
-export function inferFailure(run: Pick<RunDetail, 'classification' | 'evidence'>): FailureGuess {
+export function inferFailure(run: Pick<RunDetail, 'classification' | 'evidence' | 'failed_phase'>): FailureGuess {
+  const at = STEPPER_PHASES.findIndex((p) => p === run.failed_phase);
+  const phase = STEPPER_PHASES[at];
+  if (phase !== undefined && phase !== 'completed') {
+    return {
+      title: `Failed at ${phase}`,
+      hint: FAILED_AT_HINTS[phase],
+      steps: stepsFrom((i) => (i < at ? 'done' : i === at ? 'failed' : 'todo')),
+    };
+  }
   if (run.classification === null) {
     return {
       title: 'Failed before classification (preflight or identity)',
-      hint: 'Preflight checks the tools and credentials the run needs. Doctor shows which one is off.',
+      hint: FAILED_AT_HINTS.preflight,
       steps: stepsFrom((i) => (i <= 1 ? 'failed' : 'todo')),
     };
   }
@@ -309,7 +329,7 @@ export function inferFailure(run: Pick<RunDetail, 'classification' | 'evidence'>
 export type InvestigatorRow = {
   key: EvidenceKey;
   label: string;
-  state: 'findings in' | 'working' | 'waiting';
+  state: 'findings in' | 'working' | 'waiting' | 'failed' | 'no findings';
   detail: string;
 };
 
@@ -318,10 +338,13 @@ const BEFORE_DISPATCH: readonly RunPhase[] = ['created', 'preflight', 'identity'
 /**
  * One row per investigator for the running view: the entities the classifier
  * expects plus any entity that has already stored evidence, then the code
- * walker. There is no live per-agent status, so this is inferred from stored
- * evidence versions.
+ * walker. State comes from stored evidence versions; the last tool call and a
+ * failed task are read from the event log when it has them.
  */
-export function deriveInvestigators(run: Pick<RunDetail, 'classification' | 'evidence' | 'phase'>): InvestigatorRow[] {
+export function deriveInvestigators(
+  run: Pick<RunDetail, 'classification' | 'evidence' | 'phase'>,
+  activity: ReadonlyMap<string, AgentActivity> = new Map(),
+): InvestigatorRow[] {
   const version = new Map(run.evidence.map((e) => [e.key, e.version]));
   const likely = run.classification?.proposed.entities_likely ?? [];
   const entities = (Object.keys(ENTITY_LABELS) as Entity[]).filter((e) => likely.includes(e) || version.has(e));
@@ -331,16 +354,43 @@ export function deriveInvestigators(run: Pick<RunDetail, 'classification' | 'evi
     const v = version.get(e);
     if (v !== undefined) return { key: e, label: `${ENTITY_LABELS[e]} investigator`, state: 'findings in', detail: `Version ${v} stored` };
     return started
-      ? { key: e, label: `${ENTITY_LABELS[e]} investigator`, state: 'working', detail: 'No findings stored yet' }
+      ? { key: e, label: `${ENTITY_LABELS[e]} investigator`, ...liveState(activity, e) }
       : { key: e, label: `${ENTITY_LABELS[e]} investigator`, state: 'waiting', detail: 'Starts after classification' };
   });
   const code = version.get('code');
   rows.push(
     code !== undefined
       ? { key: 'code', label: 'Code walker', state: 'findings in', detail: `Version ${code} stored` }
-      : { key: 'code', label: 'Code walker', state: 'waiting', detail: 'Starts when an investigator asks for code' },
+      : { key: 'code', label: 'Code walker', ...codeState(activity) },
   );
   return rows;
+}
+
+const ACTIVITY_AGENTS: Readonly<Record<EvidenceKey, readonly string[]>> = {
+  ssfb: ['investigate_ssfb', 'investigate_ssfb_deep'],
+  atspl: ['investigate_atspl', 'investigate_atspl_deep'],
+  rtl: ['investigate_rtl', 'investigate_rtl_deep'],
+  code: ['code_walker'],
+};
+
+/**
+ * Working until its task ends, then failed or finished without findings; the
+ * last tool call replaces the "nothing stored" text only when the log has one.
+ */
+function liveState(activity: ReadonlyMap<string, AgentActivity>, key: EvidenceKey): Pick<InvestigatorRow, 'state' | 'detail'> {
+  // The deep pass runs after the plain one, so it is the one to report.
+  const latest = ACTIVITY_AGENTS[key].map((a) => activity.get(a)).findLast((a) => a !== undefined);
+  const call = latest?.tool === undefined ? undefined : `${latest.tool}${latest.target !== undefined ? ` ${latest.target}` : ''}`;
+  if (latest?.failed === true) return { state: 'failed', detail: call === undefined ? 'The task failed' : `The task failed after ${call}` };
+  if (latest?.done === true) {
+    return { state: 'no findings', detail: call === undefined ? 'Finished without storing findings' : `Finished after ${call}, nothing stored` };
+  }
+  return { state: 'working', detail: call === undefined ? 'No findings stored yet' : `Last: ${call}` };
+}
+
+function codeState(activity: ReadonlyMap<string, AgentActivity>): Pick<InvestigatorRow, 'state' | 'detail'> {
+  if (activity.get('code_walker') === undefined) return { state: 'waiting', detail: 'Starts when an investigator asks for code' };
+  return liveState(activity, 'code');
 }
 
 export function investigatorLook(state: InvestigatorRow['state']): StatusLook {
@@ -351,6 +401,10 @@ export function investigatorLook(state: InvestigatorRow['state']): StatusLook {
       return { tone: 'info', icon: 'spinner' };
     case 'waiting':
       return { tone: 'muted', icon: 'clock' };
+    case 'failed':
+      return { tone: 'rust', icon: 'x' };
+    case 'no findings':
+      return { tone: 'muted', icon: 'dash' };
   }
 }
 
@@ -575,4 +629,72 @@ export const YES_NO = (b: boolean): string => (b ? 'Yes' : 'No');
 
 export function capitalise(s: string): string {
   return s === '' ? s : `${s[0]?.toUpperCase()}${s.slice(1)}`;
+}
+
+// ------------------------------------------------------------------ id chain
+
+type Hop = IdChain['hops'][number];
+
+/** Failures are rust, hops that were not checked or not confirmed are amber. */
+export function hopStatusLook(status: Hop['status']): StatusLook {
+  switch (status) {
+    case 'resolved':
+      return { tone: 'neutral', icon: 'check' };
+    case 'not_found':
+    case 'unreachable':
+      return { tone: 'rust', icon: 'x' };
+    case 'unverified':
+      return { tone: 'amber', icon: 'alert' };
+    case 'skipped':
+      return { tone: 'muted', icon: 'dash' };
+  }
+}
+
+const words = (key: string): string => key.replace(/_/g, ' ');
+
+export const hopStatusLabel = (status: Hop['status']): string => words(status);
+
+/**
+ * "phone number to aspora user id" for one hop. `to` is also absent when the
+ * lookup produced nothing, so only a resolved hop without it is a state read.
+ */
+export function hopLabel(hop: Pick<Hop, 'from' | 'to' | 'status'>): string {
+  if (hop.to !== undefined) return `${words(hop.from)} to ${words(hop.to)}`;
+  return hop.status === 'resolved' ? `${words(hop.from)}, state only` : `from ${words(hop.from)}`;
+}
+
+/** "3 hops, from phone number to account number". The end is the last id a hop produced. */
+export function hopsSummary(hops: readonly Hop[]): string {
+  const [first] = hops;
+  if (first === undefined) return '0 hops';
+  const count = `${hops.length} ${hops.length === 1 ? 'hop' : 'hops'}`;
+  const end = hops.findLast((h) => h.status === 'resolved' && h.to !== undefined)?.to;
+  const path = `, from ${words(first.from)}${end !== undefined ? ` to ${words(end)}` : ''}`;
+  const failed = hops.filter((h) => h.status === 'not_found' || h.status === 'unreachable').length;
+  return `${count}${path}${failed > 0 ? `, ${failed} failed` : ''}`;
+}
+
+/**
+ * A link to a code ref on the git host, pinned to the commit the run read
+ * (else HEAD). Undefined when the repo has no known base or the base is not https.
+ * The file is encoded per segment; lines becomes an anchor only when it is a
+ * number or a range, so free text never lands in the URL.
+ */
+export function codeRefHref(
+  ref: { repo: string; file: string; lines: string },
+  bases: Record<string, string> | undefined,
+  commits: readonly { repo: string; commit: string }[],
+): string | undefined {
+  // The repo name comes from the model, so a name like "constructor" must not reach Object.prototype.
+  const base = bases !== undefined && Object.hasOwn(bases, ref.repo) ? bases[ref.repo] : undefined;
+  if (typeof base !== 'string' || !base.startsWith('https://')) return undefined;
+  const rev = commits.find((c) => c.repo === ref.repo)?.commit ?? 'HEAD';
+  const path = ref.file
+    .replace(/^\/+/, '')
+    .split('/')
+    .map(encodeURIComponent)
+    .join('/');
+  const m = /^L?(\d+)(?:\s*[-\u2013]\s*L?(\d+))?$/.exec(ref.lines.trim());
+  const anchor = m === null ? '' : m[2] === undefined ? `#L${m[1]}` : `#L${m[1]}-L${m[2]}`;
+  return `${base}/blob/${rev}/${path}${anchor}`;
 }

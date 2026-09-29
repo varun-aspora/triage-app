@@ -205,7 +205,7 @@ export default function NewRunPage() {
                 {entitiesMode === 'auto' ? (
                   <div className="runs-auto-note">
                     <span>
-                      <Icon name="info" />
+                      <Icon name="check" />
                     </span>
                     <span>
                       The agent works out which entities the issue touches from the thread and the IDs it resolves. It can use any entity
@@ -238,7 +238,7 @@ export default function NewRunPage() {
                 {tierMode === 'auto' ? (
                   <div className="runs-auto-note">
                     <span>
-                      <Icon name="info" />
+                      <Icon name="check" />
                     </span>
                     <span>
                       The classifier picks cheap, mid or strong once it has read the thread, using the tier policy. Hard or multi-entity cases

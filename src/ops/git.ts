@@ -165,12 +165,36 @@ export function parseBranch(stdout: string): string | undefined {
  * URL may carry credentials.
  */
 export function remoteIdentity(url: string): string | undefined {
+  const parts = remoteParts(url);
+  return parts === undefined ? undefined : `${parts.host}/${parts.path}`.toLowerCase();
+}
+
+/**
+ * The browsable https base of a clone URL, 'https://github.com/org/repo' for
+ * git@github.com:org/repo.git, with the original case kept. Callers add
+ * GitHub's /blob/<rev>/<file> layout, so GitLab and Bitbucket hosts, whose
+ * file URLs differ, get none. An https port is kept; an ssh port other than
+ * 22 says nothing about the web port, so that remote gets none either.
+ * Undefined for any other form. Never carries user info.
+ */
+export function remoteWebBase(url: string): string | undefined {
+  const parts = remoteParts(url);
+  if (parts === undefined || /gitlab|bitbucket/i.test(parts.host)) return undefined;
+  if (parts.port === undefined || (parts.scheme === 'ssh' && parts.port === '22')) return `https://${parts.host}/${parts.path}`;
+  return parts.scheme === 'https' ? `https://${parts.host}:${parts.port}/${parts.path}` : undefined;
+}
+
+function remoteParts(url: string): { scheme: string; host: string; port?: string; path: string } | undefined {
   const text = url.trim();
-  const m = /^[^@/\s]+@([^:/\s]+):([^\s]+)$/.exec(text) ?? /^(?:ssh|https?):\/\/(?:[^@/\s]*@)?([^:/\s]+)(?::\d+)?\/([^\s]+)$/.exec(text);
-  if (m === null) return undefined;
-  const path = (m[2] as string).replace(/^\/+|\/+$/g, '').replace(/\.git$/i, '');
+  const scp = /^[^@/\s]+@([^:/\s]+):([^\s]+)$/.exec(text);
+  const full = scp === null ? /^(ssh|https?):\/\/(?:[^@/\s]*@)?([^:/\s]+)(?::(\d+))?\/([^\s]+)$/.exec(text) : null;
+  const raw = scp !== null ? scp[2] : full?.[4];
+  if (raw === undefined) return undefined;
+  const path = raw.replace(/^\/+|\/+$/g, '').replace(/\.git$/i, '');
   if (path === '') return undefined;
-  return `${(m[1] as string).toLowerCase()}/${path.toLowerCase()}`;
+  if (scp !== null) return { scheme: 'ssh', host: scp[1] as string, path };
+  const port = full?.[3];
+  return { scheme: full?.[1] as string, host: full?.[2] as string, ...(port !== undefined ? { port } : {}), path };
 }
 
 /** A full commit id (sha1 or sha256) from rev-parse, else undefined. */

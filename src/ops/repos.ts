@@ -48,7 +48,14 @@ const MAX_OUTPUT_BYTES = 1024 * 1024;
 export type ReposDeps = Omit<CodegraphDeps, 'repos'> & {
   /** The repos manifest. Loaded from resources/repos.json when left out. */
   readonly repos?: readonly RepoPin[];
+  /** Called by syncRepos as it goes, for live progress. A throw is ignored, so progress never fails a sync. */
+  readonly onSyncProgress?: (event: SyncProgress) => void;
 };
+
+export type SyncProgress =
+  | { readonly type: 'planned'; readonly repos: readonly string[] }
+  | { readonly type: 'started'; readonly repo: string }
+  | { readonly type: 'finished'; readonly result: RepoSyncResult };
 
 export type RepoSelection = {
   /** Limits the operation to this one pin. */
@@ -333,12 +340,21 @@ export async function syncRepos(sel: RepoSelection, deps: ReposDeps): Promise<Sy
   const nc = reposDirNotConfigured(deps);
   if (nc !== undefined) return nc;
 
-  const results = await inPool(chosen, SYNC_JOBS, async (pin) => {
+  const progress = (event: SyncProgress): void => {
     try {
-      return await syncOne(pin, deps, pins, sel.index ?? true);
-    } catch (e) {
-      return finish(pin.repo, { status: 'failed', reason: e instanceof Error ? scrubToken(deps.config, e.message) : 'unexpected error' });
+      deps.onSyncProgress?.(event);
+    } catch {
+      // Display only: the sync and its written state matter more.
     }
+  };
+  progress({ type: 'planned', repos: chosen.map((p) => p.repo) });
+  const results = await inPool(chosen, SYNC_JOBS, async (pin) => {
+    progress({ type: 'started', repo: pin.repo });
+    const result = await syncOne(pin, deps, pins, sel.index ?? true).catch((e: unknown) =>
+      finish(pin.repo, { status: 'failed', reason: e instanceof Error ? scrubToken(deps.config, e.message) : 'unexpected error' }),
+    );
+    progress({ type: 'finished', result });
+    return result;
   });
   const names = (s: RepoSyncResult['status']) => Object.freeze(results.filter((r) => r.status === s).map((r) => r.repo));
   return Object.freeze({

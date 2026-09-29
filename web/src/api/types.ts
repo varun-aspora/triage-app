@@ -174,10 +174,14 @@ export type RunDetail = {
   submissions: SubmissionView[];
   feedback: FeedbackEntry[];
   report_md?: string;
+  /** Browsable https base per repo in the root cause's code refs. A repo with no entry has no known remote. */
+  code_links?: Record<string, string>;
   /** Tokens and cost of every model call in the run (D59). Absent from a server older than D59. */
   usage?: RunUsageView;
   /** D71: set while the run is running but nobody is working on it. Absent otherwise, and from older servers. */
   stalled?: StalledView;
+  /** Failed or stopped runs: the last pipeline phase the event log shows. Absent when unknown or from an older server. */
+  failed_phase?: RunPhase;
 };
 
 export type ThreadMessageInput = { ts: string; author: string; text: string; is_parent?: boolean };
@@ -331,6 +335,8 @@ export type SyncState = {
   ok: string[];
   skipped: string[];
   failed: string[];
+  /** By repo name. Absent in records written before reasons were kept. */
+  reasons?: Record<string, string>;
 };
 
 /** GET /repos row, camelCase as served. */
@@ -378,6 +384,8 @@ export type SyncJob = {
   status: 'running' | 'done' | 'busy' | 'failed';
   started_at: string;
   finished_at?: string;
+  repos?: string[];
+  running?: string[];
   results?: RepoSyncResult[];
   ok?: string[];
   skipped?: string[];

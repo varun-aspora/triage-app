@@ -45,7 +45,7 @@ export function Segmented<T extends string>({ options, value, onChange, label, d
               fontWeight: on ? 600 : 500,
               cursor: disabled ? 'not-allowed' : 'pointer',
               background: on ? 'var(--surface)' : 'transparent',
-              color: on ? 'var(--text)' : 'var(--muted)',
+              color: on ? 'var(--accent)' : 'var(--muted)',
               boxShadow: on ? '0 0 0 1px var(--line)' : 'none',
             }}
           >

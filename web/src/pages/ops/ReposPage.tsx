@@ -21,6 +21,7 @@ import {
   type RepoFilter,
   type RepoState,
   countsLine,
+  syncProgress,
   entitiesByRepo,
   filterRepos,
   problemNames,
@@ -409,6 +410,7 @@ function RepoRow({ row, entities, locked, onSync }: { row: RepoStatusRow; entiti
 // ------------------------------------------------------------------ sync panels
 
 function RunningPanel({ job, syncId }: { job: SyncJob | null; syncId: string | null }) {
+  const progress = syncProgress(job);
   return (
     <>
       <Panel style={{ padding: 20 }}>
@@ -431,10 +433,53 @@ function RunningPanel({ job, syncId }: { job: SyncJob | null; syncId: string | n
               )}
             </p>
           </div>
-          <div className="hint" style={{ margin: 0, maxWidth: 320, textAlign: 'right' }}>
-            The server reports per-repo results when the whole sync finishes.
-          </div>
+          {progress.total !== null && (
+            <div style={{ fontSize: 14, fontWeight: 500 }}>
+              {progress.done} of {progress.total} done
+            </div>
+          )}
         </div>
+        {progress.total !== null && (
+          <>
+            <div
+              role="progressbar"
+              aria-label="Sync progress"
+              aria-valuemin={0}
+              aria-valuemax={progress.total}
+              aria-valuenow={progress.done}
+              style={{ height: 6, borderRadius: 3, background: 'var(--surface-sunk)', marginTop: 16, overflow: 'hidden' }}
+            >
+              <div style={{ height: '100%', width: `${progress.total === 0 ? 0 : (progress.done / progress.total) * 100}%`, background: 'var(--tone-info-fg)' }} />
+            </div>
+            <p className="hint" style={{ margin: '8px 0 0' }}>
+              {progress.counts.ok} ok · {progress.counts.skipped} skipped · {progress.counts.failed} failed · {progress.counts.running} running ·{' '}
+              {progress.counts.waiting} waiting
+            </p>
+          </>
+        )}
+        {progress.rows.length > 0 && (
+          <table className="table" style={{ marginTop: 16 }}>
+            <tbody>
+              {progress.rows.map((r) => (
+                <tr key={r.repo}>
+                  <td className="mono" style={{ fontWeight: 500, width: 200 }}>
+                    {r.repo}
+                  </td>
+                  <td style={{ width: 120 }}>
+                    {r.state === 'running' || r.state === 'waiting' ? (
+                      <span className="hint" style={{ margin: 0 }}>
+                        {r.state}
+                      </span>
+                    ) : (
+                      <StatusTag look={syncResultTone(r.state)}>{r.state}</StatusTag>
+                    )}
+                  </td>
+                  <td style={{ fontSize: 13, color: 'var(--text-2)' }}>{r.line}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </Panel>
       <Notice variant="info" title="Only one sync at a time">
         Sync buttons are off until this one finishes. The sync id lives in the server's memory, so after a restart this page falls back to the last sync record.

@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EVENTS_FILE, flushRunEventLog, installRunEventLog, logRunEvent, uninstallRunEventLog } from './event-log.ts';
-import { lastRunEventAt, TAIL_BYTES } from './read.ts';
+import { lastPipelinePhase, lastRunEventAt, TAIL_BYTES } from './read.ts';
 
 const RUN = '01J8ZQ7XK3PSEDRMNABCDEFGH1';
 
@@ -74,5 +74,48 @@ describe('lastRunEventAt (D71)', () => {
 
   test('refuses a value that is not a run id', async () => {
     await expect(lastRunEventAt(runsDir(), '../escape')).rejects.toThrow('run id');
+  });
+});
+
+describe('lastPipelinePhase', () => {
+  test('is the last pipeline phase before the run failed', async () => {
+    const dir = runsDir();
+    writeLines(dir, line('2026-09-25T10:00:00.000Z', { phase: 'preflight' }) + line('2026-09-25T10:00:01.000Z', { phase: 'failed', reason: 'X' }));
+    expect(await lastPipelinePhase(dir, RUN)).toBe('preflight');
+  });
+
+  test('skips blocked, refused and non-phase lines', async () => {
+    const dir = runsDir();
+    const other = `${JSON.stringify({ ts: '2026-09-25T10:00:05.000Z', source: 'pipeline', type: 'failed', data: { phase: 'identity' } })}\n`;
+    writeLines(
+      dir,
+      line('2026-09-25T10:00:00.000Z', { phase: 'classifying' }) +
+        line('2026-09-25T10:00:01.000Z', { phase: 'investigating' }) +
+        line('2026-09-25T10:00:02.000Z', { phase: 'blocked' }) +
+        line('2026-09-25T10:00:03.000Z', { phase: 'dispatched', refused: 'the run was stopped' }) +
+        other,
+    );
+    expect(await lastPipelinePhase(dir, RUN)).toBe('investigating');
+  });
+
+  test('only the latest submission counts: a completed phase or a resume starts over', async () => {
+    const dir = runsDir();
+    const resume = (kind: string): string =>
+      `${JSON.stringify({ ts: '2026-09-25T10:00:05.000Z', source: 'pipeline', type: 'resume', data: { kind, from: 'failed' } })}\n`;
+    writeLines(dir, line('2026-09-25T10:00:00.000Z', { phase: 'investigating' }) + line('2026-09-25T10:00:01.000Z', { phase: 'completed' }));
+    expect(await lastPipelinePhase(dir, RUN)).toBeNull();
+    writeLines(dir, line('2026-09-25T10:00:00.000Z', { phase: 'investigating' }) + resume('resume'));
+    expect(await lastPipelinePhase(dir, RUN)).toBeNull();
+    writeLines(dir, line('2026-09-25T10:00:00.000Z', { phase: 'investigating' }) + resume('steer'));
+    expect(await lastPipelinePhase(dir, RUN)).toBe('investigating');
+    writeLines(dir, resume('resume') + line('2026-09-25T10:00:06.000Z', { phase: 'dispatched' }));
+    expect(await lastPipelinePhase(dir, RUN)).toBe('dispatched');
+  });
+
+  test('is null with no log or no pipeline phase', async () => {
+    const dir = runsDir();
+    expect(await lastPipelinePhase(dir, RUN)).toBeNull();
+    writeLines(dir, line('2026-09-25T10:00:00.000Z', { phase: 'failed' }));
+    expect(await lastPipelinePhase(dir, RUN)).toBeNull();
   });
 });

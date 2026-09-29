@@ -47,17 +47,9 @@ export type ReadRunEventsOptions = {
 };
 
 export async function readRunEvents(runsDir: string, runId: string, options: ReadRunEventsOptions = {}): Promise<RunEventsPage> {
-  if (!v.is(RunIdSchema, runId)) throw new Error('run_id is not a run id');
   const after = Math.max(0, Math.floor(options.after ?? 0));
   const limit = Math.min(MAX_EVENTS_LIMIT, Math.max(1, Math.floor(options.limit ?? DEFAULT_EVENTS_LIMIT)));
-  let text: string;
-  try {
-    text = await readFile(join(runsDir, runId, EVENTS_FILE), 'utf8');
-  } catch (err) {
-    if (hasCode(err, 'ENOENT')) return { events: [], next: after, more: false };
-    throw err;
-  }
-  const lines = completeLines(text);
+  const lines = await readLines(runsDir, runId);
   const events: NumberedRunEvent[] = [];
   let index = after;
   for (; index < lines.length && events.length < limit; index++) {
@@ -66,6 +58,19 @@ export async function readRunEvents(runsDir: string, runId: string, options: Rea
     events.push({ ...parsed, index });
   }
   return { events, next: index, more: index < lines.length };
+}
+
+/** The complete lines of the run's events.jsonl; none when the file is missing. */
+async function readLines(runsDir: string, runId: string): Promise<string[]> {
+  if (!v.is(RunIdSchema, runId)) throw new Error('run_id is not a run id');
+  let text: string;
+  try {
+    text = await readFile(join(runsDir, runId, EVENTS_FILE), 'utf8');
+  } catch (err) {
+    if (hasCode(err, 'ENOENT')) return [];
+    throw err;
+  }
+  return completeLines(text);
 }
 
 /** The lines that end in a newline; the text after the last one is not complete yet. */
@@ -82,6 +87,33 @@ function parseLine(line: string): RunEventLine | null {
   } catch {
     return null;
   }
+}
+
+const PIPELINE_PHASES: readonly string[] = ['preflight', 'identity', 'classifying', 'dispatched', 'investigating'];
+
+/**
+ * The last pipeline phase the run logged, for a run that failed or was
+ * stopped: the run record keeps only the final phase, so this is how the page
+ * knows where it stopped. Skips needs_input, blocked and the terminal lines,
+ * and a line the run refused because it was stopped. Only the latest
+ * submission counts: a completed phase or a resume starts over, so a
+ * follow-up that failed before it logged a phase does not report the earlier
+ * one's. Null when that part of the log has no such line.
+ */
+export async function lastPipelinePhase(runsDir: string, runId: string): Promise<string | null> {
+  let last: string | null = null;
+  for (const line of await readLines(runsDir, runId)) {
+    // Most lines are model and tool events; skip them before parsing, since the log can be several MB.
+    if (!line.includes('"type":"phase"') && !line.includes('"type":"resume"')) continue;
+    const e = parseLine(line);
+    const data = e?.data as { phase?: unknown; refused?: unknown; kind?: unknown } | null | undefined;
+    // A steer joins the response that is running, so it does not start over.
+    if (e?.type === 'resume' && data?.kind === 'resume') last = null;
+    if (e?.type !== 'phase' || data?.refused !== undefined || typeof data?.phase !== 'string') continue;
+    if (data.phase === 'completed') last = null;
+    else if (PIPELINE_PHASES.includes(data.phase)) last = data.phase;
+  }
+  return last;
 }
 
 /** How much of the end of events.jsonl lastRunEventAt reads first. Most lines are far shorter. */

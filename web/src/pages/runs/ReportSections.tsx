@@ -7,7 +7,7 @@ import { Chip } from '../../components/StatusTag.tsx';
 import { useCopy } from '../../lib/clipboard.ts';
 import { formatDateTime } from '../../lib/format.ts';
 import { Tag } from './RunParts.tsx';
-import { capitalise } from './run-logic.ts';
+import { capitalise, codeRefHref } from './run-logic.ts';
 
 const OWNER: Record<Report['cx_answer']['action_owner'], string> = {
   user: 'Customer',
@@ -54,7 +54,7 @@ function Tile({ k, v, f }: { k: string; v: string; f: string }) {
   );
 }
 
-export function RootCauseSection({ report }: { report: Report }) {
+export function RootCauseSection({ report, codeLinks }: { report: Report; codeLinks?: Record<string, string> }) {
   const rc = report.root_cause;
   const scope = report.scope;
   return (
@@ -69,11 +69,19 @@ export function RootCauseSection({ report }: { report: Report }) {
           {(rc.code_refs.length > 0 || rc.matched_pattern_id !== undefined) && (
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', fontSize: 13 }}>
               {rc.code_refs.length > 0 && <span className="muted">Code</span>}
-              {rc.code_refs.map((r) => (
-                <span key={`${r.repo}/${r.file}:${r.lines}`} className="mono" style={{ fontSize: 12 }}>
-                  {r.repo}/{r.file}:{r.lines}
-                </span>
-              ))}
+              {rc.code_refs.map((r) => {
+                const label = `${r.repo}/${r.file}:${r.lines}`;
+                const href = codeRefHref(r, codeLinks, report.repo_commits);
+                return href === undefined ? (
+                  <span key={label} className="mono" style={{ fontSize: 12 }}>
+                    {label}
+                  </span>
+                ) : (
+                  <a key={label} href={href} className="link mono" style={{ fontSize: 12 }} target="_blank" rel="noreferrer noopener">
+                    {label}
+                  </a>
+                );
+              })}
               {rc.matched_pattern_id !== undefined && (
                 <>
                   <span className="muted">{rc.code_refs.length > 0 ? '· ' : ''}Matches pattern</span>

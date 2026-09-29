@@ -1,10 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 import type { RunDetail, RunRequest, RunUsageView, TierDecision, UsageTotals } from '../../api/types.ts';
+import { RUN_PHASES } from '../../lib/constants.ts';
 import { formatDateTime } from '../../lib/format.ts';
-import { runStatusTone } from '../../lib/status.ts';
+import { runPhaseTone, runStatusOf, runStatusTone } from '../../lib/status.ts';
 import {
   blockedSteps,
   buildStartBody,
+  codeRefHref,
   deriveInvestigators,
   followUpPending,
   formatCalls,
@@ -13,6 +15,9 @@ import {
   formatTokenSplit,
   formatUsd,
   headerStatus,
+  hopLabel,
+  hopsSummary,
+  hopStatusLook,
   inferFailure,
   isLongText,
   joinEntityLabels,
@@ -195,6 +200,21 @@ describe('inferFailure', () => {
     expect(g.steps.classifying).toBe('done');
     expect(g.steps.dispatched).toBe('failed');
   });
+  test('failed_phase marks only that step', () => {
+    const g = inferFailure({ classification: null, evidence: [], failed_phase: 'preflight' });
+    expect(g.title).toBe('Failed at preflight');
+    expect(g.steps.preflight).toBe('failed');
+    expect(g.steps.identity).toBe('todo');
+    const later = inferFailure({ classification: decision(['ssfb']), evidence: [], failed_phase: 'dispatched' });
+    expect(later.title).toBe('Failed at dispatched');
+    expect(later.steps.classifying).toBe('done');
+    expect(later.steps.dispatched).toBe('failed');
+    expect(later.steps.investigating).toBe('todo');
+  });
+  test('a failed_phase that is not a step falls back to the guess', () => {
+    const g = inferFailure({ classification: null, evidence: [], failed_phase: 'blocked' });
+    expect(g.title).toBe('Failed before classification (preflight or identity)');
+  });
   test('with evidence', () => {
     const g = inferFailure({ classification: decision(['ssfb']), evidence: [{ key: 'ssfb', version: 1 }] });
     expect(g.title).toBe('Failed while investigating');
@@ -229,6 +249,56 @@ describe('deriveInvestigators', () => {
   test('before dispatch everything waits; nothing classified means no rows', () => {
     expect(deriveInvestigators(run({ phase: 'classifying' }))[0]?.state).toBe('waiting');
     expect(deriveInvestigators(run({ phase: 'identity', classification: null }))).toEqual([]);
+  });
+});
+
+describe('deriveInvestigators with activity', () => {
+  const run = { phase: 'investigating', classification: decision(['ssfb', 'rtl']), evidence: [] } as Pick<RunDetail, 'phase' | 'classification' | 'evidence'>;
+
+  test('the last tool call replaces the placeholder, a failed task shows as failed', () => {
+    const rows = deriveInvestigators(
+      run,
+      new Map([
+        ['investigate_ssfb', { failed: false, tool: 'sql_select', target: 'select 1' }],
+        ['investigate_rtl', { failed: true, tool: 'quickwit_search' }],
+      ]),
+    );
+    expect(rows.map((r) => [r.state, r.detail])).toEqual([
+      ['working', 'Last: sql_select select 1'],
+      ['failed', 'The task failed after quickwit_search'],
+      ['waiting', 'Starts when an investigator asks for code'],
+    ]);
+  });
+
+  test('the deep pass is the one reported; no activity keeps the current text', () => {
+    const rows = deriveInvestigators(
+      run,
+      new Map([
+        ['investigate_ssfb', { failed: true }],
+        ['investigate_ssfb_deep', { failed: false, tool: 'read_file' }],
+      ]),
+    );
+    expect(rows[0]).toMatchObject({ state: 'working', detail: 'Last: read_file' });
+    expect(rows[1]?.detail).toBe('No findings stored yet');
+  });
+
+  test('a task that ended without an error and stored nothing shows no findings', () => {
+    const rows = deriveInvestigators(
+      run,
+      new Map([
+        ['investigate_ssfb', { failed: false, done: true, tool: 'sql_select' }],
+        ['investigate_rtl', { failed: false, done: true }],
+      ]),
+    );
+    expect(rows.slice(0, 2).map((r) => [r.state, r.detail])).toEqual([
+      ['no findings', 'Finished after sql_select, nothing stored'],
+      ['no findings', 'Finished without storing findings'],
+    ]);
+  });
+
+  test('stored findings win over a failed task', () => {
+    const rows = deriveInvestigators({ ...run, evidence: [{ key: 'ssfb', version: 1 }] }, new Map([['investigate_ssfb', { failed: true }]]));
+    expect(rows[0]?.state).toBe('findings in');
   });
 });
 
@@ -293,6 +363,15 @@ describe('reports held by a steer (D72)', () => {
     const live = [s(1, 'initial', false), s(2, 'steer', false)];
     expect(live.map((x) => submissionReportLabel(live, x.seq))).toEqual(['No', 'No']);
     expect(submissionReportLabel(subs, 9)).toBe('No');
+  });
+});
+
+describe('running tone', () => {
+  test('every running phase is info with a spinner; blocked stays amber', () => {
+    for (const phase of RUN_PHASES.filter((p) => runStatusOf(p) === 'running')) {
+      expect(runPhaseTone(phase)).toEqual({ tone: 'info', icon: 'spinner' });
+    }
+    expect(runPhaseTone('blocked').tone).toBe('amber');
   });
 });
 
@@ -509,5 +588,60 @@ describe('request (D66)', () => {
     expect(isLongText('a\n'.repeat(8).trimEnd())).toBe(false);
     expect(isLongText('a\n'.repeat(9).trimEnd())).toBe(true);
     expect(isLongText('word '.repeat(80))).toBe(true);
+  });
+});
+
+describe('id chain hops', () => {
+  const at = '2026-01-01T00:00:00.000Z';
+  const hop = (from: 'phone_number' | 'aspora_user_id' | 'account_number', to: 'aspora_user_id' | 'account_number' | undefined, status: 'resolved' | 'not_found' | 'skipped') => ({
+    from,
+    ...(to !== undefined ? { to } : {}),
+    source: 'x:y',
+    status,
+    taken_at: at,
+  });
+
+  test('summary names the start and the last resolved id', () => {
+    expect(hopsSummary([hop('phone_number', 'aspora_user_id', 'resolved'), hop('aspora_user_id', 'account_number', 'resolved')])).toBe(
+      '2 hops, from phone number to account number',
+    );
+  });
+
+  test('summary counts failures and handles no resolved target', () => {
+    expect(hopsSummary([hop('phone_number', undefined, 'not_found')])).toBe('1 hop, from phone number, 1 failed');
+    expect(hopsSummary([])).toBe('0 hops');
+  });
+
+  test('labels and tones', () => {
+    expect(hopLabel({ from: 'phone_number', to: 'aspora_user_id', status: 'resolved' })).toBe('phone number to aspora user id');
+    expect(hopLabel({ from: 'account_number', status: 'resolved' })).toBe('account number, state only');
+    expect(hopLabel({ from: 'phone_number', status: 'not_found' })).toBe('from phone number');
+    expect(hopStatusLook('not_found').tone).toBe('rust');
+    expect(hopStatusLook('unverified').tone).toBe('amber');
+  });
+});
+
+describe('codeRefHref', () => {
+  const bases = { harbor: 'https://github.com/Org/harbor' };
+  const commits = [{ repo: 'harbor', commit: 'abc1234' }];
+  const ref = (over: Partial<{ repo: string; file: string; lines: string }> = {}) => ({ repo: 'harbor', file: 'src/a b.go', lines: '10-20', ...over });
+
+  test('pins to the commit and anchors a range', () => {
+    expect(codeRefHref(ref(), bases, commits)).toBe('https://github.com/Org/harbor/blob/abc1234/src/a%20b.go#L10-L20');
+  });
+  test('a single line, and HEAD without a commit', () => {
+    expect(codeRefHref(ref({ lines: '42' }), bases, [])).toBe('https://github.com/Org/harbor/blob/HEAD/src/a%20b.go#L42');
+  });
+  test('free-text lines give no anchor', () => {
+    expect(codeRefHref(ref({ lines: 'whole file' }), bases, commits)).toBe('https://github.com/Org/harbor/blob/abc1234/src/a%20b.go');
+  });
+  test('no base, or a non-https base, stays plain text', () => {
+    expect(codeRefHref(ref({ repo: 'other' }), bases, commits)).toBeUndefined();
+    expect(codeRefHref(ref(), undefined, commits)).toBeUndefined();
+    expect(codeRefHref(ref(), { harbor: 'javascript:alert(1)' }, commits)).toBeUndefined();
+  });
+  test('a repo named after an Object.prototype member stays plain text', () => {
+    expect(codeRefHref(ref({ repo: 'constructor' }), bases, commits)).toBeUndefined();
+    expect(codeRefHref(ref({ repo: 'toString' }), {}, commits)).toBeUndefined();
   });
 });

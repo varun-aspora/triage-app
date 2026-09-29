@@ -28,7 +28,7 @@ import {
   syncNow,
   timerOffReason,
 } from '../ops/repos-autosync.ts';
-import { type RepoSyncResult, repoStatus, type syncRepos, UnknownRepoError } from '../ops/repos.ts';
+import { type RepoSyncResult, repoStatus, type SyncProgress, type syncRepos, UnknownRepoError } from '../ops/repos.ts';
 import { internalError } from './internal-error.ts';
 
 export const MAX_SYNC_JOBS = 20;
@@ -41,6 +41,11 @@ export type SyncJob = {
   status: SyncJobStatus;
   readonly started_at: string;
   finished_at?: string;
+  /** Every repo this sync covers, in order. Set once the sync knows its selection. */
+  repos?: readonly string[];
+  /** Repos being synced right now. */
+  running?: readonly string[];
+  /** Fills in as each repo finishes; the final list is in the sync's order. */
   results?: readonly RepoSyncResult[];
   ok?: readonly string[];
   skipped?: readonly string[];
@@ -84,11 +89,13 @@ export function createReposRoutes(deps: ReposRouteDeps): Hono {
       return c.json({ error: 'a sync is already running', ...(running !== undefined ? { sync_id: running.sync_id } : {}) }, 409);
     }
 
+    const job: SyncJob = { sync_id: newId(), repo: repo ?? null, status: 'running', started_at: iso() };
     let pending: Promise<AutoSyncResult>;
     try {
       pending = syncNow('http', repo !== undefined ? { repo } : {}, {
         config,
         runner: deps.runner(),
+        onSyncProgress: (event) => track(job, event),
         ...(deps.syncRepos !== undefined ? { syncRepos: deps.syncRepos } : {}),
       });
     } catch (err) {
@@ -96,12 +103,14 @@ export function createReposRoutes(deps: ReposRouteDeps): Hono {
       throw err;
     }
 
-    const job: SyncJob = { sync_id: newId(), repo: repo ?? null, status: 'running', started_at: iso() };
     remember(jobs, job);
     void pending.then(
       (result) => settle(job, result, iso()),
       (err: unknown) => {
         job.status = 'failed';
+        delete job.running;
+        // Partial results would read as the whole sync, with the repos that never ran left out.
+        delete job.results;
         job.reason = err instanceof Error ? err.name : 'error';
         job.finished_at = iso();
       },
@@ -139,8 +148,24 @@ export function createReposRoutes(deps: ReposRouteDeps): Hono {
   return app;
 }
 
+function track(job: SyncJob, event: SyncProgress): void {
+  switch (event.type) {
+    case 'planned':
+      job.repos = event.repos;
+      return;
+    case 'started':
+      job.running = [...(job.running ?? []), event.repo];
+      return;
+    case 'finished':
+      job.running = (job.running ?? []).filter((r) => r !== event.result.repo);
+      job.results = [...(job.results ?? []), event.result];
+      return;
+  }
+}
+
 function settle(job: SyncJob, result: AutoSyncResult, at: string): void {
   job.finished_at = at;
+  delete job.running;
   switch (result.status) {
     case 'synced': {
       const report = result.report;

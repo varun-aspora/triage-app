@@ -79,6 +79,7 @@ export function guideStatusTone(status: GuideStatus | null): StatusLook {
     case 'stub':
       return { tone: 'amber', icon: 'alert' };
     case 'ported':
+      return { tone: 'info', icon: 'check' };
     case 'written':
       return { tone: 'neutral', icon: 'check' };
     default:

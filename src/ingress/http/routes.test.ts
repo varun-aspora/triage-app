@@ -1366,6 +1366,27 @@ describe('GET /triage/:run_id stalled (D71)', () => {
   });
 });
 
+describe('GET /triage/:run_id failed_phase', () => {
+  test('a failed run shows the last pipeline phase in its log; other runs and unknown logs show none', async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), 'triage-routes-failed-phase-'));
+    try {
+      mkdirSync(join(runsDir, RUN_B), { recursive: true });
+      const line = (phase: string) => `${JSON.stringify({ ts: '2026-09-24T00:00:00.000Z', source: 'pipeline', type: 'phase', data: { phase } })}\n`;
+      writeFileSync(join(runsDir, RUN_B, 'events.jsonl'), line('preflight') + line('failed'));
+      const get = async (h: ReturnType<typeof harness>, id: string) => (await (await h.app.request(`/triage/${id}`)).json()) as Record<string, unknown>;
+      expect((await get(harness({ runs: { [RUN_B]: record(RUN_B, 'failed') }, runsDir }), RUN_B)).failed_phase).toBe('preflight');
+      expect('failed_phase' in (await get(harness({ runs: { [RUN_B]: record(RUN_B, 'completed') }, runsDir }), RUN_B))).toBe(false);
+      expect('failed_phase' in (await get(harness({ runs: { [RUN_A]: record(RUN_A, 'failed') }, runsDir }), RUN_A))).toBe(false);
+      expect('failed_phase' in (await get(harness({ runs: { [RUN_B]: record(RUN_B, 'failed') } }), RUN_B))).toBe(false);
+      // A failed follow-up keeps the earlier report in view, so its log is not read.
+      const report = { status: 'resolved', request: { current_ask: 'x', requested_by: 'ops' } };
+      expect('failed_phase' in (await get(harness({ runs: { [RUN_B]: record(RUN_B, 'failed', report) }, runsDir }), RUN_B))).toBe(false);
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('POST /triage/:run_id/resume', () => {
   const body = { requested_by: 'ops@example.com', note: 'harbor is back' };
 
@@ -2003,5 +2024,35 @@ describe('POST /triage/:run_id/stop, GET /triage/:run_id/events, feedback on a r
     // Without a runs dir the log is empty.
     const none = harness({ store, home });
     expect(await (await none.app.request(`/triage/${RUN_A}/events`)).json()).toEqual({ events: [], next: 0, more: false });
+  });
+});
+
+describe('runView code_links', () => {
+  const report = {
+    root_cause: {
+      statement: 'x',
+      code_refs: [
+        { repo: 'harbor', file: 'a.go', lines: '1-2' },
+        { repo: 'harbor', file: 'b.go', lines: '3' },
+        { repo: 'unpinned', file: 'c.go', lines: '4' },
+      ],
+    },
+  };
+  const codeBase = (repo: string) => (repo === 'harbor' ? 'https://github.com/Org/harbor' : undefined);
+
+  test('has one base per known repo and leaves out repos with no remote', () => {
+    const view = runView(record(RUN_A, 'completed', report), undefined, undefined, codeBase);
+    expect(view.code_links).toEqual({ harbor: 'https://github.com/Org/harbor' });
+  });
+
+  test('a repo named after an Object.prototype member is looked up like any other', () => {
+    const refs = { root_cause: { statement: 'x', code_refs: [{ repo: 'constructor', file: 'a.go', lines: '1' }] } };
+    const view = runView(record(RUN_A, 'completed', refs), undefined, undefined, (repo) => `https://github.com/Org/${repo}`);
+    expect(view.code_links).toEqual({ constructor: 'https://github.com/Org/constructor' });
+  });
+
+  test('is absent without a lookup or a root cause', () => {
+    expect('code_links' in runView(record(RUN_A, 'completed', report))).toBe(false);
+    expect('code_links' in runView(record(RUN_A, 'created'), undefined, undefined, codeBase)).toBe(false);
   });
 });

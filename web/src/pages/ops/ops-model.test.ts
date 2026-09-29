@@ -10,6 +10,7 @@ import {
   needsAttention,
   problemNames,
   shortCommit,
+  syncProgress,
   triggerLabel,
 } from './repos-model.ts';
 
@@ -83,6 +84,9 @@ describe('repos model', () => {
     expect(countsLine(27, 1, 1)).toBe('27 ok · 1 skipped · 1 failed');
     expect(problemNames({ skipped: ['vance-android'], failed: ['engage', 'x'] })).toBe('skipped: vance-android · failed: engage, x');
     expect(problemNames({ skipped: [], failed: [] })).toBe('');
+    expect(
+      problemNames({ skipped: ['vance-android'], failed: ['engage', 'x'], reasons: { 'vance-android': 'dirty', engage: 'the git host is unreachable' } }),
+    ).toBe('skipped: vance-android (local changes) · failed: engage (the git host is unreachable), x');
     expect(triggerLabel('http')).toBe('HTTP');
     expect(triggerLabel('timer')).toBe('the timer');
   });
@@ -91,6 +95,18 @@ describe('repos model', () => {
     expect(syncResultTone('ok')).toEqual({ tone: 'neutral', icon: 'check' });
     expect(syncResultTone('skipped').tone).toBe('amber');
     expect(syncResultTone('failed').tone).toBe('rust');
+  });
+
+  test('syncProgress counts finished, running and waiting repos', () => {
+    const res = (repo: string, status: 'ok' | 'skipped' | 'failed') => ({ repo, status, warnings: [], line: `${repo}: ${status}` });
+    const p = syncProgress({ repos: ['a', 'b', 'c', 'd'], running: ['c'], results: [res('b', 'ok'), res('a', 'failed')] });
+    expect(p.total).toBe(4);
+    expect(p.done).toBe(2);
+    expect(p.counts).toEqual({ ok: 1, skipped: 0, failed: 1, running: 1, waiting: 1 });
+    expect(p.rows.map((r) => `${r.repo}:${r.state}`)).toEqual(['b:ok', 'a:failed', 'c:running', 'd:waiting']);
+    const before = syncProgress(null);
+    expect(before.total).toBeNull();
+    expect(before.rows).toEqual([]);
   });
 
   test('shortCommit', () => {

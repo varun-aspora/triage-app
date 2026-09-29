@@ -147,10 +147,86 @@ export function matchesStepFilter(e: Pick<RunEvent, 'source' | 'type' | 'data'>,
   }
 }
 
+export const STEP_ORDERS = ['asc', 'desc'] as const;
+export type StepOrder = (typeof STEP_ORDERS)[number];
+
+export const isStepOrder = (v: unknown): v is StepOrder => v === 'asc' || v === 'desc';
+
+/** The steps a filter keeps, oldest first or newest first. */
+export function visibleSteps<E extends Pick<RunEvent, 'source' | 'type' | 'data'>>(events: readonly E[], filter: StepFilter, order: StepOrder): E[] {
+  const shown = events.filter((e) => matchesStepFilter(e, filter));
+  return order === 'desc' ? shown.reverse() : shown;
+}
+
 /** Adds a page of lines, ignoring any the list already has. */
 export function appendEvents(have: readonly RunEvent[], page: readonly RunEvent[]): RunEvent[] {
   const last = have.at(-1)?.index ?? -1;
   return [...have, ...page.filter((e) => e.index > last)];
+}
+
+/** What one investigator's latest delegate task is doing, read from the event log. */
+export type AgentActivity = { failed: boolean; done?: boolean; tool?: string; target?: string };
+
+const MAX_TARGET = 60;
+
+// The arguments that say what a call looks at, checked before any other text argument;
+// otherwise logs_search shows its time range ("2d") rather than its terms.
+const TARGET_ARGS = ['sql', 'path', 'pattern', 'glob', 'terms', 'message', 'error', 'service', 'repo'];
+
+const argText = (v: unknown): string | undefined => {
+  if (typeof v === 'string') return v.trim() === '' ? undefined : v;
+  if (Array.isArray(v)) {
+    const parts = v.filter((x): x is string => typeof x === 'string' && x.trim() !== '');
+    return parts.length > 0 ? parts.join(', ') : undefined;
+  }
+  return undefined;
+};
+
+/** The argument that names the table, file or query, cut short. */
+function targetOf(args: unknown): string | undefined {
+  if (typeof args !== 'object' || args === null) return undefined;
+  const a = args as Data;
+  const text = TARGET_ARGS.map((k) => argText(a[k])).find((t) => t !== undefined) ?? Object.values(a).map(argText).find((t) => t !== undefined);
+  return text === undefined ? undefined : oneLine(text, MAX_TARGET);
+}
+
+function oneLine(text: string, max: number): string {
+  const one = text.replace(/\s+/g, ' ').trim();
+  return one.length > max ? `${one.slice(0, max)}…` : one;
+}
+
+function taskIdOf(d: Data): string | undefined {
+  if (typeof d.taskId === 'string') return d.taskId;
+  const session = typeof d.session === 'string' ? d.session : '';
+  return session.startsWith('task:') ? session.slice(session.lastIndexOf(':') + 1) : undefined;
+}
+
+/**
+ * Per delegate agent name (investigate_ssfb, code_walker, ...): whether its
+ * latest task has ended and errored, and its latest tool call. A tool event belongs to a task
+ * by taskId, or by a session id that ends in the task id. Agents whose task
+ * never appears in the log are left out.
+ */
+export function agentActivity(events: readonly Pick<RunEvent, 'type' | 'data'>[]): Map<string, AgentActivity> {
+  const agentOfTask = new Map<string, string>();
+  const out = new Map<string, AgentActivity>();
+  for (const e of events) {
+    const d = dataOf(e);
+    const id = taskIdOf(d);
+    if (id === undefined) continue;
+    if (e.type === 'task_start' && typeof d.agent === 'string') {
+      agentOfTask.set(id, d.agent);
+      // A later task of the same agent (a deep pass) replaces the earlier one.
+      out.set(d.agent, { failed: false });
+      continue;
+    }
+    const agent = agentOfTask.get(id);
+    const have = agent === undefined ? undefined : out.get(agent);
+    if (agent === undefined || have === undefined) continue;
+    if (e.type === 'task') out.set(agent, { ...have, done: true, failed: d.isError === true });
+    else if (e.type === 'tool_start' && typeof d.toolName === 'string') out.set(agent, { ...have, tool: d.toolName, target: targetOf(d.args) });
+  }
+  return out;
 }
 
 const MAX_EXCERPT = 180;
@@ -296,6 +372,5 @@ function excerpt(value: unknown): string {
       text = '';
     }
   }
-  const one = text.replace(/\s+/g, ' ').trim();
-  return one.length > MAX_EXCERPT ? `${one.slice(0, MAX_EXCERPT)}…` : one;
+  return oneLine(text, MAX_EXCERPT);
 }

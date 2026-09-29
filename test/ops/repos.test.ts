@@ -211,6 +211,30 @@ describe('syncRepos', () => {
     expect(report.results[0]).toMatchObject({ status: 'ok', branch: 'develop', warnings: [] });
   });
 
+  test('onSyncProgress reports the plan, then start and finish for each repo', async () => {
+    const dir = makeRepo('harbor');
+    const { d } = deps(cleanSyncSteps(dir, 'main', SHA_A), [pin('harbor', { branch: 'main' })]);
+    const events: string[] = [];
+    await syncRepos({}, {
+      ...d,
+      onSyncProgress: (e) => events.push(e.type === 'planned' ? `planned ${e.repos.join(',')}` : e.type === 'started' ? `started ${e.repo}` : `finished ${e.result.repo} ${e.result.status}`),
+    });
+    expect(events).toEqual(['planned harbor', 'started harbor', 'finished harbor ok']);
+  });
+
+  test('a progress callback that throws does not fail the sync', async () => {
+    const dir = makeRepo('harbor');
+    const { d } = deps(cleanSyncSteps(dir, 'main', SHA_A), [pin('harbor', { branch: 'main' })]);
+    const report = await syncRepos({}, {
+      ...d,
+      onSyncProgress: () => {
+        throw new Error('boom');
+      },
+    });
+    if (report.status !== 'done') throw new Error('expected done');
+    expect(report.ok).toEqual(['harbor']);
+  });
+
   test('a failure to record the default branch is a warning, not a failed sync', async () => {
     const dir = makeRepo('harbor');
     const steps: FakeStep[] = [
