@@ -59,11 +59,10 @@ has one, covers the whole journey and its first queries.
 ## Data access
 
 - Each service's database and admin API are reachable when they are
-  configured for this deployment. When one is not, the investigator's tool
-  answers "not configured for rtl:<service>", and that goes into the findings
-  as a gap.
+  configured for this deployment. When one is not, the tool answers "not
+  configured for rtl:<service>", and that goes into the findings as a gap.
 - Quickwit covers RTL. The log service name for each service is in the
-  registry; the investigator's log tool maps it.
+  registry; the log tool maps it.
 
 ## Join keys
 

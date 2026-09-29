@@ -78,7 +78,7 @@ function connector(fetchImpl: FetchLike, options: { timeoutMs?: number; registry
 }
 
 function allowed(base: string, path: string, method = 'GET', service = 'bro', rules: readonly ApiRule[] = []): HttpAllowed {
-  const d = decideHttp({ tool: 'http_call', service, method, path, base, rules });
+  const d = decideHttp({ service, method, path, base, rules });
   if (!d.ok) throw new Error(`test setup: expected allow, got ${d.code}`);
   return d;
 }
@@ -210,9 +210,9 @@ const REASON: Record<string, string> = {
   'url with credentials': OFF_HOST,
   'url path differs from the decided path': 'path differs from the one the rules decided',
   'url given as a string': 'must come from buildUrl',
-  'service finacle': 'use cbs_call',
-  'service finacle on the shipped registry': 'use cbs_call',
-  "a non-finacle service with transport 'cbs'": 'only through cbs_call',
+  'service finacle': 'through the CBS connector',
+  'service finacle on the shipped registry': 'through the CBS connector',
+  "a non-finacle service with transport 'cbs'": 'only through the CBS connector',
   'method other than the decided one': 'method differs',
   'method in lower case': 'method differs',
   'unknown service': 'not a known service',
@@ -229,7 +229,7 @@ const REASON: Record<string, string> = {
 };
 
 describe('refused before fetch', () => {
-  const block = decideHttp({ tool: 'http_call', service: 'bro', method: 'POST', path: '/bro/admin/x', base: BRO_BASE, rules: [] });
+  const block = decideHttp({ service: 'bro', method: 'POST', path: '/bro/admin/x', base: BRO_BASE, rules: [] });
 
   const cases: readonly [string, () => { req: HttpSendRequest; registry?: StubRegistry }, 'refused' | 'not_configured'][] = [
     ['decision block', () => ({ req: broRequest({ method: 'POST', decision: block }) }), 'refused'],

@@ -444,7 +444,7 @@ describe('finacle and cbs', () => {
     expect(r.serviceApi('ssfb', 'finacle')?.transport).toBe('cbs');
     expect(r.serviceApi('ssfb', 'harbor')?.transport).toBe('http');
     const row = r.capabilityReport('ssfb').rows.find((x) => x.service === 'finacle');
-    expect(row?.reason).toContain('cbs_call');
+    expect(row?.reason).toContain('CBS gateway');
   });
 
   test('cbsEnabled follows the flag', () => {

@@ -5,16 +5,20 @@
 //
 // The agent mount (D109) is built from the root context (no entity). Shared
 // modules are built once. A perEntity module is built once per enabled
-// entity, with that entity in the context, and renamed '<entity>_<name>'
-// after create(), so the module and its audit, budget and scope keys keep
-// the bare name (agent-name.ts).
+// entity it applies to, with that entity in the context, and mounted as one
+// tool under its bare name (D110): an 'entity' input picks the per-entity
+// copy a call runs on, so each copy keeps its own gates, scope, budget,
+// audit, staging and cap. A module scoped to one entity gets no entity input
+// (agent-entity.ts).
 
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ToolDefinition } from '@flue/runtime/tool';
+import * as v from 'valibot';
 import { ENTITIES, type Entity } from '../types/core.ts';
-import { agentToolName, splitAgentToolName } from './agent-name.ts';
+import { refused } from '../types/tool-result.ts';
+import { ENTITY_INPUT, markAgentEntities } from './agent-entity.ts';
 import { toolModules } from './tool-modules.gen.ts';
 import { MOUNTS, type Mount, type ToolContext, type ToolModule } from './types.ts';
 
@@ -38,9 +42,10 @@ export const TOOL_NAME_PATTERN = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 /** Longest tool name the model providers accept. */
 export const MAX_TOOL_NAME_LENGTH = 64;
 
-export { agentToolName, bareToolName, splitAgentToolName } from './agent-name.ts';
-
-/** Input keys a tool must never expose: entity and run id come from the closure (D3). */
+/**
+ * Input keys a module's tool must never expose: entity and run id come from
+ * the closure (D3). On the agent mount the index adds 'entity' itself (D110).
+ */
 export const FORBIDDEN_INPUT_KEYS: readonly string[] = Object.freeze(['entity', 'run_id', 'runId']);
 
 const OBJECT_SCHEMA_TYPES = new Set(['object', 'strict_object', 'loose_object']);
@@ -68,18 +73,27 @@ export type ToolIndex = {
   allToolNames(): readonly string[];
   /**
    * Enabled tools for the mount, after entity filtering and name checks. Calls create() only for enabled modules.
-   * On the agent mount, perEntity tools come once per enabled entity, named '<entity>_<name>'.
+   * On the agent mount, a perEntity tool comes once, with an 'entity' input unless its module serves one entity.
    */
   toolsFor(mount: Mount, ctx: ToolContext): ToolDefinition[];
   /**
-   * Every tool the mount would consider for this context, under its mounted name, with on/off and the off reason
-   * (one row per entity and module for perEntity tools on the agent mount). Never calls create().
+   * Every tool the mount would consider for this context, under its mounted name, with on/off and the off reason.
+   * A perEntity tool on the agent mount is on when any of its entities is; off, the reason names each entity's.
+   * Never calls create().
    */
   mountPlan(mount: Mount, ctx: ToolContext): readonly MountPlanRow[];
 };
 
-/** One tool a mount would build: the module, the context it is built with and the name it is mounted under. */
-type Picked = { readonly module: ToolModule; readonly index: number; readonly ctx: ToolContext; readonly name: string };
+/**
+ * One tool a mount would build: the module, the context it is built with and its list index. `entities` is set
+ * for a perEntity module on the agent mount: the enabled entities it applies to, one copy each.
+ */
+type Picked = {
+  readonly module: ToolModule;
+  readonly index: number;
+  readonly ctx: ToolContext;
+  readonly entities?: readonly Entity[];
+};
 
 export type ToolIndexOptions = {
   /** Source file of each module, same order as the list. Used only in error messages. */
@@ -104,14 +118,12 @@ export function buildToolIndex(modules: readonly ToolModule[], options: ToolInde
     modules.forEach((module, index) => {
       if (!module.mounts.some((m) => wanted.includes(m))) return;
       if (mount === 'agent' && module.perEntity === true) {
-        for (const entity of ctx.registry.enabledEntities()) {
-          if (module.entities !== 'all' && !module.entities.includes(entity)) continue;
-          picked.push({ module, index, ctx: Object.freeze({ ...ctx, entity }), name: agentToolName(entity, module.name) });
-        }
+        const entities = ctx.registry.enabledEntities().filter((e) => module.entities === 'all' || module.entities.includes(e));
+        if (entities.length > 0) picked.push({ module, index, ctx, entities });
         return;
       }
       if (module.entities !== 'all' && (ctx.entity === null || !module.entities.includes(ctx.entity))) return;
-      picked.push({ module, index, ctx, name: module.name });
+      picked.push({ module, index, ctx });
     });
     checkNames(mount, picked, sourceOf);
     return picked;
@@ -121,43 +133,208 @@ export function buildToolIndex(modules: readonly ToolModule[], options: ToolInde
     modules,
     allToolNames: () => [...new Set(modules.map((m) => m.name))].sort(),
     toolsFor(mount: Mount, ctx: ToolContext): ToolDefinition[] {
-      const tools: ToolDefinition[] = [];
-      for (const { module, index, ctx: tc, name } of select(mount, ctx)) {
-        if (!module.enabled(tc, mount).on) continue;
+      const build = (module: ToolModule, index: number, tc: ToolContext): ToolDefinition => {
         const tool = module.create(tc, mount);
         if (tool.name !== module.name) {
           throw new ToolNameMismatchError(
             `${sourceOf(index)}: module '${module.name}' created a tool named '${String(tool.name)}'`,
           );
         }
-        tools.push(name === module.name ? tool : forEntity(tool, name, tc));
+        return tool;
+      };
+      const tools: ToolDefinition[] = [];
+      for (const { module, index, ctx: tc, entities } of select(mount, ctx)) {
+        if (entities === undefined) {
+          if (module.enabled(tc, mount).on) tools.push(build(module, index, tc));
+          continue;
+        }
+        const copies: EntityCopy[] = [];
+        for (const entity of entities) {
+          const ec = entityContext(tc, entity);
+          if (module.enabled(ec, mount).on) copies.push({ entity, ctx: ec, tool: build(module, index, ec) });
+        }
+        if (copies.length === 0) continue;
+        tools.push(
+          oneEntityModule(module)
+            ? fixedEntityTool(copies[0] as EntityCopy)
+            : entityInputTool(module, copies, tc, (message) => new ToolIndexError(`${sourceOf(index)}: ${message}`)),
+        );
       }
       return tools;
     },
     mountPlan(mount: Mount, ctx: ToolContext): readonly MountPlanRow[] {
-      return select(mount, ctx).map(({ module, ctx: tc, name }) => {
-        const state = module.enabled(tc, mount);
-        return state.on ? { name, on: true } : { name, on: false, reason: state.reason };
+      return select(mount, ctx).map(({ module, ctx: tc, entities }): MountPlanRow => {
+        const name = module.name;
+        if (entities === undefined) {
+          const state = module.enabled(tc, mount);
+          return state.on ? { name, on: true } : { name, on: false, reason: state.reason };
+        }
+        const off: { entity: Entity; reason: string }[] = [];
+        for (const entity of entities) {
+          const state = module.enabled(entityContext(tc, entity), mount);
+          if (state.on) return { name, on: true };
+          off.push({ entity, reason: state.reason });
+        }
+        const reason = off.length === 1 ? (off[0] as { reason: string }).reason : off.map((o) => `${o.entity}: ${o.reason}`).join('; ');
+        return { name, on: false, reason };
       });
     },
   });
 }
 
-/**
- * A perEntity tool under its agent-mount name. The description starts with
- * the entity, its aliases and its services, so the model picks the right one
- * of the per-entity copies.
- */
-function forEntity(tool: ToolDefinition, name: string, ctx: ToolContext): ToolDefinition {
-  const entity = ctx.entity as Entity;
+// ------------------------------------------------------------ agent mount entity tools (D110)
+
+/** One per-entity copy of a perEntity module on the agent mount. */
+type EntityCopy = { readonly entity: Entity; readonly ctx: ToolContext; readonly tool: ToolDefinition };
+
+const entityContext = (ctx: ToolContext, entity: Entity): ToolContext => Object.freeze({ ...ctx, entity });
+
+/** A module scoped to one entity has no entity input on the agent mount. */
+const oneEntityModule = (module: ToolModule): boolean => module.entities !== 'all' && module.entities.length === 1;
+
+/** "rtl", or "ssfb (also called shivalik)"; `shown` is how the entity itself is written. */
+function entityLabel(ctx: ToolContext, entity: Entity, shown: string = entity): string {
   const aliases = ctx.registry.spec(entity).aliases;
-  const services = ctx.registry.services(entity);
-  const about = [
-    ...(aliases.length > 0 ? [`also called ${aliases.join(', ')}`] : []),
-    ...(services.length > 0 ? [`services: ${services.join(', ')}`] : []),
-  ];
-  const lead = `${entity.toUpperCase()} entity${about.length > 0 ? ` (${about.join('; ')})` : ''}.`;
-  return Object.freeze({ ...tool, name, description: `${lead} ${tool.description}` });
+  return aliases.length > 0 ? `${shown} (also called ${aliases.join(', ')})` : shown;
+}
+
+/** The copy of a one-entity module under its bare name, its entity fixed and named first in the description. */
+function fixedEntityTool({ entity, ctx, tool }: EntityCopy): ToolDefinition {
+  const lead = `${entityLabel(ctx, entity, entity.toUpperCase())} only.`;
+  return markAgentEntities({ ...tool, description: `${lead} ${tool.description}` }, { entities: [entity], picked: false });
+}
+
+type ObjectSchema = { readonly type: string; readonly entries: Readonly<Record<string, v.GenericSchema>> };
+type PicklistSchema = v.GenericSchema & {
+  readonly type: 'picklist';
+  readonly options: readonly string[];
+  readonly pipe?: readonly { readonly type: string; readonly description?: string }[];
+};
+
+const isPicklist = (s: v.GenericSchema): s is PicklistSchema => s.type === 'picklist';
+const descriptionOf = (s: PicklistSchema): string | undefined => s.pipe?.find((i) => i.type === 'description')?.description;
+
+// Two copies' input entries match when they differ only in closures, which
+// every create() makes anew (v.check, v.custom); the data around them decides.
+function sameShape(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a === 'function' && typeof b === 'function') return true;
+  if (a instanceof RegExp || b instanceof RegExp) return String(a) === String(b);
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  // '~' keys are valibot's standard-schema accessors.
+  const keys = (o: object): string[] => Object.keys(o).filter((k) => !k.startsWith('~'));
+  const ka = keys(a);
+  const kb = keys(b);
+  return ka.length === kb.length && ka.every((k) => sameShape((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
+}
+
+/**
+ * The input of the merged tool: 'entity' first, then each key of the copies'
+ * inputs. A key the copies disagree on must be a picklist in each (the
+ * service lists); it becomes the union, and the copy's own input checks the
+ * pair on the call. Anything else that differs is a module bug.
+ */
+function mergedInput(copies: readonly EntityCopy[], fail: (message: string) => Error): {
+  schema: v.GenericSchema<Record<string, unknown>>;
+  picklists: readonly string[];
+} {
+  const maybe = copies.map((c) => c.tool.input as unknown as ObjectSchema | undefined);
+  const first = maybe[0];
+  if (first === undefined || !['object', 'strict_object'].includes(first.type) || maybe.some((i) => i?.type !== first.type)) {
+    throw fail('a perEntity tool needs the same object or strict object input for every entity');
+  }
+  const inputs = maybe as ObjectSchema[];
+  const keys = [...new Set(inputs.flatMap((i) => Object.keys(i.entries)))];
+  const entries: Record<string, v.GenericSchema> = {
+    [ENTITY_INPUT]: v.pipe(
+      v.picklist(copies.map((c) => c.entity)),
+      v.description(`The entity this call is for: ${copies.map((c) => c.entity).join(', ')}. What each one has is in the tool description.`),
+    ),
+  };
+  const picklists: string[] = [];
+  for (const key of keys) {
+    const each = inputs.map((i) => i.entries[key]);
+    if (each.some((s) => s === undefined)) throw fail(`input '${key}' is missing for some entities`);
+    const schemas = each as v.GenericSchema[];
+    if (schemas.every((s) => sameShape(s, schemas[0]))) {
+      entries[key] = schemas[0] as v.GenericSchema;
+      continue;
+    }
+    if (!schemas.every(isPicklist)) throw fail(`input '${key}' differs between entities and is not a picklist`);
+    const lists = schemas as PicklistSchema[];
+    const options = [...new Set(lists.flatMap((s) => s.options))];
+    const texts = new Set(lists.map(descriptionOf));
+    const text = texts.size === 1 ? [...texts][0] : undefined;
+    entries[key] = v.pipe(v.picklist(options), v.description(text ?? `One of the chosen entity's; the tool description lists them per entity.`));
+    picklists.push(key);
+  }
+  const schema = first.type === 'strict_object' ? v.strictObject(entries) : v.object(entries);
+  return { schema: schema as v.GenericSchema<Record<string, unknown>>, picklists };
+}
+
+/** Options of a picklist input of one copy. */
+function optionsOf(copy: EntityCopy, key: string): readonly string[] {
+  const schema = (copy.tool.input as unknown as ObjectSchema).entries[key];
+  return schema !== undefined && isPicklist(schema) ? schema.options : [];
+}
+
+/**
+ * One tool for every copy of a perEntity module: the module's input plus a
+ * required 'entity', and a description that ends with what each entity has.
+ * A call runs the chosen entity's copy on the rest of its input, parsed by
+ * that copy's own schema, so a service the entity lacks is refused here with
+ * the valid pairs before any gate sees it.
+ */
+function entityInputTool(
+  module: ToolModule,
+  copies: readonly EntityCopy[],
+  ctx: ToolContext,
+  fail: (message: string) => Error,
+): ToolDefinition {
+  const first = copies[0] as EntityCopy;
+  if (copies.some((c) => c.tool.description !== first.tool.description)) {
+    throw fail('a perEntity tool needs one description for every entity on the agent mount; put what differs in entityLine');
+  }
+  const { schema, picklists } = mergedInput(copies, fail);
+  const byEntity = new Map(copies.map((c) => [c.entity as string, c]));
+  const pairs = (key: string): string =>
+    copies.flatMap((c) => optionsOf(c, key).map((o) => `${c.entity}:${o}`)).join(', ');
+  const perEntity = copies.map((c) => {
+    const line = module.entityLine?.(c.ctx) ?? (picklists.includes('service') ? `services ${optionsOf(c, 'service').join(', ')}` : '');
+    return `${entityLabel(c.ctx, c.entity)}${line !== '' ? `: ${line}` : ''}`;
+  });
+  const description = `${first.tool.description} entity picks the entity each call is for, and the call reaches only that one. ${perEntity.join('. ')}.`;
+  const now = (): Date => ctx.deps.now();
+
+  const tool: ToolDefinition = {
+    ...first.tool,
+    description,
+    input: schema,
+    async run(context: never) {
+      const { data } = context as { data?: Record<string, unknown> };
+      const { [ENTITY_INPUT]: picked, ...rest } = data ?? {};
+      const copy = typeof picked === 'string' ? byEntity.get(picked) : undefined;
+      if (copy === undefined) {
+        const valid = picklists.includes('service') ? `valid entity:service pairs: ${pairs('service')}` : `valid entities: ${[...byEntity.keys()].join(', ')}`;
+        return refused(`Refused: entity must be one this tool serves here; ${valid}.`, now);
+      }
+      const parsed = v.safeParse(copy.tool.input as v.GenericSchema, rest);
+      if (!parsed.success) {
+        const paths = [...new Set(parsed.issues.map((i) => v.getDotPath(i) ?? '(input)'))];
+        const key = paths.find((p) => picklists.includes(p));
+        return refused(
+          key !== undefined
+            ? `Refused: ${copy.entity} has no such ${key} for ${module.name}; valid entity:${key} pairs: ${pairs(key)}.`
+            : `Refused: the input does not fit ${module.name} for ${copy.entity} at ${paths.join(', ')}.`,
+          now,
+        );
+      }
+      const run = copy.tool.run.bind(copy.tool) as (context: never) => unknown;
+      return run({ ...(context as object), data: parsed.output } as never);
+    },
+  } as ToolDefinition;
+  return markAgentEntities(tool, { entities: copies.map((c) => c.entity), picked: true });
 }
 
 /**
@@ -213,7 +390,8 @@ function checkModuleShape(m: ToolModule, source: string): void {
 
 function checkNames(mount: Mount, picked: readonly Picked[], sourceOf: (index: number) => string): void {
   const seen = new Map<string, number>();
-  for (const { index, ctx, name } of picked) {
+  for (const { index, module } of picked) {
+    const name = module.name;
     if (!TOOL_NAME_PATTERN.test(name)) {
       throw new ToolIndexError(`${sourceOf(index)}: tool name '${name}' is not snake_case`);
     }
@@ -222,12 +400,6 @@ function checkNames(mount: Mount, picked: readonly Picked[], sourceOf: (index: n
     }
     if (RESERVED_TOOL_NAMES.includes(name)) {
       throw new ReservedToolNameError(`${sourceOf(index)}: tool name '${name}' is reserved by Flue`);
-    }
-    // The run log reads the entity from the prefix when the context has none.
-    if (ctx.entity === null && splitAgentToolName(name) !== undefined) {
-      throw new ToolIndexError(
-        `${sourceOf(index)}: tool name '${name}' starts with an entity prefix, which only perEntity tools get on the agent mount`,
-      );
     }
     const other = seen.get(name);
     if (other !== undefined) {

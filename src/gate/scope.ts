@@ -57,7 +57,7 @@ export type ScopeSet = Readonly<{
 
 export type LogsMode = 'search' | 'count' | 'group_by';
 
-export const SCOPED_TOOLS = ['sql_select', 'http_call', 'logs_search', 'cbs_call'] as const;
+export const SCOPED_TOOLS = ['sql_select', 'http_call', 'logs_search'] as const;
 export type ScopedTool = (typeof SCOPED_TOOLS)[number];
 
 export type ScopeCheckInput = {
@@ -371,8 +371,6 @@ function checkedValues(tool: string, params: unknown): unknown[] {
   switch (tool) {
     case 'http_call':
       return [...pathParts(field(params, 'path')), field(params, 'query'), field(params, 'body')];
-    case 'cbs_call':
-      return [...pathParts(field(params, 'path')), field(params, 'body')];
     case 'sql_select':
       return [field(params, 'sql'), field(params, 'params')];
     default:

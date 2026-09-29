@@ -1,6 +1,6 @@
 // Checks knowledge/method/agent.md, the single-shape method note (D109):
 // it is the file the composer reads, passes the knowledge lint, names only
-// the single agent's tools (prefixed data tools as <entity>_<tool>), covers
+// the single agent's tools (data tools by name, called with an entity), covers
 // the order of work, and carries none of the split notes' rules about
 // briefs, delegates or not querying new ids.
 
@@ -49,34 +49,22 @@ const FIELD_NAMES = new Set<string>([
   'taken_at',
   'staged_file',
   'group_by',
-  // The naming pattern itself.
-  '<entity>_<tool>',
 ]);
 
-const PREFIXED = /^(<entity>|[a-z]+)_([a-z_]+)$/;
-
-/** Backticked snake_case spans that are neither a known name, a field, nor a valid prefixed tool. */
+/** Backticked snake_case spans that are neither a known name, an entity tool, nor a field. Entity prefixes are gone (D110). */
 function unknownNames(text: string): string[] {
-  const ok = new Set<string>([...PLAIN_NAMES, ...FIELD_NAMES]);
-  const modules = new Set<string>([...ENTITY_TOOLS, ...SSFB_ONLY_TOOLS]);
+  const ok = new Set<string>([...PLAIN_NAMES, ...FIELD_NAMES, ...ENTITY_TOOLS, ...SSFB_ONLY_TOOLS]);
   const spans = [...text.matchAll(/`([^`\n]+)`/g)].map((m) => m[1] as string);
-  return spans.filter((span) => {
-    if (!/^[a-z<][a-z0-9_<>]*_[a-z0-9_<>]*$/.test(span) || ok.has(span)) return false;
-    const m = PREFIXED.exec(span);
-    if (m === null) return true;
-    const [, entity, module] = m as unknown as [string, string, string];
-    if (!modules.has(module)) return true;
-    if ((SSFB_ONLY_TOOLS as readonly string[]).includes(module)) return entity !== 'ssfb';
-    return entity !== '<entity>' && !(ENTITIES as readonly string[]).includes(entity);
-  });
+  return spans.filter((span) => /^[a-z<][a-z0-9_<>]*_[a-z0-9_<>]*$/.test(span) && !ok.has(span));
 }
 
 describe('helpers catch bad samples', () => {
-  test('an unknown or wrongly prefixed tool is found', () => {
-    expect(unknownNames('Use `rtl_sql_select`, `<entity>_logs_search`, `ssfb_cbs_call` and `read_staged`.')).toEqual([]);
-    expect(unknownNames('Use `rtl_cbs_call`, `xyz_sql_select`, `investigate_rtl` and `code_walker`.')).toEqual([
-      'rtl_cbs_call',
-      'xyz_sql_select',
+  test('an unknown or entity-prefixed tool is found', () => {
+    expect(unknownNames('Use `sql_select`, `logs_search`, `get_account_statement` and `read_staged`.')).toEqual([]);
+    expect(unknownNames('Use `rtl_sql_select`, `<entity>_logs_search`, `cbs_call`, `investigate_rtl` and `code_walker`.')).toEqual([
+      'rtl_sql_select',
+      '<entity>_logs_search',
+      'cbs_call',
       'investigate_rtl',
       'code_walker',
     ]);
@@ -102,10 +90,12 @@ describe('agent.md', () => {
     expect(lines).toBeLessThan(130);
   });
 
-  test('names only the single agent\'s tools, with data tools under their entity prefix', () => {
+  test('names only the single agent\'s tools, data tools by their name with an entity input', () => {
     expect(toolsOutside(agent, 'agent')).toEqual([]);
     expect(unknownNames(agent)).toEqual([]);
-    for (const tool of ['sql_select', 'logs_search', 'note_evidence']) expect(agent).toContain('`<entity>_' + tool + '`');
+    for (const tool of ['sql_select', 'logs_search', 'note_evidence']) expect(agent).toContain('`' + tool + '`');
+    expect(flat).toContain('each called with the `entity` to query');
+    expect(agent).not.toContain('<entity>_');
     for (const name of ['finish_report', 'ask_requester', 'stop_blocked', 'read_staged', 'worker', CODEBASE_NOTE_EVIDENCE]) {
       expect(agent).toContain('`' + name + '`');
     }
@@ -132,7 +122,7 @@ describe('agent.md', () => {
     expect(flat).toMatch(/full result is in `\/data`\. Read slices of it with `read_staged`/);
     expect(flat).toMatch(/Give it the job .* the `\/data` files, ids and window it needs, and the note names to activate/);
     expect(flat).toContain('at most 20 lines');
-    expect(flat).toContain('Call `<entity>_note_evidence` after each batch of reads');
+    expect(flat).toContain('Call `note_evidence` with the entity after each batch of reads');
     expect(flat).toContain('only saved evidence reaches the report');
     expect(flat).toContain('Code goes to `codebase_note_evidence`');
     expect(flat).toContain('`finish_report` ends the run');

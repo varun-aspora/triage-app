@@ -6,6 +6,7 @@ import type { SkillDefinition, SubagentDefinition } from '@flue/runtime';
 import type { ToolDefinition } from '@flue/runtime/tool';
 import { ConfigError } from '../../config/errors.ts';
 import { clearRunDeadline, setRunDeadline } from '../../gate/budget.ts';
+import { agentEntitiesOf } from '../../tools/agent-entity.ts';
 import { allToolModules, FORBIDDEN_INPUT_KEYS, toolsFor } from '../../tools/index.ts';
 import { logActions, releaseActions } from '../../runlog/actions.ts';
 import type { ToolDeps } from '../../tools/types.ts';
@@ -38,7 +39,7 @@ const REPO_TOOLS = ['repo_find', 'repo_grep', 'repo_read', 'repo_tree'];
 const CODEGRAPH_TOOLS = ['code_explore', 'code_impact', 'code_node'];
 const BASE_TOOLS = ['http_call', 'logs_search', 'note_evidence', 'read_staged', 'run_log', 'sql_select', ...REPO_TOOLS];
 const SSFB_ALWAYS = ['detect_silent_reversals', 'get_account_statement'];
-const SSFB_FLAGGED = ['cbs_call', 'decrypt_fields', 'encrypt_lookup_value'];
+const SSFB_FLAGGED = ['decrypt_fields', 'encrypt_lookup_value'];
 const ENTITY_IO = ['sql_select', 'http_call', 'logs_search'];
 
 const sorted = (names: readonly string[]): string[] => [...names].sort();
@@ -204,7 +205,7 @@ describe('tool sets (mock mode, credentials blank)', () => {
         .filter((m) => m.entities !== 'all' && !m.entities.includes('atspl') && !m.entities.includes('rtl'))
         .map((m) => m.name);
       // The crypto tools serve any entity with a field-encryption service (D48); none in atspl or rtl.
-      expect(sorted(ssfbOnly)).toEqual(sorted([...SSFB_ALWAYS, 'cbs_call']));
+      expect(sorted(ssfbOnly)).toEqual(sorted(SSFB_ALWAYS));
       for (const e of ['atspl', 'rtl'] as const) {
         for (const deep of [false, true]) {
           const names = namesOf(investigatorMounts(e, RUN, { env, deep }).tools);
@@ -263,7 +264,7 @@ describe('model-visible schemas', () => {
   // the closure entity.
   const ALLOWED_NESTED = new Set(['note_evidence:timeline[].source.entity']);
 
-  test("no tool on any delegate takes an 'entity' or 'run_id' input", () => {
+  test("no tool on any delegate takes an 'entity' or 'run_id' input, except the worker's entity picker", () => {
     const env = envOf(home({ flags: true }));
     const sets: [string, readonly ToolDefinition[]][] = [
       ...ENTITIES.flatMap((e): [string, readonly ToolDefinition[]][] => [
@@ -277,9 +278,11 @@ describe('model-visible schemas', () => {
     for (const [delegate, tools] of sets) {
       for (const tool of tools) {
         const input = tool.input as { entries?: Record<string, unknown> } | undefined;
-        const top = Object.keys(input?.entries ?? {}).filter((k) => FORBIDDEN_INPUT_KEYS.includes(k));
+        // The agent mount's own entity picker (D110), added by the index; the module's input still has none.
+        const picker = agentEntitiesOf(tool)?.picked === true ? 'entity' : undefined;
+        const top = Object.keys(input?.entries ?? {}).filter((k) => FORBIDDEN_INPUT_KEYS.includes(k) && k !== picker);
         const nested = schemaPaths(tool.input)
-          .filter((p) => FORBIDDEN_INPUT_KEYS.includes(p.split('.').pop() as string))
+          .filter((p) => FORBIDDEN_INPUT_KEYS.includes(p.split('.').pop() as string) && p !== picker)
           .filter((p) => !ALLOWED_NESTED.has(`${tool.name}:${p}`));
         expect({ delegate, tool: tool.name, top, nested }).toEqual({ delegate, tool: tool.name, top: [], nested: [] });
         scanned++;
@@ -426,7 +429,7 @@ describe('delegate body', () => {
 
 describe('worker (single shape, D103)', () => {
   const ROOT_ONLY = ['finish_report', 'ask_requester', 'stop_blocked', 'resolve_identity'];
-  const isEvidenceTool = (name: string): boolean => name.includes('note_') && name.endsWith('_evidence');
+  const isEvidenceTool = (name: string): boolean => name === 'note_evidence' || name === 'codebase_note_evidence';
 
   test('the definition is named worker, frozen, and describes the job and the reply', () => {
     const def = workerFor(RUN, { env: envOf(home()) });
@@ -453,20 +456,22 @@ describe('worker (single shape, D103)', () => {
     const names = namesOf(workerMounts(RUN, { env }).tools);
     const agentMount = namesOf(toolsFor('agent', delegateContext(RUN, null, env, WORKER_NAME)));
     expect(sorted(names)).toEqual(sorted(agentMount.filter((n) => !ROOT_ONLY.includes(n) && !isEvidenceTool(n))));
-    for (const e of ENTITIES) for (const io of ENTITY_IO) expect(names).toContain(`${e}_${io}`);
-    for (const name of [...CODE_TOOLS, 'run_log', 'read_staged']) expect(names).toContain(name);
+    for (const name of [...ENTITY_IO, ...CODE_TOOLS, 'run_log', 'read_staged']) expect(names).toContain(name);
     for (const name of ROOT_ONLY) expect(names).not.toContain(name);
     expect(names.filter(isEvidenceTool)).toEqual([]);
     expect(agentMount.filter(isEvidenceTool).length).toBeGreaterThan(0);
-    for (const name of ENTITY_IO) expect(names).not.toContain(name);
+    expect(names.filter((n) => /^(ssfb|atspl|rtl)_/.test(n))).toEqual([]);
     expect(new Set(names).size).toBe(names.length);
+    // The same one-tool form as the root (D110): sql_select picks among every enabled entity.
+    const sql = workerMounts(RUN, { env }).tools.find((t) => t.name === 'sql_select')!;
+    expect(agentEntitiesOf(sql)).toEqual({ entities: ENTITIES.filter((e) => env.registry.isEnabled(e)), picked: true });
   });
 
-  test('rootOnlyTool covers the ending tools, resolve_identity and every evidence tool name', () => {
-    for (const name of [...ROOT_ONLY, 'note_evidence', 'rtl_note_evidence', 'ssfb_note_evidence', 'codebase_note_evidence', 'note_code_evidence']) {
+  test('rootOnlyTool covers the ending tools, resolve_identity and both evidence tools', () => {
+    for (const name of [...ROOT_ONLY, 'note_evidence', 'codebase_note_evidence']) {
       expect({ name, off: rootOnlyTool(name) }).toEqual({ name, off: true });
     }
-    for (const name of ['rtl_sql_select', 'repo_read', 'code_explore', 'run_log', 'read_staged']) {
+    for (const name of ['sql_select', 'repo_read', 'code_explore', 'run_log', 'read_staged']) {
       expect({ name, off: rootOnlyTool(name) }).toEqual({ name, off: false });
     }
   });
@@ -475,8 +480,10 @@ describe('worker (single shape, D103)', () => {
     const env = envOf(home({ entities: ['rtl'] }));
     const mounts = workerMounts(RUN, { env });
     const names = namesOf(mounts.tools);
-    expect(names).toContain('rtl_sql_select');
-    expect(names.some((n) => n.startsWith('ssfb_') || n.startsWith('atspl_'))).toBe(false);
+    expect(names).toContain('sql_select');
+    const sql = mounts.tools.find((t) => t.name === 'sql_select')!;
+    expect(agentEntitiesOf(sql)?.entities).toEqual(['rtl']);
+    expect(names).not.toContain('get_account_statement');
     expect(mounts.skills.some((s) => s.name.startsWith('ssfb-') || s.name.startsWith('atspl-'))).toBe(false);
     expect(mounts.instructions).toContain('# RTL logs');
     expect(mounts.instructions).not.toContain('# SSFB logs');
@@ -487,7 +494,7 @@ describe('worker (single shape, D103)', () => {
     const hooks = recorder();
     const text = render(workerFor(RUN, { env, hooks }));
     expect(hooks.skills.map((s) => s.name)).toEqual(rootSkills(ENTITIES, knowledge, 'single').map((s) => s.name));
-    expect(hooks.tools.length).toBeGreaterThan(15);
+    expect(hooks.tools.length).toBeGreaterThan(10);
     for (const heading of ['# Logs', '# SSFB logs', '# ATSPL logs', '# RTL logs']) expect(text).toContain(heading);
     expect(text).not.toContain('# Investigator');
     expect(text).not.toContain('## This delegate');
@@ -503,7 +510,9 @@ describe('worker (single shape, D103)', () => {
     expect(footer).toContain(`Reply with the answer in at most ${WORKER_REPLY_LINES} lines, then the /data file paths you wrote and the tool calls you made`);
     expect(footer).toContain('Tool calls allowed in this task: 7.');
     expect(footer).toContain('- Tools mounted: ');
-    expect(footer).toContain('rtl_sql_select');
+    expect(footer).toContain('sql_select with entity "ssfb"');
+    expect(footer).toContain('sql_select');
+    expect(footer).not.toMatch(/\b(ssfb|atspl|rtl)_sql_select\b/);
     expect(footer).toContain('## Already done in this run');
     expect(footer).not.toContain('- Finish by');
   });
@@ -526,7 +535,7 @@ describe('worker (single shape, D103)', () => {
     let ran = 0;
     const fake = (name: string) => ({ name, run: async () => (ran++, ok({ name })) }) as unknown as ToolDefinition;
     const call = (t: ToolDefinition): Promise<unknown> => (t.run as (c: unknown) => Promise<unknown>)({ data: {}, toolCallId: 't' });
-    const [a, b] = capToolCalls([fake('rtl_sql_select'), fake('repo_read')], 2, ctx);
+    const [a, b] = capToolCalls([fake('sql_select'), fake('repo_read')], 2, ctx);
     expect(((await call(a!)) as { output: { status: string } }).output.status).toBe('ok');
     expect(((await call(b!)) as { output: { status: string } }).output.status).toBe('ok');
     const third = (await call(a!)) as { output: { status: string; message: string; taken_at: string } };

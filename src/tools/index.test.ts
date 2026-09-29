@@ -5,11 +5,10 @@ import { FakeDepsAccessError, makeToolContext } from '../../test/support/fake-to
 import { CODE_TOOLS } from '../gate/budget.ts';
 import type { Entity } from '../types/core.ts';
 import { ok } from '../types/tool-result.ts';
+import { agentEntitiesOf, entityOfCall, markAgentEntities } from './agent-entity.ts';
 import {
-  agentToolName,
   allToolModules,
   allToolNames,
-  bareToolName,
   buildToolIndex,
   conformanceCases,
   conformanceProblems,
@@ -17,13 +16,12 @@ import {
   generatedToolSources,
   mountPlan,
   ReservedToolNameError,
-  splitAgentToolName,
   TOOL_NAME_PATTERN,
   ToolIndexError,
   ToolNameMismatchError,
   toolsFor,
 } from './index.ts';
-import type { Mount, ToolContext, ToolModule } from './types.ts';
+import type { Mount, ToolContext, ToolDeps, ToolModule } from './types.ts';
 
 function tool(name: string, input: v.ObjectSchema<v.ObjectEntries, undefined> = v.object({ q: v.string() })): ToolDefinition {
   return defineTool({ name, description: `fake ${name}`, input, run: async () => ok({}) });
@@ -37,6 +35,7 @@ function fake(name: string, opts: FakeOptions = {}): ToolModule {
     mounts: opts.mounts ?? ['investigator'],
     entities: opts.entities ?? 'all',
     ...(opts.perEntity !== undefined ? { perEntity: opts.perEntity } : {}),
+    ...(opts.entityLine !== undefined ? { entityLine: opts.entityLine } : {}),
     enabled: opts.enabled ?? (() => ({ on: true })),
     create: opts.create ?? (() => tool(opts.created ?? name)),
   };
@@ -206,8 +205,9 @@ describe('toolsFor', () => {
   });
 });
 
-describe('the agent mount (D109)', () => {
-  const root = (entities = 'ssfb,atspl,rtl'): ToolContext => makeToolContext({ env: { TRIAGE_ENTITIES: entities } });
+describe('the agent mount (D109, D110)', () => {
+  const root = (entities = 'ssfb,atspl,rtl', deps?: ToolDeps): ToolContext =>
+    makeToolContext({ env: { TRIAGE_ENTITIES: entities }, ...(deps !== undefined ? { deps } : {}) });
   const ctx = (entity: Entity): ToolContext => makeToolContext({ entity });
   const agentModules = (): ToolModule[] => [
     fake('sql_select', { mounts: ['investigator', 'agent'], perEntity: true }),
@@ -217,37 +217,57 @@ describe('the agent mount (D109)', () => {
     fake('finish_report', { mounts: ['triage', 'agent'] }),
     fake('investigator_only', { mounts: ['investigator'] }),
   ];
+  const entries = (t: ToolDefinition): Record<string, v.GenericSchema> =>
+    (t.input as unknown as { entries: Record<string, v.GenericSchema> }).entries;
+  const optionsOf = (t: ToolDefinition, key: string): unknown => (entries(t)[key] as unknown as { options?: unknown }).options;
+  const clockDeps = { now: () => new Date('2026-09-29T00:00:00.000Z') } as unknown as ToolDeps;
 
-  test('one prefixed set per enabled entity, shared tools once and unprefixed', () => {
+  // A module whose copies differ by their service picklist, like sql_select. run() answers with the copy's entity and data.
+  const SERVICES: Record<Entity, string[]> = { ssfb: ['harbor', 'rhythm'], atspl: ['package'], rtl: ['workflow', 'banking'] };
+  const serviceModule = (opts: FakeOptions = {}): ToolModule =>
+    fake('sql_select', {
+      mounts: ['agent'],
+      perEntity: true,
+      create: (c) =>
+        defineTool({
+          name: 'sql_select',
+          description: 'fake sql_select',
+          input: v.object({ service: v.pipe(v.picklist(SERVICES[c.entity as Entity]), v.description('The service.')), q: v.string() }),
+          run: async ({ data }) => ok({ entity: c.entity, data }, clockDeps.now),
+        }),
+      ...opts,
+    });
+  const call = (t: ToolDefinition, data: Record<string, unknown>): Promise<{ output: { status: string; message?: string; data?: unknown } }> =>
+    (t.run as (c: unknown) => Promise<{ output: { status: string; message?: string; data?: unknown } }>)({ data, toolCallId: 'call_1' });
+
+  test('one tool per perEntity module under its bare name, shared tools once', () => {
     const index = buildToolIndex(agentModules());
-    expect(names(index.toolsFor('agent', root()))).toEqual([
-      'ssfb_sql_select',
-      'atspl_sql_select',
-      'rtl_sql_select',
-      'ssfb_logs_search',
-      'atspl_logs_search',
-      'rtl_logs_search',
-      'ssfb_get_account_statement',
-      'repo_grep',
-      'finish_report',
-    ]);
+    expect(names(index.toolsFor('agent', root()))).toEqual(['sql_select', 'logs_search', 'get_account_statement', 'repo_grep', 'finish_report']);
   });
 
-  test('only enabled entities get a set, and an ssfb-only module exists only as ssfb_*', () => {
+  test('the entity input lists the enabled entities, first; an ssfb-only module is absent without ssfb', () => {
     const index = buildToolIndex(agentModules());
-    expect(names(index.toolsFor('agent', root('atspl,rtl')))).toEqual([
-      'atspl_sql_select',
-      'rtl_sql_select',
-      'atspl_logs_search',
-      'rtl_logs_search',
-      'repo_grep',
-      'finish_report',
-    ]);
-    const all = names(index.toolsFor('agent', root()));
-    expect(all.filter((n) => n.endsWith('get_account_statement'))).toEqual(['ssfb_get_account_statement']);
+    const tools = index.toolsFor('agent', root('atspl,rtl'));
+    expect(names(tools)).toEqual(['sql_select', 'logs_search', 'repo_grep', 'finish_report']);
+    const sql = tools[0] as ToolDefinition;
+    expect(Object.keys(entries(sql))).toEqual(['entity', 'q']);
+    expect(optionsOf(sql, 'entity')).toEqual(['atspl', 'rtl']);
+    expect(agentEntitiesOf(sql)).toEqual({ entities: ['atspl', 'rtl'], picked: true });
+    expect(agentEntitiesOf(tools[2] as ToolDefinition)).toBeUndefined();
   });
 
-  test('each prefixed tool is built with its entity in the context; shared tools with none', () => {
+  test('a module scoped to one entity has no entity input, keeps its name and names its entity first', () => {
+    const [statement] = buildToolIndex([fake('get_account_statement', { mounts: ['agent'], entities: ['ssfb'], perEntity: true })]).toolsFor(
+      'agent',
+      root(),
+    );
+    expect(statement!.name).toBe('get_account_statement');
+    expect(Object.keys(entries(statement!))).toEqual(['q']);
+    expect(statement!.description).toBe('SSFB (also called shivalik) only. fake get_account_statement');
+    expect(agentEntitiesOf(statement!)).toEqual({ entities: ['ssfb'], picked: false });
+  });
+
+  test('each copy is built with its entity in the context; shared tools with none', () => {
     const seen: [string, Entity | null, Mount][] = [];
     const spy = (name: string, opts: FakeOptions): ToolModule =>
       fake(name, {
@@ -266,45 +286,93 @@ describe('the agent mount (D109)', () => {
     ]);
   });
 
-  test('enabled() is asked per entity, and mountPlan has one row per entity and module', () => {
-    const index = buildToolIndex([
-      fake('decrypt_fields', {
-        mounts: ['agent'],
-        perEntity: true,
-        enabled: (c) => (c.entity === 'ssfb' ? { on: true } : { on: false, reason: `no key for ${String(c.entity)}` }),
-      }),
-      fake('stop_blocked', { mounts: ['agent'] }),
-    ]);
-    expect(names(index.toolsFor('agent', root()))).toEqual(['ssfb_decrypt_fields', 'stop_blocked']);
+  test('enabled() is asked per entity; the entity input lists only the enabled copies; mountPlan has one row', () => {
+    const decrypt = fake('decrypt_fields', {
+      mounts: ['agent'],
+      perEntity: true,
+      enabled: (c) => (c.entity === 'ssfb' ? { on: true } : { on: false, reason: `no key for ${String(c.entity)}` }),
+    });
+    const index = buildToolIndex([decrypt, fake('stop_blocked', { mounts: ['agent'] })]);
+    const tools = index.toolsFor('agent', root());
+    expect(names(tools)).toEqual(['decrypt_fields', 'stop_blocked']);
+    expect(optionsOf(tools[0] as ToolDefinition, 'entity')).toEqual(['ssfb']);
     expect(index.mountPlan('agent', root())).toEqual([
-      { name: 'ssfb_decrypt_fields', on: true },
-      { name: 'atspl_decrypt_fields', on: false, reason: 'no key for atspl' },
-      { name: 'rtl_decrypt_fields', on: false, reason: 'no key for rtl' },
+      { name: 'decrypt_fields', on: true },
       { name: 'stop_blocked', on: true },
     ]);
+    expect(index.mountPlan('agent', root('atspl,rtl'))).toEqual([
+      { name: 'decrypt_fields', on: false, reason: 'atspl: no key for atspl; rtl: no key for rtl' },
+      { name: 'stop_blocked', on: true },
+    ]);
+    expect(index.toolsFor('agent', root('atspl,rtl')).map((t) => t.name)).toEqual(['stop_blocked']);
   });
 
-  test('the description of a prefixed tool starts with its entity and services', () => {
-    const ctx = root();
-    const [ssfb, rtl] = buildToolIndex([fake('sql_select', { mounts: ['agent'], perEntity: true, entities: ['ssfb', 'rtl'] })]).toolsFor(
-      'agent',
-      ctx,
+  test('service picklists merge into one, and the description lists each entity with its services', () => {
+    const [sql] = buildToolIndex([serviceModule()]).toolsFor('agent', root());
+    expect(optionsOf(sql!, 'service')).toEqual(['harbor', 'rhythm', 'package', 'workflow', 'banking']);
+    expect(sql!.description).toBe(
+      'fake sql_select entity picks the entity each call is for, and the call reaches only that one. ' +
+        'ssfb (also called shivalik): services harbor, rhythm. atspl: services package. rtl: services workflow, banking.',
     );
-    expect(ssfb!.description).toStartWith('SSFB entity (also called shivalik; services: ');
-    expect(ssfb!.description).toEndWith('. fake sql_select');
-    expect(rtl!.description).toStartWith(`RTL entity (services: ${ctx.registry.services('rtl').join(', ')}). fake sql_select`);
+    // One description for the merged key when the copies share it.
+    const service = entries(sql!).service as unknown as { pipe: { type: string; description?: string }[] };
+    expect(service.pipe.find((i) => i.type === 'description')?.description).toBe('The service.');
   });
 
-  test('a prefixed tool keeps the created tool apart from its name and description', () => {
-    const created = tool('sql_select');
-    const [prefixed] = buildToolIndex([fake('sql_select', { mounts: ['agent'], perEntity: true, create: () => created })]).toolsFor(
-      'agent',
-      root('rtl'),
+  test("entityLine replaces the service list in the module's description", () => {
+    const [sql] = buildToolIndex([serviceModule({ entityLine: (c) => `index ${String(c.entity)}-logs` })]).toolsFor('agent', root('rtl'));
+    expect(sql!.description).toEndWith('rtl: index rtl-logs.');
+  });
+
+  test('a call runs the chosen copy on the rest of its input', async () => {
+    const [sql] = buildToolIndex([serviceModule()]).toolsFor('agent', root(undefined, clockDeps));
+    const out = await call(sql!, { entity: 'rtl', service: 'banking', q: 'x' });
+    expect(out.output).toMatchObject({ status: 'ok', data: { entity: 'rtl', data: { service: 'banking', q: 'x' } } });
+  });
+
+  test('a service the entity does not have is refused with the valid pairs, before the copy runs', async () => {
+    const [sql] = buildToolIndex([serviceModule()]).toolsFor('agent', root('ssfb,rtl', clockDeps));
+    const out = await call(sql!, { entity: 'rtl', service: 'harbor', q: 'x' });
+    expect(out.output.status).toBe('refused');
+    expect(out.output.message).toBe(
+      'Refused: rtl has no such service for sql_select; valid entity:service pairs: ssfb:harbor, ssfb:rhythm, rtl:workflow, rtl:banking.',
     );
-    expect(prefixed!.name).toBe('rtl_sql_select');
-    expect(prefixed!.input).toBe(created.input);
-    expect(prefixed!.run).toBe(created.run);
-    expect(Object.isFrozen(prefixed)).toBe(true);
+  });
+
+  test('an entity the tool does not serve is refused with the valid pairs, or the entities where there is no service', async () => {
+    const [sql] = buildToolIndex([serviceModule()]).toolsFor('agent', root('ssfb,rtl', clockDeps));
+    const out = await call(sql!, { entity: 'atspl', service: 'package', q: 'x' });
+    expect(out.output.status).toBe('refused');
+    expect(out.output.message).toBe(
+      'Refused: entity must be one this tool serves here; valid entity:service pairs: ssfb:harbor, ssfb:rhythm, rtl:workflow, rtl:banking.',
+    );
+    const [logs] = buildToolIndex([fake('logs_search', { mounts: ['agent'], perEntity: true })]).toolsFor('agent', root('ssfb,rtl', clockDeps));
+    const none = await call(logs!, { q: 'x' });
+    expect(none.output.message).toBe('Refused: entity must be one this tool serves here; valid entities: ssfb, rtl.');
+  });
+
+  test('copies that differ in description or in a non-picklist input are refused, naming the file', () => {
+    const differs = (create: ToolModule['create']) =>
+      buildToolIndex([fake('sql_select', { mounts: ['agent'], perEntity: true, create })], { sources: ['src/tools/sql-select.tool.ts'] });
+    const byDescription = differs((c) => defineTool({ name: 'sql_select', description: `for ${String(c.entity)}`, input: v.object({ q: v.string() }), run: async () => ok({}) }));
+    expect(() => byDescription.toolsFor('agent', root())).toThrow(/sql-select\.tool\.ts: .*one description for every entity/);
+    const byInput = differs((c) =>
+      defineTool({ name: 'sql_select', description: 'x', input: v.object({ q: v.pipe(v.string(), v.maxLength(c.entity === 'rtl' ? 5 : 9)) }), run: async () => ok({}) }),
+    );
+    expect(() => byInput.toolsFor('agent', root())).toThrow(ToolIndexError);
+    expect(() => byInput.toolsFor('agent', root())).toThrow(/input 'q' differs between entities and is not a picklist/);
+  });
+
+  test('the merged input stays a plain object, strict when the copies are', () => {
+    const strict = fake('http_call', {
+      mounts: ['agent'],
+      perEntity: true,
+      create: () => defineTool({ name: 'http_call', description: 'x', input: v.strictObject({ path: v.string() }), run: async () => ok({}) }),
+    });
+    const [http] = buildToolIndex([strict]).toolsFor('agent', root());
+    expect((http!.input as unknown as { type: string }).type).toBe('strict_object');
+    expect(v.safeParse(http!.input as v.GenericSchema, { entity: 'rtl', path: '/x', extra: 1 }).success).toBe(false);
+    expect(v.safeParse(http!.input as v.GenericSchema, { path: '/x' }).success).toBe(false);
   });
 
   test('the agent mount refuses a context with an entity', () => {
@@ -312,63 +380,54 @@ describe('the agent mount (D109)', () => {
     expect(() => index.toolsFor('agent', makeToolContext({ entity: 'rtl' }))).toThrow(/without an entity/);
   });
 
-  test('the created name is still checked against the bare module name', () => {
+  test('the created name is still checked against the module name', () => {
     const index = buildToolIndex([fake('sql_select', { mounts: ['agent'], perEntity: true, created: 'rtl_sql_select' })], {
       sources: ['src/tools/sql-select.tool.ts'],
     });
     expect(() => index.toolsFor('agent', root())).toThrow(ToolNameMismatchError);
   });
 
-  test('two modules under one name clash per entity, even when one is disabled', () => {
+  test('two modules under one name clash, even when one is disabled or shared', () => {
     const index = buildToolIndex([
       fake('sql_select', { mounts: ['agent'], perEntity: true }),
       fake('sql_select', { mounts: ['agent'], perEntity: true, enabled: () => ({ on: false, reason: 'off' }) }),
     ]);
     expect(() => index.toolsFor('agent', root())).toThrow(DuplicateToolNameError);
-    expect(() => index.mountPlan('agent', root())).toThrow(/duplicate tool name 'ssfb_sql_select' on mount agent/);
+    expect(() => index.mountPlan('agent', root())).toThrow(/duplicate tool name 'sql_select' on mount agent/);
+    const shared = buildToolIndex([fake('sql_select', { mounts: ['agent'], perEntity: true }), fake('sql_select', { mounts: ['agent'] })]);
+    expect(() => shared.toolsFor('agent', root())).toThrow(DuplicateToolNameError);
   });
 
-  test('a shared name with an entity prefix is refused on every entity-free mount', () => {
-    for (const mount of ['agent', 'triage', 'code_walker'] as const) {
-      const index = buildToolIndex([fake('rtl_sql_select', { mounts: [mount] })], { sources: ['src/tools/rtl-sql-select.tool.ts'] });
-      expect(() => index.toolsFor(mount, root())).toThrow(/rtl-sql-select\.tool\.ts: tool name 'rtl_sql_select' starts with an entity prefix/);
-    }
-    // An investigator's own tools are not read by prefix, so the name is allowed there.
-    expect(names(buildToolIndex([fake('rtl_only')]).toolsFor('investigator', ctx('rtl')))).toEqual(['rtl_only']);
-  });
-
-  test('names longer than 64 characters are refused, prefix included', () => {
-    const long = `a${'_b'.repeat(29)}x`; // 60 characters: fits bare, not with a prefix
-    expect(long).toHaveLength(60);
-    const index = buildToolIndex([fake(long, { mounts: ['investigator', 'agent'], perEntity: true })], {
-      sources: ['src/tools/long.tool.ts'],
-    });
-    expect(names(index.toolsFor('investigator', ctx('atspl')))).toEqual([long]);
-    expect(() => index.toolsFor('agent', root())).toThrow(/long\.tool\.ts: tool name 'ssfb_a_b.*' is longer than 64 characters/);
+  test('names longer than 64 characters are refused', () => {
     expect(() => buildToolIndex([fake(`a${'b'.repeat(64)}`)]).toolsFor('investigator', ctx('rtl'))).toThrow(/longer than 64/);
+    expect(() => buildToolIndex([fake(`a${'b'.repeat(64)}`, { mounts: ['agent'], perEntity: true })]).toolsFor('agent', root())).toThrow(
+      /longer than 64/,
+    );
   });
 
   test('other mounts ignore perEntity', () => {
     const index = buildToolIndex([fake('sql_select', { mounts: ['investigator', 'agent'], perEntity: true })]);
-    expect(names(index.toolsFor('investigator', ctx('rtl')))).toEqual(['sql_select']);
+    const [sql] = index.toolsFor('investigator', ctx('rtl'));
+    expect(sql!.name).toBe('sql_select');
+    expect(Object.keys(entries(sql!))).toEqual(['q']);
+    expect(agentEntitiesOf(sql!)).toBeUndefined();
   });
 });
 
-describe('agent tool names', () => {
-  test('agentToolName prefixes, and splitAgentToolName and bareToolName undo it', () => {
-    expect(agentToolName('rtl', 'sql_select')).toBe('rtl_sql_select');
-    expect(splitAgentToolName('rtl_sql_select')).toEqual({ entity: 'rtl', name: 'sql_select' });
-    expect(splitAgentToolName('ssfb_note_evidence')).toEqual({ entity: 'ssfb', name: 'note_evidence' });
-    expect(bareToolName('atspl_logs_search')).toBe('logs_search');
+describe('the entity of an agent-mount call', () => {
+  test('entityOfCall reads the fixed entity or a served entity input', () => {
+    expect(entityOfCall({ entities: ['ssfb'], picked: false }, { account_id: 'x' })).toBe('ssfb');
+    expect(entityOfCall({ entities: ['ssfb', 'rtl'], picked: true }, { entity: 'rtl' })).toBe('rtl');
+    expect(entityOfCall({ entities: ['ssfb', 'rtl'], picked: true }, { entity: 'atspl' })).toBeUndefined();
+    expect(entityOfCall({ entities: ['ssfb', 'rtl'], picked: true }, undefined)).toBeUndefined();
+    expect(entityOfCall(undefined, { entity: 'rtl' })).toBeUndefined();
   });
 
-  test.each(['sql_select', 'repo_grep', 'rtl', 'rtl_', '_rtl_x', 'shivalik_sql_select', 'RTL_sql_select', 'rtlx_sql_select'])(
-    '%p has no entity prefix',
-    (name) => {
-      expect(splitAgentToolName(name)).toBeUndefined();
-      expect(bareToolName(name)).toBe(name);
-    },
-  );
+  test('the mark survives a wrapper that spreads the tool', () => {
+    const marked = markAgentEntities(tool('sql_select'), { entities: ['rtl'], picked: true });
+    expect(agentEntitiesOf({ ...marked, run: async () => ok({}) } as ToolDefinition)).toEqual({ entities: ['rtl'], picked: true });
+    expect(agentEntitiesOf(tool('sql_select'))).toBeUndefined();
+  });
 });
 
 describe('conformanceProblems', () => {
@@ -453,15 +512,16 @@ describe('generated tool list', () => {
     mountPlan('agent', makeToolContext());
   });
 
-  test('every agent-mount name is a shared module name or <entity>_<perEntity module name>', () => {
+  test('every agent-mount name is a module name, and only perEntity tools carry an entity mark', () => {
     const byName = new Map(allToolModules.map((m) => [m.name, m]));
-    const built = toolsFor('agent', makeToolContext()).map((t) => t.name);
+    const built = toolsFor('agent', makeToolContext());
     expect(built.length).toBeGreaterThan(0);
-    for (const name of built) {
-      expect(name).toMatch(TOOL_NAME_PATTERN);
-      const split = splitAgentToolName(name);
-      const module = byName.get(split?.name ?? name);
-      expect({ name, perEntity: module?.perEntity === true }).toEqual({ name, perEntity: split !== undefined });
+    for (const t of built) {
+      expect(t.name).toMatch(TOOL_NAME_PATTERN);
+      const module = byName.get(t.name);
+      expect({ name: t.name, perEntity: module?.perEntity === true }).toEqual({ name: t.name, perEntity: agentEntitiesOf(t) !== undefined });
+      const picked = agentEntitiesOf(t)?.picked === true;
+      expect({ name: t.name, entityInput: Object.hasOwn((t.input as unknown as { entries: object }).entries, 'entity') }).toEqual({ name: t.name, entityInput: picked });
     }
   });
 });

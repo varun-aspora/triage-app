@@ -30,12 +30,12 @@ canopy is not in the registry and is not investigated (unverified: it shows up i
 ## Data access
 
 - Each service's database and admin API are reachable when they are
-  configured for this deployment. When one is not, the investigator's tool
-  answers "not configured for atspl:<service>", and that goes into the
-  findings as a gap rather than a guess.
+  configured for this deployment. When one is not, the tool answers "not
+  configured for atspl:<service>", and that goes into the findings as a gap
+  rather than a guess.
 - Quickwit covers ATSPL. The log service names differ from the registry keys
   (pulse logs as `pulse-backend`; the package workers log under their own
-  names), and the log tool maps the registry key for the investigator.
+  names), and the log tool maps the registry key.
 - The admin APIs are read with GET only. Retries and re-triggers are
   recommended in the report, never called.
 

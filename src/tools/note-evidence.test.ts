@@ -19,10 +19,11 @@ import {
   type RunRecord,
   type RunStore,
 } from '../runstore/types.ts';
-import type { Entity } from '../types/core.ts';
+import { ENTITIES, type Entity } from '../types/core.ts';
 import type { CodeFindings, EntityFindings } from '../types/findings.ts';
 import { ToolEnvelopeSchema, type ToolEnvelope } from '../types/tool-result.ts';
 import { makeToolContext } from '../../test/support/fake-tool-context.ts';
+import { markAgentEntities } from './agent-entity.ts';
 import { conformanceCases, conformanceProblems, FORBIDDEN_INPUT_KEYS, toolsFor } from './index.ts';
 import { toolModule as codebaseModule } from './codebase-note-evidence.tool.ts';
 import {
@@ -157,16 +158,22 @@ function toolOn(mount: Mount, entity: Entity | null, h: Harness): ToolDefinition
   return toolModule.create(ctx, mount);
 }
 
-/** Adds one line to the run's action log, the way logActions records a mounted tool's call. */
-async function logged(h: Harness, tool: string, status: 'ok' | 'refused'): Promise<void> {
-  const fakeTool = {
+/**
+ * Adds one line to the run's action log, the way logActions records a mounted
+ * tool's call. With an entity, the tool is an agent-mount entity tool called
+ * with that entity (D110).
+ */
+async function logged(h: Harness, tool: string, status: 'ok' | 'refused', entity?: Entity): Promise<void> {
+  const plain = {
     name: tool,
     description: 'test tool',
     input: v.object({}),
     run: async () => ({ output: status === 'ok' ? { status, data: { row_count: 1 } } : { status, message: 'not allowed' } }),
   } as unknown as ToolDefinition;
+  const fakeTool = entity === undefined ? plain : markAgentEntities(plain, { entities: ENTITIES, picked: true });
   const [wrapped] = logActions([fakeTool], makeToolContext({ runId: h.runId, deps: h.deps }));
-  await (wrapped!.run as (c: unknown) => Promise<unknown>)({ data: {}, toolCallId: 'call_0', log: console });
+  const data = entity === undefined ? {} : { entity };
+  await (wrapped!.run as (c: unknown) => Promise<unknown>)({ data, toolCallId: 'call_0', log: console });
 }
 
 /** The single-shape agent's tools for a run (D109), by name. */
@@ -492,23 +499,27 @@ describe('note_evidence: audit', () => {
   });
 });
 
-describe('note_evidence: agent mount (D109)', () => {
-  test('the agent gets one <entity>_note_evidence per enabled entity plus codebase_note_evidence', () => {
-    const names = toolsFor('agent', makeToolContext()).map((t) => t.name);
-    for (const e of ['ssfb', 'atspl', 'rtl']) expect(names).toContain(`${e}_note_evidence`);
+describe('note_evidence: agent mount (D109, D110)', () => {
+  test('the agent gets one note_evidence with an entity input plus codebase_note_evidence', () => {
+    const tools = toolsFor('agent', makeToolContext());
+    const names = tools.map((t) => t.name);
+    expect(names.filter((n) => n === 'note_evidence')).toHaveLength(1);
+    const note = tools.find((t) => t.name === 'note_evidence')!;
+    const entity = (note.input as unknown as { entries: Record<string, { options?: unknown }> }).entries.entity;
+    expect(entity?.options).toEqual(['ssfb', 'atspl', 'rtl']);
     expect(names).toContain(CODEBASE_NOTE_EVIDENCE);
-    expect(names).not.toContain('note_evidence');
+    for (const e of ['ssfb', 'atspl', 'rtl']) expect(names).not.toContain(`${e}_note_evidence`);
     expect(codebaseModule.mounts).toEqual(['agent']);
     expect(codebaseModule.perEntity).toBeUndefined();
   });
 
-  test('rtl_note_evidence records under rtl once an rtl_* call returned data', async () => {
+  test('note_evidence with entity rtl records under rtl once an rtl data call returned data', async () => {
     const h = harness();
-    await logged(h, 'rtl_sql_select', 'ok');
-    const tool = agentTools(h).get('rtl_note_evidence')!;
-    expect(tool.description).toContain('Only rtl findings go here');
+    await logged(h, 'sql_select', 'ok', 'rtl');
+    const tool = agentTools(h).get('note_evidence')!;
+    expect(tool.description).toContain("Only that entity's findings go in a call");
 
-    const out = await call(tool, findings());
+    const out = await call(tool, { entity: 'rtl', ...findings() });
 
     expect(out.output).toMatchObject({ status: 'ok', data: { evidence_id: 'rtl@v1', version: 1 } });
     expect((h.store as FakeStore).puts.map((p) => p.key)).toEqual(['rtl']);
@@ -519,14 +530,14 @@ describe('note_evidence: agent mount (D109)', () => {
 
   test('an entity that was never queried is refused with the reason, and nothing is written', async () => {
     const h = harness();
-    await logged(h, 'ssfb_sql_select', 'ok');
+    await logged(h, 'sql_select', 'ok', 'ssfb');
     // A refused rtl call read nothing.
-    await logged(h, 'rtl_logs_search', 'refused');
+    await logged(h, 'logs_search', 'refused', 'rtl');
 
-    const out = await call(agentTools(h).get('rtl_note_evidence')!, findings());
+    const out = await call(agentTools(h).get('note_evidence')!, { entity: 'rtl', ...findings() });
 
     expect(out.output.status).toBe('refused');
-    expect(out.output.message).toContain('no rtl_* data call has returned a result');
+    expect(out.output.message).toContain('no rtl data call has returned a result');
     expect((h.store as FakeStore).puts).toHaveLength(0);
     expect(h.escalation.snapshot().findings).toHaveLength(0);
     expect(h.audit.lines.at(-1)).toMatchObject({ decision: 'deny', entity: 'rtl', reason: 'rtl not queried in this run' });
@@ -534,7 +545,7 @@ describe('note_evidence: agent mount (D109)', () => {
 
   test('after the action log is released, a key already stored takes a new version', async () => {
     const h = harness();
-    await logged(h, 'atspl_http_call', 'ok');
+    await logged(h, 'http_call', 'ok', 'atspl');
     const first = toolModule.create(makeToolContext({ entity: 'atspl', runId: h.runId, deps: h.deps }), 'agent');
     expect((await call(first, findings())).output.status).toBe('ok');
     releaseActions(h.runId);
@@ -581,21 +592,21 @@ describe('note_evidence: agent mount (D109)', () => {
 
   test('one agent writing two self-blaming entity records still fires conflicting_hypotheses', async () => {
     const h = harness();
-    await logged(h, 'rtl_sql_select', 'ok');
-    await logged(h, 'ssfb_logs_search', 'ok');
-    const tools = agentTools(h);
-    await call(tools.get('rtl_note_evidence')!, findings());
-    await call(tools.get('ssfb_note_evidence')!, findings());
+    await logged(h, 'sql_select', 'ok', 'rtl');
+    await logged(h, 'logs_search', 'ok', 'ssfb');
+    const note = agentTools(h).get('note_evidence')!;
+    await call(note, { entity: 'rtl', ...findings() });
+    await call(note, { entity: 'ssfb', ...findings() });
     expect(h.escalation.snapshot().reasons).toContain('conflicting_hypotheses');
   });
 
   test('a record that points at the other entity does not conflict with it', async () => {
     const h = harness();
-    await logged(h, 'rtl_sql_select', 'ok');
-    await logged(h, 'ssfb_logs_search', 'ok');
-    const tools = agentTools(h);
-    await call(tools.get('rtl_note_evidence')!, findings({ suggested_next_entity: 'ssfb' }));
-    await call(tools.get('ssfb_note_evidence')!, findings());
+    await logged(h, 'sql_select', 'ok', 'rtl');
+    await logged(h, 'logs_search', 'ok', 'ssfb');
+    const note = agentTools(h).get('note_evidence')!;
+    await call(note, { entity: 'rtl', ...findings({ suggested_next_entity: 'ssfb' }) });
+    await call(note, { entity: 'ssfb', ...findings() });
     const snap = h.escalation.snapshot();
     expect(snap.findings.map((f) => f.entity)).toEqual(['rtl', 'ssfb']);
     expect(snap.reasons).not.toContain('conflicting_hypotheses');
@@ -603,23 +614,33 @@ describe('note_evidence: agent mount (D109)', () => {
 });
 
 describe('note_evidence: queried entities', () => {
-  const action = (tool: string, outcome: string): Action => ({ at: AT, agent: 'triage', tool, entity: null, args: '', outcome });
+  const action = (tool: string, outcome: string, entity: Entity | null = null, entityTool = true): Action => ({
+    at: AT,
+    agent: 'triage',
+    tool,
+    entity,
+    ...(entityTool ? { entityTool: true as const } : {}),
+    args: '',
+    outcome,
+  });
 
-  test('the entity comes from the <entity>_ prefix; shared tools and evidence tools have none', () => {
-    expect(queriedEntity({ tool: 'rtl_sql_select' })).toBe('rtl');
-    expect(queriedEntity({ tool: 'ssfb_detect_silent_reversals' })).toBe('ssfb');
-    expect(queriedEntity({ tool: 'rtl_note_evidence' })).toBeNull();
-    expect(queriedEntity({ tool: CODEBASE_NOTE_EVIDENCE })).toBeNull();
-    expect(queriedEntity({ tool: 'sql_select' })).toBeNull();
-    expect(queriedEntity({ tool: 'repo_grep' })).toBeNull();
+  test('the entity is the one an agent-mount entity tool ran for; shared tools, note_evidence and split calls have none', () => {
+    expect(queriedEntity(action('sql_select', 'ok', 'rtl'))).toBe('rtl');
+    expect(queriedEntity(action('detect_silent_reversals', 'ok', 'ssfb'))).toBe('ssfb');
+    expect(queriedEntity(action('note_evidence', 'ok', 'rtl'))).toBeNull();
+    expect(queriedEntity(action('sql_select', 'refused', null))).toBeNull();
+    // An investigator's own call (split shape) carries its entity but is not an agent-mount entity tool.
+    expect(queriedEntity(action('sql_select', 'ok', 'rtl', false))).toBeNull();
+    expect(queriedEntity(action(CODEBASE_NOTE_EVIDENCE, 'ok', null, false))).toBeNull();
+    expect(queriedEntity(action('repo_grep', 'ok', null, false))).toBeNull();
   });
 
   test('only ok calls count, a reused result included', () => {
     const found = entitiesQueried([
-      action('rtl_sql_select', 'ok rows=0'),
-      action('atspl_logs_search', 'ok hits=3 (Already run by worker at 10:00:00Z; result reused, nothing new was queried.)'),
-      action('ssfb_http_call', 'refused: not allowed'),
-      action('ssfb_sql_select', 'error (TypeError)'),
+      action('sql_select', 'ok rows=0', 'rtl'),
+      action('logs_search', 'ok hits=3 (Already run by worker at 10:00:00Z; result reused, nothing new was queried.)', 'atspl'),
+      action('http_call', 'refused: not allowed', 'ssfb'),
+      action('sql_select', 'error (TypeError)', 'ssfb'),
     ]);
     expect([...found].sort()).toEqual(['atspl', 'rtl']);
   });

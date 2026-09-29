@@ -53,8 +53,8 @@ column and log message names before you query.
   with code results; read them, they say how that code is laid out.
 - **Admin API**: `http_call`, only for live state the DB does not hold, and
   only when it is mounted. It is GET unless a rule allows more.
-- **CBS**, SSFB only: `cbs_call`, when it is mounted. It is the only way to
-  reach Finacle; `http_call` refuses it.
+- **CBS**, SSFB only: `http_call` with `service: "finacle"`, when the CBS
+  gateway is on. GET only. It is the only way to reach Finacle.
 
 Read state and logs about a failure. Never replay the user's failed action.
 Every evidence item records where it came from in `source`: `api`, `db`,
@@ -233,7 +233,8 @@ These exist on the SSFB investigator only, and some only when configured:
   most 20 values. Never guess a plaintext, never compare plaintext with an
   encrypted column, and never try to decrypt by hand. If these tools are
   absent, or do not list the service, record the gap.
-- `cbs_call`: the CBS source above, when mounted.
+- `http_call` with `service: "finacle"`: the CBS source above, when the
+  gateway is on.
 
 ## Code tools
 

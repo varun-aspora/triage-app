@@ -57,7 +57,7 @@ import { semanticKey } from '../mock/key.ts';
 import type { Entity, TimeWindow } from '../types/core.ts';
 import type { ToolEnvelope } from '../types/tool-result.ts';
 import { cutText, type GateDecision, runIoTool, type BackingRef, type StagingHarness } from './_lib/pipeline.ts';
-import type { ToolContext, ToolModule } from './types.ts';
+import type { Mount, ToolContext, ToolModule } from './types.ts';
 import { observedScopeOf } from './_lib/context.ts';
 
 declare module './_lib/context.ts' {
@@ -183,25 +183,46 @@ export type LogsSearchOutput = LogsSearchData & {
   readonly groups_omitted?: { readonly groups: number; readonly hits: number };
 };
 
-function description(ctx: ToolContext, entity: Entity): string {
-  let cfg: QuickwitGateConfig | undefined;
+function gateConfig(ctx: ToolContext, entity: Entity): QuickwitGateConfig | undefined {
   try {
-    cfg = quickwitGateConfig(ctx.registry, entity);
+    return quickwitGateConfig(ctx.registry, entity);
   } catch {
     // A registry that cannot answer leaves the lists out; run() reports not configured.
+    return undefined;
   }
+}
+
+/** The page size, services and fields of one entity's logs. Undefined where logs are not configured. */
+function entityLists(ctx: ToolContext, entity: Entity): { readonly page: number; readonly services: string[]; readonly fields: readonly string[] } | undefined {
+  const cfg = gateConfig(ctx, entity);
+  if (cfg === undefined) return undefined;
+  const services = Object.entries(cfg.services)
+    .filter(([, logName]) => logName !== undefined)
+    .map(([name]) => name);
+  return { page: Math.min(PAGE_SIZE, cfg.maxHits), services, fields: cfg.fields };
+}
+
+// entity is null on the agent mount (D110): one description for every
+// entity, with the page size and lists per entity in entityLine.
+function description(ctx: ToolContext, entity: Entity | null): string {
+  const lists = entity === null ? undefined : entityLists(ctx, entity);
   const { defaultLookbackDays, maxLogCallsPerRun } = ctx.config.budgets;
-  const pageSize = Math.min(PAGE_SIZE, cfg?.maxHits ?? PAGE_SIZE);
   const limit = HIT_LIMIT.toLocaleString('en-US');
+  const entityNote =
+    entity === null
+      ? ' On ssfb, denoise drops kong, kafka and access-log noise; on the other entities a UUID goes in terms, never in fields.'
+      : entity === 'ssfb'
+        ? ' denoise drops kong, kafka and access-log noise.'
+        : ' On this entity a UUID goes in terms, never in fields.';
+  const page = entity === null ? 'one page of hits (page size per entity below)' : `one page of ${lists?.page ?? PAGE_SIZE} hits`;
   const lines = [
-    `Search the ${entity} service logs (Quickwit).`,
+    entity === null ? "Search one entity's service logs (Quickwit)." : `Search the ${entity} service logs (Quickwit).`,
     'Give at least one of terms, fields, message, error, contains or an any_of group of messages or terms; ' +
       'service, level and exclude narrow a query but are not enough on their own. Leave service out to search every service.',
     'terms, exclude and any_of values with a space or a dash are sent whole in single quotes; a single quote inside a value is refused. ' +
       'message is the exact label from the code. error ANDs its words on the error field. contains is one word matched inside raw_message. ' +
-      'fields are exact filters by name.' +
-      (entity === 'ssfb' ? ' denoise drops kong, kafka and access-log noise.' : ' On this entity a UUID goes in terms, never in fields.'),
-    `Each call returns one page of ${pageSize} hits, newest first (order: "oldest" to reverse), with num_hits and next_offset when more remain; ` +
+      `fields are exact filters by name.${entityNote}`,
+    `Each call returns ${page}, newest first (order: "oldest" to reverse), with num_hits and next_offset when more remain; ` +
       'pass offset for the next page. The tool never fetches the next page itself.',
     'Every query sends both ends of its window: without from/to it is the request window ' +
       `(${defaultLookbackDays} days before the thread's first message up to when the request came in), and the window used is returned. Times are UTC.`,
@@ -219,14 +240,11 @@ function description(ctx: ToolContext, entity: Entity): string {
       'The full result is also written to /data/<call id>.json in the sandbox. A 0-hit result says what to try next.',
     '"Refused" means the query was not run or Quickwit rejected it: fix what the message says and retry. ' +
       '"did not answer" carries the reason: retry once or narrow the window. "not configured" means logs are not set up ' +
-      `for ${entity}: record the gap and use another source.`,
+      `for ${entity ?? 'that entity'}: record the gap and use another source.`,
   ];
-  if (cfg !== undefined) {
-    const services = Object.entries(cfg.services)
-      .filter(([, logName]) => logName !== undefined)
-      .map(([name]) => name);
-    if (services.length > 0) lines.push(`Services: ${services.join(', ')}.`);
-    lines.push(`Fields: ${cfg.fields.join(', ')}.`);
+  if (lists !== undefined) {
+    if (lists.services.length > 0) lines.push(`Services: ${lists.services.join(', ')}.`);
+    lines.push(`Fields: ${lists.fields.join(', ')}.`);
   }
   return lines.join(' ');
 }
@@ -573,13 +591,13 @@ async function runLogsSearch(ctx: ToolContext, entity: Entity, args: RunArgs): P
   );
 }
 
-/** Builds the logs_search tool for an investigator's entity. */
-export function logsSearchTool(ctx: ToolContext): ToolDefinition {
+/** Builds the logs_search tool for an investigator's entity, or one agent-mount copy. */
+export function logsSearchTool(ctx: ToolContext, mount?: Mount): ToolDefinition {
   const entity = ctx.entity;
   if (entity === null) throw new Error('logs_search needs an entity in the tool context');
   return defineTool({
     name: LOGS_SEARCH,
-    description: description(ctx, entity),
+    description: description(ctx, mount === 'agent' ? null : entity),
     input: LogsSearchInputSchema,
     harness: true,
     run: async ({ data, signal, toolCallId, log, harness }): Promise<ToolEnvelope> =>
@@ -601,5 +619,11 @@ export const toolModule: ToolModule = {
   // Always mounted: a blank Quickwit config answers "not configured" so the
   // investigator records the gap instead of guessing (HLD 02 §1.2).
   enabled: () => ({ on: true }),
-  create: (ctx) => logsSearchTool(ctx),
+  create: (ctx, mount) => logsSearchTool(ctx, mount),
+  entityLine(ctx) {
+    const lists = ctx.entity === null ? undefined : entityLists(ctx, ctx.entity);
+    if (lists === undefined) return '';
+    const services = lists.services.length > 0 ? [`services ${lists.services.join(', ')}`] : [];
+    return [`page ${lists.page} hits`, ...services, `fields ${lists.fields.join(', ')}`].join('; ');
+  },
 };

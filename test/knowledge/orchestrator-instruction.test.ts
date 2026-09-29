@@ -217,7 +217,7 @@ describe('orchestrator.md', () => {
   });
 
   test('never names the entity I/O tools', () => {
-    for (const tool of ['sql_select', 'http_call', 'logs_search', 'cbs_call']) {
+    for (const tool of ['sql_select', 'http_call', 'logs_search']) {
       expect(orchestrator.includes(tool)).toBe(false);
     }
   });

@@ -433,7 +433,6 @@ export const SSFB_EXTRA_TOOLS = [
   'detect_silent_reversals',
   'encrypt_lookup_value',
   'decrypt_fields',
-  'cbs_call',
 ] as const;
 export const CODE_TOOLS = [
   'code_explore',
@@ -465,8 +464,8 @@ export const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 
 /**
  * Agent kinds, matching the tool mounts in src/tools/types.ts. 'agent' is the
- * single-shape Triage (D109): the split tools under their plain names, since a
- * note names a data tool without its entity prefix.
+ * single-shape Triage (D109): the split tools under their plain names, which
+ * is how it mounts them, with an entity input (D110).
  */
 export const AGENTS = ['triage', 'investigator', 'investigator_deep', 'code_walker', 'agent'] as const;
 export type AgentKind = (typeof AGENTS)[number];

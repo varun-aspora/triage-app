@@ -7,18 +7,16 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { defineTool, type ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
+import { agentEntitiesOf } from '../../src/tools/agent-entity.ts';
 import {
-  agentToolName,
   allToolModules,
   allToolNames,
-  bareToolName,
   conformanceCases,
   conformanceProblems,
   FORBIDDEN_INPUT_KEYS,
   generatedToolSources,
   MAX_TOOL_NAME_LENGTH,
   RESERVED_TOOL_NAMES,
-  splitAgentToolName,
   TOOL_NAME_PATTERN,
   toolsFor,
 } from '../../src/tools/index.ts';
@@ -40,7 +38,6 @@ const T05_TOOLS = [
   'detect_silent_reversals',
   'encrypt_lookup_value',
   'decrypt_fields',
-  'cbs_call',
   'code_explore',
   'code_node',
   'code_impact',
@@ -247,14 +244,6 @@ describe('conformance per module, mount and entity', () => {
     const created = c.module.create(ctxFor(c.entity), c.mount);
     expect({ label, problems: conformanceProblems(c.module, created) }).toEqual({ label, problems: [] });
     expect({ label, forbidden: forbiddenKeyPaths(created.input) }).toEqual({ label, forbidden: [] });
-    // The agent mount renames a perEntity tool '<entity>_<name>' (D109).
-    if (c.mount === 'agent' && c.entity !== null) {
-      const name = agentToolName(c.entity, c.module.name);
-      expect(name).toBe(`${c.entity}_${c.module.name}`);
-      expect(name).toMatch(TOOL_NAME_PATTERN);
-      expect(name.length).toBeLessThanOrEqual(MAX_TOOL_NAME_LENGTH);
-      expect(splitAgentToolName(name)).toEqual({ entity: c.entity, name: c.module.name });
-    }
   });
 
   test('the agent mount has perEntity cases for each entity and shared cases once', () => {
@@ -289,12 +278,16 @@ describe('conformance per module, mount and entity', () => {
 // ------------------------------------------------------------ every set toolsFor returns
 
 describe('every set toolsFor returns', () => {
-  test('no schema holds an entity or run id key at any depth', () => {
+  // The agent mount's entity picker (D110) is the index's own top-level key; the module's input has none.
+  const pickerPath = (tool: ToolDefinition): string | undefined => (agentEntitiesOf(tool)?.picked === true ? 'input.entity' : undefined);
+
+  test('no schema holds an entity or run id key at any depth, besides the agent mount picker', () => {
     let walked = 0;
     for (const { label, tools } of everySet()) {
       for (const tool of tools) {
         walked += 1;
-        expect({ set: label, tool: tool.name, forbidden: forbiddenKeyPaths(tool.input) }).toEqual({
+        const forbidden = forbiddenKeyPaths(tool.input).filter((p) => p !== pickerPath(tool));
+        expect({ set: label, tool: tool.name, forbidden }).toEqual({
           set: label,
           tool: tool.name,
           forbidden: [],
@@ -315,7 +308,7 @@ describe('every set toolsFor returns', () => {
     for (const { label, tools } of everySet()) {
       for (const tool of tools) {
         const found = walkSchema(tool.input).labels.sort();
-        const pinned = PINNED_LABELS[bareToolName(tool.name)] ?? [];
+        const pinned = PINNED_LABELS[tool.name] ?? [];
         expect({ set: label, tool: tool.name, unpinned: found.filter((p) => !pinned.includes(p)) }).toEqual({
           set: label,
           tool: tool.name,
@@ -347,17 +340,24 @@ describe('every set toolsFor returns', () => {
     }
   });
 
-  test('agent-mount names are <entity>_<module> for perEntity modules and the module name otherwise', () => {
+  test('agent-mount names are module names; perEntity tools pick an entity unless their module has one (D110)', () => {
     const byName = new Map(allToolModules.map((m) => [m.name, m]));
     const agent = everySet().find((s) => s.mount === 'agent')!;
-    expect(agent.tools.some((t) => t.name === 'rtl_sql_select')).toBe(true);
-    for (const { name } of agent.tools) {
+    expect(agent.tools.some((t) => t.name === 'sql_select')).toBe(true);
+    for (const tool of agent.tools) {
+      const { name } = tool;
       expect(name).toMatch(TOOL_NAME_PATTERN);
       expect(name.length).toBeLessThanOrEqual(MAX_TOOL_NAME_LENGTH);
-      const split = splitAgentToolName(name);
-      const module = byName.get(split?.name ?? name);
-      expect({ name, perEntity: module?.perEntity === true }).toEqual({ name, perEntity: split !== undefined });
-      if (split !== undefined && module !== undefined && module.entities !== 'all') expect(module.entities).toContain(split.entity);
+      const module = byName.get(name);
+      const mark = agentEntitiesOf(tool);
+      expect({ name, perEntity: module?.perEntity === true }).toEqual({ name, perEntity: mark !== undefined });
+      if (mark === undefined || module === undefined) continue;
+      const oneEntity = module.entities !== 'all' && module.entities.length === 1;
+      expect({ name, picked: mark.picked }).toEqual({ name, picked: !oneEntity });
+      if (module.entities !== 'all') for (const e of mark.entities) expect(module.entities).toContain(e);
+      // The picker is a required picklist of exactly the entities the tool serves.
+      const picker = (tool.input as unknown as { entries: Record<string, { type?: string; options?: unknown }> }).entries.entity;
+      expect({ name, picker: picker?.type === 'picklist' ? picker.options : undefined }).toEqual({ name, picker: mark.picked ? mark.entities : undefined });
     }
   });
 

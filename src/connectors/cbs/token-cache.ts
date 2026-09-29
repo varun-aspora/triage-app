@@ -1,4 +1,4 @@
-// OAuth token for cbs_call (D14, D30). The mint is tool infrastructure, not a
+// OAuth token for the CBS gateway (D14, D30). The mint is tool infrastructure, not a
 // model action: the model never reaches /security/oauth.
 //
 // The token is cached at <TRIAGE_DATA_DIR>/cache/ssfb-cbs-oauth.json (mode

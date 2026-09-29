@@ -30,7 +30,7 @@ export type ToolContext = {
   readonly runId: string;
   /**
    * The entity the tool is built for: the investigator's, or on the agent
-   * mount the one a perEntity module was built for. Null for the triage and
+   * mount the one a perEntity copy was built for. Null for the triage and
    * code_walker mounts and for shared tools on the agent mount.
    */
   readonly entity: Entity | null;
@@ -51,11 +51,18 @@ export interface ToolModule {
   readonly entities: 'all' | readonly Entity[];
   /**
    * On the agent mount, the module is built once per enabled entity (limited
-   * by `entities`), with that entity in ctx.entity, and named '<entity>_<name>'.
-   * Audit, budget, scope and fixture keys keep the bare name. Other mounts
-   * ignore it.
+   * by `entities`), with that entity in ctx.entity, and mounted as one tool
+   * with an 'entity' input that picks the copy (D110); with one entity in
+   * `entities` there is no such input. The copies must share one description
+   * and differ in their input only by picklists. Other mounts ignore it.
    */
   readonly perEntity?: true;
+  /**
+   * perEntity only: what this tool has on ctx.entity, in a few words, listed
+   * per entity in the agent-mount description. Left out, a tool with a
+   * service picklist lists that entity's services.
+   */
+  entityLine?(ctx: ToolContext): string;
   /** Cheap and pure: decides whether the tool is mounted for this context. */
   enabled(ctx: ToolContext, mount: Mount): ToolEnabled;
   /**

@@ -23,7 +23,7 @@ import type { ToolDefinition } from '@flue/runtime/tool';
 import { excerpt } from '../connectors/error-text.ts';
 import { redactPersisted } from '../gate/redact.ts';
 import { canonicalJson } from '../mock/key.ts';
-import { splitAgentToolName } from '../tools/agent-name.ts';
+import { agentEntitiesOf, ENTITY_INPUT, entityOfCall } from '../tools/agent-entity.ts';
 import type { ToolContext } from '../tools/types.ts';
 import type { Entity } from '../types/core.ts';
 import type { ToolEnvelope } from '../types/tool-result.ts';
@@ -56,10 +56,13 @@ export type Action = {
   readonly tool: string;
   /**
    * The entity the call was for: the calling investigator's, or on the agent
-   * mount the prefix of a '<entity>_<name>' tool (D109). Null for the entity-free
-   * calls (root tools, code tools, code_walker).
+   * mount the one an entity tool ran for (its entity input, or its fixed
+   * entity; D110). Null for the entity-free calls (root tools, code tools,
+   * code_walker) and for an entity input the tool does not serve.
    */
   readonly entity: Entity | null;
+  /** Set when the call went to an agent-mount entity tool (D110), so the entity is the one the call chose. */
+  readonly entityTool?: true;
   readonly args: string;
   readonly outcome: string;
 };
@@ -118,21 +121,20 @@ export function actionBrief(runId: string, entity: Entity | null): string[] {
 
 /**
  * Wraps each tool so every call adds one line to the run's log. The agent name
- * comes from ctx.agent. Where ctx has no entity, a '<entity>_<name>' tool of the
- * agent mount gives the entity; the line keeps the name the model called.
+ * comes from ctx.agent. Where ctx has no entity, an agent-mount entity tool
+ * gives it from the call (D110).
  */
 export function logActions(tools: readonly ToolDefinition[], ctx: ToolContext): ToolDefinition[] {
   const agent = ctx.agent ?? ROOT_AGENT;
   return tools.map((tool) => {
-    const prefixed = ctx.entity === null ? splitAgentToolName(tool.name) : undefined;
-    const entity = ctx.entity ?? prefixed?.entity ?? null;
-    const bare = prefixed?.name ?? tool.name;
-    if (NOT_LOGGED.has(bare)) return tool;
+    if (NOT_LOGGED.has(tool.name)) return tool;
+    const mark = ctx.entity === null ? agentEntitiesOf(tool) : undefined;
     const run = tool.run.bind(tool) as (context: never) => Promise<unknown>;
     return {
       ...tool,
       async run(context: never) {
         const { data } = context as { data?: unknown };
+        const entity = ctx.entity ?? entityOfCall(mark, data) ?? null;
         const add = (outcome: string): void => {
           const names = ctx.deps.run.redactionNames;
           const safe = (text: string): string => redactPersisted(text, { names }).value;
@@ -141,7 +143,10 @@ export function logActions(tools: readonly ToolDefinition[], ctx: ToolContext): 
             agent,
             tool: tool.name,
             entity,
-            args: NO_ARGS.has(bare) ? '' : excerpt(safe(argsText(data)), ARGS_CHARS),
+            ...(mark !== undefined ? { entityTool: true as const } : {}),
+            args: NO_ARGS.has(tool.name)
+              ? noArgsText(mark !== undefined ? entity : null)
+              : excerpt(safe(argsText(data, mark?.picked === true ? entity : null)), ARGS_CHARS),
             outcome: excerpt(safe(outcome), OUTCOME_CHARS),
           });
         };
@@ -159,12 +164,30 @@ export function logActions(tools: readonly ToolDefinition[], ctx: ToolContext): 
   });
 }
 
-function argsText(data: unknown): string {
+// The entity stays in the line of an agent-mount call whose arguments are left out, as the tool name no longer carries it.
+function noArgsText(entity: Entity | null): string {
+  return entity === null ? '' : argsText({}, entity);
+}
+
+// With `lead`, the entity input goes first, so a line cut at ARGS_CHARS still
+// says which entity the call was for (canonical order would put any_of,
+// body or columns before it).
+function argsText(data: unknown, lead: Entity | null = null): string {
+  let text: string;
   try {
-    return canonicalJson(data ?? {});
+    const rest = lead === null || typeof data !== 'object' || data === null ? data : withoutEntity(data);
+    text = canonicalJson(rest ?? {});
   } catch {
-    return '{}';
+    text = '{}';
   }
+  if (lead === null || !text.startsWith('{')) return text;
+  const head = `{${JSON.stringify(ENTITY_INPUT)}:${JSON.stringify(lead)}`;
+  return text === '{}' ? `${head}}` : `${head},${text.slice(1)}`;
+}
+
+function withoutEntity(data: object): Record<string, unknown> {
+  const { [ENTITY_INPUT]: _entity, ...rest } = data as Record<string, unknown>;
+  return rest;
 }
 
 // Fields of an ok result that say what came back, in the order shown.

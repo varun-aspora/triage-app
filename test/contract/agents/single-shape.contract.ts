@@ -1,18 +1,20 @@
 // Agent contract: the single shape (TRIAGE_AGENT_SHAPE=single; plan 16 wave B,
-// D103, D108, D109).
+// D103, D108, D109, D110).
 //
 // Boots start({ agents: [Triage] }) on a strict mock-mode home with the
 // single shape and asserts, from what the fake model was given:
-// - mounting: the root sees every enabled entity's '<entity>_<tool>' data
-//   tools and the shared tools once, every entity note plus repo-map,
-//   patterns, frontend-routing and codegraph-limits, and the worker as its
-//   only subagent. No investigate_* or code_walker, and no bare entity tool.
-// - one scripted run end to end: the root calls rtl_sql_select and
-//   rtl_logs_search on the ticket's seed lead, saves evidence with
-//   rtl_note_evidence, hands a count to the worker through task (the worker
-//   calls rtl_logs_search and replies), then calls finish_report. The run
-//   completes and the stored report's entities_consulted has rtl, which the
-//   draft left out.
+// - mounting: the root sees each data tool once with an entity input (the
+//   SSFB-only tools without one) and the shared tools once, every entity note
+//   plus repo-map, patterns, frontend-routing and codegraph-limits, and the
+//   worker as its only subagent. No investigate_* or code_walker, and no
+//   entity-prefixed tool.
+// - one scripted run end to end: the root calls sql_select and logs_search
+//   with entity rtl on the ticket's seed lead, saves evidence with
+//   note_evidence for rtl, hands a count to the worker through task (the
+//   worker calls logs_search for rtl and replies), then calls finish_report.
+//   The run completes and the stored report's entities_consulted has rtl,
+//   which the draft left out. A call for a service rtl does not have is
+//   refused with the valid pairs.
 // - the routers (this harness and src/evals/contract/faux-script.ts) route
 //   the real single root prompt as the root and the worker prompt as
 //   'worker'.
@@ -38,7 +40,8 @@ import { callerOf } from '../../../src/evals/contract/faux-script.ts';
 import { createFakeModel, finish, text, toolCall, toolCalls } from '../../../src/mock/fake-model.ts';
 import { hashKeyString, keyString, semanticKey } from '../../../src/mock/key.ts';
 import type { FixtureKind, SemanticKey } from '../../../src/mock/types.ts';
-import { splitAgentToolName, toolsFor } from '../../../src/tools/index.ts';
+import { agentEntitiesOf } from '../../../src/tools/agent-entity.ts';
+import { toolsFor } from '../../../src/tools/index.ts';
 import { type TriageInit, TriageInitSchema } from '../../../src/types/classification.ts';
 import { ENTITIES } from '../../../src/types/core.ts';
 import { throwingDeps } from '../../support/fake-tool-context.ts';
@@ -92,9 +95,9 @@ vi.mock('../../../src/config/registry.ts', async (importOriginal) => {
 const LEAD = '5a1e0000-0000-4000-8000-00000000c0de';
 const WINDOW = { from: '2026-09-01T00:00:00.000Z', to: '2026-09-23T00:00:00.000Z' };
 const WORKFLOW_SQL = 'SELECT id, status, current_step_identifier FROM workflow_executions WHERE reference_id = $1';
-const HITS_INPUT = { service: 'appserver', terms: [LEAD], columns: ['x-device-id'] };
-const COUNT_INPUT = { service: 'appserver', terms: [LEAD], count: true };
-const WORKER_REPLY = 'appserver has 3 lines for the lead in the window. Calls: rtl_logs_search count on appserver.';
+const HITS_INPUT = { entity: 'rtl', service: 'appserver', terms: [LEAD], columns: ['x-device-id'] };
+const COUNT_INPUT = { entity: 'rtl', service: 'appserver', terms: [LEAD], count: true };
+const WORKER_REPLY = 'appserver has 3 lines for the lead in the window. Calls: logs_search count for rtl on appserver.';
 
 const fixturesDir = mkdtempSync(join(tmpdir(), 'triage-single-fixtures-'));
 
@@ -144,6 +147,7 @@ let b: Booted;
 const HARNESS_TOOLS = new Set([...SANDBOX_TOOL_NAMES, ...FRAMEWORK_TOOL_NAMES]);
 const SHARED_ROOT_TOOLS = ['ask_requester', 'codebase_note_evidence', 'finish_report', 'resolve_identity', 'run_log', 'stop_blocked'];
 const ENTITY_TOOLS_ALWAYS = ['sql_select', 'logs_search', 'http_call', 'note_evidence'];
+const SSFB_ONLY = ['get_account_statement', 'detect_silent_reversals'];
 const SPLIT_ONLY = ['investigate_', 'code_walker'];
 
 const sorted = (names: readonly string[]): string[] => [...names].sort();
@@ -203,23 +207,22 @@ describe('single shape: what the root is given', () => {
     expect(fake.failures()).toEqual([]);
   });
 
-  test('the model context holds the agent mount: prefixed entity tools, shared tools once, no bare entity tool', () => {
+  test('the model context holds the agent mount: each entity tool once with an entity input, shared tools once', () => {
     const own = ownTools(first);
     const ctx = delegateContext(init.request.request_id, null, env(), 'triage');
-    expect(sorted(own)).toEqual(sorted(toolsFor('agent', ctx).map((t) => t.name)));
+    const agent = toolsFor('agent', ctx);
+    expect(sorted(own)).toEqual(sorted(agent.map((t) => t.name)));
     expect(new Set(first.tools).size).toBe(first.tools.length);
-    for (const t of SHARED_ROOT_TOOLS) expect(own.filter((n) => n === t), t).toHaveLength(1);
-    for (const e of ENTITIES) for (const t of ENTITY_TOOLS_ALWAYS) expect(own, `${e}_${t}`).toContain(`${e}_${t}`);
-    // SSFB-only tools only under the ssfb prefix.
-    for (const e of ['rtl', 'atspl']) for (const t of ['cbs_call', 'get_account_statement', 'detect_silent_reversals']) {
-      expect(own).not.toContain(`${e}_${t}`);
+    for (const t of [...SHARED_ROOT_TOOLS, ...ENTITY_TOOLS_ALWAYS, ...SSFB_ONLY]) expect(own.filter((n) => n === t), t).toHaveLength(1);
+    // Each data tool picks among every enabled entity; the SSFB-only tools have ssfb fixed.
+    for (const t of ENTITY_TOOLS_ALWAYS) {
+      expect(agentEntitiesOf(agent.find((x) => x.name === t)!), t).toEqual({ entities: home.registry.enabledEntities(), picked: true });
     }
-    // Every name is a shared tool or '<entity>_<tool>', and no entity tool is mounted bare.
-    for (const name of own) {
-      if (SHARED_ROOT_TOOLS.includes(name) || name === 'read_staged' || /^(repo|code)_/.test(name)) continue;
-      expect(splitAgentToolName(name), name).toBeDefined();
-    }
-    for (const t of [...ENTITY_TOOLS_ALWAYS, 'cbs_call', 'decrypt_fields', 'encrypt_lookup_value']) expect(own).not.toContain(t);
+    for (const t of SSFB_ONLY) expect(agentEntitiesOf(agent.find((x) => x.name === t)!), t).toEqual({ entities: ['ssfb'], picked: false });
+    // No entity-prefixed name is mounted.
+    expect(own.filter((n) => /^(ssfb|atspl|rtl)_/.test(n))).toEqual([]);
+    // Removed in D111: finacle goes through http_call.
+    expect(own).not.toContain('cbs_call');
     expect(first.tools).toContain('task');
     expect(first.model).toBe('mid');
   });
@@ -238,12 +241,15 @@ describe('single shape: what the root is given', () => {
     for (const note of ['repo-map', 'patterns', 'frontend-routing', 'codegraph-limits']) expect(skills).toContain(note);
   });
 
-  test('the system prompt is the single method: One agent, prefixed tool lines, no brief skeleton', () => {
+  test('the system prompt is the single method: One agent, tool lines per entity, no brief skeleton', () => {
     expect(first.systemPrompt).toContain('## Fixed rules');
     expect(first.systemPrompt).toContain('## One agent');
     expect(first.systemPrompt).not.toContain('## Brief skeleton for this run');
-    expect(first.systemPrompt).toMatch(/^ {2}- rtl: rtl_\w+(, rtl_\w+)*$/m);
-    expect(first.systemPrompt).toMatch(/^ {2}- rtl: .*\brtl_sql_select\b/m);
+    expect(first.systemPrompt).toMatch(/^ {2}- rtl: \w+(, \w+)*$/m);
+    expect(first.systemPrompt).toMatch(/^ {2}- rtl: .*\bsql_select\b/m);
+    expect(first.systemPrompt).toMatch(/^ {2}- ssfb: .*\bget_account_statement\b/m);
+    expect(first.systemPrompt).not.toMatch(/^ {2}- rtl: .*\bget_account_statement\b/m);
+    expect(first.systemPrompt).not.toMatch(/\b(ssfb|atspl|rtl)_(sql_select|logs_search|note_evidence)\b/);
   });
 
   test('both routers send the single root prompt to the root', () => {
@@ -267,10 +273,13 @@ describe('single shape: one scripted run', () => {
     s = scriptAgents(fake, {
       triage: [
         toolCalls([
-          { name: 'rtl_sql_select', args: { service: 'workflow', sql: WORKFLOW_SQL, params: [LEAD] } },
-          { name: 'rtl_logs_search', args: HITS_INPUT },
+          { name: 'sql_select', args: { entity: 'rtl', service: 'workflow', sql: WORKFLOW_SQL, params: [LEAD] } },
+          { name: 'logs_search', args: HITS_INPUT },
+          // rtl has no harbor: refused with the valid pairs before any gate.
+          { name: 'sql_select', args: { entity: 'rtl', service: 'harbor', sql: WORKFLOW_SQL, params: [LEAD] } },
         ]),
-        toolCall('rtl_note_evidence', {
+        toolCall('note_evidence', {
+          entity: 'rtl',
           evidence: [
             { source: 'db', at: '2026-09-20T10:04:05.000Z', query_or_path: 'rtl workflow_executions by the lead', summary: 'the workflow is IN_PROGRESS at KYC_REVIEW' },
           ],
@@ -286,7 +295,7 @@ describe('single shape: one scripted run', () => {
         finish(reportDraft(init, { entities_consulted: [] })),
         text('report written'),
       ],
-      worker: [toolCall('rtl_logs_search', COUNT_INPUT), text(WORKER_REPLY)],
+      worker: [toolCall('logs_search', COUNT_INPUT), text(WORKER_REPLY)],
     });
     result = await runTriage(b.Triage, id, init);
   });
@@ -295,15 +304,18 @@ describe('single shape: one scripted run', () => {
     expect(result.ok).toBe(true);
     expect(fake.failures()).toEqual([]);
     expect(s.left()).toEqual({ triage: 0, worker: 0 });
-    expect(result.tools).toEqual(['rtl_sql_select', 'rtl_logs_search', 'rtl_note_evidence', 'task', 'finish_report']);
+    expect(result.tools).toEqual(['sql_select', 'logs_search', 'sql_select', 'note_evidence', 'task', 'finish_report']);
   });
 
   test('the data calls on the seed lead are answered from the fixtures', () => {
     const second = s.callsFor('triage')[1] as SeenCall;
-    const sql = second.toolResults.find((r) => r.toolName === 'rtl_sql_select');
-    const logs = second.toolResults.find((r) => r.toolName === 'rtl_logs_search');
+    const [sql, wrongService] = second.toolResults.filter((r) => r.toolName === 'sql_select');
+    const logs = second.toolResults.find((r) => r.toolName === 'logs_search');
     expect(sql?.isError).toBe(false);
     expect(sql?.text).toContain('KYC_REVIEW');
+    expect(wrongService?.text).toContain('Refused: rtl has no such service for sql_select; valid entity:service pairs: ');
+    expect(wrongService?.text).toContain('rtl:workflow');
+    expect(wrongService?.text).toContain('ssfb:harbor');
     expect(logs?.isError).toBe(false);
     expect(logs?.text).toContain('/api/v1/onboarding/status');
     // Audit lines keep the bare tool name and carry the entity.
@@ -317,9 +329,9 @@ describe('single shape: one scripted run', () => {
     ]);
   });
 
-  test('rtl_note_evidence records under rtl once rtl was queried', async () => {
+  test('note_evidence for rtl records under rtl once rtl was queried', async () => {
     const third = s.callsFor('triage')[2] as SeenCall;
-    const note = third.toolResults.find((r) => r.toolName === 'rtl_note_evidence');
+    const note = third.toolResults.find((r) => r.toolName === 'note_evidence');
     expect(note?.isError).toBe(false);
     expect(note?.text).not.toMatch(/^Refused/);
     const run = await b.store.getRun(id);
@@ -337,9 +349,9 @@ describe('single shape: one scripted run', () => {
     const mounts = workerMounts(id as never, { env: env() });
     expect(sorted(ownTools(w))).toEqual(sorted(mounts.tools.map((t) => t.name)));
     expect(ownTools(w).some(rootOnlyTool)).toBe(false);
-    expect(ownTools(w)).toContain('rtl_logs_search');
+    expect(ownTools(w)).toContain('logs_search');
     expect(listed(w.systemPrompt, '## Available Agents')).toEqual([]);
-    const count = (calls[1] as SeenCall).toolResults.find((r) => r.toolName === 'rtl_logs_search');
+    const count = (calls[1] as SeenCall).toolResults.find((r) => r.toolName === 'logs_search');
     expect(count?.isError).toBe(false);
     expect(count?.text).toContain('3');
     const fourth = s.callsFor('triage')[3] as SeenCall;

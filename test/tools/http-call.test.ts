@@ -341,21 +341,24 @@ describe('http_call path checks', () => {
 // ------------------------------------------------------------------ services
 
 describe('http_call services', () => {
-  test('deny: finacle is refused and the message names cbs_call', async () => {
+  test('finacle never goes through fetch: with the CBS flag off it answers not configured with the reason', async () => {
     const s = setup({ real: true });
     const env = await call(s, { service: 'finacle', path: '/custom/api/x' });
-    expect(env.output.status).toBe('refused');
-    expect(env.output.message).toContain('cbs_call');
+    expect(env.output.status).toBe('not_configured');
+    expect(env.output.message).toBe('not configured for ssfb:finacle: SSFB_CBS_VIA_KUBECTL_ENABLED is not true');
     expect(s.fetchCalls.length).toBe(0);
-    expect(lastAudit(s).decision).toBe('deny');
   });
 
-  test('deny: finacle on an entity without it still points to cbs_call', async () => {
-    const s = setup({ entity: 'atspl' });
-    const env = await call(s, { service: 'finacle', path: '/custom/api/x' });
-    expect(env.output.status).toBe('refused');
-    expect(env.output.message).toContain('cbs_call');
-  });
+  for (const entity of ['atspl', 'rtl'] as const) {
+    test(`deny: finacle on ${entity} is an unknown service`, async () => {
+      const s = setup({ entity });
+      const env = await call(s, { service: 'finacle', path: '/custom/api/x' });
+      expect(env.output.status).toBe('refused');
+      expect(env.output.message).toContain(`${entity} has no HTTP API named that`);
+      expect(lastAudit(s).reason).toBe('bad_service: not an API service of the entity');
+      expect(s.storeCalls()).toBe(0);
+    });
+  }
 
   test('deny: a service without an API is refused', async () => {
     const s = setup();

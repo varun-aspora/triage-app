@@ -103,8 +103,8 @@ const NO_DEPS = new Proxy(Object.create(null) as object, {
 /**
  * Every tool name any agent in this deployment can call: the triage mount,
  * investigator_deep (which includes investigator) for each entity in
- * TRIAGE_ENTITIES, code_walker, the agent mount (its '<entity>_<name>' tools
- * for each entity in TRIAGE_ENTITIES and its shared tools, D109), the six
+ * TRIAGE_ENTITIES, code_walker, the agent mount (its entity tools and its
+ * shared tools, D109, D110), the six
  * sandbox tools and Flue's framework tools. The agent mount is listed
  * whatever TRIAGE_AGENT_SHAPE says, because a run keeps the shape it started
  * with. Sorted and unique.

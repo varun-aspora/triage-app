@@ -32,7 +32,7 @@
 //      before every model turn and so builds a fresh tool each time.
 //   4b. On the agent mount (single shape, D109), entities_consulted becomes
 //      the union of the draft's list, the entities with findings and the
-//      entities of the run's ok '<entity>_' data calls in the action log.
+//      entities of the run's ok entity tool calls in the action log (D110).
 //      The log is released when the run settles, so after a resume the
 //      stored evidence keys are what remains. The split shape keeps the
 //      draft's list.
@@ -246,7 +246,7 @@ export function collectFindings(
 
 /**
  * Step 4b: the draft's entities, the entities with findings and the entities
- * of the ok '<entity>_' data calls in the action log, in ENTITIES order.
+ * of the ok entity tool calls in the action log (D110), in ENTITIES order.
  */
 export function consultedEntities(
   draft: readonly Entity[],

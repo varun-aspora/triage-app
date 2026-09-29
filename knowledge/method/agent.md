@@ -6,10 +6,10 @@ write one Report with `finish_report`.
 
 ## What you have
 
-- Data tools for each enabled entity, named `<entity>_<tool>`, such as
-  `<entity>_sql_select` and `<entity>_logs_search`. Each one reaches only its
-  own entity; the list is under This run. `<entity>_note_evidence` saves your
-  findings for that entity, and `codebase_note_evidence` your code findings.
+- Data tools such as `sql_select` and `logs_search`, each called with the
+  `entity` to query (the SSFB-only tools take none); a call reaches only that
+  entity, and This run lists each entity's tools. `note_evidence` with an
+  entity saves your findings for it, `codebase_note_evidence` your code ones.
 - Shared: `resolve_identity`, the code tools (`repo_grep`, `repo_read`,
   `repo_find`, `repo_tree`, `code_explore`, `code_node`, `code_impact`),
   `read_staged`, `run_log`, `finish_report`, `ask_requester` and
@@ -91,8 +91,8 @@ reads yourself.
 
 ## Save evidence as you go
 
-Call `<entity>_note_evidence` after each batch of reads that finds something
-for that entity; it refuses until one of that entity's calls has returned a
+Call `note_evidence` with the entity after each batch of reads that finds
+something for it; it refuses until one of that entity's calls has returned a
 result. The run can stop at any time, and only saved evidence reaches the
 report. Each call replaces the one before for that entity, so send
 everything found so far: `evidence` (one item per useful read, with `source`

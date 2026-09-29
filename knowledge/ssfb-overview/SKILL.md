@@ -111,7 +111,7 @@ they narrow a search but do not identify one request on their own.
 | Cohorts | cohort | `cohort` |
 | PDF generation | pdf-generator | `pdfgen` |
 | Scheduled reminders | reminder-service | `reminder` |
-| The bank's own records (Finacle) | Shivalik bank; the investigator reads them only when CBS access is enabled | `finacle` |
+| The bank's own records (Finacle) | Shivalik bank; readable only when CBS access is enabled | `finacle` |
 | Event fan-out between services | eventbus | `eventbus` |
 | Platform audit trail | audit | `audit` |
 

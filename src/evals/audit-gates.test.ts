@@ -75,12 +75,12 @@ describe('checkNoRealIo', () => {
   test('null or unknown transport values fail', () => {
     const result = checkNoRealIo([
       { ...line(), transport: null },
-      { ...line({ tool: 'cbs_call', rule_index: 0, action: 'allow' }), transport: 'Mock' },
+      { ...line({ tool: 'http_call', rule_index: 0, action: 'allow' }), transport: 'Mock' },
       { ...line(), transport: '' },
     ]);
     expect(result.ok).toBe(false);
     expect(result.offending.map((o) => o.problem)).toEqual(['missing_transport', 'unknown_transport', 'unknown_transport']);
-    expect(result.offending[1]?.tool).toBe('cbs_call');
+    expect(result.offending[1]?.tool).toBe('http_call');
   });
 
   test('a line that is not an object fails with an unknown tool', () => {

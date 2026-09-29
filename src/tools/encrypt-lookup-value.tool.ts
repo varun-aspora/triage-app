@@ -13,9 +13,9 @@
 //   {op: 'encrypt', service, kind, values: [value]} and no key is read.
 // - The audit line records a count of 1, never the value (makeAuditLine
 //   rebuilds the summary from the count for this tool).
-// - Not scope-checked: the HLD scope rule covers sql_select, http_call,
-//   logs_search and cbs_call, and the IdChain has no email or CIF key, so a
-//   check here would refuse every email and most CIF lookups. The sql_select
+// - Not scope-checked: the HLD scope rule covers sql_select, http_call and
+//   logs_search, and the IdChain has no email or CIF key, so a check here
+//   would refuse every email and most CIF lookups. The sql_select
 //   call that uses the ciphertext is still audited.
 
 import { defineTool } from '@flue/runtime/tool';

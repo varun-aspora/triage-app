@@ -9,6 +9,7 @@ import { ConfigError } from '../config/errors.ts';
 import type { RunStore } from '../runstore/types.ts';
 import { connectorFailuresFor, recordConnectorFailure } from '../tools/_lib/connector-failures.ts';
 import { mergeIdChains, scopeSetOf, widenIdChain } from '../tools/_lib/context.ts';
+import { markAgentEntities } from '../tools/agent-entity.ts';
 import { ASK_REQUESTER } from '../tools/ask-requester.tool.ts';
 import { FINISH_REPORT, synthesisPassesFor } from '../tools/finish-report.tool.ts';
 import { toolsFor } from '../tools/index.ts';
@@ -366,14 +367,24 @@ describe('triagePlan: shape (D109)', () => {
     expect(triagePlan(init(), singleHome.config, singleHome.registry, { saved: old, knowledge }).shape).toBe('split');
   });
 
-  test('entityToolNames groups the prefixed tools by entity and leaves the shared ones out', () => {
-    expect(entityToolNames(['rtl_sql_select', 'repo_read', 'ssfb_logs_search', 'rtl_logs_search', 'run_log', 'codebase_note_evidence'])).toEqual({
-      rtl: ['rtl_sql_select', 'rtl_logs_search'],
-      ssfb: ['ssfb_logs_search'],
+  test('entityToolNames groups the entity tools by the entities each serves and leaves the shared ones out (D110)', () => {
+    const plain = (name: string): ToolDefinition => ({ name, description: name, input: undefined, output: undefined, run: () => 'x' }) as ToolDefinition;
+    const entityTool = (name: string, entities: Entity[], picked = true): ToolDefinition => markAgentEntities(plain(name), { entities, picked });
+    const tools = [
+      entityTool('sql_select', ['ssfb', 'rtl']),
+      plain('repo_read'),
+      entityTool('logs_search', ['rtl']),
+      entityTool('get_account_statement', ['ssfb'], false),
+      plain('run_log'),
+      plain('codebase_note_evidence'),
+    ];
+    expect(entityToolNames(tools)).toEqual({
+      ssfb: ['sql_select', 'get_account_statement'],
+      rtl: ['sql_select', 'logs_search'],
     });
     expect(entityToolNames([])).toEqual({});
     // An enabled entity with no mounted tool gets an empty list, not the default names.
-    expect(entityToolNames(['rtl_sql_select'], ['ssfb', 'rtl'])).toEqual({ ssfb: [], rtl: ['rtl_sql_select'] });
+    expect(entityToolNames([entityTool('sql_select', ['rtl'])], ['ssfb', 'rtl'])).toEqual({ ssfb: [], rtl: ['sql_select'] });
   });
 
   test('shapeFor: no saved plan means the config value', () => {

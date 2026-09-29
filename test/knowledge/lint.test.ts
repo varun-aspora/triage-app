@@ -164,14 +164,15 @@ describe('tool sets from HLD §2', () => {
 
   test('triage has no entity I/O and investigators have no report tool', () => {
     const triage = allowedTools('triage');
-    for (const t of ['sql_select', 'http_call', 'logs_search', 'cbs_call']) expect(triage.has(t)).toBe(false);
+    for (const t of ['sql_select', 'http_call', 'logs_search']) expect(triage.has(t)).toBe(false);
     expect(triage.has('finish_report')).toBe(true);
     expect(allowedTools('investigator', 'rtl').has('finish_report')).toBe(false);
   });
 
   test('SSFB extras only on SSFB investigators, CodeGraph only on deep and code_walker, repo tools on all three', () => {
-    expect(allowedTools('investigator', 'ssfb').has('cbs_call')).toBe(true);
-    expect(allowedTools('investigator', 'atspl').has('cbs_call')).toBe(false);
+    expect(allowedTools('investigator', 'ssfb').has('get_account_statement')).toBe(true);
+    expect(allowedTools('investigator', 'atspl').has('get_account_statement')).toBe(false);
+    expect(allowedTools('investigator', 'ssfb').has('cbs_call')).toBe(false);
     expect(allowedTools('investigator', 'ssfb').has('code_explore')).toBe(false);
     expect(allowedTools('investigator', 'rtl').has('repo_grep')).toBe(true);
     expect(allowedTools('investigator', 'rtl').has('repo_read')).toBe(true);

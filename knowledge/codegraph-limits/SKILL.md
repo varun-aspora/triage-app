@@ -34,7 +34,7 @@ below), and to confirm a graph answer against the source before you cite it.
 
 - **Structural only.** No runtime behaviour, no database schema, no CBS error
   codes. A code path that could fail is not a finding. A triage finding still
-  needs a log line or a database row from an investigator.
+  needs a log line or a database row.
 - **One index per repo, no cross-repo edges.** A call from harbor into
   `go-commons` or `shivalik-cbs-go` does not appear in harbor's graph. Make a
   second call against the library repo and join the two by hand. Every call

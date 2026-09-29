@@ -102,9 +102,10 @@ export const DetectSilentReversalsKeySchema = v.strictObject({
 });
 export type DetectSilentReversalsKey = v.InferOutput<typeof DetectSilentReversalsKeySchema>;
 
-// cbs_call has no query (the path charset forbids it); the body is part of
-// the key because a POST to the same path with a different body is a
-// different call.
+// http_call's finacle route (D111). The kind keeps the name of the cbs_call
+// tool it replaced, so fixtures recorded under it still resolve. It has no
+// query (the path charset forbids it); the body stays in the key for fixtures
+// recorded when a rule could allow a POST.
 export const CbsCallKeySchema = v.strictObject({
   entity: EntitySchema,
   method: HttpMethodSchema,

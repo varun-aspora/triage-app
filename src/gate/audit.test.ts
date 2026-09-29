@@ -216,9 +216,9 @@ describe('makeAuditLine: HTTP decisions', () => {
     expect(line.action).toBe('allow');
   });
 
-  test('deny: an allowed http_call or cbs_call without rule_index throws', () => {
-    for (const tool of ['http_call', 'cbs_call']) {
-      expect(rejectedFields(() => makeAuditLine(base({ tool, target: 'SSFB_HARBOR_API_URL' })))).toEqual(['rule_index']);
+  test('deny: an allowed http_call without rule_index throws, finacle route included', () => {
+    for (const target of ['SSFB_HARBOR_API_URL', 'SSFB_CBS_GATEWAY_URL']) {
+      expect(rejectedFields(() => makeAuditLine(base({ tool: 'http_call', target })))).toEqual(['rule_index']);
     }
   });
 

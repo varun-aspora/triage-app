@@ -162,8 +162,8 @@ Steps 3 to 6 are the order the tool's 0-hit note gives. A `service_absent`
 note means the service has no lines at all in that window, so the name is
 wrong: drop it. For a full id inside a response body, try `contains` with the
 id. To prove a zero is real, `count` the id alone with no other filter. For an
-empty lookup by the known id, the investigator note ("Empty means ask why")
-says what comes after this ladder.
+empty lookup by the known id, the method note says what comes after this
+ladder.
 
 If the ladder still returns zero, report the absence as a finding and list the
 queries you ran.

@@ -97,17 +97,17 @@ describe('createScopeSet', () => {
       true,
     );
     const withCc = createScopeSet(chain({ phone_number: '+919000012345' }));
-    expect(checkScope({ tool: 'cbs_call', params: { path: '/x', body: { mobile: RUN_PHONE } }, scopeSet: withCc }).ok).toBe(true);
-    expect(checkScope({ tool: 'cbs_call', params: { path: '/x', body: { mobile: '919000012345' } }, scopeSet: withCc }).ok).toBe(
+    expect(checkScope({ tool: 'http_call', params: { path: '/x', body: { mobile: RUN_PHONE } }, scopeSet: withCc }).ok).toBe(true);
+    expect(checkScope({ tool: 'http_call', params: { path: '/x', body: { mobile: '919000012345' } }, scopeSet: withCc }).ok).toBe(
       true,
     );
   });
 
   test('a bare-digit phone_number also matches its last 10 digits; the same digits under another key do not', () => {
     const phone = createScopeSet(chain({ phone_number: '919000012345' }));
-    expect(checkScope({ tool: 'cbs_call', params: { path: '/x', body: { mobile: RUN_PHONE } }, scopeSet: phone }).ok).toBe(true);
+    expect(checkScope({ tool: 'http_call', params: { path: '/x', body: { mobile: RUN_PHONE } }, scopeSet: phone }).ok).toBe(true);
     const account = createScopeSet(chain({ account_number: '919000012345' }));
-    expect(checkScope({ tool: 'cbs_call', params: { path: '/x', body: { mobile: RUN_PHONE } }, scopeSet: account }).ok).toBe(false);
+    expect(checkScope({ tool: 'http_call', params: { path: '/x', body: { mobile: RUN_PHONE } }, scopeSet: account }).ok).toBe(false);
   });
 });
 
@@ -258,15 +258,15 @@ describe('checkScope denies ids outside the chain', () => {
     expect(checkScope({ tool: 'logs_search', params: { contains: 'someone@example' }, scopeSet: withEmail })).toEqual({ ok: true });
   });
 
-  test('foreign phone in cbs body', () => {
+  test('foreign phone in an http_call body', () => {
     const deny = expectDenied(
-      checkScope({ tool: 'cbs_call', params: { path: '/fi/customer', body: { mobile: FOREIGN_PHONE } }, scopeSet: set }),
+      checkScope({ tool: 'http_call', params: { path: '/fi/customer', body: { mobile: FOREIGN_PHONE } }, scopeSet: set }),
     );
     expect(deny.offending).toEqual([{ kind: 'phone', masked: 'phone:***9999' }]);
   });
 
-  test('foreign account number in a cbs path', () => {
-    expectDenied(checkScope({ tool: 'cbs_call', params: { path: `/fi/accounts/${FOREIGN_ACCOUNT}` }, scopeSet: set }));
+  test('foreign account number in a finacle path', () => {
+    expectDenied(checkScope({ tool: 'http_call', params: { path: `/fi/accounts/${FOREIGN_ACCOUNT}` }, scopeSet: set }));
   });
 
   test('foreign id uppercased or with surrounding whitespace is still denied', () => {
@@ -284,7 +284,7 @@ describe('checkScope denies ids outside the chain', () => {
       ],
     });
     expect(checkScope({ tool: 'sql_select', params: { sql: 'x', params: [FOREIGN_UUID] }, scopeSet: seeded })).toEqual({ ok: true });
-    expect(checkScope({ tool: 'cbs_call', params: { path: '/fi/customer', body: { mobile: FOREIGN_PHONE } }, scopeSet: seeded })).toEqual({ ok: true });
+    expect(checkScope({ tool: 'http_call', params: { path: '/fi/customer', body: { mobile: FOREIGN_PHONE } }, scopeSet: seeded })).toEqual({ ok: true });
     expect(checkScope({ tool: 'logs_search', params: { terms: ['919000099999'] }, scopeSet: seeded })).toEqual({ ok: true });
     // A later chain without the leads keeps them in scope.
     expect(extendScopeSet(seeded, chain({ customer_id: RUN_CUSTOMER })).uuid.has(FOREIGN_UUID)).toBe(true);
@@ -356,10 +356,10 @@ describe('systemic mode', () => {
     }
   });
 
-  test('never widens scope for http_call or cbs_call', () => {
+  test('never widens scope for http_call, a finacle path included', () => {
     expectDenied(checkScope({ tool: 'http_call', params: { path: `/v1/forms/${FOREIGN_UUID}` }, scopeSet: set, systemic: true }));
     expectDenied(
-      checkScope({ tool: 'cbs_call', params: { path: '/x', body: { mobile: FOREIGN_PHONE } }, scopeSet: set, systemic: true }),
+      checkScope({ tool: 'http_call', params: { path: '/x', body: { mobile: FOREIGN_PHONE } }, scopeSet: set, systemic: true }),
     );
   });
 
@@ -670,7 +670,7 @@ describe('derived leads (D97)', () => {
     expect(found.leads.map((l) => [l.value, l.kind])).toEqual([['+919000099999', 'phone']]);
     const next = withLeads(runChain, found.leads);
     expect(allowed(next, 'logs_search', { terms: ['9000099999'] })).toEqual({ ok: true });
-    expect(allowed(next, 'cbs_call', { path: '/fi/customer', body: { mobile: FOREIGN_PHONE } })).toEqual({ ok: true });
+    expect(allowed(next, 'http_call', { path: '/fi/customer', body: { mobile: FOREIGN_PHONE } })).toEqual({ ok: true });
   });
 
   test('depth is one more than the shallowest anchor, and nothing is added past the limit', () => {

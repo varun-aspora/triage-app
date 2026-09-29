@@ -85,7 +85,7 @@ export const PIPELINE_STEPS = [
 ] as const;
 export type PipelineStep = (typeof PIPELINE_STEPS)[number];
 
-/** A tool-specific gate result. rule_index and action go on the audit line (http_call, cbs_call). */
+/** A tool-specific gate result. rule_index and action go on the audit line (http_call). */
 export type GateDecision =
   | { readonly ok: true; readonly rule_index?: number | 'default'; readonly action?: 'allow' | 'block' }
   | {
@@ -103,7 +103,12 @@ export type GateDecision =
  * the value is set. Only envName ever reaches an audit line; the value never
  * reaches this module.
  */
-export type BackingRef = { readonly envName: string; readonly status: string };
+export type BackingRef = {
+  readonly envName: string;
+  readonly status: string;
+  /** Why it is off when that is more than a blank env var. Goes to the model and the audit line. */
+  readonly reason?: string;
+};
 
 export type ScopeOptions = {
   /** What to check. Defaults to spec.input. */
@@ -391,10 +396,10 @@ export async function runIoTool<K extends FixtureKind, T>(
     return build(safe);
   };
   const refuse = (text: string): ToolEnvelope => finish((t) => refused(t, now), text);
-  const notConfiguredEnvelope = (): ToolEnvelope =>
+  const notConfiguredEnvelope = (reason?: string): ToolEnvelope =>
     entity === null
       ? refuse(`not configured for ${spec.service}`)
-      : finish(() => notConfigured(entity, spec.service, now), '');
+      : finish(() => notConfigured(entity, spec.service, now, reason), '');
 
   // 1. Repeat: an exact repeat of an earlier ok call in this run. A spent run
   // budget skips it, so the model reads the budget message instead.
@@ -460,10 +465,10 @@ export async function runIoTool<K extends FixtureKind, T>(
       decision: 'deny',
       exit: 'not_configured',
       transport: noIoTransport,
-      reason: `not configured: ${spec.backing.envName} is blank`,
+      reason: `not configured: ${spec.backing.reason ?? `${spec.backing.envName} is blank`}`,
       gate,
     });
-    return notConfiguredEnvelope();
+    return notConfiguredEnvelope(spec.backing.reason);
   }
 
   // 6. Mock or real. resolveIo never calls real() in mock mode (D19).

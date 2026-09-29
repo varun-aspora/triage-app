@@ -35,7 +35,7 @@ function rules(raw: unknown[]): readonly ApiRule[] {
 }
 
 function decide(over: Partial<HttpDecisionInput>) {
-  return decideHttp({ tool: 'http_call', service: 'harbor', method: 'GET', path: '/', base: BASE, rules: [], ...over });
+  return decideHttp({ service: 'harbor', method: 'GET', path: '/', base: BASE, rules: [], ...over });
 }
 
 // ---------------------------------------------------------------- buildUrl
@@ -351,7 +351,7 @@ describe('decideHttp', () => {
   });
 
   test('method defaults to GET and HEAD is allowed by default', () => {
-    const noMethod = decideHttp({ tool: 'http_call', service: 'harbor', path: '/x', base: BASE, rules: [] });
+    const noMethod = decideHttp({ service: 'harbor', path: '/x', base: BASE, rules: [] });
     const head = decide({ method: 'HEAD', path: '/x' });
     expect(noMethod.ok && noMethod.method).toBe('GET');
     expect(head.ok && head.method).toBe('HEAD');
@@ -365,10 +365,9 @@ describe('decideHttp', () => {
     expect(ok.ok && ok.url.search).toBe('?a=1');
   });
 
-  test("deny: service 'finacle' via http_call is refused with a cbs_call hint", () => {
-    const r = refusal(decide({ service: 'finacle', path: '/custom/api/x' }));
-    expect(r.code).toBe('finacle_via_http');
-    expect(r.message).toContain('cbs_call');
+  test("service 'finacle' takes the cbs path check instead of being refused", () => {
+    expect(decide({ service: 'finacle', path: '/custom/api/x' }).ok).toBe(true);
+    expect(refusal(decide({ service: 'finacle', path: '/custom/api?x=1' })).code).toBe('bad_cbs_path');
   });
 
   for (const method of ['CONNECT', 'TRACE', 'get ', 'get', 'OPTIONS', ' GET', 'G\nET', '']) {
@@ -449,10 +448,10 @@ describe('decideHttp', () => {
   });
 });
 
-describe('decideHttp for cbs_call', () => {
+describe('decideHttp for finacle', () => {
   const CBS = 'https://cbs-gateway.example.test';
   const cbs = (over: Partial<HttpDecisionInput>) =>
-    decideHttp({ tool: 'cbs_call', service: 'finacle', path: '/custom/api/x', base: CBS, rules: [], ...over });
+    decideHttp({ service: 'finacle', path: '/custom/api/x', base: CBS, rules: [], ...over });
 
   test('GET on a clean path is allowed by default under service finacle', () => {
     const r = cbs({});
@@ -466,7 +465,7 @@ describe('decideHttp for cbs_call', () => {
     const allow = rules([{ service: 'finacle', method: 'POST', api: '/custom/api/*', action: 'allow', reason: 'reads' }]);
     const r = cbs({ method: 'POST', rules: allow });
     expect(r.ok && r.rule_index).toBe(0);
-    // A harbor rule on the same path does not apply to cbs_call.
+    // A harbor rule on the same path does not apply to finacle.
     const harborAllow = rules([{ service: 'harbor', method: 'POST', api: '/custom/api/*', action: 'allow', reason: 'x' }]);
     expect(refusal(cbs({ method: 'POST', rules: harborAllow })).rule_index).toBe('default');
   });
@@ -482,12 +481,11 @@ describe('decideHttp for cbs_call', () => {
     expect(refusal(cbs({ path: '/custom/api/' })).code).toBe('bad_path');
   });
 
-  test('deny: cbs_call takes no query and only service finacle', () => {
+  test('deny: finacle takes no query', () => {
     expect(refusal(cbs({ query: { a: '1' } })).code).toBe('bad_query');
-    expect(refusal(cbs({ service: 'harbor' })).code).toBe('bad_service');
   });
 
-  test('deny: bad methods are refused on cbs_call too', () => {
+  test('deny: bad methods are refused on finacle too', () => {
     expect(refusal(cbs({ method: 'TRACE' })).code).toBe('bad_method');
   });
 });

@@ -7,8 +7,8 @@
 // - the decision must be an allow for the same method and pathname;
 // - the URL must keep the registry base origin and sit under the base path
 //   at a segment boundary;
-// - services with transport 'cbs' (finacle) are refused; they go through
-//   cbs_call.
+// - services with transport 'cbs' (finacle) are refused; http_call sends
+//   finacle to the CBS connector instead.
 // Headers are built only here (see auth.ts). fetch never follows a redirect:
 // any 3xx is a refusal, so a Location header cannot move the call to another
 // host. The body is read up to MAX_HTTP_BODY_BYTES and cut there.
@@ -120,7 +120,7 @@ export function createHttpConnector(deps: HttpConnectorDeps): HttpConnector {
     const { entity, service, decision } = request;
     const where = `${entity}:${service}`;
 
-    if (service === CBS_SERVICE) throw refused(`${where}: finacle has no HTTP route; use cbs_call`);
+    if (service === CBS_SERVICE) throw refused(`${where}: finacle goes through the CBS connector, not HTTP`);
     if (decision?.ok !== true || decision.action !== 'allow') {
       throw refused(`${where}: the call has no allow decision from the rules`);
     }
@@ -130,7 +130,7 @@ export function createHttpConnector(deps: HttpConnectorDeps): HttpConnector {
 
     const { spec, api, authCap } = lookupService(registry, entity, service, where);
     if (api === undefined) throw new ConnectorError('not_configured', `${where}: the registry lists no API for this service`);
-    if (api.transport === 'cbs') throw refused(`${where}: this service is reachable only through cbs_call`);
+    if (api.transport === 'cbs') throw refused(`${where}: this service is reachable only through the CBS connector`);
     if (api.status !== 'ok') throw new ConnectorError('not_configured', `${where}: ${api.envName} is blank`);
     const base = parseBase(api.value);
     if (base === undefined) throw refused(`${where}: ${api.envName} is not a usable http or https base URL`);

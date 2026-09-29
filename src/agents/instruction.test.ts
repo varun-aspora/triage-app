@@ -405,27 +405,28 @@ describe('single shape (D109)', () => {
     expect(text.indexOf('## One agent')).toBeLessThan(text.indexOf('## This run'));
     const oneAgent = text.slice(text.indexOf('## One agent'), text.indexOf('## This run'));
     expect(oneAgent).toContain('There are no investigators to brief');
-    expect(oneAgent).toContain("call the entity's prefixed one");
+    expect(oneAgent).toContain('`logs_search` with `entity: "rtl"`');
     expect(oneAgent).toContain('`worker`, reached with `task`');
     expect(text.slice(text.indexOf('## Fixed rules'))).not.toMatch(/investigate_|code_walker/);
   });
 
-  test('the entity line lists each enabled entity with its prefixed tools, SSFB extras on SSFB only', () => {
+  test('the entity line lists each enabled entity with the tools that reach it, SSFB extras on SSFB only (D110)', () => {
     const run = runOf(render({ entities: ['rtl', 'ssfb'] }));
-    expect(run).toContain('- Enabled entities: ssfb, rtl. Each has its own tools, named <entity>_<tool>; some are there only where configured:\n');
-    const ssfb = [...ENTITY_TOOLS, ...SSFB_ONLY_TOOLS].map((t) => `ssfb_${t}`).join(', ');
-    const rtl = ENTITY_TOOLS.map((t) => `rtl_${t}`).join(', ');
+    expect(run).toContain('- Enabled entities: ssfb, rtl. The tools that reach each one, called with that entity; some are there only where configured:\n');
+    const ssfb = [...ENTITY_TOOLS, ...SSFB_ONLY_TOOLS].join(', ');
+    const rtl = ENTITY_TOOLS.join(', ');
     expect(run).toContain(`\n  - ssfb: ${ssfb}\n  - rtl: ${rtl}\n- Named in the request:`);
-    expect(run).toContain('rtl_sql_select, rtl_logs_search');
-    expect(run).toContain('rtl_note_evidence');
-    expect(run).not.toContain('rtl_cbs_call');
-    expect(run).not.toContain('atspl_');
+    expect(run).toContain('  - rtl: sql_select, logs_search');
+    expect(run).not.toMatch(/- rtl: .*get_account_statement/);
+    expect(run).not.toMatch(/\b(rtl|ssfb|atspl)_(sql_select|logs_search|note_evidence)\b/);
+    expect(run).not.toContain('cbs_call');
+    expect(run).not.toContain('  - atspl:');
   });
 
   test('the tool names can come from the wiring', () => {
-    const run = runOf(render({ entities: ['atspl'], entityTools: { atspl: ['atspl_sql_select', 'atspl_logs_search'] } }));
-    expect(run).toContain('\n  - atspl: atspl_sql_select, atspl_logs_search\n');
-    expect(run).not.toContain('atspl_http_call');
+    const run = runOf(render({ entities: ['atspl'], entityTools: { atspl: ['sql_select', 'logs_search'] } }));
+    expect(run).toContain('\n  - atspl: sql_select, logs_search\n');
+    expect(run).not.toContain('http_call');
   });
 
   test('with no enabled entity, says only the code tools are there', () => {

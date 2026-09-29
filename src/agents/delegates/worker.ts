@@ -7,12 +7,12 @@
 // rows or hits, reading many files to answer one question), and it replies
 // with a short result plus the /data files it wrote.
 //
-// Tools: the agent mount (every enabled entity's '<entity>_<tool>' data
-// tools and the shared code, run_log and read_staged tools) minus the tools
-// only the root may call: finish_report, ask_requester, stop_blocked,
-// resolve_identity and every evidence tool ('<entity>_note_evidence' and the
-// code one). Like every delegate body it cannot mount a subagent. Skills: the
-// same notes as the single root (rootSkills(..., 'single')). Method text:
+// Tools: the agent mount (the data tools, each with an entity input, D110,
+// and the shared code, run_log and read_staged tools) minus the tools only
+// the root may call: finish_report, ask_requester, stop_blocked,
+// resolve_identity and both evidence tools. Like every delegate body it
+// cannot mount a subagent. Skills: the same notes as the single root
+// (rootSkills(..., 'single')). Method text:
 // logs.md and logs-<e>.md for the enabled entities, then the '## This worker'
 // footer.
 //
@@ -30,6 +30,7 @@ import { actionBrief, logActions } from '../../runlog/actions.ts';
 import { ASK_REQUESTER } from '../../tools/ask-requester.tool.ts';
 import { FINISH_REPORT } from '../../tools/finish-report.tool.ts';
 import { toolsFor } from '../../tools/index.ts';
+import { CODEBASE_NOTE_EVIDENCE, NOTE_EVIDENCE } from '../../tools/note-evidence.tool.ts';
 import { RESOLVE_IDENTITY } from '../../tools/resolve-identity.tool.ts';
 import { STOP_BLOCKED } from '../../tools/stop-blocked.tool.ts';
 import type { ToolContext } from '../../tools/types.ts';
@@ -57,7 +58,14 @@ export const WORKER_NAME = 'worker';
 export const WORKER_REPLY_LINES = 20;
 
 // Only the root ends the run, asks the requester, widens the id chain or records evidence.
-const ROOT_ONLY: ReadonlySet<string> = new Set([FINISH_REPORT, ASK_REQUESTER, STOP_BLOCKED, RESOLVE_IDENTITY]);
+const ROOT_ONLY: ReadonlySet<string> = new Set([
+  FINISH_REPORT,
+  ASK_REQUESTER,
+  STOP_BLOCKED,
+  RESOLVE_IDENTITY,
+  NOTE_EVIDENCE,
+  CODEBASE_NOTE_EVIDENCE,
+]);
 
 export type WorkerOptions = {
   readonly env: DelegateEnv;
@@ -86,12 +94,9 @@ export function workerFor(runId: RunId, options: WorkerOptions): SubagentDefinit
   });
 }
 
-/**
- * True for the tools the worker does not get: the root-only ones and every
- * evidence tool (note_evidence, '<entity>_note_evidence' and the code one).
- */
+/** True for the tools the worker does not get: the root-only ones, both evidence tools among them. */
 export function rootOnlyTool(name: string): boolean {
-  return ROOT_ONLY.has(name) || (name.includes('note_') && name.endsWith('_evidence'));
+  return ROOT_ONLY.has(name);
 }
 
 /** The tools, skills and instruction text one worker render (one task) mounts. */
@@ -115,7 +120,7 @@ export function workerMounts(runId: RunId, options: { readonly env: DelegateEnv 
     '- Write bulk output (rows, hits, file lists) to files under /data and read slices of them. Never paste it into the reply.',
     `- Reply with the answer in at most ${WORKER_REPLY_LINES} lines, then the /data file paths you wrote and the tool calls you made (tool and main arguments). Say what you could not check and why.`,
     '- You cannot record evidence, resolve identities, ask the requester or end the run. The Triage agent does that from your reply.',
-    `- Entities: ${entities.join(', ')}. Data tools are named <entity>_<tool> (for example ${entities[0] ?? 'rtl'}_sql_select) and each reaches only its entity; its description lists the entity's services.`,
+    `- Entities: ${entities.join(', ')}. A data tool takes the entity to query (for example sql_select with entity "${entities[0] ?? 'rtl'}") and each call reaches only that entity; the tool description lists each entity's services. The SSFB-only tools take no entity.`,
     ...deployManifestLines(env.config, env.registry, entities),
     `- Tool calls allowed in this task: ${max}. Calls past that are refused.`,
     `- Tools mounted: ${tools.map((t) => t.name).join(', ')}.`,

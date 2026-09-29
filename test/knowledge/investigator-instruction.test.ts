@@ -100,7 +100,7 @@ describe('tool names per agent', () => {
   test('investigator.md names no orchestrator tool and covers the source tools', () => {
     const tools = mentionedTools(read('investigator.md'));
     for (const t of TRIAGE_TOOLS.filter((x) => x !== 'note_evidence')) expect(tools).not.toContain(t);
-    for (const t of ['logs_search', 'sql_select', 'http_call', 'note_evidence', 'cbs_call', 'repo_grep', 'repo_read', 'run_log']) {
+    for (const t of ['logs_search', 'sql_select', 'http_call', 'note_evidence', 'repo_grep', 'repo_read', 'run_log']) {
       expect(tools).toContain(t);
     }
     for (const t of ['encrypt_lookup_value', 'decrypt_fields']) expect(tools).toContain(t);

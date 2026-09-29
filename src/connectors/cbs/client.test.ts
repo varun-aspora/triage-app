@@ -46,7 +46,7 @@ const RULES: ApiRule[] = [
 ];
 
 function decide(method: string, path: string): HttpDecision {
-  return decideHttp({ tool: 'cbs_call', service: 'finacle', method, path, base: GATEWAY, rules: RULES });
+  return decideHttp({ service: 'finacle', method, path, base: GATEWAY, rules: RULES });
 }
 
 function input(method: string, path: string, extra: Partial<CbsCallInput> = {}): CbsCallInput {

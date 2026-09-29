@@ -35,7 +35,7 @@ address. It is not a product or plan master.
 
 harbor keeps its own copy of the delivery status in `customer_deliveries`.
 That table is SSFB data; if it disagrees with package, say so in the findings
-so the SSFB investigator can check it.
+so it can be checked in SSFB.
 
 ## Queries
 

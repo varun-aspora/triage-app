@@ -14,9 +14,10 @@ metadata:
 This note is about the Shivalik copy of workflow-op. A second copy runs for
 RTL, with its own database; it is the registry service `rtl:workflow` and its
 note is `rtl-workflow`. A form or execution that is missing here may exist on
-`rtl:workflow`. The SSFB investigator cannot query the RTL copy, so report the
-missing row as a gap and say it may be on `rtl:workflow`, rather than
-concluding the form does not exist.
+`rtl:workflow`. SSFB's tools cannot reach the RTL copy: check `rtl:workflow`
+when you have RTL's tools, and otherwise report the missing row as a gap and
+say it may be on `rtl:workflow`, rather than concluding the form does not
+exist.
 
 workflow-op runs workflow steps and serves the UI templates for onboarding
 and banking flows. harbor calls it to fetch form submission state and step

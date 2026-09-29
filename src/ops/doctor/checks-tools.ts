@@ -1,8 +1,8 @@
 // Doctor check: which tools each agent would get (HLD §7 Doctor).
 //
 // One ok row per mount lists the tool names toolsFor() mounts: triage,
-// code_walker and agent (the single shape, D109, with its '<entity>_<name>'
-// tools) once, and investigator plus investigator_deep's extras per enabled
+// code_walker and agent (the single shape, D109, with each entity tool once,
+// D110) once, and investigator plus investigator_deep's extras per enabled
 // entity. Tools that are off get a separate disabled row with the
 // reason each module gives, which names env keys only. create() builds the
 // tool definitions and never touches run dependencies, so no I/O happens.

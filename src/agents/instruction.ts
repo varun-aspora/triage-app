@@ -11,8 +11,9 @@
 // The single shape (D109) has one agent with every entity's tools and no
 // briefs: agent.md, report-format.md and the logs notes of the enabled
 // entities, the fixed rules without the delegate lines, a '## One agent'
-// section, and a run section that lists each entity's prefixed tools. The
-// split text stays exactly as it was.
+// section, and a run section that lists the tools each entity has (one tool
+// per capability with an entity input, D110). The split text stays exactly
+// as it was.
 
 import { parsePatterns, type Pattern } from '../classify/patterns.ts';
 import type { AgentShape } from '../config/env.ts';
@@ -39,13 +40,13 @@ export function methodDocsFor(shape: AgentShape, entities: readonly Entity[] = E
 }
 
 /**
- * The entity-scoped modules the single agent mounts per entity as
- * <entity>_<name> (D109), in the order the run section lists them. Some are
- * mounted only where configured.
+ * The entity tools of the single agent (D109, D110), each mounted once with
+ * an entity input, in the order the run section lists them. Some are there
+ * only where configured.
  */
 export const ENTITY_TOOLS = ['sql_select', 'logs_search', 'http_call', 'encrypt_lookup_value', 'decrypt_fields', 'note_evidence'] as const;
 /** Mounted on SSFB only. */
-export const SSFB_ONLY_TOOLS = ['cbs_call', 'get_account_statement', 'detect_silent_reversals'] as const;
+export const SSFB_ONLY_TOOLS = ['get_account_statement', 'detect_silent_reversals'] as const;
 
 /** The brief template fields, in order (LLD 04 §2.5). */
 export const BRIEF_FIELDS = ['Entity', 'Question', 'Ids', 'Window', 'Services in play', 'Return'] as const;
@@ -69,9 +70,8 @@ export type MethodOptions = {
   /** The run's agent shape (D109). Defaults to split. */
   readonly shape?: AgentShape;
   /**
-   * Single shape: the prefixed tool names mounted per entity, as the run
-   * section lists them. Defaults to ENTITY_TOOLS (plus SSFB_ONLY_TOOLS on SSFB)
-   * with the entity prefix.
+   * Single shape: the entity tools mounted per entity, as the run section
+   * lists them. Defaults to ENTITY_TOOLS (plus SSFB_ONLY_TOOLS on SSFB).
    */
   readonly entityTools?: Partial<Readonly<Record<Entity, readonly string[]>>>;
 };
@@ -101,8 +101,8 @@ const SINGLE_RULES = rulesText([...COMMON_RULES, ENDING_RULE]);
 const ONE_AGENT = [
   '## One agent',
   '',
-  '- You are the only agent in this run. There are no investigators to brief: you read every enabled entity yourself with its prefixed tools, listed under This run.',
-  "- The notes name data tools by their plain name (`sql_select`, `logs_search`); call the entity's prefixed one, such as `rtl_logs_search`. Where a note mentions an investigator, a delegate or a brief, read it as you and your own plan.",
+  '- You are the only agent in this run. There are no investigators to brief: you read every enabled entity yourself with the data tools, listed per entity under This run.',
+  '- A data tool takes the entity to query, such as `logs_search` with `entity: "rtl"`; the notes name the tools the same way, without the entity. The SSFB-only tools take no entity. Where a note mentions an investigator, a delegate or a brief, read it as you and your own plan.',
   '- The one subagent is `worker`, reached with `task`, for bulk jobs.',
 ].join('\n');
 
@@ -132,10 +132,10 @@ export function methodText(init: TriageInit, options: MethodOptions = {}): strin
   return `${sections.join('\n\n')}\n`;
 }
 
-// Single shape: one line per enabled entity with its prefixed tool names.
+// Single shape: one line per enabled entity with the tools that reach it.
 function entityToolLines(entities: readonly Entity[], given: MethodOptions['entityTools']): string[] {
   return entities.map((e) => {
-    const names = given?.[e] ?? [...ENTITY_TOOLS, ...(e === 'ssfb' ? SSFB_ONLY_TOOLS : [])].map((name) => `${e}_${name}`);
+    const names = given?.[e] ?? [...ENTITY_TOOLS, ...(e === 'ssfb' ? SSFB_ONLY_TOOLS : [])];
     return `  - ${e}: ${names.map(clean).join(', ')}`;
   });
 }
@@ -158,7 +158,7 @@ function runSection(
       : 'none; you have only code_walker';
   const singleLine =
     entities.length > 0
-      ? `${entities.join(', ')}. Each has its own tools, named <entity>_<tool>; some are there only where configured:`
+      ? `${entities.join(', ')}. The tools that reach each one, called with that entity; some are there only where configured:`
       : 'none; you have only the code tools';
   const entityLine = single ? singleLine : splitLine;
   const focusLine =

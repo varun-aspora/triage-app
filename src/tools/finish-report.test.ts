@@ -23,7 +23,7 @@ import {
   type RunStore,
 } from '../runstore/types.ts';
 import type { PreflightWarning, TriageInit } from '../types/classification.ts';
-import type { Tier } from '../types/core.ts';
+import { ENTITIES, type Entity, type Tier } from '../types/core.ts';
 import type { IdChain } from '../types/id-chain.ts';
 import type { CodeFindings, EntityFindings } from '../types/findings.ts';
 import type { Report, ReportDraft } from '../types/report.ts';
@@ -47,6 +47,7 @@ import {
   unpricedGap,
   type UsageReader,
 } from './finish-report.tool.ts';
+import { markAgentEntities } from './agent-entity.ts';
 import { conformanceProblems, toolsFor } from './index.ts';
 import type { ToolDeps } from './types.ts';
 
@@ -1024,19 +1025,24 @@ describe('finish_report: initialData', () => {
 
 // ------------------------------------------------------------------ entities_consulted
 
-/** Adds one line to the run's action log, the way logActions records a mounted tool's call. */
-async function logged(s: Setup, tool: string, status: 'ok' | 'refused'): Promise<void> {
-  const fakeTool = {
+/**
+ * Adds one line to the run's action log, the way logActions records a mounted
+ * tool's call. With an entity, the tool is an agent-mount entity tool called
+ * with that entity (D110).
+ */
+async function logged(s: Setup, tool: string, status: 'ok' | 'refused', entity?: Entity): Promise<void> {
+  const plain = {
     name: tool,
     description: 'test tool',
     input: v.object({}),
     run: async () => ({ output: status === 'ok' ? { status, data: { row_count: 1 } } : { status, message: 'not allowed' } }),
   } as unknown as ToolDefinition;
+  const fakeTool = entity === undefined ? plain : markAgentEntities(plain, { entities: ENTITIES, picked: true });
   const [wrapped] = logActions([fakeTool], makeToolContext({ runId: s.runId, config, deps: s.deps }));
-  await (wrapped!.run as (c: unknown) => Promise<unknown>)({ data: {}, toolCallId: 'call_0', log: console });
+  await (wrapped!.run as (c: unknown) => Promise<unknown>)({ data: entity === undefined ? {} : { entity }, toolCallId: 'call_0', log: console });
 }
 
-describe('finish_report: entities_consulted (D109)', () => {
+describe('finish_report: entities_consulted (D109, D110)', () => {
   test('on the agent mount it is the union of the draft, the evidence keys and the ok data calls', async () => {
     const writer = fakeWriter();
     const s = setup({ tier: 'strong', options: { writeReport: writer.writeReport, consultedFromRun: true } });
@@ -1044,7 +1050,7 @@ describe('finish_report: entities_consulted (D109)', () => {
     expect(baseDraft('strong').entities_consulted).toEqual(['ssfb']);
     putEvidence(s.store, 'rtl', entityFindings('high'));
     putEvidence(s.store, 'code', codeFindings([]));
-    await logged(s, 'atspl_logs_search', 'ok');
+    await logged(s, 'logs_search', 'ok', 'atspl');
 
     const out = await call(s, baseDraft('strong'));
 
@@ -1055,7 +1061,7 @@ describe('finish_report: entities_consulted (D109)', () => {
   test('a refused data call and a shared tool add nothing', async () => {
     const writer = fakeWriter();
     const s = setup({ tier: 'strong', options: { writeReport: writer.writeReport, consultedFromRun: true } });
-    await logged(s, 'rtl_sql_select', 'refused');
+    await logged(s, 'sql_select', 'refused', 'rtl');
     await logged(s, 'repo_grep', 'ok');
 
     await call(s, baseDraft('strong'));
@@ -1066,7 +1072,7 @@ describe('finish_report: entities_consulted (D109)', () => {
   test('after the action log is released the stored evidence keys still count', async () => {
     const writer = fakeWriter();
     const s = setup({ tier: 'strong', options: { writeReport: writer.writeReport, consultedFromRun: true } });
-    await logged(s, 'atspl_sql_select', 'ok');
+    await logged(s, 'sql_select', 'ok', 'atspl');
     putEvidence(s.store, 'atspl', entityFindings('high'));
     releaseActions(s.runId);
 
@@ -1094,7 +1100,7 @@ describe('finish_report: entities_consulted (D109)', () => {
     const writer = fakeWriter();
     const s = setup({ tier: 'strong', options: { writeReport: writer.writeReport } });
     putEvidence(s.store, 'rtl', entityFindings('high'));
-    await logged(s, 'atspl_logs_search', 'ok');
+    await logged(s, 'logs_search', 'ok', 'atspl');
 
     await call(s, baseDraft('strong'));
 
@@ -1125,7 +1131,7 @@ describe('finish_report: entities_consulted (D109)', () => {
         { entity: 'code', findings: codeFindings(['harbor']) },
         { entity: 'rtl', findings: entityFindings('high') },
       ],
-      [{ at, agent: 'worker', tool: 'ssfb_cbs_call', entity: null, args: '', outcome: 'ok status=200' }],
+      [{ at, agent: 'worker', tool: 'http_call', entity: 'ssfb', entityTool: true, args: '', outcome: 'ok status=200' }],
     );
     expect(got).toEqual(['ssfb', 'rtl']);
   });

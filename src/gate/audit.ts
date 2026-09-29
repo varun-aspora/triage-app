@@ -25,7 +25,7 @@ import { type PersistedOptions, redactPersisted } from './redact.ts';
 export const COUNT_ONLY_TOOLS: ReadonlySet<string> = new Set(['decrypt_fields', 'encrypt_lookup_value']);
 
 /** Tools whose method policy comes from rules.ts, so an allow always has a rule behind it. */
-export const HTTP_RULE_TOOLS: ReadonlySet<string> = new Set(['http_call', 'cbs_call']);
+export const HTTP_RULE_TOOLS: ReadonlySet<string> = new Set(['http_call']);
 
 export type AuditInput = {
   readonly run_id: string;

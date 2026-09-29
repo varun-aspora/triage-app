@@ -10,15 +10,15 @@
 //   also the compaction settings from compactionFor (S1.4);
 // - the one sandbox, once (useSandbox); delegates inherit it;
 // - the method text as an always-on instruction (single: the shape's note and
-//   the prefixed tools per entity);
+//   the entity tools per entity);
 // - split: toolsFor('triage'): resolve_identity, note_evidence and
 //   finish_report and the other ending tools only, so the root has no entity
 //   I/O of its own; per enabled entity (all of them, not only the hinted
 //   ones, so a follow-up can reach any entity), investigate_<e>,
 //   investigate_<e>_deep and the <e>-overview skill; then code_walker and the
 //   patterns and frontend-routing skills;
-// - single: toolsFor('agent'), every enabled entity's '<entity>_<tool>' data
-//   tools plus the shared ones; the worker subagent; every enabled entity's
+// - single: toolsFor('agent'), the data tools once each with an entity input
+//   (D110) plus the shared ones; the worker subagent; every enabled entity's
 //   notes plus repo-map, patterns, frontend-routing and codegraph-limits.
 // The choices themselves live in triage-plan.ts, which is unit tested.
 //
@@ -107,12 +107,12 @@ export function Triage({ id }: AgentProps): string {
   const rootTools = single ? toolsFor('agent', rootCtx) : toolsFor('triage', rootCtx);
   for (const tool of logActions(rootTools, rootCtx)) useTool(watchFinishReport(id, tool));
 
-  // After the tools, so the single shape's run section lists the prefixed tools actually mounted.
+  // After the tools, so the single shape's run section lists the entity tools actually mounted.
   const services = Object.fromEntries(plan.entities.map((e) => [e, rt.registry.services(e)]));
   const deployManifests = deployManifestLines(rt.config, rt.registry, plan.entities);
   const times = runTimes(id);
   const finishBy = times === undefined ? {} : { finishBy: times.finishBy };
-  const shaped = single ? { shape: plan.shape, entityTools: entityToolNames(rootTools.map((t) => t.name), plan.entities) } : {};
+  const shaped = single ? { shape: plan.shape, entityTools: entityToolNames(rootTools, plan.entities) } : {};
   useInstruction(
     methodText(init, { entities: plan.entities, focus: plan.focus, services, deployManifests, knowledge: rt.knowledge, ...finishBy, ...shaped }),
   );

@@ -20,18 +20,17 @@
 // 'code', so on the triage mount the call is refused and the model is told to
 // let the delegate record its own findings.
 //
-// Single shape (D109): the module is perEntity, so the agent mount gets one
-// '<entity>_note_evidence' per enabled entity, each built with its entity in
-// the closure. Code findings go through codebase_note_evidence
-// (codebase-note-evidence.tool.ts), a shared tool built here with the 'code'
-// key; its name ends in _note_evidence like the others, so the worker, which
-// gets no evidence tool, leaves it out with them.
+// Single shape (D109, D110): the module is perEntity, so the agent mount
+// gets one note_evidence with an entity input, which runs the copy built
+// with that entity in the closure. Code findings go through
+// codebase_note_evidence (codebase-note-evidence.tool.ts), a shared tool
+// built here with the 'code' key.
 //
 // On the agent mount a call is refused unless the run has queried what it
-// records: an ok '<entity>_' data call (or a repo_* / code_* call for code)
-// in the run action log, or an earlier stored version of the same key. The
-// action log is released when the run settles, so after a resume the stored
-// key is what lets the agent add a version without querying again.
+// records: an ok data call for that entity (or a repo_* / code_* call for
+// code) in the run action log, or an earlier stored version of the same key.
+// The action log is released when the run settles, so after a resume the
+// stored key is what lets the agent add a version without querying again.
 
 import { defineTool, type ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
@@ -45,7 +44,6 @@ import type { AuditTransport } from '../types/audit.ts';
 import type { Entity } from '../types/core.ts';
 import { CodeFindingsSchema, EntityFindingsSchema } from '../types/findings.ts';
 import { ok, refused, type ToolEnvelope } from '../types/tool-result.ts';
-import { splitAgentToolName } from './agent-name.ts';
 import type { Mount, ToolContext, ToolModule } from './types.ts';
 import type {} from './_lib/context.ts';
 
@@ -75,24 +73,24 @@ const TRIAGE_REFUSAL =
   'Refused: the orchestrator has no entity to record findings under. Ask the investigate_<entity> ' +
   'or code_walker delegate to record them with note_evidence.';
 
-const agentEntityDescription = (e: Entity): string =>
-  `Save your findings for ${e} as EntityFindings: evidence items with source, at, query_or_path and ` +
+// One text for every entity: the agent mount shows one tool for all of them (D110).
+const AGENT_ENTITY_DESCRIPTION =
+  'Save your findings for one entity as EntityFindings: evidence items with source, at, query_or_path and ' +
   'summary; a timeline; hypotheses; confidence high|medium|low; gaps; and suggested_next_entity. ' +
-  `Only ${e} findings go here, after a ${e}_* call returned a result; another entity's findings go to ` +
-  'its own <entity>_note_evidence tool. When the cause sits in another entity, set suggested_next_entity to it: two ' +
-  'entity records that each blame their own entity count as conflicting hypotheses. A later call ' +
-  'stores a new version. Returns evidence_id and version.';
+  "Only that entity's findings go in a call, after a data call for it returned a result; another entity's " +
+  'findings go in their own call. When the cause sits in another entity, set suggested_next_entity to it: two ' +
+  'entity records that each blame their own entity count as conflicting hypotheses. A later call for the ' +
+  'same entity stores a new version. Returns evidence_id and version.';
 
 const AGENT_CODE_DESCRIPTION =
   'Save your code findings as CodeFindings: claims with repo, file, lines and what_it_shows, an ' +
   'optional matches_known_pattern, and confidence high|medium|low. Only after a repo_* or code_* call ' +
-  'returned a result; data findings go to the <entity>_note_evidence tools. A later call stores a new ' +
+  'returned a result; data findings go to note_evidence with their entity. A later call stores a new ' +
   'version. Returns evidence_id and version.';
 
 const notQueriedRefusal = (e: Entity): string =>
-  `Refused: no ${e}_* data call has returned a result in this run, so there is nothing to record under ` +
-  `${e}. Query ${e} first, or save these findings with the <entity>_note_evidence tool of the entity ` +
-  'you queried.';
+  `Refused: no ${e} data call has returned a result in this run, so there is nothing to record under ` +
+  `${e}. Query ${e} first, or save these findings under the entity you queried.`;
 
 const CODE_NOT_READ_REFUSAL =
   'Refused: no repo_* or code_* call has returned a result in this run, so there are no code findings ' +
@@ -117,15 +115,15 @@ function planFor(ctx: ToolContext, mount: Mount): Plan {
 const OK_OUTCOME = /^ok\b/;
 
 /**
- * The entity a logged call read, from its '<entity>_' prefix on the agent
- * mount (D109). Null for shared tools and for the evidence tools themselves.
+ * The entity a logged call read: the entity of an agent-mount entity tool
+ * (D110). Null for shared tools, for note_evidence itself and for every call
+ * of the split shape.
  */
-export function queriedEntity(action: Pick<Action, 'tool'>): Entity | null {
-  const split = splitAgentToolName(action.tool);
-  return split === undefined || split.name === NOTE_EVIDENCE ? null : split.entity;
+export function queriedEntity(action: Pick<Action, 'tool' | 'entity' | 'entityTool'>): Entity | null {
+  return action.entityTool === true && action.tool !== NOTE_EVIDENCE ? action.entity : null;
 }
 
-/** Entities with at least one ok '<entity>_' data call in the action log. */
+/** Entities with at least one ok data call through an agent-mount entity tool in the action log. */
 export function entitiesQueried(actions: readonly Action[]): Set<Entity> {
   const found = new Set<Entity>();
   for (const a of actions) {
@@ -158,7 +156,7 @@ function listPaths(paths: readonly string[]): string {
 function describe(plan: Plan): string {
   if (plan.kind === 'triage') return TRIAGE_DESCRIPTION;
   if (plan.kind === 'code') return plan.checkQueried ? AGENT_CODE_DESCRIPTION : CODE_DESCRIPTION;
-  return plan.checkQueried ? agentEntityDescription(plan.key) : ENTITY_DESCRIPTION;
+  return plan.checkQueried ? AGENT_ENTITY_DESCRIPTION : ENTITY_DESCRIPTION;
 }
 
 type Checked =

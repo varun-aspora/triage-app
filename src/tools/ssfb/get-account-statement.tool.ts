@@ -190,7 +190,6 @@ export function decideStatement(base: string, rules: readonly ApiRule[], q: Stat
     return { ok: false, code: 'bad_base', message: 'the rhythm base URL could not be parsed' };
   }
   return decideHttp({
-    tool: 'http_call',
     service: RHYTHM,
     method: 'GET',
     path,

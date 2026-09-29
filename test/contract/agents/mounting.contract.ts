@@ -45,7 +45,7 @@ const CODEGRAPH_TOOLS = ['code_explore', 'code_impact', 'code_node'];
 const BASE_TOOLS = ['http_call', 'logs_search', 'note_evidence', 'read_staged', 'run_log', 'sql_select', ...REPO_TOOLS];
 const CODE_TOOLS = [...CODEGRAPH_TOOLS, ...REPO_TOOLS];
 const SSFB_ALWAYS = ['detect_silent_reversals', 'get_account_statement'];
-const SSFB_ONLY = [...SSFB_ALWAYS, 'cbs_call', 'decrypt_fields', 'encrypt_lookup_value'];
+const SSFB_ONLY = [...SSFB_ALWAYS, 'decrypt_fields', 'encrypt_lookup_value'];
 const ENTITY_IO = ['sql_select', 'http_call', 'logs_search'];
 const HARNESS_TOOLS = new Set([...SANDBOX_TOOL_NAMES, ...FRAMEWORK_TOOL_NAMES]);
 

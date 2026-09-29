@@ -62,7 +62,7 @@ import {
   releaseFinishReport,
   type UsageReader,
 } from '../tools/finish-report.tool.ts';
-import { splitAgentToolName } from '../tools/agent-name.ts';
+import { agentEntitiesOf } from '../tools/agent-entity.ts';
 import { STOP_BLOCKED } from '../tools/stop-blocked.tool.ts';
 import type { ToolContext, ToolDeps } from '../tools/types.ts';
 import type { TriageInit } from '../types/classification.ts';
@@ -109,7 +109,7 @@ export type TriagePlan = {
   readonly thinkingLevel: ThinkingLevel;
   /** Single shape only: compactionFor(model). Missing means Flue's default. */
   readonly compaction?: CompactionSettings;
-  /** Every enabled entity, in ENTITIES order. Split: each gets its investigators; single: its prefixed tools. */
+  /** Every enabled entity, in ENTITIES order. Split: each gets its investigators; single: the entity tools reach it. */
   readonly entities: readonly Entity[];
   /** The enabled entities request.hints.entities names, in ENTITIES order; empty with no hints. */
   readonly focus: readonly Entity[];
@@ -188,16 +188,15 @@ export function triagePlan(init: TriageInit, config: Config, registry: Registry,
 }
 
 /**
- * The '<entity>_<tool>' names among the mounted tool names, grouped by entity,
- * in mount order. Each of the given entities gets a list, empty when none of
- * its tools is mounted, so the instruction never falls back to names that are
- * not mounted.
+ * The names of the mounted agent-mount entity tools (D110), grouped by the
+ * entities each serves, in mount order. Each of the given entities gets a
+ * list, empty when none of its tools is mounted, so the instruction never
+ * falls back to names that are not mounted.
  */
-export function entityToolNames(names: readonly string[], entities: readonly Entity[] = []): Partial<Record<Entity, string[]>> {
+export function entityToolNames(tools: readonly ToolDefinition[], entities: readonly Entity[] = []): Partial<Record<Entity, string[]>> {
   const byEntity: Partial<Record<Entity, string[]>> = Object.fromEntries(entities.map((e) => [e, []]));
-  for (const name of names) {
-    const entity = splitAgentToolName(name)?.entity;
-    if (entity !== undefined) (byEntity[entity] ??= []).push(name);
+  for (const tool of tools) {
+    for (const entity of agentEntitiesOf(tool)?.entities ?? []) (byEntity[entity] ??= []).push(tool.name);
   }
   return byEntity;
 }
@@ -496,7 +495,7 @@ function knowledgeFor(config: Config): Knowledge {
 
 /**
  * The real connectors. Built only when mock mode is off; none of them
- * connects or spawns until a tool calls it. cbs_call builds its own per run.
+ * connects or spawns until a tool calls it. http_call builds the CBS connector per run.
  */
 export function realConnectors(config: Config, registry: Registry): ToolConnectors {
   return Object.freeze({

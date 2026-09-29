@@ -149,7 +149,7 @@ export type Capability =
   | { readonly status: 'ok'; readonly envName: string; readonly value: string }
   | { readonly status: 'disabled'; readonly envName: string; readonly reason: 'blank' };
 
-/** 'cbs' means the base URL is reachable only through cbs_call, never http_call. */
+/** 'cbs' means the base URL is reachable only through the CBS connector (http_call's finacle route), never plain HTTP. */
 export type ApiCapability = Capability & { readonly transport: 'http' | 'cbs' };
 /** naiveTimestampZone is the service's naive_timestamp_zone, or UTC. */
 export type DbCapability = Capability & { readonly naiveTimestampZone: string };
@@ -595,7 +595,7 @@ function report(spec: EntityRegistry, enabled: boolean, look: (name: string) => 
 
   for (const [service, s] of Object.entries(spec.services)) {
     if (s.db !== undefined) single('db', s.db, service);
-    if (s.api !== undefined) single('api', s.api, service, s.transport === 'cbs' ? 'reachable only through cbs_call' : undefined);
+    if (s.api !== undefined) single('api', s.api, service, s.transport === 'cbs' ? 'reachable only through the CBS gateway' : undefined);
     if (s.auth !== undefined) single('auth', s.auth.token_env, service);
     if (s.field_encryption !== undefined) single('field_encryption', s.field_encryption.key_env, service);
   }
