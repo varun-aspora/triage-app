@@ -9,7 +9,8 @@
 //   budget -> scope (id-shaped terms; systemic only with count or group_by,
 //   ids still checked; correlation ids seen in an earlier result, D76, D77)
 //   -> gate (buildLogsQuery and resolveWindow from src/gate) -> not configured
-//   -> fixture (transport-neutral key) or the Quickwit connector -> envelope
+//   -> fixture (transport-neutral key) or the Quickwit connector -> derived
+//   leads from the hits (D97) -> envelope
 //
 // This tool holds no limiter. The connector takes the entity's slot from
 // quickwitSlot() for each request it sends, so the per-entity cap
@@ -48,15 +49,16 @@ import {
   type LogsQuery,
   type QuickwitGateConfig,
 } from '../gate/quickwit.ts';
+import type { Config } from '../config/env.ts';
 import { resolveWindow } from '../gate/quickwit-window.ts';
-import { redactModelFacing } from '../gate/redact.ts';
-import { observeCorrelationIds, observeJourneyKeys, type LogsMode } from '../gate/scope.ts';
+import { redactForModel } from '../gate/redact.ts';
+import { observeCorrelationIds, type LogsMode } from '../gate/scope.ts';
 import { semanticKey } from '../mock/key.ts';
 import type { Entity, TimeWindow } from '../types/core.ts';
 import type { ToolEnvelope } from '../types/tool-result.ts';
 import { cutText, type GateDecision, runIoTool, type BackingRef, type StagingHarness } from './_lib/pipeline.ts';
 import type { ToolContext, ToolModule } from './types.ts';
-import { observedScopeOf, scopeSetOf } from './_lib/context.ts';
+import { observedScopeOf } from './_lib/context.ts';
 
 declare module './_lib/context.ts' {
   interface ToolConnectors {
@@ -329,14 +331,15 @@ export function foldGroups(groups: readonly LogGroup[]): LogGroup[] {
  * the cut, because a cut can split an email or a card number so the later
  * model-facing redaction no longer matches it. Cut keys that end up equal
  * stay separate groups. The staged file and the audit line keep the full list.
+ * Keys are redacted as the run's model sees them (TRIAGE_MODEL_REDACTION, D107).
  */
-export function forModel(out: LogsSearchOutput): LogsSearchOutput {
+export function forModel(out: LogsSearchOutput, config: Pick<Config, 'redaction'>): LogsSearchOutput {
   if ('groups' in out && out.groups !== undefined) {
-    const { top, fields } = topGroups(out.groups, out.notes);
+    const { top, fields } = topGroups(out.groups, out.notes, config);
     return { ...out, ...fields, groups: top };
   }
   if (out.message_groups !== undefined) {
-    const { top, fields } = topGroups(out.message_groups, out.notes);
+    const { top, fields } = topGroups(out.message_groups, out.notes, config);
     return { ...out, ...fields, message_groups: top };
   }
   return out;
@@ -348,8 +351,9 @@ export function forModel(out: LogsSearchOutput): LogsSearchOutput {
 function topGroups(
   all: readonly LogGroup[],
   notes: readonly string[] | undefined,
+  config: Pick<Config, 'redaction'>,
 ): { top: LogGroup[]; fields: Pick<LogsSearchOutput, 'group_count' | 'groups_omitted' | 'notes'> } {
-  const shown = all.slice(0, GROUP_TOP_N).map((g) => ({ key: redactModelFacing(g.key), count: g.count }));
+  const shown = all.slice(0, GROUP_TOP_N).map((g) => ({ key: redactForModel(g.key, config), count: g.count }));
   const omitted = all.slice(GROUP_TOP_N);
   const cut = shown.some((g) => g.key.length > GROUP_KEY_CHARS);
   const note =
@@ -546,12 +550,14 @@ async function runLogsSearch(ctx: ToolContext, entity: Entity, args: RunArgs): P
       },
       render: (value) => {
         const out = shapeOf(value);
-        // Correlation ids and journey keys in these hits may be searched later in the run (D77).
-        if ('hits' in out) {
-          observeCorrelationIds(ctx.runId, out.hits);
-          observeJourneyKeys(ctx.runId, LOGS_SEARCH, data, scopeSetOf(deps), out.hits);
-        }
-        return forModel(out);
+        // Correlation ids in these hits may be searched later in the run (D77).
+        if ('hits' in out) observeCorrelationIds(ctx.runId, out.hits);
+        return forModel(out, ctx.config);
+      },
+      // Ids in hits tied to an id in scope become derived leads (D97).
+      leads: (value) => {
+        const out = shapeOf(value);
+        return { records: 'hits' in out ? out.hits : [] };
       },
       // The staged file and the audit summary keep every group.
       stage: shapeOf,

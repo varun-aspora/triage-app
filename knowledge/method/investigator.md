@@ -209,8 +209,10 @@ to `/data/<call_id>.json` in the sandbox.
   scratch files only.
 - The sandbox has no network and no access to the host. It cannot reach any
   entity system; the typed tools are the only way in.
-- Files are wiped between messages. Anything you need to keep goes into
-  `note_evidence`. Put the `/data` path in the evidence item's `raw_ref`.
+- Files in `/data` are kept for the whole run, across a question to the
+  requester and a resume. Only saved evidence reaches the report, so anything
+  you need goes into `note_evidence`. Put the `/data` path in the evidence
+  item's `raw_ref`.
 - On some deployments the staged text is masked. If ids in `/data` look masked,
   work from the tool summary instead of joining on them.
 

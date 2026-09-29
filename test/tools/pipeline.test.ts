@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
 import { escalationFor, releaseEscalation } from '../../src/agents/escalation.ts';
@@ -14,7 +15,8 @@ import { semanticKey } from '../../src/mock/key.ts';
 import type { FixtureStore } from '../../src/mock/store.ts';
 import type { RunStore } from '../../src/runstore/types.ts';
 import { connectorFailuresFor, releaseConnectorFailures } from '../../src/tools/_lib/connector-failures.ts';
-import { createToolDeps, widenIdChain } from '../../src/tools/_lib/context.ts';
+import { EVENTS_FILE, flushRunEventLog, installRunEventLog, uninstallRunEventLog } from '../../src/runlog/event-log.ts';
+import { addLeads, createToolDeps, mergeIdChains, widenIdChain } from '../../src/tools/_lib/context.ts';
 import {
   capModelResult,
   type IoRunContext,
@@ -29,7 +31,7 @@ import {
 import { runCodeTool } from '../../src/tools/code/_lib/code-tool.ts';
 import type { ToolContext, ToolDeps } from '../../src/tools/types.ts';
 import type { AuditLine } from '../../src/types/audit.ts';
-import type { IdChain } from '../../src/types/id-chain.ts';
+import { type IdChain, IdChainSchema, type Lead } from '../../src/types/id-chain.ts';
 import { type ToolEnvelope, ToolEnvelopeSchema } from '../../src/types/tool-result.ts';
 import { makeTestConfig, makeToolContext } from '../support/fake-tool-context.ts';
 
@@ -280,6 +282,9 @@ function expectEnvelope(env: ToolEnvelope): void {
 }
 
 const REAL = { TRIAGE_MOCK_MODE: 'false' };
+// TRIAGE_MODEL_REDACTION=on: the model-facing profile (D107). Off is the default.
+const REAL_MASKED = { ...REAL, TRIAGE_MODEL_REDACTION: 'on' };
+const SECRET_NOTE = 'PGPASSWORD=synthetic-secret-42';
 
 // ------------------------------------------------------------------ allow path
 
@@ -350,8 +355,8 @@ describe('call order', () => {
     expect(spies.real).toBe(0);
   });
 
-  test('ok envelope carries the capped render, the staged path and model-facing redaction', async () => {
-    const h = setup({ env: REAL });
+  test('ok envelope carries the capped render, the staged path and model-facing redaction (redaction on)', async () => {
+    const h = setup({ env: REAL_MASKED });
     const { harness, written } = fakeHarness(h);
     const env = await runIoTool(sqlSpec(h), runCtx(h, { harness }));
     const data = env.output.data as { rows: Row[]; row_count: number; staged_file: string };
@@ -363,6 +368,19 @@ describe('call order', () => {
     expect(data.rows[0]?.account_number).toBe(ACCOUNT_NO);
     expect(data.rows[0]?.id).toBe(CUSTOMER);
     expect(written).toHaveLength(1);
+  });
+
+  test('with redaction off, the default, the email reaches the model raw and a credential is still masked (D107)', async () => {
+    const h = setup({ env: REAL });
+    const { harness, written } = fakeHarness(h);
+    const env = await runIoTool(
+      sqlSpec(h, { render: (rows) => ({ rows: rows.slice(0, 2), row_count: rows.length, note: SECRET_NOTE }) }),
+      runCtx(h, { harness }),
+    );
+    const data = env.output.data as { rows: Row[]; note: string };
+    expect(data.rows[0]?.email).toBe(EMAIL);
+    expect(data.note).toBe('PGPASSWORD=****');
+    expect(written[0]?.text).toContain(EMAIL);
   });
 });
 
@@ -554,14 +572,17 @@ describe('mock mode', () => {
 
 describe('staging', () => {
   const cases = [
-    { provider: 'virtual', profile: 'model_facing' },
-    { provider: 'e2b', profile: 'persisted' },
-    { provider: 'daytona', profile: 'persisted' },
+    { provider: 'virtual', redaction: 'on', profile: 'model_facing' },
+    { provider: 'e2b', redaction: 'on', profile: 'persisted' },
+    { provider: 'daytona', redaction: 'on', profile: 'persisted' },
+    // Redaction off does not change what leaves the machine (D45, D107).
+    { provider: 'e2b', redaction: 'off', profile: 'persisted' },
+    { provider: 'daytona', redaction: 'off', profile: 'persisted' },
   ] as const;
 
-  for (const { provider, profile } of cases) {
-    test(`${provider} stages ${profile} text at /data/<toolCallId>.json`, async () => {
-      const h = setup({ env: { ...REAL, TRIAGE_SANDBOX_PROVIDER: provider } });
+  for (const { provider, redaction, profile } of cases) {
+    test(`${provider} with redaction ${redaction} stages ${profile} text at /data/<toolCallId>.json`, async () => {
+      const h = setup({ env: { ...REAL, TRIAGE_SANDBOX_PROVIDER: provider, TRIAGE_MODEL_REDACTION: redaction } });
       const { harness, written } = fakeHarness(h);
       const env = await runIoTool(sqlSpec(h), runCtx(h, { harness }));
       expect(env.output.status).toBe('ok');
@@ -583,6 +604,15 @@ describe('staging', () => {
       expect(staged[0]?.id).toBe(CUSTOMER);
     });
   }
+
+  test('virtual with redaction off stages raw text, credentials still masked (D107)', async () => {
+    const h = setup({ env: { ...REAL, TRIAGE_SANDBOX_PROVIDER: 'virtual' } });
+    const { harness, written } = fakeHarness(h);
+    const rows = [{ email: EMAIL, card: '4111111111111111', note: SECRET_NOTE }];
+    const result = await stageRows(harness, 'toolu_x', rows, h.config);
+    expect(result).toEqual({ staged: true, path: '/data/toolu_x.json', profile: 'raw' });
+    expect(JSON.parse(written[0]?.text ?? 'null')).toEqual([{ email: EMAIL, card: '4111111111111111', note: 'PGPASSWORD=****' }]);
+  });
 
   test('persisted staging masks the ingress names', async () => {
     const h = setup({ env: { TRIAGE_SANDBOX_PROVIDER: 'e2b' } });
@@ -631,7 +661,7 @@ describe('staging', () => {
         },
       },
     };
-    const result = await stageRows(harness, 'toolu_x', [1], { sandbox: { provider: 'local' } } as Config);
+    const result = await stageRows(harness, 'toolu_x', [1], { sandbox: { provider: 'local' }, redaction: { model: 'off' } } as Config);
     expect(result.staged).toBe(false);
     expect(written).toHaveLength(0);
   });
@@ -804,6 +834,98 @@ describe('createToolDeps', () => {
   test('widenIdChain refuses deps it did not build', () => {
     const fake = { idChain: () => CHAIN } as unknown as ToolDeps;
     expect(() => widenIdChain(fake, CHAIN)).toThrow('createToolDeps');
+  });
+});
+
+// ------------------------------------------------------------------ derived leads (D97)
+
+describe('derived leads (D97)', () => {
+  const DEVICE = 'c0ffee00-1111-4222-8333-00000000d001';
+  const uuid = (n: number): string => `c0ffee00-1111-4222-8333-${String(n).padStart(12, '0')}`;
+  const lead = (value: string, extra: Partial<Lead> = {}): Lead => ({
+    value,
+    kind: 'uuid',
+    source: 'derived',
+    status: 'derived',
+    depth: 1,
+    parent: 'uuid:***6666',
+    via: { tool: 'sql_select', tool_call_id: 'toolu_01ABCdef', field: 'device_id' },
+    ...extra,
+  });
+
+  test('ids in a tied result join the chain and the scope; the run log gets masked values and counts only', async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), 'triage-leads-'));
+    installRunEventLog({ runsDir, observe: () => () => {} });
+    cleanups.push(() => {
+      uninstallRunEventLog();
+      rmSync(runsDir, { recursive: true, force: true });
+    });
+    const h = setup({ env: REAL });
+    // referee_id has 11 new values, over the default of 10, so it adds none.
+    const rows = Array.from({ length: 11 }, (_, i) => ({ referee_id: uuid(i), device_id: DEVICE, id: CUSTOMER }));
+    const spec = sqlSpec(h, {
+      real: async () => rows as never,
+      leads: (value) => ({ records: value, rowKeys: { params: [1], literals: [] } }),
+    });
+    expect((await runIoTool(spec, runCtx(h))).output.status).toBe('ok');
+    expect(h.deps.idChain().leads).toEqual([lead(DEVICE)]);
+    const byDevice = sqlSpec(h, { input: { service: 'harbor', sql: 'SELECT 1 WHERE $1 = $1', params: [DEVICE] } });
+    expect((await runIoTool(byDevice, runCtx(h))).output.status).toBe('ok');
+    expect((await runIoTool(sqlSpec(h, { input: { service: 'harbor', sql: 'x', params: [uuid(3)] } }), runCtx(h))).output.status).toBe('refused');
+
+    await flushRunEventLog();
+    const events = readFileSync(join(runsDir, h.runId, EVENTS_FILE), 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { type: string; data: unknown });
+    expect(events.filter((e) => e.type === 'lead').map((e) => e.data)).toEqual([
+      { value: 'uuid:***d001', kind: 'uuid', depth: 1, parent: 'uuid:***6666', tool: 'sql_select', tool_call_id: 'toolu_01ABCdef', field: 'device_id' },
+    ]);
+    expect(events.filter((e) => e.type === 'lead_skipped').map((e) => e.data)).toEqual([
+      { reason: 'fan-out', field: 'referee_id', count: 11, tool: 'sql_select', tool_call_id: 'toolu_01ABCdef' },
+    ]);
+    expect(JSON.stringify(events)).not.toContain(DEVICE);
+  });
+
+  test('an untied result, a systemic call and a refused call add nothing', async () => {
+    const h = setup({ env: REAL });
+    const rows = [{ device_id: DEVICE }];
+    const leads = (value: unknown[]) => ({ records: value });
+    expect((await runIoTool(sqlSpec(h, { real: async () => rows as never, leads }), runCtx(h))).output.status).toBe('ok');
+    const tied = { records: rows, rowKeys: { params: [1], literals: [] } };
+    const systemic = sqlSpec(h, { real: async () => rows as never, leads: () => tied, scope: { systemic: true, sqlAggregateOnly: true } });
+    expect((await runIoTool(systemic, runCtx(h))).output.status).toBe('ok');
+    const refused = sqlSpec(h, { real: async () => rows as never, leads: () => tied, gate: () => ({ ok: false, message: 'no', reason: 'no' }) });
+    expect((await runIoTool(refused, runCtx(h))).output.status).toBe('refused');
+    expect(h.deps.idChain().leads).toBeUndefined();
+  });
+
+  test('addLeads adds new leads once and keeps them through widenIdChain, mergeIdChains and a stored copy', () => {
+    const h = setup();
+    const seed: Lead = { value: STRANGER, kind: 'uuid', source: 'thread', status: 'seed' };
+    widenIdChain(h.deps, { ...CHAIN, leads: [seed] });
+    expect(addLeads(h.deps, [lead(DEVICE), lead(STRANGER)])).toEqual([lead(DEVICE)]);
+    expect(addLeads(h.deps, [lead(DEVICE)])).toEqual([]);
+    // A resolve_identity re-run without leads keeps them.
+    widenIdChain(h.deps, { ids: { customer_id: CUSTOMER, account_id: ACCOUNT_NO }, hops: [], basic_state: [] });
+    const chain = h.deps.idChain();
+    expect(chain.leads).toEqual([seed, lead(DEVICE)]);
+    // The saved chain (persistent state) parses back with every field, and an answer merged on top keeps them.
+    const stored = v.parse(IdChainSchema, JSON.parse(JSON.stringify(chain)));
+    expect(stored.leads).toEqual([seed, lead(DEVICE)]);
+    const answered = mergeIdChains(stored, { ids: {}, hops: [], basic_state: [], leads: [{ ...seed, value: uuid(9), source: 'answer' }] });
+    expect(answered.leads?.map((l) => [l.value, l.source])).toEqual([
+      [STRANGER, 'thread'],
+      [DEVICE, 'derived'],
+      [uuid(9), 'answer'],
+    ]);
+    // A chain stored before D97 still parses.
+    expect(v.parse(IdChainSchema, CHAIN)).toEqual(CHAIN);
+  });
+
+  test('addLeads refuses deps it did not build', () => {
+    const fake = { idChain: () => CHAIN } as unknown as ToolDeps;
+    expect(() => addLeads(fake, [lead(DEVICE)])).toThrow('createToolDeps');
   });
 });
 
@@ -1028,8 +1150,8 @@ describe('tool errors reach the model', () => {
     }
   });
 
-  test('secrets and other records are scrubbed or redacted from the text, the audit line and the log', async () => {
-    const h = setup({ env: REAL });
+  test('secrets and other records are scrubbed or redacted from the text, the audit line and the log (redaction on)', async () => {
+    const h = setup({ env: REAL_MASKED });
     const other = 'meera.iyer@example.com';
     const pan = '5500005555555559';
     const message = [
@@ -1049,6 +1171,21 @@ describe('tool errors reach the model', () => {
     expect(env.output.message).toContain('could not connect to <url>');
     expect(env.output.message).toContain('Authorization: <redacted>');
     expect(env.output.message).toContain('@example.com');
+  });
+
+  test('with redaction off, secrets are still scrubbed; the email and the card reach the model but not the audit line or the log', async () => {
+    const h = setup({ env: REAL });
+    const other = 'meera.iyer@example.com';
+    const pan = '5500005555555559';
+    const message = [`could not connect to ${FAKE_DSN}`, 'x-api-key=apikey-SEEDED-99', `row for ${other} with card ${pan}`].join('\n');
+    const env = await runIoTool(failing(h, coded('unreachable', message)), runCtx(h));
+    const everything = JSON.stringify(env) + JSON.stringify(h.audit.lines) + h.logs.join('\n');
+    for (const part of FAKE_DSN_PARTS) expect(everything).not.toContain(part);
+    expect(everything).not.toContain('apikey-SEEDED-99');
+    expect(env.output.message).toContain(`row for ${other} with card ${pan}`);
+    const logged = JSON.stringify(h.audit.lines) + h.logs.join('\n');
+    expect(logged).not.toContain(other);
+    expect(logged).not.toContain(pan);
   });
 
   test('a ConnectorError reaches the model with its own message, not the raw cause it attached', async () => {
@@ -1202,7 +1339,7 @@ describe('result cap (D104)', () => {
   });
 
   test('the summary is measured after redaction and keeps redacted values', async () => {
-    const h = setup({ env: REAL });
+    const h = setup({ env: REAL_MASKED });
     const rows = Array.from({ length: 400 }, () => ({ email: EMAIL, note: 'n'.repeat(100) }));
     const env = await runIoTool(bigSpec(h, { rows, row_count: 400 }), runCtx(h));
     expect(JSON.stringify(env.output.data)).not.toContain('priya.sharma@');
@@ -1253,6 +1390,16 @@ describe('result cap (D104)', () => {
       const small = { repo: 'harbor', path: 'a.ts', text: 'ok' };
       const env = await runCodeTool({ tool: 'repo_read', ctx: h.ctx, work: async () => ({ ok: true, data: small, summary: 'repo_read harbor' }) });
       expect(env.output.data).toEqual(small);
+    });
+
+    test('repo text follows TRIAGE_MODEL_REDACTION: an email is raw with off and masked with on; a credential is masked with both (D107)', async () => {
+      const file = { repo: 'harbor', path: 'a.ts', text: `// owner ${EMAIL}\n${SECRET_NOTE}` };
+      const read = (h: Harness) => runCodeTool({ tool: 'repo_read', ctx: h.ctx, work: async () => ({ ok: true, data: file, summary: 'repo_read harbor' }) });
+      const off = (await read(setup({ env: REAL }))).output.data as { text: string };
+      expect(off.text).toBe(`// owner ${EMAIL}\nPGPASSWORD=****`);
+      const on = (await read(setup({ env: REAL_MASKED }))).output.data as { text: string };
+      expect(on.text).not.toContain('priya.sharma@');
+      expect(on.text).toContain('PGPASSWORD=****');
     });
   });
 });

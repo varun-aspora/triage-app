@@ -60,7 +60,9 @@ write one Report with `finish_report`.
 ## Ids
 
 - An id you find in a result (another key of this customer, a device id, a
-  transfer reference) can be used in later calls.
+  transfer reference) can be used in later calls when that call was keyed
+  by an id you could already use, a few steps deep at most. Systemic counts
+  and `contains` add no ids.
 - Another customer's records are fine to read when they are part of this
   case, such as a referrer or the other side of a transfer between two
   customers. Do not browse customers the case does not touch. To measure how

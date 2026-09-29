@@ -231,7 +231,8 @@ type Harness = {
 };
 
 type HarnessOptions = {
-  config?: Partial<{ mock: boolean; priorCases: boolean; usageFlushMs: number }>;
+  /** modelRedaction left out: the config key is left out too, which reads as off (D107). */
+  config?: Partial<{ mock: boolean; priorCases: boolean; usageFlushMs: number; modelRedaction: 'off' | 'on' }>;
   classify?: SubmissionDeps['classify'];
   identity?: () => Promise<IngressIdentity>;
   read?: ReadBehaviour;
@@ -262,6 +263,7 @@ function harness(o: HarnessOptions = {}): Harness {
       ...(o.config?.usageFlushMs !== undefined ? { usageFlushMs: o.config.usageFlushMs } : {}),
     },
     budgets: { runTimeoutMs: 1_000, runMaxAttempts: 1 },
+    ...(o.config?.modelRedaction !== undefined ? { redaction: { model: o.config.modelRedaction } } : {}),
   };
   const deps: SubmissionDeps = {
     config,
@@ -400,8 +402,8 @@ describe('redaction', () => {
     expect(storeText(h.calls)).not.toContain(NAME);
   });
 
-  test('the message is model-facing and initialData.request is the persisted-profile copy', async () => {
-    const h = harness();
+  test('with redaction on, the message is model-facing and initialData.request is the persisted-profile copy', async () => {
+    const h = harness({ config: { modelRedaction: 'on' } });
     const p = prepared();
     await runSubmission(p, h.deps);
     const body = bodyOf(h);
@@ -414,6 +416,19 @@ describe('redaction', () => {
     const expected = { ...redactPersisted(p.request, { names: [NAME] }).value, request_id: RUN_ID };
     expect(initialDataOf(h).request).toEqual(expected);
     expect(JSON.stringify(initialDataOf(h).request)).not.toContain(PAN);
+  });
+
+  test('with redaction off, the default, the message is raw and initialData.request is still the persisted-profile copy (D107)', async () => {
+    for (const h of [harness(), harness({ config: { modelRedaction: 'off' } })]) {
+      const p = prepared();
+      await runSubmission(p, h.deps);
+      const body = bodyOf(h);
+      expect(body).toContain(PAN);
+      expect(body).toContain(ACCOUNT);
+      const expected = { ...redactPersisted(p.request, { names: [NAME] }).value, request_id: RUN_ID };
+      expect(initialDataOf(h).request).toEqual(expected);
+      expect(JSON.stringify(initialDataOf(h))).not.toContain(PAN);
+    }
   });
 
   test('the classifier gets the model-facing thread', async () => {
@@ -890,6 +905,7 @@ describe('text files and PDFs', () => {
   test('their text follows the thread in the message; unread files become warnings', async () => {
     const classified: unknown[] = [];
     const h = harness({
+      config: { modelRedaction: 'on' },
       classify: async (input) => {
         classified.push(input);
         return goodClassification();
@@ -982,8 +998,8 @@ describe('askRun', () => {
     await expect(askRun(RUN_ID, '   ', 'ops', h.deps)).rejects.toBeInstanceOf(IngressInputError);
   });
 
-  test('a known run gets a new submission without initialData and with the redacted question', async () => {
-    const h = harness();
+  test('a known run gets a new submission without initialData and with the redacted question (redaction on)', async () => {
+    const h = harness({ config: { modelRedaction: 'on' } });
     await runSubmission(prepared(), h.deps);
     const question = `Did the retry to ${PHONE} go out for card ${PAN}?`;
     const result = await askRun(RUN_ID, question, 'ops.reviewer@example.com', h.deps);
@@ -1565,7 +1581,7 @@ describe('blocked and resumeRun', () => {
   });
 
   test('the note is model-facing in the signal and persisted-profile in the store; a blank note is left out', async () => {
-    const h = harness();
+    const h = harness({ config: { modelRedaction: 'on' } });
     await blocked(h);
     await resumeRun(RUN_ID, { by: 'ops', note: `  harbor is back for ${PHONE}; card ${PAN} was the test card  ` }, h.deps);
     const body = signalOf(h).body;
@@ -1576,6 +1592,16 @@ describe('blocked and resumeRun', () => {
     expect(stored).toContain('harbor is back for');
     expect(stored).not.toContain(PHONE);
     expect(stored).not.toContain(PAN);
+
+    // Redaction off (D107): the signal carries the note raw, the store stays masked.
+    const r = harness();
+    await blocked(r);
+    await resumeRun(RUN_ID, { by: 'ops', note: `card ${PAN} was the test card` }, r.deps);
+    expect(signalOf(r).body).toContain(`card ${PAN} was the test card`);
+    const rawRun = await r.store.getRun(RUN_ID);
+    const rawStored = JSON.stringify([rawRun?.submissions[1]?.note, rawRun?.block_history[0]?.note]);
+    expect(rawStored).toContain('was the test card');
+    expect(rawStored).not.toContain(PAN);
 
     const g = harness();
     await blocked(g);
@@ -1833,7 +1859,7 @@ describe('resumeRun on a working run (D72)', () => {
   });
 
   test('a dispatched run is steered too; the note is persisted-profile in the store and model-facing in the signal', async () => {
-    const h = harness();
+    const h = harness({ config: { modelRedaction: 'on' } });
     await working(h, 'dispatched');
     const { deps } = withModes(h.deps, { stalled: notStalled });
     await resumeRun(RUN_ID, { by: 'ops', note: `call ${PHONE}; card ${PAN} is the test card` }, deps);

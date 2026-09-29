@@ -5,12 +5,15 @@
 // (LLD 04 §2.4, D24, P6 §4.3, D55, D72).
 //
 // All of them are built from the in-memory request and then passed through
-// the model-facing redaction profile as a whole: PAN, card numbers,
-// passports, secrets and email local parts are masked, while account
-// numbers, UTRs, phones, UUIDs and names stay visible because the
-// investigation searches with them. The persisted-profile copy of the
-// request travels separately, in initialData.
-import { redactModelFacing } from '../gate/redact.ts';
+// the model-facing redaction as a whole, which follows TRIAGE_MODEL_REDACTION
+// (redactForModel, D107). With off, the default, only secrets are masked and
+// the model reads the thread raw. With on, PAN, card numbers, passports,
+// secrets and email local parts are masked, while account numbers, UTRs,
+// phones, UUIDs and names stay visible because the investigation searches
+// with them. The persisted-profile copy of the request travels separately,
+// in initialData, whatever the setting.
+import type { Config } from '../config/env.ts';
+import { redactForModel } from '../gate/redact.ts';
 import type { BlockRecord } from '../types/block.ts';
 import { KNOWN_ID_KEYS, type KnownIds } from '../types/core.ts';
 import type { InputRequest } from '../types/input-request.ts';
@@ -44,8 +47,6 @@ export function unreadList(unread: readonly SkippedFile[]): string {
   return unread.map((f) => `${f.name} (${f.reason})`).join('; ');
 }
 
-const NO_FILES: RenderFiles = { read: [], unread: [] };
-
 const SOURCE_LABEL: Readonly<Record<TriageRequest['source']['kind'], string>> = {
   slack: 'a Slack thread',
   thread_file: 'a thread file',
@@ -53,12 +54,11 @@ const SOURCE_LABEL: Readonly<Record<TriageRequest['source']['kind'], string>> = 
   json: 'a JSON request',
 };
 
-/** The orchestrator's first message: the whole thread, parent first, model-facing profile. */
-export function renderThread(
-  request: TriageRequest,
-  images: RenderImages = { attached: 0, dropped: 0 },
-  files: RenderFiles = NO_FILES,
-): string {
+/** What the model-facing redaction of these messages reads (D107). */
+export type RenderConfig = Pick<Config, 'redaction'>;
+
+/** The orchestrator's first message: the whole thread, parent first, model-facing redaction. */
+export function renderThread(request: TriageRequest, images: RenderImages, files: RenderFiles, config: RenderConfig): string {
   const lines: string[] = [
     `New triage request from ${SOURCE_LABEL[request.source.kind]}, raised by ${request.requested_by}.`,
     `Investigation window: ${request.window.from} to ${request.window.to}.`,
@@ -71,18 +71,19 @@ export function renderThread(
   const imageLines = imageNote(images);
   if (imageLines.length > 0) lines.push('', ...imageLines);
   lines.push(...fileLines(files));
-  return redactModelFacing(lines.join('\n'));
+  return redactForModel(lines.join('\n'), config);
 }
 
-/** A follow-up question on an existing run, model-facing profile. */
-export function renderAsk(question: string, by: string): string {
-  return redactModelFacing(
+/** A follow-up question on an existing run, model-facing redaction. */
+export function renderAsk(question: string, by: string, config: RenderConfig): string {
+  return redactForModel(
     [
       `Follow-up question from ${by} on this run:`,
       question,
       '',
       'Answer it from the evidence you have, investigate further if needed, and call finish_report with the updated report.',
     ].join('\n'),
+    config,
   );
 }
 
@@ -97,8 +98,8 @@ export type AnswerRender = {
   readonly gaps: readonly string[];
 };
 
-/** The answer to a question the run asked, or the skip, model-facing profile. */
-export function renderAnswer(request: Pick<InputRequest, 'question_id' | 'question'>, a: AnswerRender): string {
+/** The answer to a question the run asked, or the skip, model-facing redaction. */
+export function renderAnswer(request: Pick<InputRequest, 'question_id' | 'question'>, a: AnswerRender, config: RenderConfig): string {
   const lines: string[] = [];
   if (a.skip) {
     lines.push(
@@ -113,7 +114,7 @@ export function renderAnswer(request: Pick<InputRequest, 'question_id' | 'questi
   if (ids.length > 0) lines.push('', `Ids they gave, resolved by the identity step and in scope: ${ids.join(', ')}.`);
   if (a.gaps.length > 0) lines.push('', `Identity lookups: ${a.gaps.join('; ')}.`);
   if (!a.skip) lines.push('', 'Continue the triage with this. Investigate further if needed and call finish_report with the report.');
-  return redactModelFacing(lines.join('\n'));
+  return redactForModel(lines.join('\n'), config);
 }
 
 // The stored question, on one line and short enough to quote back.
@@ -150,8 +151,8 @@ export type ResumeRender = {
 const CONTINUE_LINE =
   'Continue from what you already found: the evidence you noted stands, so do not repeat lookups that answered.';
 
-/** The signal that sends a blocked, failed or stopped run on (D55), model-facing profile. */
-export function renderResume(from: ResumeFrom, r: ResumeRender): string {
+/** The signal that sends a blocked, failed or stopped run on (D55), model-facing redaction. */
+export function renderResume(from: ResumeFrom, r: ResumeRender, config: RenderConfig): string {
   const lines: string[] = [];
   if (from.kind === 'blocked') {
     lines.push(`This run was blocked (${from.block.block_id}) because ${listed(from.block.systems)} did not answer: ${oneLine(from.block.reason)}`);
@@ -179,7 +180,7 @@ export function renderResume(from: ResumeFrom, r: ResumeRender): string {
       'Finish the investigation and call finish_report with the report. If a system does not answer and you cannot go on without it, call stop_blocked.',
     );
   }
-  return redactModelFacing(lines.join('\n'));
+  return redactForModel(lines.join('\n'), config);
 }
 
 function stalledWhy(reason: StalledReason | undefined): string {
@@ -199,14 +200,14 @@ export type SteerRender = {
 
 /**
  * The note a person adds while the run is still working (D72), model-facing
- * profile. It is sent as a user message, like a follow-up, so the model reads
+ * redaction. It is sent as a user message, like a follow-up, so the model reads
  * it as that person speaking. Flue joins it into the live response at the
  * next turn boundary, after the turn's tool calls and before the next model
  * call. It carries the note, who sent it and when, and no instructions of
  * its own: the run goes on as it was, with the note in front of the model.
  */
-export function renderSteer(s: SteerRender): string {
-  return redactModelFacing([`Note from ${s.by}, added at ${s.at} while this run is working:`, s.note.trim()].join('\n'));
+export function renderSteer(s: SteerRender, config: RenderConfig): string {
+  return redactForModel([`Note from ${s.by}, added at ${s.at} while this run is working:`, s.note.trim()].join('\n'), config);
 }
 
 // "a", "a and b", "a, b and c".

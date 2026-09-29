@@ -2,7 +2,7 @@
 // and example.test domains, and made-up names, phones and addresses.
 import { describe, expect, test } from 'bun:test';
 
-import { checkEgress, isPersisted, redactModelFacing, redactPersisted, type Persisted } from './redact.ts';
+import { checkEgress, isPersisted, redactForModel, redactModelFacing, redactPersisted, type Persisted } from './redact.ts';
 import { compileNames, luhnValid } from './redact-patterns.ts';
 
 const PAN = '4111111111111111'; // Luhn-valid test Visa
@@ -414,6 +414,41 @@ describe('Persisted<T>', () => {
     const refused = () => takesPersisted('hello');
     expect([typeof fromString, typeof fromObject, typeof refused]).toEqual(['string', 'object', 'function']);
     expect(takesPersisted(redactPersisted('hello'))).toBe('hello');
+  });
+});
+
+describe('redactForModel (D107)', () => {
+  const OFF = { redaction: { model: 'off' } } as const;
+  const ON = { redaction: { model: 'on' } } as const;
+  const text = `card ${PAN}, mail ${EMAIL}, passport K1234567, account ${ACCOUNT}, phone ${PHONE}, ${NAME}`;
+
+  test('on is the model-facing profile', () => {
+    expect(redactForModel(text, ON)).toBe(redactModelFacing(text));
+    expect(redactForModel(text, ON)).not.toContain(PAN);
+  });
+
+  test('off keeps PAN, email, passport and the rest raw', () => {
+    expect(redactForModel(text, OFF)).toBe(text);
+    const value = { rows: [{ email: EMAIL, card: PAN }], n: 1 };
+    expect(redactForModel(value, OFF)).toEqual(value);
+  });
+
+  test('off still masks credentials, raw and base64-encoded', () => {
+    const dsn = 'DATABASE_URL=postgresql://app:another-synth@h.example.test/db';
+    expect(redactForModel(`${dsn} for ${EMAIL}`, OFF)).toBe(`DATABASE_URL=postgresql://app:****@h.example.test/db for ${EMAIL}`);
+    expect(redactForModel({ header: 'Authorization: Bearer synthetictoken.abc123' }, OFF)).toEqual({ header: 'Authorization: Bearer ****' });
+    expect(redactForModel(`blob ${b64('PGPASSWORD=synthetic-secret-42')}`, OFF)).not.toContain('synthetic-secret-42');
+  });
+
+  test('what off lets through is still caught by the egress check (finish_report, Slack, notes)', () => {
+    const report = { reply_text: redactForModel(`Refund sent to ${EMAIL} for card ${PAN}`, OFF) };
+    expect(checkEgress(report)).toEqual({ ok: false, unmasked: ['email', 'pan'], paths: ['$.reply_text'] });
+  });
+
+  test('the input is not changed', () => {
+    const value = { note: 'PGPASSWORD=synthetic-secret-42' };
+    redactForModel(value, OFF);
+    expect(value.note).toBe('PGPASSWORD=synthetic-secret-42');
   });
 });
 

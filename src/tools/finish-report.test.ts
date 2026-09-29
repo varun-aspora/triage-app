@@ -434,6 +434,73 @@ describe('finish_report: writeReport refusals', () => {
     for (const raw of [uuid, '9876543210', 'ops.user@example.com', '000011112222', 'c0ffee00']) expect(stored).not.toContain(raw);
   });
 
+  test('the report lists derived leads masked, with their depth, parent and source call (D97)', async () => {
+    const referee = 'b4e7d2a9-1c3f-4a6b-8e5d-9f2a0c1b3d47';
+    const chain: IdChain = {
+      ids: { customer_id: 'c0ffee00-1111-4222-8333-444455556666' },
+      hops: [],
+      basic_state: [],
+      leads: [
+        {
+          value: referee,
+          kind: 'uuid',
+          source: 'derived',
+          status: 'derived',
+          depth: 1,
+          parent: 'uuid:***6666',
+          via: { tool: 'sql_select', tool_call_id: 'toolu_01ABC', field: 'referee_id' },
+        },
+        {
+          value: '+919876543210',
+          kind: 'phone',
+          source: 'derived',
+          status: 'derived',
+          depth: 2,
+          parent: 'uuid:***3d47',
+          via: { tool: 'logs_search', tool_call_id: 'toolu_02DEF', field: 'message' },
+        },
+        {
+          // A tool call id with a long run of digits, as the fake model mints them.
+          value: 'b4e7d2a9-1c3f-4a6b-8e5d-9f2a0c1b0001',
+          kind: 'uuid',
+          source: 'derived',
+          status: 'derived',
+          depth: 1,
+          parent: 'uuid:***6666',
+          via: { tool: 'logs_search', tool_call_id: 'tool_1790654474586_kyk5zrfznje', field: 'x-device-id' },
+        },
+      ],
+    };
+    const s = setup({ idChain: chain });
+
+    const out = await call(s, baseDraft());
+
+    expect(out.output.status).toBe('ok');
+    expect(s.store.reports[0]!.report.id_chain.leads).toEqual([
+      {
+        value: 'uuid:***3d47',
+        kind: 'uuid',
+        source: 'derived',
+        status: 'derived',
+        depth: 1,
+        parent: 'uuid:***6666',
+        via: { tool: 'sql_select', tool_call_id: 'toolu_01ABC', field: 'referee_id' },
+      },
+      {
+        value: 'phone:***3210',
+        kind: 'phone',
+        source: 'derived',
+        status: 'derived',
+        depth: 2,
+        parent: 'uuid:***3d47',
+        via: { tool: 'logs_search', tool_call_id: 'toolu_02DEF', field: 'message' },
+      },
+      expect.objectContaining({ value: 'uuid:***0001', via: expect.objectContaining({ tool: 'logs_search', field: 'x-device-id' }) }),
+    ]);
+    const stored = JSON.stringify(s.store.reports[0]!.report.id_chain.leads);
+    for (const raw of [referee, '9876543210', '1790654474586']) expect(stored).not.toContain(raw);
+  });
+
   test('a lead list the model writes in a shape LeadSchema refuses does not get the draft refused (D96)', async () => {
     expect(Object.keys(FinishReportInputSchema.entries.id_chain.entries)).not.toContain('leads');
     const s = setup();

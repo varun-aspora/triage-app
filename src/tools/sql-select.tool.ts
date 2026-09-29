@@ -11,8 +11,9 @@
 //   scope 'systemic' with an aggregate-only select list) -> SQL gate
 //   (validateSelect, $n count, wrapWithCap, buildReadOnlyTxn) -> not
 //   configured (blank <ENTITY>_<SERVICE>_DB_URL) -> fixture or the SQL
-//   connector -> audit (target is the env var name) -> stage the full rows to
-//   /data -> model-facing redaction -> envelope.
+//   connector -> audit (target is the env var name) -> derived leads from
+//   rows tied by a WHERE equality on an id in scope (D97) -> stage the full
+//   rows to /data -> model-facing redaction -> envelope.
 //
 // The row cap is TRIAGE_SQL_MAX_ROWS (through the run budget). The wrapped
 // query asks for one row more than the cap, so a cut result is reported as
@@ -38,12 +39,12 @@ import { capRows, jsonBytes, type SqlConnector } from '../connectors/sql/pg-clie
 import type { MockPort } from '../connectors/mock.ts';
 import { ConnectorError, type ConnectorContext } from '../connectors/types.ts';
 import { MAX_SQL_LENGTH, type SqlCheck, type SqlRefusalCode, validateSelect } from '../gate/sql.ts';
-import { observeJourneyKeys, onlyExemptTables } from '../gate/scope.ts';
+import { onlyExemptTables } from '../gate/scope.ts';
 import { buildReadOnlyTxn, explainStatement, wrapWithCap } from '../gate/sql-txn.ts';
 import { semanticKey, type SqlSelectFacts } from '../mock/key.ts';
 import type { Entity } from '../types/core.ts';
 import type { ToolEnvelope } from '../types/tool-result.ts';
-import { observedScopeOf, scopeSetOf } from './_lib/context.ts';
+import { observedScopeOf } from './_lib/context.ts';
 import { type BackingRef, type GateDecision, runIoTool, type StagingHarness } from './_lib/pipeline.ts';
 import type { ToolContext, ToolModule } from './types.ts';
 
@@ -316,12 +317,10 @@ async function runSqlSelect(ctx: ToolContext, entity: Entity, services: readonly
       input: data,
       backing:
         service === 'unknown' ? { envName: 'TRIAGE_ENTITIES', status: 'disabled' } : backingFor(ctx, entity, service),
-      // A device or verification id seen earlier in the run is in scope (D77, Q13),
-      // and a query on the service's config tables alone skips the id check (D89).
+      // A query on the service's config tables alone skips the id check (D89).
       scope: {
         systemic,
         sqlAggregateOnly: check.ok && check.aggregateOnly,
-        sqlJourneyParams: check.ok ? check.journeyParams : [],
         sqlConfigTablesOnly:
           check.ok && service !== 'unknown' && onlyExemptTables(check.tables, ctx.registry.service(entity, service).scope_exempt_tables ?? []),
         ...observedScopeOf(ctx.runId),
@@ -373,7 +372,6 @@ async function runSqlSelect(ctx: ToolContext, entity: Entity, services: readonly
       render: (value) => {
         const answer = parseAnswer(value);
         const rows = answer.rows.slice(0, cap);
-        observeJourneyKeys(ctx.runId, SQL_SELECT, data, scopeSetOf(deps), rows, check.ok ? check.rowKeys : undefined);
         return fitModelBytes(
           {
             service,
@@ -385,6 +383,11 @@ async function runSqlSelect(ctx: ToolContext, entity: Entity, services: readonly
           ctx.config.budgets.maxModelBytesPerCall,
         );
       },
+      // Ids in rows tied to an id in scope by a WHERE equality become derived leads (D97).
+      leads: (value) => ({
+        records: parseAnswer(value).rows.slice(0, cap),
+        ...(check.ok && check.rowKeys !== undefined ? { rowKeys: check.rowKeys } : {}),
+      }),
       stage: (value) => {
         const answer = parseAnswer(value);
         return { service, ...(answer.columns !== undefined ? { columns: answer.columns } : {}), rows: answer.rows };

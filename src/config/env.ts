@@ -17,6 +17,7 @@ import {
   HOME_KEY,
   KEY_BY_NAME,
   AGENT_SHAPES,
+  MODEL_REDACTION_MODES,
   PROVIDER_KEYS,
   RENAMED_KEYS,
   THINKING_LEVELS,
@@ -35,6 +36,7 @@ export type UiEnv = 'production' | 'non-production';
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 export type TracingMode = (typeof TRACING_MODES)[number];
 export type AgentShape = (typeof AGENT_SHAPES)[number];
+export type ModelRedaction = (typeof MODEL_REDACTION_MODES)[number];
 
 export type Config = {
   readonly home: string;
@@ -76,6 +78,10 @@ export type Config = {
     readonly maxAsksPerRun: number;
     /** D109: tool calls per worker in the single shape. */
     readonly maxToolCallsPerWorker: number;
+    /** D97: new ids one field of one result may add as derived leads. */
+    readonly maxDerivedPerField: number;
+    /** D97: how deep derived leads may chain from a seed lead. */
+    readonly maxLeadDepth: number;
     /** S1.4: the root agent's context is compacted back under this many tokens. */
     readonly maxPromptTokens: number;
     readonly maxResponseBytesPerCall: number;
@@ -143,10 +149,14 @@ export type Config = {
     readonly provider: SandboxProvider;
     readonly python: boolean;
     readonly timeoutMs: number;
+    /** D105: the most the run's sandbox directory may hold, in MB. */
+    readonly quotaMb: number;
     readonly e2bApiKey?: string;
     readonly daytonaApiKey?: string;
     readonly daytonaApiUrl?: string;
   };
+  /** D107: off gives the model and the sandbox raw values; the check on what leaves the run stays. */
+  readonly redaction: { readonly model: ModelRedaction };
   readonly code: { readonly codegraphBin: string; readonly qwBin: string; readonly syncBeforeQuery: boolean };
   readonly git: { readonly protocol: GitProtocol; readonly host: string; readonly org: string; readonly httpsToken?: string };
   readonly repos: { readonly syncIntervalMs: number; readonly syncInterfaces: readonly Interface[] };
@@ -242,6 +252,8 @@ export function configFromRecord(
       maxTasksPerRun: r.requiredInt('TRIAGE_MAX_TASKS_PER_RUN'),
       maxAsksPerRun: r.requiredInt('TRIAGE_MAX_ASKS_PER_RUN'),
       maxToolCallsPerWorker: r.requiredInt('TRIAGE_MAX_TOOL_CALLS_PER_WORKER'),
+      maxDerivedPerField: r.requiredInt('TRIAGE_MAX_DERIVED_PER_FIELD'),
+      maxLeadDepth: r.requiredInt('TRIAGE_MAX_LEAD_DEPTH'),
       maxPromptTokens: r.requiredInt('TRIAGE_MAX_PROMPT_TOKENS'),
       maxResponseBytesPerCall: r.requiredInt('TRIAGE_MAX_RESPONSE_BYTES_PER_CALL'),
       maxBytesPerRun: r.requiredInt('TRIAGE_MAX_BYTES_PER_RUN'),
@@ -308,10 +320,12 @@ export function configFromRecord(
       provider: r.enumOf<SandboxProvider>('TRIAGE_SANDBOX_PROVIDER'),
       python: r.bool('TRIAGE_SANDBOX_PYTHON'),
       timeoutMs: r.requiredInt('TRIAGE_SANDBOX_TIMEOUT_MS'),
+      quotaMb: r.requiredInt('TRIAGE_SANDBOX_QUOTA_MB'),
       e2bApiKey: r.str('E2B_API_KEY'),
       daytonaApiKey: r.str('DAYTONA_API_KEY'),
       daytonaApiUrl: r.str('DAYTONA_API_URL'),
     },
+    redaction: { model: r.enumOf<ModelRedaction>('TRIAGE_MODEL_REDACTION') },
     code: {
       codegraphBin: r.requiredStr('CODEGRAPH_BIN'),
       qwBin: r.requiredStr('QW_BIN'),

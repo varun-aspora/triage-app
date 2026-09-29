@@ -19,6 +19,7 @@ export type KeyGroup =
   | 'http'
   | 'slack'
   | 'sandbox'
+  | 'redaction'
   | 'code'
   | 'repos'
   | 'tracing';
@@ -54,6 +55,8 @@ export const TRACING_MODES = ['off', 'otlp', 'braintrust'] as const;
 export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 /** D109: split is the Triage root with investigator and code_walker subagents; single is one agent plus an on-demand worker. */
 export const AGENT_SHAPES = ['split', 'single'] as const;
+/** D107: off gives the model and the sandbox raw values; on masks them again. */
+export const MODEL_REDACTION_MODES = ['off', 'on'] as const;
 
 /** Provider credentials copied into process.env for pi-ai by applyProviderEnv. */
 export const PROVIDER_KEYS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY'] as const;
@@ -108,6 +111,10 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'TRIAGE_MAX_ASKS_PER_RUN', type: 'int', group: 'budgets', default: '10', min: 0 },
   // D109: tool calls one worker may make in the single shape; the run's limits still apply.
   { name: 'TRIAGE_MAX_TOOL_CALLS_PER_WORKER', type: 'int', group: 'budgets', default: '40', min: 1 },
+  // D97: derived leads. One field of one result adds at most this many new ids, and a
+  // derived lead adds further leads up to this depth.
+  { name: 'TRIAGE_MAX_DERIVED_PER_FIELD', type: 'int', group: 'budgets', default: '10', min: 1 },
+  { name: 'TRIAGE_MAX_LEAD_DEPTH', type: 'int', group: 'budgets', default: '3', min: 1 },
   // S1.4: the prompt size the root agent's context is compacted back under (reserve = window - this).
   { name: 'TRIAGE_MAX_PROMPT_TOKENS', type: 'int', group: 'budgets', default: '60000', min: 10_000 },
   { name: 'TRIAGE_MAX_RESPONSE_BYTES_PER_CALL', type: 'int', group: 'budgets', default: '1048576', min: 1 },
@@ -191,9 +198,15 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'TRIAGE_SANDBOX_PROVIDER', type: 'enum', group: 'sandbox', default: 'virtual', values: ['virtual', 'e2b', 'daytona', 'local'] },
   { name: 'TRIAGE_SANDBOX_PYTHON', type: 'bool', group: 'sandbox', default: 'true' },
   { name: 'TRIAGE_SANDBOX_TIMEOUT_MS', type: 'int', group: 'sandbox', default: '30000', min: 1 },
+  // D105: the most the run's sandbox directory may hold.
+  { name: 'TRIAGE_SANDBOX_QUOTA_MB', type: 'int', group: 'sandbox', default: '500', min: 1 },
   { name: 'E2B_API_KEY', type: 'string', group: 'sandbox', secret: true },
   { name: 'DAYTONA_API_KEY', type: 'string', group: 'sandbox', secret: true },
   { name: 'DAYTONA_API_URL', type: 'string', group: 'sandbox' },
+
+  // Model-facing redaction (D107). off: staged files and tool results hold raw values.
+  // The PII check on what leaves the run applies either way.
+  { name: 'TRIAGE_MODEL_REDACTION', type: 'enum', group: 'redaction', default: 'off', values: MODEL_REDACTION_MODES },
 
   // Code navigation. Binary names are looked up on PATH, so they are strings, not paths.
   { name: 'CODEGRAPH_BIN', type: 'string', group: 'code', default: 'codegraph' },

@@ -296,9 +296,10 @@ describe('response-shape variants', () => {
     expect(JSON.stringify(out)).not.toContain('hidden text');
   });
 
-  test('output values pass the model-facing profile', async () => {
+  test('with redaction on, output values pass the model-facing profile', async () => {
     const w = world({
       mock: true,
+      env: { TRIAGE_MODEL_REDACTION: 'on' },
       fixtures: [
         {
           kind: 'get_account_statement',
@@ -316,6 +317,22 @@ describe('response-shape variants', () => {
     expect(text).not.toContain('test.user@example.com');
     expect(text).not.toContain('4111111111111111');
     expect(redactModelFacing(out)).toEqual(out);
+  });
+
+  test('with redaction off, the default, output values are raw (D107)', async () => {
+    const narration = 'refund to test.user@example.com card 4111111111111111';
+    const w = world({
+      mock: true,
+      fixtures: [
+        {
+          kind: 'get_account_statement',
+          facts: { entity: 'ssfb', account_id: ACCOUNT },
+          result: { limit: 100, pages: [{ page: 1, status: 200, body: [{ ...one, narration }] }] },
+        },
+      ],
+    });
+    const text = JSON.stringify(data(await callTool(toolModule, w, { account_id: ACCOUNT })));
+    expect(text).toContain(narration);
   });
 });
 

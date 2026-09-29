@@ -33,10 +33,10 @@ afterEach(() => {
 
 let seq = 0;
 
-function setup(files: Record<string, string> = { [FILE]: JSON.stringify(STAGED) }, maxToolCalls = 10) {
+function setup(files: Record<string, string> = { [FILE]: JSON.stringify(STAGED) }, maxToolCalls = 10, env: Record<string, string> = {}) {
   seq += 1;
   const runId = `run_read_staged_${seq}_${Math.random().toString(36).slice(2, 8)}`;
-  const config = makeTestConfig({});
+  const config = makeTestConfig(env);
   const budget = createRunBudget({ runId, maxToolCalls, maxTasks: 1, maxRowsPerCall: 10, maxBytesPerCall: 100_000, maxBytesPerRun: 1_000_000 });
   cleanups.push(() => {
     releaseRunBudget(runId);
@@ -148,11 +148,14 @@ describe('read_staged', () => {
     expect(out.lines_total).toBe(3);
   });
 
-  test('the result passes the model-facing redaction', async () => {
-    const s = setup();
-    const out = resultOf(await s.call({ file: FILE, jq: '{owner, customer_id}' }));
-    expect(out.result).not.toContain('priya.sharma@');
-    expect(out.result).toContain(CUSTOMER);
+  test('the result follows TRIAGE_MODEL_REDACTION (D107): raw when off, masked when on', async () => {
+    const raw = resultOf(await setup().call({ file: FILE, jq: '{owner, customer_id}' }));
+    expect(raw.result).toContain('priya.sharma@');
+    const masked = resultOf(
+      await setup(undefined, 10, { TRIAGE_MODEL_REDACTION: 'on' }).call({ file: FILE, jq: '{owner, customer_id}' }),
+    );
+    expect(masked.result).not.toContain('priya.sharma@');
+    expect(masked.result).toContain(CUSTOMER);
   });
 
   test('max_bytes cuts the result and says so; it never goes over the cap', async () => {

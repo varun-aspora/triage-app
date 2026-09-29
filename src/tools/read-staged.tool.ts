@@ -20,7 +20,7 @@ import { Bash, InMemoryFs } from 'just-bash';
 import * as v from 'valibot';
 import { excerpt } from '../connectors/error-text.ts';
 import { isExhausted } from '../gate/budget.ts';
-import { redactModelFacing } from '../gate/redact.ts';
+import { redactForModel, redactModelFacing } from '../gate/redact.ts';
 import { ok, refused, type ToolEnvelope } from '../types/tool-result.ts';
 import { capModelResult, stageProfileFor } from './_lib/pipeline.ts';
 import type { ToolContext, ToolModule } from './types.ts';
@@ -250,7 +250,7 @@ export function readStagedTool(ctx: ToolContext, opts: ReadStagedOptions = {}): 
         ...(truncated ? { note: 'Cut to max_bytes. Narrow the jq filter, or read a smaller line range.' } : {}),
       };
       // Never staged again: an over-cap summary points back at the same file.
-      return ok(capModelResult(redactModelFacing(out), { cap, stagedFile: input.file }), now);
+      return ok(capModelResult(redactForModel(out, ctx.config), { cap, stagedFile: input.file }), now);
     },
   });
 }

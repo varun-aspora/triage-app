@@ -1,14 +1,25 @@
 // The one sandbox the Triage root mounts (D45, HLD 02 §2). sandboxFactory()
 // picks the backend from TRIAGE_SANDBOX_PROVIDER:
 //
-// - virtual (the default when unset): just-bash over an in-memory
-//   filesystem. No network (curl and wget are not even registered), python3
-//   only when TRIAGE_SANDBOX_PYTHON is true, the hardened resource limits,
-//   and a per-command timeout of TRIAGE_SANDBOX_TIMEOUT_MS.
+// - virtual (the default when unset): just-bash with no network (curl and
+//   wget are not even registered), python3 only when TRIAGE_SANDBOX_PYTHON is
+//   true, the hardened resource limits, and a per-command timeout of
+//   TRIAGE_SANDBOX_TIMEOUT_MS. Its filesystem is in memory except for two
+//   mounts (D105):
+//   - /data is the run's own directory on disk,
+//     <TRIAGE_RUNS_DIR>/<run id>/sandbox/ (mode 700). Flue creates the
+//     sandbox again on every submission with the run id, so the same run
+//     sees the same files after needs_input, a resume or a process restart.
+//     Paths that leave the directory and symlinks are refused by just-bash,
+//     and writes stop at TRIAGE_SANDBOX_QUOTA_MB for the run. Nothing here
+//     deletes the directory; retention is ops work.
+//   - /scripts is <TRIAGE_KNOWLEDGE_DIR>/scripts, read-only, the reviewed
+//     scripts. It is not mounted when that folder does not exist.
 // - e2b and daytona: the remote backends. Their SDKs are loaded by dynamic
 //   import inside createSandbox(), so nothing is fetched until an agent
 //   initializes. A blank API key or an SDK that does not load throws
-//   'sandbox not configured'. There is no fallback to another backend.
+//   'sandbox not configured'. There is no fallback to another backend. They
+//   still get a new, empty sandbox on every submission.
 // - local, or any other value: refused. local() is not an isolation
 //   boundary. The config loader refuses it too; this is the second check.
 //
@@ -25,8 +36,23 @@ import {
   SandboxOperationUnsupportedError,
   type ShellResult,
 } from '@flue/runtime';
-import { Bash, InMemoryFs } from 'just-bash';
+import { mkdirSync, readdirSync, statSync } from 'node:fs';
+import { join, posix } from 'node:path';
+import {
+  Bash,
+  type CpOptions,
+  type FileContent,
+  type FsStat,
+  type IFileSystem,
+  InMemoryFs,
+  type MountConfig,
+  MountableFs,
+  OverlayFs,
+  ReadWriteFs,
+} from 'just-bash';
+import * as v from 'valibot';
 import { type Config, loadConfig, rawKeyState } from '../config/env.ts';
+import { RunIdSchema } from '../types/core.ts';
 
 export const SANDBOX_PROVIDER_KEY = 'TRIAGE_SANDBOX_PROVIDER';
 export const SANDBOX_PROVIDERS = ['virtual', 'e2b', 'daytona'] as const;
@@ -147,6 +173,8 @@ export type SandboxFactoryOptions = {
    * the app runs, supports it.
    */
   readonly defenseInDepth?: boolean;
+  /** Where the virtual backend keeps each run's /data. Defaults to config.paths.runsDir; tests pass a temp directory. */
+  readonly runsDir?: string;
 };
 
 const E2B_PACKAGE = 'e2b';
@@ -167,7 +195,7 @@ export function sandboxFactory(config: Config = loadConfig(), options: SandboxFa
   const capMs = config.sandbox.timeoutMs;
   switch (provider) {
     case 'virtual':
-      return withCommandTimeout(virtualFactory(config, options.defenseInDepth ?? true), capMs);
+      return withCommandTimeout(virtualFactory(config, options), capMs);
     case 'e2b':
       return withCommandTimeout(e2bFactory(config, load), capMs);
     case 'daytona':
@@ -175,18 +203,24 @@ export function sandboxFactory(config: Config = loadConfig(), options: SandboxFa
   }
 }
 
-function virtualFactory(config: Config, defenseInDepth: boolean): SandboxFactory {
-  // No network and no fetch: just-bash registers curl and wget only when one
-  // of them is given, so neither command exists in this sandbox.
-  return bash(
-    () =>
-      new Bash({
-        fs: new InMemoryFs(),
-        python: config.sandbox.python,
-        executionLimitProfile: 'hardened',
-        defenseInDepth,
-      }),
-  );
+function virtualFactory(config: Config, options: SandboxFactoryOptions): SandboxFactory {
+  const runsDir = options.runsDir ?? config.paths.runsDir;
+  return {
+    async createSandbox({ id }) {
+      const fs = runFilesystem(config, runsDir, id);
+      // No network and no fetch: just-bash registers curl and wget only when
+      // one of them is given, so neither command exists in this sandbox.
+      return bash(
+        () =>
+          new Bash({
+            fs,
+            python: config.sandbox.python,
+            executionLimitProfile: 'hardened',
+            defenseInDepth: options.defenseInDepth ?? true,
+          }),
+      ).createSandbox({ id });
+    },
+  };
 }
 
 function e2bFactory(config: Config, load: (s: string) => Promise<unknown>): SandboxFactory {
@@ -237,6 +271,124 @@ async function loadSdk<M>(
     throw new SandboxNotConfiguredError(provider, `the ${specifier} package does not export the expected API`);
   }
   return mod as M;
+}
+
+// ------------------------------------------------------------ virtual filesystem
+
+/**
+ * The virtual sandbox's filesystem for one run: memory, with the run's
+ * directory at /data and the reviewed scripts read-only at /scripts.
+ */
+function runFilesystem(config: Config, runsDir: string, id: string): IFileSystem {
+  // The id becomes a path segment; the schema allows no '.' or '/'.
+  if (!v.is(RunIdSchema, id)) throw new Error('sandbox: the run id is not a valid run id');
+  const root = join(runsDir, id, 'sandbox');
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const mounts: MountConfig[] = [
+    { mountPoint: '/data', filesystem: new QuotaFs(root, config.sandbox.quotaMb) },
+  ];
+  const scripts = join(config.paths.knowledgeDir, 'scripts');
+  if (isDirectory(scripts)) {
+    // OverlayFs maps only paths under its own mountPoint, and MountableFs
+    // hands it paths relative to /scripts, so its mountPoint is '/'.
+    mounts.push({ mountPoint: '/scripts', filesystem: new OverlayFs({ root: scripts, mountPoint: '/', readOnly: true }) });
+  }
+  return new MountableFs({ base: new InMemoryFs(), mounts });
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The run's directory with its writes counted against quotaMb. The count
+ * starts at the directory's size and only goes up; when a write would pass
+ * the quota, the directory is measured again (files may have been removed,
+ * and a file the write replaces does not count) before the write is refused
+ * with an EFBIG error the script sees.
+ */
+class QuotaFs extends ReadWriteFs {
+  readonly #dir: string;
+  readonly #quotaMb: number;
+  #used: number;
+
+  constructor(dir: string, quotaMb: number) {
+    super({ root: dir });
+    this.#dir = dir;
+    this.#quotaMb = quotaMb;
+    this.#used = diskBytes(dir);
+  }
+
+  async #reserve(bytes: number, replaces?: string): Promise<void> {
+    const limit = this.#quotaMb * 1024 * 1024;
+    if (this.#used + bytes > limit) this.#used = diskBytes(this.#dir) - (replaces === undefined ? 0 : await fileBytes(this, replaces));
+    if (this.#used + bytes > limit) {
+      throw Object.assign(new Error(`EFBIG: sandbox quota of ${this.#quotaMb} MB reached`), { code: 'EFBIG' });
+    }
+    this.#used += bytes;
+  }
+
+  override async writeFile(path: string, content: FileContent, options?: WriteOptions): Promise<void> {
+    await this.#reserve(contentBytes(content, options), path);
+    await super.writeFile(path, content, options);
+  }
+
+  override async appendFile(path: string, content: FileContent, options?: WriteOptions): Promise<void> {
+    await this.#reserve(contentBytes(content, options));
+    await super.appendFile(path, content, options);
+  }
+
+  override async cp(src: string, dest: string, options?: CpOptions): Promise<void> {
+    await this.#reserve(await treeBytes(this, src), dest);
+    await super.cp(src, dest, options);
+  }
+}
+
+type WriteOptions = Parameters<ReadWriteFs['writeFile']>[2];
+
+function contentBytes(content: FileContent, options: WriteOptions): number {
+  if (typeof content !== 'string') return content.byteLength;
+  const encoding = typeof options === 'string' ? options : options?.encoding;
+  return Buffer.byteLength(content, encoding ?? 'utf8');
+}
+
+/** Size of the regular file at path in fs, 0 for anything else. */
+async function fileBytes(fs: IFileSystem, path: string): Promise<number> {
+  try {
+    const stat = await fs.lstat(path);
+    return stat.isFile ? stat.size : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Bytes under path in fs. 0 when it does not exist; the copy then fails with its own error. */
+async function treeBytes(fs: IFileSystem, path: string): Promise<number> {
+  let stat: FsStat;
+  try {
+    stat = await fs.lstat(path);
+  } catch {
+    return 0;
+  }
+  if (!stat.isDirectory) return stat.isFile ? stat.size : 0;
+  let total = 0;
+  for (const name of await fs.readdir(path)) total += await treeBytes(fs, posix.join(path, name));
+  return total;
+}
+
+/** Bytes of the regular files under a real directory. Symlinks are not followed; a file removed mid-scan counts 0. */
+function diskBytes(dir: string): number {
+  let total = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) total += diskBytes(path);
+    else if (entry.isFile()) total += statSync(path, { throwIfNoEntry: false })?.size ?? 0;
+  }
+  return total;
 }
 
 // ------------------------------------------------------------ per-command timeout

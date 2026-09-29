@@ -273,6 +273,7 @@ import {
   renderThread,
   unreadList,
   type FileText,
+  type RenderConfig,
   type RenderFiles,
   type RenderImages,
   type ResumeFrom,
@@ -289,7 +290,14 @@ export type SubmissionConfig = {
   readonly budgets: Pick<Config['budgets'], 'runTimeoutMs' | 'runMaxAttempts'> & Partial<Pick<Config['budgets'], 'wrapUpMs'>>;
   /** For a partial report's env_label (D88). Left out: blank. */
   readonly display?: Config['display'];
+  /** The model-facing redaction of the messages the run gets (D107). Left out: off, the TRIAGE_MODEL_REDACTION default. */
+  readonly redaction?: Config['redaction'];
 };
+
+/** What render-thread's model-facing redaction reads (D107). */
+function renderConfig(config: SubmissionConfig): RenderConfig {
+  return { redaction: config.redaction ?? { model: 'off' } };
+}
 
 /** The parts of Flue's instance handle the pipeline uses. */
 export type AgentHandle = Pick<AgentInstanceHandle, 'dispatch' | 'read' | 'abort'>;
@@ -713,7 +721,7 @@ async function submitInScope(prepared: PreparedSubmission, deps: SubmissionDeps)
 
   const message: DeliveredMessage = {
     kind: 'user',
-    body: renderThread(request, render, files),
+    body: renderThread(request, render, files, renderConfig(deps.config)),
     ...(images.length > 0 ? { attachments: images } : {}),
   };
   return dispatchAndSettle(
@@ -734,7 +742,7 @@ export async function askRun(runId: string, question: string, by: string, deps: 
   if (typeof by !== 'string' || by.trim() === '') throw new IngressInputError('by', 'is required');
   const run = await deps.store.getRun(runId);
   if (run === null) throw new RunNotFoundError(runId);
-  const message: DeliveredMessage = { kind: 'user', body: renderAsk(question.trim(), by.trim()) };
+  const message: DeliveredMessage = { kind: 'user', body: renderAsk(question.trim(), by.trim(), renderConfig(deps.config)) };
   // No initialData and no uid: the instance exists and is continued.
   return dispatchAndSettle(runId, { kind: 'ask', question: question.trim() }, { message }, { id: runId }, deps);
 }
@@ -799,7 +807,7 @@ async function answerInScope(runId: string, input: AnswerInput, deps: AnswerDeps
   const message: DeliveredMessage = {
     kind: 'signal',
     type: INPUT_ANSWER_SIGNAL,
-    body: renderAnswer(open, { skip, answer, by, ids: chain?.ids ?? {}, gaps }),
+    body: renderAnswer(open, { skip, answer, by, ids: chain?.ids ?? {}, gaps }, renderConfig(deps.config)),
     attributes: {
       question_id: questionId,
       ...(chain !== undefined ? { [INPUT_ANSWER_CHAIN_ATTR]: JSON.stringify(chain) } : {}),
@@ -938,7 +946,7 @@ async function resumeStored(run: RunRecord, by: string, note: string, deps: Sett
   const message: DeliveredMessage = {
     kind: 'signal',
     type: BLOCK_RESUME_SIGNAL,
-    body: renderResume(resumeFrom(from, stalled), { by, at, note }),
+    body: renderResume(resumeFrom(from, stalled), { by, at, note }, renderConfig(deps.config)),
   };
   const result = await dispatchAndSettle(
     runId,
@@ -993,7 +1001,7 @@ async function steerRun(run: RunRecord, by: string, note: string, deps: SettleDe
   // A user message, like a follow-up (askRun): the model reads it as the
   // person speaking, not as a framework event. renderSteer adds no
   // instructions of its own, and the fixed rules still bind.
-  const message: DeliveredMessage = { kind: 'user', body: renderSteer({ by, at: now().toISOString(), note }) };
+  const message: DeliveredMessage = { kind: 'user', body: renderSteer({ by, at: now().toISOString(), note }, renderConfig(deps.config)) };
   const result = await dispatchAndSettle(runId, { kind: 'steer', note }, { message }, { id: runId }, deps);
   return Object.freeze({ ...result, mode: 'steer' as const });
 }

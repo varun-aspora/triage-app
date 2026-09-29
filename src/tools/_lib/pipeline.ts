@@ -2,8 +2,18 @@
 // in one place (HLD 02 §2 and §3, D2, D19, D20, D26, D27, D42, D45):
 //
 //   signal -> repeat -> budget -> scope -> gate -> not configured
-//   -> mock or real -> audit -> stage to /data -> model-facing redaction
-//   -> result cap -> envelope
+//   -> mock or real -> audit -> derived leads -> stage to /data
+//   -> model-facing redaction -> result cap -> envelope
+//
+// Derived leads (D97): a tool that sets spec.leads hands over the records of
+// its full result. When the call was tied to an id in scope, every new
+// id-shaped value in them joins the run's chain (deriveLeads in
+// src/gate/scope.ts, addLeads in context.ts). Each added lead and each field
+// that added none is written to the run event log, values masked.
+//
+// Model-facing redaction follows TRIAGE_MODEL_REDACTION (D107, redactForModel):
+// off, the default, masks credentials only, so the model reads raw data; on
+// is the model-facing profile.
 //
 // Repeat (D79): a tool that sets spec.repeat opts into the run's repeat
 // cache (src/runlog/actions.ts). An exact repeat of an earlier ok call in the
@@ -25,8 +35,9 @@
 //
 // Staging is owned here and nowhere else: stageRows() writes the full result
 // to /data/<toolCallId>.json in the sandbox. On the virtual sandbox it writes
-// model-facing text; e2b and daytona leave the machine, so they get
-// persisted-profile text only (D45).
+// what the model sees: raw with TRIAGE_MODEL_REDACTION=off (credentials still
+// masked), model-facing text with on. e2b and daytona leave the machine, so
+// they get persisted-profile text only (D45).
 //
 // The result cap (D104) is owned here too: after redaction, a result whose
 // JSON is over TRIAGE_MAX_MODEL_BYTES_PER_CALL is replaced by a summary
@@ -40,19 +51,21 @@ import type { Config } from '../../config/env.ts';
 import { errorText, excerpt, safeErrorText, scrubSecrets, stripAddresses } from '../../connectors/error-text.ts';
 import { makeAuditLine } from '../../gate/audit.ts';
 import { isExhausted } from '../../gate/budget.ts';
-import { checkScope, type LogsMode } from '../../gate/scope.ts';
+import { checkScope, deriveLeads, type LogsMode, maskId, type LeadCall } from '../../gate/scope.ts';
+import type { RowKeys } from '../../gate/sql.ts';
 import { classifySqlState, isSqlState, maskSqlValues, sqlErrorMessage, type SqlStateInfo } from '../../gate/sql-errors.ts';
-import { redactModelFacing, redactPersisted } from '../../gate/redact.ts';
+import { redactForModel, redactPersisted } from '../../gate/redact.ts';
 import { FixtureMissError } from '../../mock/errors.ts';
 import { keyString } from '../../mock/key.ts';
 import type { FixtureEntity, FixtureKind, SemanticKey } from '../../mock/types.ts';
 import { findRepeat, rememberRepeat } from '../../runlog/actions.ts';
+import { logRunEvent } from '../../runlog/event-log.ts';
 import type { AuditDecision, AuditTransport } from '../../types/audit.ts';
 import type { Entity } from '../../types/core.ts';
 import { notConfigured, ok, refused, type ToolEnvelope, unreachable } from '../../types/tool-result.ts';
 import type { ToolContext } from '../types.ts';
 import { recordConnectorFailure } from './connector-failures.ts';
-import { scopeSetOf } from './context.ts';
+import { addLeads, scopeSetOf } from './context.ts';
 
 // ------------------------------------------------------------------ types
 
@@ -99,10 +112,8 @@ export type ScopeOptions = {
   /** From the SQL parser: true when the select list is aggregate-only. */
   readonly sqlAggregateOnly?: boolean;
   readonly logsMode?: LogsMode;
-  /** Correlation ids and journey keys seen in earlier results of the run (D77). */
+  /** Correlation ids seen in earlier results of the run (D77). */
   readonly observed?: ReadonlySet<string>;
-  /** From the SQL parser: the $n params compared only to a device_id or verification_id column (Q13). */
-  readonly sqlJourneyParams?: readonly number[];
   /** The query reads only its service's scope_exempt_tables (D89). */
   readonly sqlConfigTablesOnly?: boolean;
 };
@@ -135,6 +146,12 @@ export type IoToolSpec<K extends FixtureKind, T> = {
   readonly render: (value: T) => unknown;
   /** The full result to stage as /data/<toolCallId>.json. Row-returning tools only. */
   readonly stage?: (value: T) => unknown;
+  /**
+   * The records of the full result to read for derived leads (D97), with the
+   * SQL parser's row keys for sql_select. Leave it out for tools whose
+   * results never add ids.
+   */
+  readonly leads?: (value: T) => { readonly records: readonly unknown[]; readonly rowKeys?: RowKeys };
   /** Audit summary for an allowed call. Passes the persisted profile. */
   readonly summary?: (value: T) => string;
   /** Count-only tools (decrypt_fields, encrypt_lookup_value): values handled. */
@@ -173,7 +190,8 @@ export type IoRunContext = {
 
 // ------------------------------------------------------------------ staging
 
-export type StageProfile = 'model_facing' | 'persisted';
+/** raw: TRIAGE_MODEL_REDACTION=off on the virtual sandbox, credentials still masked (D107). */
+export type StageProfile = 'raw' | 'model_facing' | 'persisted';
 
 export type StageResult =
   | { readonly staged: true; readonly path: string; readonly profile: StageProfile }
@@ -189,9 +207,9 @@ export type StageOptions = {
 const REMOTE_SANDBOXES: ReadonlySet<string> = new Set(['e2b', 'daytona']);
 
 /** The profile staged text passes for the configured sandbox provider (D45). */
-export function stageProfileFor(config: Pick<Config, 'sandbox'>): StageProfile | null {
+export function stageProfileFor(config: Pick<Config, 'sandbox' | 'redaction'>): StageProfile | null {
   const provider = config.sandbox.provider;
-  if (provider === 'virtual') return 'model_facing';
+  if (provider === 'virtual') return config.redaction.model === 'off' ? 'raw' : 'model_facing';
   if (REMOTE_SANDBOXES.has(provider)) return 'persisted';
   // local is refused by config and the doctor; never stage into it.
   return null;
@@ -212,7 +230,7 @@ export async function stageRows(
   harness: StagingHarness | undefined,
   toolCallId: string,
   rows: unknown,
-  config: Pick<Config, 'sandbox'>,
+  config: Pick<Config, 'sandbox' | 'redaction'>,
   opts: StageOptions = {},
 ): Promise<StageResult> {
   if (harness === undefined) return { staged: false, reason: 'no harness' };
@@ -224,7 +242,7 @@ export async function stageRows(
     const safe =
       profile === 'persisted'
         ? redactPersisted(rows, opts.names !== undefined ? { names: opts.names } : {}).value
-        : redactModelFacing(rows);
+        : redactForModel(rows, config);
     const text = JSON.stringify(safe ?? null);
     // harness.sandbox throws when the agent has no sandbox, so read it here.
     await harness.sandbox.writeFile(path, text);
@@ -368,7 +386,7 @@ export async function runIoTool<K extends FixtureKind, T>(
 
   const finish = <V>(build: (safe: V) => ToolEnvelope, value: V): ToolEnvelope => {
     step('redact');
-    const safe = redactModelFacing(value);
+    const safe = redactForModel(value, toolContext.config);
     step('envelope');
     return build(safe);
   };
@@ -412,8 +430,8 @@ export async function runIoTool<K extends FixtureKind, T>(
       ...(options.sqlAggregateOnly !== undefined ? { sqlAggregateOnly: options.sqlAggregateOnly } : {}),
       ...(options.logsMode !== undefined ? { logsMode: options.logsMode } : {}),
       ...(options.observed !== undefined ? { observed: options.observed } : {}),
-      ...(options.sqlJourneyParams !== undefined ? { sqlJourneyParams: options.sqlJourneyParams } : {}),
       ...(options.sqlConfigTablesOnly !== undefined ? { sqlConfigTablesOnly: options.sqlConfigTablesOnly } : {}),
+      maxLeadDepth: toolContext.config.budgets.maxLeadDepth,
     });
     if (!result.ok) {
       audit({ decision: 'deny', exit: 'refused', transport: noIoTransport, reason: result.reason });
@@ -570,7 +588,21 @@ export async function runIoTool<K extends FixtureKind, T>(
     gate,
   });
 
-  // 8. Stage the full result. A failure is logged and does not fail the call.
+  // 8. Derived leads from the full result (D97).
+  if (spec.leads !== undefined && spec.scope !== 'skip') {
+    const { records, rowKeys } = spec.leads(value);
+    const scope = spec.scope;
+    const call: LeadCall = {
+      tool: spec.tool,
+      toolCallId: ctx.toolCallId,
+      params: scope.params !== undefined ? scope.params : spec.input,
+      ...(rowKeys !== undefined ? { rowKeys } : {}),
+      ...(scope.systemic !== undefined ? { systemic: scope.systemic } : {}),
+    };
+    recordLeads(toolContext, call, records);
+  }
+
+  // 9. Stage the full result. A failure is logged and does not fail the call.
   let staged: StageResult | undefined;
   if (spec.stage !== undefined) {
     step('stage');
@@ -578,13 +610,13 @@ export async function runIoTool<K extends FixtureKind, T>(
   }
   const stagedPath = staged?.staged === true ? staged.path : undefined;
 
-  // 9. Model-facing redaction, the result cap (D104), then 10. the envelope.
+  // 10. Model-facing redaction, the result cap (D104), then 11. the envelope.
   // An over-cap result of a tool that stages nothing gets its rendered value
   // staged now, so the summary can still point at a file.
   const rendered = spec.render(value);
   const data = stagedPath !== undefined && isPlainObject(rendered) ? { ...rendered, staged_file: stagedPath } : rendered;
   step('redact');
-  const safe = asJson(redactModelFacing(data));
+  const safe = asJson(redactForModel(data, toolContext.config));
   const cap = toolContext.config.budgets.maxModelBytesPerCall;
   const overCap = spec.overCap;
   const capped = await fitModelResult(safe, {
@@ -595,7 +627,7 @@ export async function runIoTool<K extends FixtureKind, T>(
       : !staged.staged
         ? { notStaged: staged.reason }
         : {}),
-    ...(overCap !== undefined ? { custom: () => asJson(redactModelFacing(overCap(value, cap))) } : {}),
+    ...(overCap !== undefined ? { custom: () => asJson(redactForModel(overCap(value, cap), toolContext.config)) } : {}),
   });
   step('envelope');
   const envelope = ok(capped, now);
@@ -603,6 +635,34 @@ export async function runIoTool<K extends FixtureKind, T>(
     rememberRepeat(toolContext.runId, repeatKey, envelope, toolContext.agent ?? 'an earlier call', now().toISOString());
   }
   return envelope;
+}
+
+// ------------------------------------------------------------------ derived leads (D97)
+
+// Adds the call's derived leads to the run's chain and writes one run event
+// per added lead and per skipped field. Values are masked; a skip carries
+// counts only.
+function recordLeads(toolContext: ToolContext, call: LeadCall, records: readonly unknown[]): void {
+  const deps = toolContext.deps;
+  const { budgets } = toolContext.config;
+  const found = deriveLeads(deps.idChain(), scopeSetOf(deps), call, records, {
+    maxDepth: budgets.maxLeadDepth,
+    maxPerField: budgets.maxDerivedPerField,
+  });
+  for (const lead of found.leads.length > 0 ? addLeads(deps, found.leads) : []) {
+    logRunEvent(toolContext.runId, 'lead', {
+      value: maskId({ kind: lead.kind, normalised: lead.value }),
+      kind: lead.kind,
+      depth: lead.depth,
+      parent: lead.parent,
+      tool: call.tool,
+      tool_call_id: call.toolCallId,
+      field: lead.via?.field,
+    });
+  }
+  for (const skip of found.skipped) {
+    logRunEvent(toolContext.runId, 'lead_skipped', { ...skip, tool: call.tool, tool_call_id: call.toolCallId });
+  }
 }
 
 // ------------------------------------------------------------------ result cap (D104)

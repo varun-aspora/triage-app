@@ -13,10 +13,15 @@
 // arrays and plain objects, never alter keys, and leave numbers, booleans and
 // null as they are. Numbers are not scanned, so ids must travel as strings.
 //
+// redactForModel is what the model and scripts see (D107): with
+// TRIAGE_MODEL_REDACTION=on it is the model-facing profile, with off it masks
+// credentials only, so data reaches the model raw but secrets never do.
+//
 // checkEgress reports which patterns redactPersisted would still mask and at
 // which JSON paths. It never returns matched text. It is ok exactly when
 // redactPersisted would change nothing.
 
+import type { Config } from '../config/env.ts';
 import { MAX_DECODE_DEPTH, jsonUnescape, replaceBase64Blobs, urlDecode } from './redact-decode.ts';
 import {
   PATTERN_NAMES,
@@ -86,6 +91,9 @@ const use = (detector: Detector, mask: (text: string) => string = detector.mask)
 // Order matters: each detector runs on the output of the ones before it.
 // Addresses go before phones and digits so the postcode is still there.
 const MODEL_FACING: Profile = [use(credential), use(email, maskEmailLocal), use(pan), use(card), use(passport)];
+
+// TRIAGE_MODEL_REDACTION=off (D107): raw data, but never a secret.
+const CREDENTIALS_ONLY: Profile = [use(credential)];
 
 const PERSISTED: Profile = [
   use(credential),
@@ -266,6 +274,16 @@ export type EgressResult =
 /** The model-facing profile. Returns a redacted copy; the input is not changed. */
 export function redactModelFacing<T>(value: T): T {
   return walk(value, { profile: MODEL_FACING, names: null }) as T;
+}
+
+/**
+ * What the model and scripts see (D107). With config.redaction.model 'on' it
+ * is redactModelFacing; with 'off' only credentials are masked. Returns a
+ * redacted copy; the input is not changed.
+ */
+export function redactForModel<T>(value: T, config: Pick<Config, 'redaction'>): T {
+  if (config.redaction.model === 'on') return redactModelFacing(value);
+  return walk(value, { profile: CREDENTIALS_ONLY, names: null }) as T;
 }
 
 /** The persisted profile, and the only producer of Persisted<T>. */

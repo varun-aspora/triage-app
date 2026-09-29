@@ -20,8 +20,9 @@
 
 import { defineTool } from '@flue/runtime/tool';
 import * as v from 'valibot';
+import type { Config } from '../config/env.ts';
 import { ENC_PREFIX, FIELD_KINDS, normaliseLookupValue } from '../connectors/crypto/field-crypto.ts';
-import { redactModelFacing } from '../gate/redact.ts';
+import { redactForModel } from '../gate/redact.ts';
 import { semanticKey } from '../mock/key.ts';
 import type { ToolEnvelope } from '../types/tool-result.ts';
 import { outcomeData, realConnectorContext } from './_lib/connector-context.ts';
@@ -37,16 +38,17 @@ export const MAX_LOOKUP_VALUE_CHARS = 320;
 const CiphertextSchema = v.pipe(v.string(), v.startsWith(ENC_PREFIX), v.minLength(ENC_PREFIX.length + 1));
 
 /**
- * The model-facing result. The pipeline runs model-facing redaction over it,
- * and a ciphertext that happens to look like a secret (for example base64
- * with 'pwd' before '==') would be masked into a wrong value. That case says
- * so instead of handing back a ciphertext that cannot match.
+ * The model-facing result. The pipeline runs model-facing redaction over it
+ * (redactForModel, D107), and a ciphertext that happens to look like a
+ * secret (for example base64 with 'pwd' before '==') would be masked into a
+ * wrong value. That case says so instead of handing back a ciphertext that
+ * cannot match.
  */
-export function renderCiphertext(kind: string, value: unknown): Record<string, unknown> {
+export function renderCiphertext(kind: string, value: unknown, config: Pick<Config, 'redaction'>): Record<string, unknown> {
   const parsed = v.safeParse(CiphertextSchema, value);
   if (!parsed.success) throw new Error(`${NAME}: the field_crypto encrypt answer has the wrong shape`);
   const ciphertext = parsed.output;
-  const seen = redactModelFacing({ ciphertext }) as { ciphertext?: unknown };
+  const seen = redactForModel({ ciphertext }, config) as { ciphertext?: unknown };
   if (seen.ciphertext !== ciphertext) {
     return {
       kind,
@@ -127,7 +129,7 @@ export const toolModule: ToolModule = {
               const crypto = openFieldCrypto(ctx.config, service, keyEnv as string);
               return outcomeData(await crypto.encryptLookupValue(realConnectorContext(ctx, sig), value, kind));
             },
-            render: (ciphertext) => renderCiphertext(kind, ciphertext),
+            render: (ciphertext) => renderCiphertext(kind, ciphertext, ctx.config),
             count: 1,
           },
           { toolContext: ctx, toolCallId, log, ...(signal !== undefined ? { signal } : {}) },

@@ -8,7 +8,10 @@
 // calls see the wider scope. widenIdChain() is the only way to change it, and
 // it only ever adds ids to the scope set. It also keeps the chain's leads
 // (D96) when the new chain leaves them out, so the report and the saved chain
-// still list them.
+// still list them. addLeads() adds the derived leads the pipeline finds in a
+// tied result (D97) to the same chain, so they are saved with it
+// (triage.agent.ts syncs deps.idChain() at every finish) and survive a settle
+// and a resume.
 
 import * as v from 'valibot';
 import type { EscalationStore } from '../../agents/escalation.ts';
@@ -189,6 +192,22 @@ export function widenIdChain(deps: ToolDeps, next: IdChain): IdChain {
 }
 
 /**
+ * Adds derived leads (D97) to the run's chain and scope set. A lead whose
+ * kind and value the chain already holds is skipped. Returns the leads that
+ * were added.
+ */
+export function addLeads(deps: ToolDeps, leads: readonly Lead[]): Lead[] {
+  const holder = holders.get(deps);
+  if (holder === undefined) throw new IdChainError('these deps were not built by createToolDeps');
+  const merged = mergeLeads(holder.chain.leads, leads);
+  const added = merged.slice(holder.chain.leads?.length ?? 0);
+  if (added.length === 0) return [];
+  holder.chain = { ...holder.chain, leads: merged };
+  holder.scope = extendScopeSet(holder.scope, { ids: {}, hops: [], basic_state: [], leads: added });
+  return added;
+}
+
+/**
  * base with extra's ids added (extra wins), extra's hops and state items
  * appended when base does not already hold them, and the leads of both, one
  * per kind and value. Pure; nothing is widened.
@@ -224,7 +243,7 @@ export function scopeSetOf(deps: ToolDeps): ScopeSet {
   return createScopeSet(chain);
 }
 
-/** The ids seen in the run's earlier results (D77), as the pipeline's scope option. */
+/** The correlation ids seen in the run's earlier results (D77), as the pipeline's scope option. */
 export function observedScopeOf(runId: RunId): { observed?: ReadonlySet<string> } {
   const observed = observedIds(runId);
   return observed !== undefined ? { observed } : {};

@@ -632,12 +632,24 @@ describe('http_call body cap', () => {
     expect((env.output.data as { truncated: boolean }).truncated).toBe(true);
   });
 
-  test('the body passes the model-facing redaction profile', async () => {
+  test('with redaction on, the body passes the model-facing redaction profile', async () => {
     const card = '4111111111111111';
-    const s = setup({ fixtures: harborFixture('/admin/v1/card', 'GET', { status: 200, body: { card } }) });
+    const s = setup({
+      env: { TRIAGE_MODEL_REDACTION: 'on' },
+      fixtures: harborFixture('/admin/v1/card', 'GET', { status: 200, body: { card } }),
+    });
     const env = await call(s, { service: 'harbor', path: '/admin/v1/card' });
     expect(env.output.status).toBe('ok');
     expect(JSON.stringify(env)).not.toContain(card);
+  });
+
+  test('with redaction off, the default, the body is raw except for credentials (D107)', async () => {
+    const card = '4111111111111111';
+    const body = { card, email: 'priya.sharma@example.com', token: 'Authorization: Bearer synthetictoken.abc123' };
+    const s = setup({ fixtures: harborFixture('/admin/v1/card', 'GET', { status: 200, body }) });
+    const env = await call(s, { service: 'harbor', path: '/admin/v1/card' });
+    expect(env.output.status).toBe('ok');
+    expect((env.output.data as { body: unknown }).body).toEqual({ ...body, token: 'Authorization: Bearer ****' });
   });
 
   test('deny: a fixture with the wrong shape is a loud error', async () => {

@@ -37,7 +37,7 @@ import { ConnectorError } from '../connectors/types.ts';
 import { makeAuditLine } from '../gate/audit.ts';
 import { isExhausted } from '../gate/budget.ts';
 import { extractIdShaped } from '../gate/id-patterns.ts';
-import { redactModelFacing } from '../gate/redact.ts';
+import { redactForModel } from '../gate/redact.ts';
 import { extendScopeSet, inScope, type ScopeSet } from '../gate/scope.ts';
 import type { AuditDecision } from '../types/audit.ts';
 import { ENTITIES, KNOWN_ID_KEYS, type KnownIdKey, type KnownIds } from '../types/core.ts';
@@ -370,7 +370,7 @@ async function runResolveIdentity(ctx: ToolContext, flue: RunInput): Promise<Too
     ...(errors.length > 0 ? { errors, errors_hint: HOP_ERRORS_HINT } : {}),
     ...(flue.data.entity_hint !== undefined ? { entity_hint: flue.data.entity_hint } : {}),
   };
-  return ok(JSON.parse(JSON.stringify(redactModelFacing(data))) as unknown, now);
+  return ok(JSON.parse(JSON.stringify(redactForModel(data, ctx.config))) as unknown, now);
 }
 
 // ------------------------------------------------------------ hop errors

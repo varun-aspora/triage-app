@@ -315,3 +315,28 @@ describe('aggregateOnly', () => {
     }
   });
 });
+
+describe('rowKeys (D97)', () => {
+  test('top-level ANDed equalities tie every row, joins on id columns included', () => {
+    expect(allowed("SELECT * FROM t WHERE user_id = $1 AND status = 'OPEN'").rowKeys).toEqual({ params: [1], literals: ['OPEN'] });
+    const join = 'SELECT d.* FROM r JOIN d ON d.verification_id = r.verification_id WHERE r.subject = $1';
+    expect(allowed(join).rowKeys).toEqual({ params: [1], literals: [] });
+  });
+
+  test('a renamed column no longer drops the row keys: every field of a tied row is read', () => {
+    expect(allowed('SELECT subject AS device_id FROM refresh_tokens WHERE verification_id = $1').rowKeys).toEqual({ params: [1], literals: [] });
+  });
+
+  test('queries that can widen their rows have none', () => {
+    for (const sql of [
+      'SELECT * FROM t WHERE a = $1 OR b = $2',
+      'SELECT * FROM t WHERE a IN (SELECT a FROM u WHERE b = $1)',
+      'WITH x AS (SELECT * FROM t WHERE a = $1) SELECT * FROM x',
+      'SELECT * FROM t, u WHERE t.a = $1',
+      'SELECT * FROM t JOIN u ON t.status = u.status WHERE t.a = $1',
+      'SELECT a FROM t WHERE a = $1 UNION SELECT a FROM u',
+    ]) {
+      expect([sql, allowed(sql).rowKeys]).toEqual([sql, undefined]);
+    }
+  });
+});

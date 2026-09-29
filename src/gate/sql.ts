@@ -97,10 +97,8 @@ export type SqlAllowed = {
   aggregateOnly: boolean;
   // Highest $n used; the caller must bind exactly this many params.
   paramCount: number;
-  // The $n params and literals every row is tied to (D77, Q13). See rowKeys.
+  // The $n params and literals every row is tied to (D97). See rowKeys.
   rowKeys?: RowKeys;
-  // The $n params used only as `device_id = $n` or `verification_id = $n` (Q13).
-  journeyParams: number[];
   // Set when the statement is EXPLAIN of a SELECT. The caller must run the
   // text as it is: a row-cap wrapper around EXPLAIN is not valid SQL.
   explain?: { analyze: boolean };
@@ -235,7 +233,6 @@ function checkSelect(select: JsonObject): SqlAllowed {
     aggregateOnly: isAggregateOnly(select),
     paramCount,
     ...rowKeysOf(select),
-    journeyParams: journeyParams(select),
   };
 }
 
@@ -573,19 +570,15 @@ function children(body: JsonObject): Json[] {
   return out;
 }
 
-// ---- row keys and journey params (D77, Q13) ------------------------------
+// ---- row keys (D97) --------------------------------------------------------
 //
-// A device or verification id in a row may be used later in the run only when
-// every row is tied to a chain id. rowKeys are the values in a top-level
-// `column = value` of WHERE (ANDed, not under OR, NOT or a subquery). There
-// are none when the query can widen its rows past them or rename a column:
-// a CTE, a set operation, VALUES, a subquery anywhere, more than one FROM
-// item, a join not on an id-like column of each side (or NATURAL), or a
-// select-list alias device_id, x-device-id or verification_id on another
-// column. A join on a low-cardinality id-like column (tenant_id) can still
-// widen; the parser cannot know the column's values.
-
-const JOURNEY_COLUMNS: ReadonlySet<string> = new Set(['device_id', 'x-device-id', 'verification_id']);
+// An id in a row becomes a derived lead only when every row is tied to an id
+// in scope. rowKeys are the values in a top-level `column = value` of WHERE
+// (ANDed, not under OR, NOT or a subquery). There are none when the query can
+// widen its rows past them: a CTE, a set operation, VALUES, a subquery
+// anywhere, more than one FROM item, or a join not on an id-like column of
+// each side (or NATURAL). A join on a low-cardinality id-like column
+// (tenant_id) can still widen; the parser cannot know the column's values.
 
 function stripCast(value: Json | undefined): Json | undefined {
   const node = unwrap(value);
@@ -653,14 +646,6 @@ function joinedTables(item: Json | undefined): Set<string> | undefined {
   return linked ? new Set([...left, ...right]) : undefined;
 }
 
-function keepsJourneyNames(targets: Json[]): boolean {
-  return targets.every((entry) => {
-    const rt = unwrap(entry);
-    const name = rt?.[0] === 'ResTarget' && typeof rt[1].name === 'string' ? rt[1].name.toLowerCase() : undefined;
-    return name === undefined || !JOURNEY_COLUMNS.has(name) || columnParts(rt![1].val)?.at(-1) === name;
-  });
-}
-
 function rowKeysOf(select: JsonObject): { rowKeys?: RowKeys } {
   if (select.withClause !== undefined || select.valuesLists !== undefined) return {};
   if (typeof select.op === 'string' && select.op !== 'SETOP_NONE') return {};
@@ -668,7 +653,7 @@ function rowKeysOf(select: JsonObject): { rowKeys?: RowKeys } {
   if (from.length !== 1 || joinedTables(from[0]) === undefined) return {};
   let subquery = false;
   eachNode(select, (kind) => void (subquery ||= kind === 'SubLink'));
-  if (subquery || !keepsJourneyNames(Array.isArray(select.targetList) ? select.targetList : [])) return {};
+  if (subquery) return {};
   const keys: RowKeys = { params: [], literals: [] };
   for (const expr of conjuncts(select.whereClause)) {
     const [l, r] = equalitySides(expr) ?? [];
@@ -681,21 +666,4 @@ function rowKeysOf(select: JsonObject): { rowKeys?: RowKeys } {
     if (typeof literal === 'string' || typeof literal === 'number') keys.literals.push(String(literal));
   }
   return keys.params.length + keys.literals.length > 0 ? { rowKeys: keys } : {};
-}
-
-function journeyParams(select: JsonObject): number[] {
-  const uses = new Map<number, number>();
-  const journey = new Map<number, number>();
-  const bump = (m: Map<number, number>, n: number): void => void m.set(n, (m.get(n) ?? 0) + 1);
-  eachNode(select, (kind, body) => {
-    if (kind === 'ParamRef' && typeof body.number === 'number') bump(uses, body.number);
-    const sides = kind === 'A_Expr' ? equalitySides({ A_Expr: body }) : undefined;
-    if (sides === undefined) return;
-    for (const [p, c] of [sides, [sides[1], sides[0]]] as const) {
-      const n = paramNumber(p);
-      const column = columnParts(c)?.at(-1);
-      if (n !== undefined && column !== undefined && JOURNEY_COLUMNS.has(column)) bump(journey, n);
-    }
-  });
-  return [...uses].filter(([n, count]) => journey.get(n) === count).map(([n]) => n).sort((a, b) => a - b);
 }

@@ -23,6 +23,8 @@ export const PIPELINE_EVENT_TYPES = [
   'phase',
   'dispatch',
   'sql_retry',
+  'lead',
+  'lead_skipped',
   'blocked',
   'settled',
   'failed',

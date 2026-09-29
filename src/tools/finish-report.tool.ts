@@ -10,7 +10,8 @@
 //   1. Re-check the draft shape (Flue parses it first; this keeps the check in
 //      our hands). A bad shape is refused with the failing paths. The input
 //      schema has no id_chain.leads: code fills them from the run chain's
-//      leads (D96), values masked with maskId and labels through the
+//      leads (seeds, D96, and derived leads with their depth, parent and
+//      source call, D97), values masked with maskId and labels through the
 //      persisted profile, so the model never writes the list and the egress
 //      check has nothing to refuse there. Synthesis pins id_chain, so the
 //      list survives it.
@@ -124,6 +125,10 @@ export function withRunLeads(draft: ReportDraft, chain: IdChain, names: readonly
       ...lead,
       value: maskId({ kind: lead.kind, normalised: lead.value }),
       ...(label !== undefined ? { label } : {}),
+      // A tool call id can hold a run of digits the egress check refuses, and
+      // the model cannot fix a list code fills, so the source call passes the
+      // persisted profile too.
+      ...(lead.via !== undefined ? { via: redactPersisted(lead.via, { names }).value } : {}),
     };
   });
   return { ...draft, id_chain: leads.length > 0 ? { ...idChain, leads } : idChain };

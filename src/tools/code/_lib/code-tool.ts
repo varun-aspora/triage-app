@@ -1,15 +1,15 @@
 // What repo_read and repo_grep share: the repo picklist, the enabled() rule
-// and the run wrapper (signal, budget, audit line, model-facing redaction,
-// result cap, envelope). They read local disk only, so they do not go through the mock
-// layer: in mock mode they read the same TRIAGE_REPOS_DIR and the audit line
-// says transport mock (D19, D42).
+// and the run wrapper (signal, budget, audit line, model-facing redaction
+// per TRIAGE_MODEL_REDACTION (D107), result cap, envelope). They read local
+// disk only, so they do not go through the mock layer: in mock mode they read
+// the same TRIAGE_REPOS_DIR and the audit line says transport mock (D19, D42).
 
 import type { Config } from '../../../config/env.ts';
 import type { Registry } from '../../../config/registry.ts';
 import { loadRepos, type RepoPin, repoEnum } from '../../../config/repos.ts';
 import { makeAuditLine } from '../../../gate/audit.ts';
 import { isExhausted } from '../../../gate/budget.ts';
-import { redactModelFacing } from '../../../gate/redact.ts';
+import { redactForModel } from '../../../gate/redact.ts';
 import type { AuditTransport } from '../../../types/audit.ts';
 import type { Entity } from '../../../types/core.ts';
 import { ok, refused, type ToolEnvelope } from '../../../types/tool-result.ts';
@@ -118,7 +118,7 @@ export async function runCodeTool(spec: CodeRunSpec): Promise<ToolEnvelope> {
       ),
     );
   };
-  const refuse = (message: string): ToolEnvelope => refused(redactModelFacing(message), now);
+  const refuse = (message: string): ToolEnvelope => refused(redactForModel(message, ctx.config), now);
 
   const budget = deps.budget.consumeToolCall(spec.tool, ctx.entity ?? undefined, { dataTool: true });
   if (!budget.ok) {
@@ -138,7 +138,7 @@ export async function runCodeTool(spec: CodeRunSpec): Promise<ToolEnvelope> {
   // only when the result goes out.
   const docs = outcome.docs !== undefined ? await repoDocsFor(ctx, outcome.docs, spec.signal) : undefined;
   const data = docs !== undefined && isRecord(outcome.data) ? { ...outcome.data, ...docs.fields } : outcome.data;
-  const safe = asJson(redactModelFacing(data));
+  const safe = asJson(redactForModel(data, ctx.config));
   // The result cap (D104): what is over it is summarised, and only the summary counts as sent.
   const { harness, toolCallId } = spec;
   const capped = await fitModelResult(safe, {

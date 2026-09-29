@@ -131,11 +131,15 @@ describe('defaults with an empty .env', () => {
     expect(c.sandbox.provider).toBe('virtual');
     expect(c.sandbox.python).toBe(true);
     expect(c.sandbox.timeoutMs).toBe(30000);
+    expect(c.sandbox.quotaMb).toBe(500);
+    expect(c.redaction.model).toBe('off');
     expect(c.budgets.maxToolCallsPerRun).toBe(120);
     expect(c.budgets.maxLogCallsPerRun).toBe(50);
     expect(c.budgets.maxCodeCallsPerRun).toBe(400);
     expect(c.budgets.maxTasksPerRun).toBe(12);
     expect(c.budgets.maxToolCallsPerWorker).toBe(40);
+    expect(c.budgets.maxDerivedPerField).toBe(10);
+    expect(c.budgets.maxLeadDepth).toBe(3);
     expect(c.budgets.maxPromptTokens).toBe(60000);
     expect(c.agentShape).toBe('split');
     expect(c.models.worker).toBeUndefined();
@@ -599,6 +603,30 @@ describe('single agent keys (D108, D109)', () => {
     expect(c.budgets.maxPromptTokens).toBe(80000);
     const err = configError(() => fromRecord({ TRIAGE_MAX_TOOL_CALLS_PER_WORKER: '0', TRIAGE_MAX_PROMPT_TOKENS: '500' }));
     expect(err.keys).toEqual(['TRIAGE_MAX_TOOL_CALLS_PER_WORKER', 'TRIAGE_MAX_PROMPT_TOKENS']);
+  });
+});
+
+describe('sandbox quota, model redaction and derived lead caps (D97, D105, D107)', () => {
+  test('TRIAGE_SANDBOX_QUOTA_MB is a whole number of at least 1', () => {
+    expect(fromRecord({ TRIAGE_SANDBOX_QUOTA_MB: '2048' }).sandbox.quotaMb).toBe(2048);
+    expect(configError(() => fromRecord({ TRIAGE_SANDBOX_QUOTA_MB: '0' })).keys).toEqual(['TRIAGE_SANDBOX_QUOTA_MB']);
+    expect(configError(() => fromRecord({ TRIAGE_SANDBOX_QUOTA_MB: '1.5' })).message).toContain('whole number');
+  });
+
+  test('TRIAGE_MODEL_REDACTION takes off or on and names the key otherwise', () => {
+    expect(fromRecord({ TRIAGE_MODEL_REDACTION: 'on' }).redaction.model).toBe('on');
+    expect(fromRecord({ TRIAGE_MODEL_REDACTION: ' ' }).redaction.model).toBe('off');
+    const err = configError(() => fromRecord({ TRIAGE_MODEL_REDACTION: 'true' }));
+    expect(err.keys).toEqual(['TRIAGE_MODEL_REDACTION']);
+    expect(err.message).toContain('off, on');
+  });
+
+  test('the derived lead caps are ints of at least 1', () => {
+    const c = fromRecord({ TRIAGE_MAX_DERIVED_PER_FIELD: '25', TRIAGE_MAX_LEAD_DEPTH: '5' });
+    expect(c.budgets.maxDerivedPerField).toBe(25);
+    expect(c.budgets.maxLeadDepth).toBe(5);
+    const err = configError(() => fromRecord({ TRIAGE_MAX_DERIVED_PER_FIELD: '0', TRIAGE_MAX_LEAD_DEPTH: '0' }));
+    expect(err.keys).toEqual(['TRIAGE_MAX_DERIVED_PER_FIELD', 'TRIAGE_MAX_LEAD_DEPTH']);
   });
 });
 

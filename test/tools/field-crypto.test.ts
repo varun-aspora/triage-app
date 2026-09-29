@@ -15,6 +15,9 @@ const KEY = Buffer.from(KEY_TEXT).toString('base64');
 const PHONE = '+919876543210';
 const OTHER_PHONE = '+919812345678';
 const EMAIL = 'priya.sharma@example.com';
+// TRIAGE_MODEL_REDACTION (D107).
+const OFF = { redaction: { model: 'off' } } as const;
+const ON = { redaction: { model: 'on' } } as const;
 
 const cleanups: (() => void)[] = [];
 afterEach(() => {
@@ -77,8 +80,8 @@ describe('encrypt_lookup_value and decrypt_fields (real mode, test key)', () => 
     expect(out['counts']).toEqual({ decrypted: 1, passthrough: 0, failed: 2 });
   });
 
-  test('decrypt output passes the model-facing profile: email local part masked, phone kept', async () => {
-    const r = run(world(false));
+  test('decrypt output with redaction on passes the model-facing profile: email local part masked, phone kept', async () => {
+    const r = run(world(false, { TRIAGE_MODEL_REDACTION: 'on' }));
     const ctEmail = data(await r.call(r.encrypt, { service: 'harbor', value: EMAIL, kind: 'email' }))['ciphertext'];
     const ctPhone = data(await r.call(r.encrypt, { service: 'harbor', value: PHONE, kind: 'phone' }))['ciphertext'];
     const out = data(await r.call(r.decrypt, { service: 'harbor', values: [ctEmail, ctPhone] }));
@@ -86,6 +89,13 @@ describe('encrypt_lookup_value and decrypt_fields (real mode, test key)', () => 
     expect(items[0]?.value).toBe('****@example.com');
     expect(items[1]?.value).toBe(PHONE);
     expect(JSON.stringify(out)).not.toContain('priya.sharma');
+  });
+
+  test('decrypt output with redaction off, the default, is raw (D107)', async () => {
+    const r = run(world(false));
+    const ctEmail = data(await r.call(r.encrypt, { service: 'harbor', value: EMAIL, kind: 'email' }))['ciphertext'];
+    const out = data(await r.call(r.decrypt, { service: 'harbor', values: [ctEmail] }));
+    expect((out['items'] as { value: string }[])[0]?.value).toBe(EMAIL);
   });
 });
 
@@ -215,18 +225,27 @@ describe('mock mode', () => {
 });
 
 describe('ciphertext rendering', () => {
-  test('a ciphertext that redaction would mask comes back as null with a note', () => {
-    // 'pWD' followed by '==' reads as a pwd=value secret to the credential detector.
-    const masked = renderCiphertext('phone', 'enc:pWDQmgAbuKB703xmk66sE1rSgVjhrA==');
-    expect(masked['ciphertext']).toBeNull();
-    expect(String(masked['note'])).toContain('Record the gap');
-    const kept = renderCiphertext('phone', 'enc:bW9jay1jaXBoZXJ0ZXh0');
-    expect(kept['ciphertext']).toBe('enc:bW9jay1jaXBoZXJ0ZXh0');
+  test('a ciphertext that redaction would mask comes back as null with a note, with redaction on or off', () => {
+    for (const config of [ON, OFF]) {
+      // 'pWD' followed by '==' reads as a pwd=value secret to the credential detector.
+      const masked = renderCiphertext('phone', 'enc:pWDQmgAbuKB703xmk66sE1rSgVjhrA==', config);
+      expect(masked['ciphertext']).toBeNull();
+      expect(String(masked['note'])).toContain('Record the gap');
+      const kept = renderCiphertext('phone', 'enc:bW9jay1jaXBoZXJ0ZXh0', config);
+      expect(kept['ciphertext']).toBe('enc:bW9jay1jaXBoZXJ0ZXh0');
+    }
+  });
+
+  test('a ciphertext that only the model-facing profile would mask is nulled with redaction on and kept with it off', () => {
+    // A card-shaped run of digits in the base64 text.
+    const ct = 'enc:x/4111111111111111/y';
+    expect(renderCiphertext('phone', ct, ON)['ciphertext']).toBeNull();
+    expect(renderCiphertext('phone', ct, OFF)['ciphertext']).toBe(ct);
   });
 
   test('a fixture that is not a ciphertext is a loud error', () => {
-    expect(() => renderCiphertext('phone', 'plain')).toThrow('wrong shape');
-    expect(() => renderCiphertext('phone', 42)).toThrow('wrong shape');
+    expect(() => renderCiphertext('phone', 'plain', OFF)).toThrow('wrong shape');
+    expect(() => renderCiphertext('phone', 42, OFF)).toThrow('wrong shape');
   });
 });
 
