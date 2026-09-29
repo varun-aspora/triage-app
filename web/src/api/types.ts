@@ -386,6 +386,8 @@ export type SyncJob = {
   status: 'running' | 'done' | 'busy' | 'failed';
   started_at: string;
   finished_at?: string;
+  repos?: string[];
+  running?: string[];
   results?: RepoSyncResult[];
   ok?: string[];
   skipped?: string[];

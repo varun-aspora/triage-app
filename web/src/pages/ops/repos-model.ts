@@ -1,7 +1,7 @@
 // Pure helpers for the Repos page, kept out of the component so they can be
 // tested without a DOM.
 
-import type { Entity, RepoPinRow, RepoStatusRow, SyncState } from '../../api/types.ts';
+import type { Entity, RepoPinRow, RepoStatusRow, SyncJob, SyncState } from '../../api/types.ts';
 
 export const REPO_STATES = ['All', 'needs attention', 'drift', 'local changes', 'not cloned', 'not indexed'] as const;
 export type RepoState = (typeof REPO_STATES)[number];
@@ -83,4 +83,31 @@ export function problemNames(last: Pick<SyncState, 'skipped' | 'failed' | 'reaso
 
 export function shortCommit(commit: string | null): string | null {
   return commit === null || commit === '' ? null : commit.slice(0, 7);
+}
+
+export type SyncProgressRow = { repo: string; state: 'ok' | 'skipped' | 'failed' | 'running' | 'waiting'; line?: string };
+
+export type SyncProgressView = {
+  /** null until the server has said which repos the sync covers. */
+  total: number | null;
+  done: number;
+  counts: { ok: number; skipped: number; failed: number; running: number; waiting: number };
+  rows: SyncProgressRow[];
+};
+
+/** Live progress of a running sync. Finished repos come first, then running, then waiting. */
+export function syncProgress(job: Pick<SyncJob, 'repos' | 'running' | 'results'> | null): SyncProgressView {
+  const results = job?.results ?? [];
+  const running = new Set(job?.running ?? []);
+  const finished = new Set(results.map((r) => r.repo));
+  const planned = job?.repos;
+  const pending = (planned ?? []).filter((repo) => !finished.has(repo));
+  const rows: SyncProgressRow[] = [
+    ...results.map((r) => ({ repo: r.repo, state: r.status, line: r.line })),
+    ...pending.filter((repo) => running.has(repo)).map((repo) => ({ repo, state: 'running' as const })),
+    ...pending.filter((repo) => !running.has(repo)).map((repo) => ({ repo, state: 'waiting' as const })),
+  ];
+  const counts = { ok: 0, skipped: 0, failed: 0, running: 0, waiting: 0 };
+  for (const r of rows) counts[r.state]++;
+  return { total: planned === undefined ? null : planned.length, done: results.length, counts, rows };
 }

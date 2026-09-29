@@ -67,6 +67,33 @@ async function settled(app: ReturnType<typeof routes>, id: string): Promise<Reco
   throw new Error('the sync did not settle');
 }
 
+describe('sync progress', () => {
+  test('GET shows repos, the one running and finished results while the sync runs', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const ok = (repo: string) => ({ repo, status: 'ok' as const, warnings: [], line: `${repo}: ok` });
+    const app = routes({
+      syncRepos: (async (_sel: unknown, d: { onSyncProgress?: (e: unknown) => void }) => {
+        d.onSyncProgress?.({ type: 'planned', repos: ['a', 'b'] });
+        d.onSyncProgress?.({ type: 'started', repo: 'a' });
+        d.onSyncProgress?.({ type: 'finished', result: ok('a') });
+        d.onSyncProgress?.({ type: 'started', repo: 'b' });
+        await gate;
+        return { status: 'done', results: [ok('a'), ok('b')], ok: ['a', 'b'], skipped: [], failed: [] };
+      }) as unknown as ReposRouteDeps['syncRepos'],
+    });
+    await app.request('/repos/sync', post('{}'));
+    await new Promise((r) => setTimeout(r, 5));
+    const mid = (await (await app.request('/repos/sync/sync-1')).json()) as Record<string, unknown>;
+    expect(mid).toMatchObject({ status: 'running', repos: ['a', 'b'], running: ['b'], results: [{ repo: 'a', status: 'ok' }] });
+
+    release();
+    const done = await settled(app, 'sync-1');
+    expect(done['running']).toBeUndefined();
+    expect(done['results']).toHaveLength(2);
+  });
+});
+
 describe('POST /repos/sync', () => {
   test('starts a sync in the background and GET shows it running, then done', async () => {
     const g = gated();
