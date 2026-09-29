@@ -411,6 +411,8 @@ describe('deny paths', () => {
 
     expect(env.output.status).toBe('refused');
     expect(env.output.message).toContain('not in the run');
+    // The way forward (P6) follows the reason on the model's text only.
+    expect(env.output.message).toContain('locate can tell you where an in-scope id lives');
     expect(env.output.message).not.toContain(STRANGER);
     expectEnvelope(env);
     expect(h.audit.lines).toHaveLength(1);
@@ -426,7 +428,10 @@ describe('deny paths', () => {
     const spies = { gate: 0, real: 0, render: 0 };
     const env = await runIoTool(sqlSpec(h, { scope: { systemic: true, sqlAggregateOnly: false } }, spies), runCtx(h));
     expect(env.output.status).toBe('refused');
-    expect(h.audit.lines[0]).toMatchObject({ decision: 'deny' });
+    expect(env.output.message).toBe(
+      "Refused: scope: systemic sql_select allows only an aggregate-only select list. Next: select only aggregates (count, sum, min, max) with scope: 'systemic', or drop it and query by an id in scope.",
+    );
+    expect(h.audit.lines[0]).toMatchObject({ decision: 'deny', reason: 'scope: systemic sql_select allows only an aggregate-only select list' });
     expect(spies.real).toBe(0);
   });
 

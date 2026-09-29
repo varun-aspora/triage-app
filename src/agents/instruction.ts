@@ -14,6 +14,9 @@
 // section, and a run section that lists the tools each entity has (one tool
 // per capability with an entity input, D110). The split text stays exactly
 // as it was.
+//
+// When the scout ran before dispatch (plan 15 P4), both shapes' run sections
+// carry its masked lines: where each intake id was counted, counts only.
 
 import { parsePatterns, type Pattern } from '../classify/patterns.ts';
 import type { AgentShape } from '../config/env.ts';
@@ -178,6 +181,7 @@ function runSection(
     ...leadsLine(init),
     `- Classification: ${classificationLine(init)}`,
     `- Id chain: ${hopsLine(init)}`,
+    ...scoutLines(init),
     // Absolute, so the text stays the same across the submission's renders and the prompt cache holds.
     ...(finishBy !== undefined ? [`- ${finishByText(finishBy)}`] : []),
   ].join('\n');
@@ -296,6 +300,15 @@ function knownIds(init: TriageInit): string {
   return parts.length > 0 ? parts.join(', ') : 'none resolved yet';
 }
 
+// The scout's lines ride in initialData as `scout`, already masked by
+// ingress (src/tools/_lib/scout.ts). Catalogue names in them come from the
+// live databases, so they are kept on one line like thread text.
+function scoutLines(init: TriageInit): string[] {
+  const lines = init.scout ?? [];
+  if (lines.length === 0) return [];
+  return ['- Scout before the run (counts only; each id masked to its last characters):', ...lines.map((line) => `  - ${flatten(line, 400)}`)];
+}
+
 /** Most leads the run section lists; the rest are counted. */
 export const MAX_LISTED_LEADS = 10;
 
@@ -323,8 +336,12 @@ function compact(value: string): string {
 // Ids come from thread text, so keep them on one line and short: a value
 // must not be able to add lines or headings to the instruction.
 function clean(value: string): string {
+  return flatten(value, 200);
+}
+
+function flatten(value: string, max: number): string {
   const flat = value.replace(/[\u0000-\u001f\u007f`]+/g, ' ').replace(/\s+/g, ' ').trim();
-  return flat.length > 200 ? `${flat.slice(0, 200)}…` : flat;
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
 }
 
 // Pattern text is curated in the repo, so it is only kept on one line.

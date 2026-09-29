@@ -110,7 +110,8 @@ function runProbe(probe: Probe): Promise<CaseResult> {
 }
 
 beforeAll(async () => {
-  await bootEvalRuntime({ faux: fake });
+  // Off, so the only strict miss is the probe's (the scout's locate would add its own).
+  await bootEvalRuntime({ faux: fake, overrides: { TRIAGE_SCOUT: 'off' } });
   connectorKeys = Object.keys(triageRuntime().connectors);
   for (const probe of PROBES) results.set(probe.tool, await runProbe(probe));
 });

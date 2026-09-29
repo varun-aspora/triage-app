@@ -719,3 +719,56 @@ describe('derived leads (D97)', () => {
     expect(two.reason).toContain('(at most 1 step)');
   });
 });
+
+describe('the way forward (P6)', () => {
+  const check = (tool: string, params: unknown, extra: { systemic?: boolean; sqlAggregateOnly?: boolean; logsMode?: 'search' | 'count' | 'group_by' } = {}) =>
+    expectDenied(checkScope({ tool, params, scopeSet: set, ...extra }));
+
+  test('an id refusal names a query by an in-scope id, the requester and locate', () => {
+    for (const denied of [
+      check('sql_select', { sql: 'SELECT 1 FROM t WHERE id = $1', params: [FOREIGN_UUID] }),
+      check('logs_search', { terms: [FOREIGN_ACCOUNT] }),
+      check('logs_search', { contains: '5556667' }),
+      check('http_call', { path: `/users/${FOREIGN_UUID}` }),
+    ]) {
+      expect(denied.next).toContain('query by an id already in scope');
+      expect(denied.next).toContain('requester');
+      expect(denied.next).toContain('locate');
+      // The audit reason is unchanged and carries no way forward of its own.
+      expect(denied.reason).toStartWith('scope: ');
+      expect(denied.reason).not.toContain('locate');
+    }
+  });
+
+  test('systemic is offered only where it could lift the refusal', () => {
+    expect(check('sql_select', { sql: 'x', params: [FOREIGN_UUID] }).next).toContain("scope: 'systemic'");
+    expect(check('logs_search', { terms: [FOREIGN_ACCOUNT] }).next).toContain("scope: 'systemic'");
+    // A systemic logs call still has its ids checked, and http_call has no systemic scope.
+    expect(check('logs_search', { terms: [FOREIGN_ACCOUNT] }, { systemic: true, logsMode: 'count' }).next).not.toContain('systemic');
+    expect(check('http_call', { path: `/users/${FOREIGN_UUID}` }).next).not.toContain('systemic');
+  });
+
+  test('a systemic refusal names the aggregate or the id route', () => {
+    const sql = check('sql_select', { sql: 'SELECT * FROM t' }, { systemic: true, sqlAggregateOnly: false });
+    expect(sql.reason).toBe('scope: systemic sql_select allows only an aggregate-only select list');
+    expect(sql.next).toContain('select only aggregates');
+    expect(sql.next).toContain('query by an id in scope');
+    const logs = check('logs_search', { message: 'timeout' }, { systemic: true, logsMode: 'search' });
+    expect(logs.reason).toBe('scope: systemic logs_search allows only count or group_by, not search');
+    expect(logs.next).toContain('count or group_by');
+    expect(logs.next).toContain('search by an id in scope');
+  });
+
+  test('each way forward is one short sentence', () => {
+    const texts = [
+      check('sql_select', { sql: 'x', params: [FOREIGN_UUID] }).next,
+      check('sql_select', { sql: 'x' }, { systemic: true, sqlAggregateOnly: false }).next,
+      check('logs_search', {}, { systemic: true, logsMode: 'search' }).next,
+    ];
+    for (const text of texts) {
+      expect(text.length).toBeLessThanOrEqual(220);
+      expect(text.match(/\. /g)).toBeNull();
+      expect(text).toEndWith('.');
+    }
+  });
+});

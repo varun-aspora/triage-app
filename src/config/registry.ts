@@ -103,6 +103,17 @@ export const QuickwitSpecSchema = v.strictObject({
 });
 export type QuickwitSpec = v.InferOutput<typeof QuickwitSpecSchema>;
 
+/** D98: what locate never probes in this entity. A table is "table" in any schema or "schema.table". */
+export const LocateSpecSchema = v.strictObject({
+  exclude_tables: v.optional(
+    v.array(v.pipe(v.string(), v.regex(/^(?:[a-z_][a-z0-9_]*\.)?[a-z_][a-z0-9_]*$/, 'must be a lowercase table or schema.table'))),
+  ),
+  exclude_services: v.optional(v.array(ServiceNameSchema)),
+  /** Why the exclusions are there. */
+  note: v.optional(v.string()),
+});
+export type LocateSpec = v.InferOutput<typeof LocateSpecSchema>;
+
 export const EntityRegistrySchema = v.strictObject({
   entity: v.picklist(ENTITIES),
   aliases: v.array(v.pipe(v.string(), v.regex(/^[a-z][a-z0-9_-]*$/, 'must be lowercase'))),
@@ -114,6 +125,7 @@ export const EntityRegistrySchema = v.strictObject({
   repos_extra: v.optional(v.array(RepoNameSchema)),
   /** Env name whose value is `repo` or `repo:path`: the deploy manifests this deployment reads. */
   infra_repo: v.optional(RegistryEnvNameSchema),
+  locate: v.optional(LocateSpecSchema),
 });
 export type EntityRegistry = v.InferOutput<typeof EntityRegistrySchema>;
 
@@ -313,7 +325,7 @@ export function buildRegistry(config: Config, docs: readonly { file: string; doc
 }
 
 // Checks the schema cannot express: file name, env prefix, cbs wiring, one
-// naive timestamp zone per database.
+// naive timestamp zone per database, locate exclusions naming real services.
 function structureProblems(file: string, spec: EntityRegistry): RegistryProblem[] {
   const out: RegistryProblem[] = [];
   const base = file.split('/').pop() ?? file;
@@ -327,6 +339,12 @@ function structureProblems(file: string, spec: EntityRegistry): RegistryProblem[
   for (const [service, s] of Object.entries(spec.services)) {
     if (s.transport === 'cbs' && spec.cbs === undefined) {
       out.push({ key: file, reason: `services.${service} has transport cbs but the registry has no cbs block` });
+    }
+  }
+  // A misspelt service would leave it probed without a word.
+  for (const service of spec.locate?.exclude_services ?? []) {
+    if (!Object.hasOwn(spec.services, service)) {
+      out.push({ key: file, reason: `locate.exclude_services names ${service}, which is not a service of ${spec.entity}` });
     }
   }
   // One pool per db env name reads every service behind it, so they must agree.

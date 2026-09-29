@@ -20,6 +20,7 @@ import {
   MODEL_REDACTION_MODES,
   PROVIDER_KEYS,
   RENAMED_KEYS,
+  SCOUT_MODES,
   THINKING_LEVELS,
   TRACING_MODES,
   isEntityKey,
@@ -37,6 +38,7 @@ export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 export type TracingMode = (typeof TRACING_MODES)[number];
 export type AgentShape = (typeof AGENT_SHAPES)[number];
 export type ModelRedaction = (typeof MODEL_REDACTION_MODES)[number];
+type ScoutMode = (typeof SCOUT_MODES)[number];
 
 export type Config = {
   readonly home: string;
@@ -51,6 +53,8 @@ export type Config = {
     readonly runsDir: string;
     readonly reposDir?: string;
     readonly knowledgeDir: string;
+    /** D99: propose_note output; later runs never read it. */
+    readonly proposalsDir: string;
     readonly fixturesDir: string;
   };
   readonly db: {
@@ -104,6 +108,15 @@ export type Config = {
     readonly requireReadonlyRole: boolean;
     /** D57: attempts per entity DB call on a lost connection; the wait doubles from delayMs up to maxDelayMs, with jitter. */
     readonly retry: { readonly attempts: number; readonly delayMs: number; readonly maxDelayMs: number };
+  };
+  /** Plan 15 P3, P4, P6. */
+  readonly discovery: {
+    /** D98: count probes per run, across every locate call; timeoutMs is the statement timeout of one probe. */
+    readonly locate: { readonly maxProbesPerRun: number; readonly maxColumnsPerDb: number; readonly timeoutMs: number };
+    /** P4: locate each seed lead before the first brief. */
+    readonly scout: boolean;
+    /** P6: refused or zero-hit calls in a row before the stuck note. */
+    readonly stuckAfter: number;
   };
   readonly models: {
     readonly decision?: string;
@@ -223,6 +236,7 @@ export function configFromRecord(
       runsDir: r.requiredPath('TRIAGE_RUNS_DIR'),
       reposDir: r.path('TRIAGE_REPOS_DIR'),
       knowledgeDir: r.requiredPath('TRIAGE_KNOWLEDGE_DIR'),
+      proposalsDir: r.requiredPath('TRIAGE_PROPOSALS_DIR'),
       fixturesDir: r.requiredPath('TRIAGE_FIXTURES_DIR'),
     },
     db: {
@@ -275,6 +289,15 @@ export function configFromRecord(
         delayMs: r.requiredInt('TRIAGE_SQL_RETRY_DELAY_MS'),
         maxDelayMs: r.requiredInt('TRIAGE_SQL_RETRY_MAX_DELAY_MS'),
       },
+    },
+    discovery: {
+      locate: {
+        maxProbesPerRun: r.requiredInt('TRIAGE_LOCATE_MAX_PROBES_PER_RUN'),
+        maxColumnsPerDb: r.requiredInt('TRIAGE_LOCATE_MAX_COLUMNS_PER_DB'),
+        timeoutMs: r.requiredInt('TRIAGE_LOCATE_TIMEOUT_MS'),
+      },
+      scout: r.enumOf<ScoutMode>('TRIAGE_SCOUT') === 'on',
+      stuckAfter: r.requiredInt('TRIAGE_STUCK_AFTER'),
     },
     models: {
       decision: r.str('MODEL_DECISION'),

@@ -393,6 +393,8 @@ function decideCbs(ctx: ToolContext, entity: Entity, input: HttpCallInput, metho
 
 // ------------------------------------------------------------ result
 
+const NOT_STUCK_STATUSES: ReadonlySet<number> = new Set([401, 403, 429]);
+
 const HttpCallDataSchema = v.object({
   status: v.pipe(v.number(), v.integer()),
   body: v.optional(v.unknown(), null),
@@ -546,6 +548,9 @@ async function runHttpCall(ctx: ToolContext, services: ServiceLists, flue: HttpR
         };
       },
       stage: (value) => value,
+      // A client error is a variation that did not work: found nothing, for the stuck count (P6).
+      // Auth and throttling are not the model's query, so they do not count.
+      empty: (value) => v.is(HttpCallDataSchema, value) && value.status >= 400 && value.status < 500 && !NOT_STUCK_STATUSES.has(value.status),
       summary: (value) => {
         const p = planned();
         const status = v.is(HttpCallDataSchema, value) ? String(value.status) : 'unknown';

@@ -45,6 +45,15 @@
 // staged_file path, and says how to read the rest with read_staged or how
 // to narrow the call. runCodeTool calls the same helper, so repo_* results
 // are capped the same way.
+//
+// Stuck note (P6): each agent of the run (the root, each investigator, the
+// worker) has a count of calls in a row that were refused by scope or the
+// tool's gate or found nothing (spec.empty, or no mock fixture). A call that
+// found something resets it; budget refusals, connector errors and not
+// configured leave it as it is. When it reaches TRIAGE_STUCK_AFTER, and at
+// every multiple after that, the result gets a note telling the model to stop
+// trying variations and say what is missing, and a 'stuck' run event records
+// the counts. There is no hard stop: the model decides.
 
 import type { FlueLogger, Sandbox } from '@flue/runtime';
 import type { Config } from '../../config/env.ts';
@@ -58,12 +67,12 @@ import { redactForModel, redactPersisted } from '../../gate/redact.ts';
 import { FixtureMissError } from '../../mock/errors.ts';
 import { keyString } from '../../mock/key.ts';
 import type { FixtureEntity, FixtureKind, SemanticKey } from '../../mock/types.ts';
-import { findRepeat, rememberRepeat } from '../../runlog/actions.ts';
+import { findRepeat, rememberRepeat, ROOT_AGENT } from '../../runlog/actions.ts';
 import { logRunEvent } from '../../runlog/event-log.ts';
 import type { AuditDecision, AuditTransport } from '../../types/audit.ts';
 import type { Entity } from '../../types/core.ts';
 import { notConfigured, ok, refused, type ToolEnvelope, unreachable } from '../../types/tool-result.ts';
-import type { ToolContext } from '../types.ts';
+import type { ToolContext, ToolDeps } from '../types.ts';
 import { recordConnectorFailure } from './connector-failures.ts';
 import { addLeads, scopeSetOf } from './context.ts';
 
@@ -176,6 +185,8 @@ export type IoToolSpec<K extends FixtureKind, T> = {
    * the over_cap fields and the note added.
    */
   readonly overCap?: (value: T, cap: number) => unknown;
+  /** True when the call found nothing (0 rows, 0 hits, a 404), for the stuck count (P6). Left out, an ok result counts as found. */
+  readonly empty?: (value: T) => boolean;
 };
 
 /** The sandbox surface staging needs: a harness tool's harness. */
@@ -343,6 +354,18 @@ export async function runIoTool<K extends FixtureKind, T>(
   spec: IoToolSpec<K, T>,
   ctx: IoRunContext,
 ): Promise<ToolEnvelope> {
+  const seen: { outcome: StuckOutcome } = { outcome: 'other' };
+  const envelope = await runPipeline(spec, ctx, (outcome) => {
+    seen.outcome = outcome;
+  });
+  return countStuck(ctx.toolContext, spec.tool, envelope, seen.outcome);
+}
+
+async function runPipeline<K extends FixtureKind, T>(
+  spec: IoToolSpec<K, T>,
+  ctx: IoRunContext,
+  mark: (outcome: StuckOutcome) => void,
+): Promise<ToolEnvelope> {
   const step = (name: PipelineStep): void => ctx.onStep?.(name);
   const { toolContext } = ctx;
 
@@ -409,6 +432,7 @@ export async function runIoTool<K extends FixtureKind, T>(
     const earlier = deps.budget.state().exhausted ? undefined : findRepeat(toolContext.runId, repeatKey, now());
     if (earlier !== undefined) {
       audit({ decision: 'allow', exit: 'reused', transport: noIoTransport, summary: `${spec.tool} ${where}: result reused` });
+      mark(stuckStateOf(deps).emptyRepeats.has(repeatKey) ? 'empty' : 'found');
       return earlier;
     }
   }
@@ -440,10 +464,8 @@ export async function runIoTool<K extends FixtureKind, T>(
     });
     if (!result.ok) {
       audit({ decision: 'deny', exit: 'refused', transport: noIoTransport, reason: result.reason });
-      return refuse(
-        `Refused: ${result.reason}. Use only ids from the brief or the ID chain; ` +
-          "for counts across customers use scope: 'systemic'.",
-      );
+      mark('refused');
+      return refuse(`Refused: ${result.reason}. ${result.next}`);
     }
   }
 
@@ -454,6 +476,7 @@ export async function runIoTool<K extends FixtureKind, T>(
     gate = spec.gate();
     if (!gate.ok) {
       audit({ decision: 'deny', exit: 'refused', transport: noIoTransport, reason: gate.reason, gate });
+      mark('refused');
       return refuse(gate.message);
     }
   }
@@ -580,6 +603,8 @@ export async function runIoTool<K extends FixtureKind, T>(
 
   if (outcome.fixture_miss) {
     audit({ decision: 'allow', exit: 'fixture_miss', transport: 'mock', summary: `${spec.tool} ${where}: no fixture`, gate });
+    // The text tells the model to treat it as no data, so it counts as found nothing.
+    mark('empty');
     return refuse(`No ${fixture.kind} fixture for this call (mock mode). Treat it as no data and record the gap.`);
   }
 
@@ -592,6 +617,14 @@ export async function runIoTool<K extends FixtureKind, T>(
     ...(spec.summary !== undefined ? { summary: spec.summary(value) } : {}),
     gate,
   });
+
+  const empty = spec.empty?.(value) === true;
+  mark(empty ? 'empty' : 'found');
+  if (repeatKey !== undefined) {
+    const emptyRepeats = stuckStateOf(deps).emptyRepeats;
+    if (empty) emptyRepeats.add(repeatKey);
+    else emptyRepeats.delete(repeatKey);
+  }
 
   // 8. Derived leads from the full result (D97).
   if (spec.leads !== undefined && spec.scope !== 'skip') {
@@ -668,6 +701,59 @@ function recordLeads(toolContext: ToolContext, call: LeadCall, records: readonly
   for (const skip of found.skipped) {
     logRunEvent(toolContext.runId, 'lead_skipped', { ...skip, tool: call.tool, tool_call_id: call.toolCallId });
   }
+}
+
+// ------------------------------------------------------------------ stuck note (P6)
+
+/** What a call counts as: refused and empty add to the streak, found resets it, other leaves it. */
+export type StuckOutcome = 'refused' | 'empty' | 'found' | 'other';
+
+type StuckState = {
+  /** Calls in a row that were refused or found nothing, per agent name. */
+  readonly streaks: Map<string, number>;
+  /** Repeat keys whose result was empty, so a reused result counts the same. */
+  readonly emptyRepeats: Set<string>;
+};
+
+// Keyed by the run's deps, so the counts go when the run's deps do and a
+// resumed run (new deps) starts from zero. Keyed within that by agent name:
+// Flue gives a tool no id for the agent instance calling it.
+const stuckByDeps = new WeakMap<ToolDeps, StuckState>();
+
+function stuckStateOf(deps: ToolDeps): StuckState {
+  let state = stuckByDeps.get(deps);
+  if (state === undefined) stuckByDeps.set(deps, (state = { streaks: new Map(), emptyRepeats: new Set() }));
+  return state;
+}
+
+/** The note added to a result when an agent has had `calls` refused or empty calls in a row. */
+export function stuckNote(calls: number, root: boolean): string {
+  const next = root
+    ? 'say what is missing and use ask_requester for it, or stop_blocked if nobody can give it.'
+    : 'return what is missing to the root.';
+  return `${calls} calls in a row were refused or found nothing. Stop trying variations: ${next}`;
+}
+
+// Counts the call for its agent and adds the note at TRIAGE_STUCK_AFTER and
+// every multiple of it, so a long streak is reminded without every result
+// carrying it. The repeat cache already holds the envelope without the note.
+// Exported for tools that run their own pipeline (locate), so they share the count.
+export function countStuck(toolContext: ToolContext, tool: string, envelope: ToolEnvelope, outcome: StuckOutcome): ToolEnvelope {
+  if (outcome === 'other') return envelope;
+  const agent = toolContext.agent ?? ROOT_AGENT;
+  const streaks = stuckStateOf(toolContext.deps).streaks;
+  if (outcome === 'found') {
+    streaks.delete(agent);
+    return envelope;
+  }
+  const calls = (streaks.get(agent) ?? 0) + 1;
+  streaks.set(agent, calls);
+  const after = toolContext.config.discovery.stuckAfter;
+  if (calls % after !== 0) return envelope;
+  logRunEvent(toolContext.runId, 'stuck', { agent, tool, calls, after });
+  const note = stuckNote(calls, agent === ROOT_AGENT);
+  const message = envelope.output.message;
+  return { output: { ...envelope.output, message: message !== undefined && message !== '' ? `${message} ${note}` : note } };
 }
 
 // ------------------------------------------------------------------ result cap (D104)

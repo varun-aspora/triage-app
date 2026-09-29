@@ -252,6 +252,28 @@ describe('investigator.md', () => {
   });
 });
 
+describe('investigator.md: locate, the stuck note and propose_note (plan 15 P3, P5, P6)', () => {
+  const flat = read('investigator.md').replace(/\s+/g, ' ');
+
+  test('locates an id in its own entity before guessing tables, and reads unprobed places as unknown', () => {
+    expect(flat).toContain('## Where an id lives');
+    expect(flat).toContain('call `locate` with it before you guess tables');
+    expect(flat).toContain('Counts only, never rows, and it adds no ids');
+    expect(flat).toContain('do not read it as zero');
+    expect(flat).toContain('use `encrypt_lookup_value`');
+  });
+
+  test('follows the refusal\'s Next tail, and returns what is missing when stuck', () => {
+    expect(flat).toContain('A scope refusal ends with "Next: ...": follow it');
+    expect(flat).toContain('stop trying variations. Save what you tried with `note_evidence` and reply with what is missing');
+  });
+
+  test('proposes a note only for what the notes did not say, with call ids', () => {
+    expect(flat).toContain('call `propose_note` only when this task confirmed something the notes did not say');
+    expect(flat).toContain('with the tool call ids that show it');
+  });
+});
+
 describe('code-walker.md', () => {
   const text = read('code-walker.md');
 

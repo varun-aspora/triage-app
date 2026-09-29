@@ -181,6 +181,17 @@ describe('tool sets from HLD §2', () => {
     expect(allowedTools('code_walker').has('repo_grep')).toBe(true);
   });
 
+  test('locate is on the investigators and the single agent, propose_note also on the root', () => {
+    expect(allowedTools('triage').has('locate')).toBe(false);
+    expect(allowedTools('triage').has('propose_note')).toBe(true);
+    for (const agent of ['investigator', 'investigator_deep', 'agent'] as const) {
+      expect(allowedTools(agent, 'rtl').has('locate')).toBe(true);
+      expect(allowedTools(agent, 'rtl').has('propose_note')).toBe(true);
+    }
+    expect(allowedTools('code_walker').has('locate')).toBe(false);
+    expect(toolsOutside('Call `locate` on the id.', 'triage')).toEqual(['locate']);
+  });
+
   test('mentionedTools and toolsOutside', () => {
     const text = 'Use sql_select, then `grep` the rows; read the notes and call finish_report.';
     expect(mentionedTools(text)).toEqual(['finish_report', 'grep', 'sql_select']);

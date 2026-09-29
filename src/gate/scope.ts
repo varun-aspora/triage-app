@@ -80,7 +80,16 @@ export type ScopeCheckInput = {
 
 export type ScopeOffender = { kind: IdKind; masked: string };
 
-export type ScopeCheckResult = { ok: true } | { ok: false; reason: string; offending: ScopeOffender[] };
+export type ScopeCheckResult =
+  | { ok: true }
+  | {
+      ok: false;
+      /** For the audit line and the model. */
+      reason: string;
+      offending: ScopeOffender[];
+      /** The way forward in one sentence (P6), for the model only; the audit line keeps the reason. */
+      next: string;
+    };
 
 type Group = keyof ScopeSet;
 
@@ -430,6 +439,20 @@ function logsParts(params: unknown): Part[] {
   return parts;
 }
 
+// The way forward after a refusal (P6): what would make the call possible,
+// so the model does not keep trying variations of a refused one.
+// Systemic is offered only where it could help: it does not exist for other
+// tools, and a systemic logs call already had its ids checked.
+function idNext(input: ScopeCheckInput): string {
+  const systemic = input.systemic !== true && (input.tool === 'sql_select' || input.tool === 'logs_search');
+  return (
+    'Next: query by an id already in scope so its result brings this value in, or get it from the requester; ' +
+    `locate can tell you where an in-scope id lives${systemic ? ", and scope: 'systemic' gives counts across customers" : ''}.`
+  );
+}
+const SYSTEMIC_SQL_NEXT = "Next: select only aggregates (count, sum, min, max) with scope: 'systemic', or drop it and query by an id in scope.";
+const SYSTEMIC_LOGS_NEXT = "Next: use count or group_by with scope: 'systemic', or drop it and search by an id in scope.";
+
 // What a refused id can still become: a lead (D96, D97), or a correlation id.
 function leadNote(maxDepth: number): string {
   return (
@@ -495,6 +518,7 @@ function systemicDecision(input: ScopeCheckInput): ScopeCheckResult | undefined 
       ok: false,
       reason: 'scope: systemic sql_select allows only an aggregate-only select list',
       offending: [],
+      next: SYSTEMIC_SQL_NEXT,
     };
   }
   if (input.tool === 'logs_search') {
@@ -505,6 +529,7 @@ function systemicDecision(input: ScopeCheckInput): ScopeCheckResult | undefined 
       ok: false,
       reason: 'scope: systemic logs_search allows only count or group_by, not search',
       offending: [],
+      next: SYSTEMIC_LOGS_NEXT,
     };
   }
   // Systemic does not apply to other tools; their ids are checked as usual.
@@ -558,5 +583,6 @@ export function checkScope(input: ScopeCheckInput): ScopeCheckResult {
       .map((o) => o.masked)
       .join(', ')})${[...notes].map((n) => `; ${n}`).join('')}`,
     offending,
+    next: idNext(input),
   };
 }

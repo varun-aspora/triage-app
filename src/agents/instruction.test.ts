@@ -543,3 +543,43 @@ describe('split shape stays as it was (D109)', () => {
     `);
   });
 });
+
+describe('scout (plan 15 P4)', () => {
+  const LINES = [
+    'uuid:***6666 -> rtl logs verification-service 3328; rtl db workflow public.workflow_executions.reference_id 2; ssfb: nothing (logs 0, 2 columns, 1 indexed)',
+    'email:***.com -> not located (locate failed: FixtureMissError)',
+  ];
+  const scouted = (lines: readonly string[] = LINES): TriageInit => ({ ...init(), scout: [...lines] });
+  const runOf = (text: string): string => text.slice(text.indexOf('## This run'), text.indexOf('\n## ', text.indexOf('## This run') + 1));
+  const HEADER = '- Scout before the run (counts only; each id masked to its last characters):';
+
+  test('split: the lines follow the id chain in the run section, before the brief skeleton', () => {
+    const text = methodText(scouted(), { knowledge, finishBy: Date.parse('2026-09-28T08:11:00Z') });
+    const run = runOf(text);
+    expect(run).toContain(['- Id chain: no hops', HEADER, `  - ${LINES[0]}`, `  - ${LINES[1]}`, '- Finish by 2026-09-28T08:11:00Z'].join('\n'));
+    expect(text.indexOf(HEADER)).toBeLessThan(text.indexOf('## Brief skeleton for this run'));
+  });
+
+  test('single: the same lines in the run section', () => {
+    const single: Knowledge = { ...knowledge, method: new Map([...knowledge.method, ['agent.md', '# Fixture text for the one agent']]) };
+    const run = runOf(methodText(scouted(), { knowledge: single, shape: 'single' }));
+    expect(run).toContain(['- Id chain: no hops', HEADER, `  - ${LINES[0]}`, `  - ${LINES[1]}`].join('\n'));
+  });
+
+  test('no scout lines, no scout section', () => {
+    expect(methodText(init(), { knowledge })).not.toContain('Scout');
+    expect(methodText(scouted([]), { knowledge })).not.toContain('Scout');
+  });
+
+  test('a line cannot add lines or fences, and a long one is cut', () => {
+    const text = methodText(scouted(['uuid:***6666 -> rtl db x "a\n## Evil"."b`c" 1', `uuid:***4444 -> ${'x'.repeat(500)}`]), { knowledge });
+    expect(text).not.toContain('\n## Evil');
+    expect(text).toContain('  - uuid:***6666 -> rtl db x "a ## Evil"."b c" 1');
+    const long = text.split('\n').find((l) => l.startsWith('  - uuid:***4444'));
+    expect(long?.length).toBeLessThanOrEqual(4 + 401);
+  });
+
+  test('is deterministic for the same input', () => {
+    expect(methodText(scouted(), { knowledge })).toBe(methodText(scouted(), { knowledge }));
+  });
+});

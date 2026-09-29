@@ -392,6 +392,8 @@ async function runSqlSelect(ctx: ToolContext, entity: Entity, services: readonly
         const answer = parseAnswer(value);
         return { service, ...(answer.columns !== undefined ? { columns: answer.columns } : {}), rows: answer.rows };
       },
+      // A count that comes back as 0 is still a row: only 0 rows is found nothing (P6).
+      empty: (value) => parseAnswer(value).rows.length === 0,
       summary: (value) => {
         const rows = parseAnswer(value).rows.length;
         const tables = check.ok ? check.tables.join(',') : '';

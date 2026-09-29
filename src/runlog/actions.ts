@@ -46,6 +46,7 @@ const NO_ARGS: ReadonlySet<string> = new Set([
   'finish_report',
   'ask_requester',
   'stop_blocked',
+  'propose_note',
 ]);
 // Reading the log is not an action worth listing.
 const NOT_LOGGED: ReadonlySet<string> = new Set(['run_log']);
@@ -65,6 +66,8 @@ export type Action = {
   readonly entityTool?: true;
   readonly args: string;
   readonly outcome: string;
+  /** Flue's id for the call, so propose_note can check the evidence it cites (D99). */
+  readonly toolCallId?: string;
 };
 
 type Repeat = { readonly envelope: ToolEnvelope; readonly by: string; readonly at: string };
@@ -93,8 +96,10 @@ export function clockOf(iso: string): string {
   return `${iso.slice(11, 19)}Z`;
 }
 
-export function actionLine(a: Action): string {
-  return `${clockOf(a.at)} ${a.agent} ${a.tool}${a.args !== '' ? ` ${a.args}` : ''} -> ${a.outcome}`;
+export function actionLine(a: Action, withCall = false): string {
+  // withCall: run_log shows the call id, which propose_note cites as evidence; briefs leave it out to save tokens.
+  const call = withCall && a.toolCallId !== undefined ? ` [call ${a.toolCallId}]` : '';
+  return `${clockOf(a.at)} ${a.agent} ${a.tool}${a.args !== '' ? ` ${a.args}` : ''} -> ${a.outcome}${call}`;
 }
 
 /** What one agent may see: its own entity's calls and the entity-free ones (root, code_walker); all for null. */
@@ -133,7 +138,7 @@ export function logActions(tools: readonly ToolDefinition[], ctx: ToolContext): 
     return {
       ...tool,
       async run(context: never) {
-        const { data } = context as { data?: unknown };
+        const { data, toolCallId } = context as { data?: unknown; toolCallId?: unknown };
         const entity = ctx.entity ?? entityOfCall(mark, data) ?? null;
         const add = (outcome: string): void => {
           const names = ctx.deps.run.redactionNames;
@@ -148,6 +153,7 @@ export function logActions(tools: readonly ToolDefinition[], ctx: ToolContext): 
               ? noArgsText(mark !== undefined ? entity : null)
               : excerpt(safe(argsText(data, mark?.picked === true ? entity : null)), ARGS_CHARS),
             outcome: excerpt(safe(outcome), OUTCOME_CHARS),
+            ...(typeof toolCallId === 'string' ? { toolCallId } : {}),
           });
         };
         try {

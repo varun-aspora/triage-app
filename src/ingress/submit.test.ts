@@ -36,6 +36,7 @@ import type { Stalled } from '../types/stalled.ts';
 import type { RunPhase, RunRecord } from '../runstore/types.ts';
 import { priceUsage } from '../usage/price.ts';
 import { NO_USAGE_GAP } from '../tools/finish-report.tool.ts';
+import type { ScoutInput, ScoutResult } from '../tools/_lib/scout.ts';
 import {
   installUsageMeter,
   recordUsage,
@@ -2996,5 +2997,137 @@ describe('trace names (D100)', () => {
 
     expect((await runSubmission(prepared(), h.deps)).status).toBe('completed');
     expect(traceLabel(RUN_ID)).toEqual({ topic: 'card:charge not reflected', kind: 'initial' });
+  });
+});
+
+// ------------------------------------------------------------------ scout (plan 15 P4)
+
+describe('scout', () => {
+  const SCOUTED: ScoutResult = {
+    lines: ['****5678 -> ssfb db harbor public.accounts.account_number 1; atspl: nothing (logs 0, 1 column, 1 indexed)'],
+    gaps: [],
+    values: [{ value: '****5678', kind: 'digits', status: 'ok', hits: 1 }],
+    probes: 3,
+  };
+
+  /** The harness with the scout switched on or off and a fake scout that records its calls. */
+  function scouting(on: boolean | undefined, fake: (input: ScoutInput) => Promise<ScoutResult> = async () => SCOUTED, o: HarnessOptions = {}) {
+    const h = harness(o);
+    const calls: ScoutInput[] = [];
+    const deps: SubmissionDeps = {
+      ...h.deps,
+      config: { ...h.deps.config, ...(on !== undefined ? { discovery: { scout: on } } : {}) },
+      scout: async (input) => {
+        h.events.push('scout');
+        calls.push(input);
+        return fake(input);
+      },
+    };
+    return { h, deps, calls };
+  }
+
+  async function withEventLog<T>(fn: (runsDir: string) => Promise<T>): Promise<T> {
+    const runsDir = mkdtempSync(join(tmpdir(), 'triage-submit-scout-'));
+    dirs.push(runsDir);
+    installRunEventLog({ runsDir, observe: () => () => undefined });
+    try {
+      return await fn(runsDir);
+    } finally {
+      await flushRunEventLog();
+      uninstallRunEventLog();
+    }
+  }
+
+  test('runs once after identity and before the classification is stored, and its lines ride in initialData', async () => {
+    const { h, deps, calls } = scouting(true);
+    await runSubmission(prepared(), deps);
+    const order = h.events.filter((e) => ['identity', 'scout', 'putClassification', 'dispatch'].includes(e));
+    expect(order).toEqual(['identity', 'scout', 'putClassification', 'dispatch']);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ runId: RUN_ID, idChain: CHAIN, interface: 'cli', redactionNames: [NAME] });
+    expect(calls[0]?.window).toEqual(prepared().request.window);
+    // Flue re-parses initialData with the schema, which drops unknown keys: the lines must survive it.
+    expect(v.parse(TriageInitSchema, initialDataOf(h)).scout).toEqual([...SCOUTED.lines]);
+  });
+
+  test('the step log gets a scout line with the counts and masked values only', async () => {
+    await withEventLog(async (runsDir) => {
+      const { deps } = scouting(true);
+      await runSubmission(prepared(), deps);
+      await flushRunEventLog();
+      const { events } = await readRunEvents(runsDir, RUN_ID);
+      const scout = events.filter((e) => e.type === 'scout');
+      expect(scout).toHaveLength(1);
+      expect(scout[0]?.data).toMatchObject({ probes: 3, values: SCOUTED.values, gaps: 0 });
+      expect(JSON.stringify(scout[0]?.data)).not.toContain(ACCOUNT);
+    });
+  });
+
+  test('its gaps become scout warnings, stored and in initialData', async () => {
+    const { h, deps } = scouting(true, async () => ({ ...SCOUTED, gaps: ['scout: locate failed for ****5678 (FixtureMissError)'] }));
+    await runSubmission(prepared(), deps);
+    const warning = { step: 'scout', message: 'scout: locate failed for ****5678 (FixtureMissError)' };
+    expect(initialDataOf(h).preflight_warnings).toContainEqual(warning);
+    const stored = h.calls.find((c) => c.method === 'putClassification')?.args[1];
+    expect(isPersisted(stored) ? (stored.value as { preflight_warnings: unknown[] }).preflight_warnings : []).toContainEqual(warning);
+  });
+
+  test('a scout that throws is a gap: the run is still dispatched, without scout lines', async () => {
+    await withEventLog(async (runsDir) => {
+      const { h, deps } = scouting(true, async () => {
+        throw new TypeError(`cannot read ${ACCOUNT}`);
+      });
+      const result = await runSubmission(prepared(), deps);
+      expect(result.status).toBe('completed');
+      const init = initialDataOf(h);
+      expect(init.scout).toBeUndefined();
+      const gap = init.preflight_warnings?.find((w) => w.step === 'scout');
+      expect(gap?.message).toStartWith('scout failed, so where the ids live was not checked before the run: TypeError');
+      expect(gap?.message).not.toContain(ACCOUNT);
+      await flushRunEventLog();
+      const { events } = await readRunEvents(runsDir, RUN_ID);
+      expect(events.find((e) => e.type === 'scout')?.data).toMatchObject({ error: 'TypeError' });
+    });
+  });
+
+  test('a stop during the scout stops the run, as in any other step', async () => {
+    const ac = new AbortController();
+    const { h, deps } = scouting(
+      true,
+      async (input) => {
+        ac.abort();
+        input.signal.throwIfAborted();
+        return SCOUTED;
+      },
+      { signal: ac.signal },
+    );
+    await expect(runSubmission(prepared(), deps)).rejects.toThrow();
+    expect(h.flue.dispatches).toHaveLength(0);
+  });
+
+  test('off, or left out of the config: not called and no scout lines', async () => {
+    for (const on of [false, undefined]) {
+      const { h, deps, calls } = scouting(on);
+      await runSubmission(prepared(), deps);
+      expect(calls).toHaveLength(0);
+      expect(initialDataOf(h).scout).toBeUndefined();
+      expect(initialDataOf(h).preflight_warnings?.some((w) => w.step === 'scout')).toBe(false);
+    }
+  });
+
+  test('only the initial submission scouts: a follow-up, an answer and a resume do not', async () => {
+    const { h, deps, calls } = scouting(true, async () => SCOUTED, {
+      read: async () => {
+        if (h.flue.reads.length === 2) await h.store.putInputRequest(RUN_ID, redactPersisted(sampleInputRequest('q1')));
+        if (h.flue.reads.length === 3) await h.store.putBlock(RUN_ID, redactPersisted(sampleBlock('b1')));
+        return { text: 'done', submissionId: `sub-${h.flue.reads.length}`, data: {} };
+      },
+    });
+    await runSubmission(prepared(), deps);
+    await askRun(RUN_ID, 'and the second transfer?', 'ops', deps);
+    await answerRun(RUN_ID, { answer: 'no more ids', by: 'ops' }, deps);
+    await resumeRun(RUN_ID, { by: 'ops', note: 'harbor is back' }, deps);
+    expect(h.flue.dispatches).toHaveLength(4);
+    expect(calls).toHaveLength(1);
   });
 });

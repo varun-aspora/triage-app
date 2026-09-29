@@ -19,7 +19,10 @@
 //      match, then the tier policy. A classifier failure ends as category
 //      unknown and tier strong, and the run is still dispatched.
 //   5. store.putClassification with the decision, the id chain and the
-//      warnings, and prior cases when TRIAGE_PRIOR_CASES=true.
+//      warnings, and prior cases when TRIAGE_PRIOR_CASES=true. Just before
+//      it, when TRIAGE_SCOUT is on, the scout (plan 15 P4) locates the chain
+//      ids and seed leads, counts only: its masked lines go in
+//      initialData.scout for the run section, and a failure is a warning.
 //   6. A new submission, then init(Triage, { id: run_id, uid: null })
 //      .dispatch({ message, initialData }). Flue 2.0.8 puts the uid send
 //      condition on init(), not on the handle's dispatch(), so uid: null goes
@@ -218,6 +221,7 @@ import { registryNames } from '../report/gaps.ts';
 import { partialReportDraft } from '../report/partial.ts';
 import { writeReport } from '../report/write.ts';
 import { collectFindings, reportTail } from '../tools/finish-report.tool.ts';
+import { runScout, type ScoutInput, type ScoutResult } from '../tools/_lib/scout.ts';
 import {
   type PhaseDetail,
   RunNotFoundError,
@@ -292,6 +296,8 @@ export type SubmissionConfig = {
   readonly display?: Config['display'];
   /** The model-facing redaction of the messages the run gets (D107). Left out: off, the TRIAGE_MODEL_REDACTION default. */
   readonly redaction?: Config['redaction'];
+  /** TRIAGE_SCOUT (plan 15 P4). Left out: no scout. */
+  readonly discovery?: Pick<Config['discovery'], 'scout'>;
 };
 
 /** What render-thread's model-facing redaction reads (D107). */
@@ -395,6 +401,8 @@ export type SubmissionDeps = SettleDeps & {
   readonly priorCases: (runId: RunId, signal: AbortSignal, onUsage?: (u: EmbedUsage) => void) => Promise<PriorCasesResult>;
   /** Reads an attachment's bytes from its bytes_ref. */
   readonly readAttachment: (bytesRef: string, signal: AbortSignal) => Promise<Uint8Array>;
+  /** Locates the intake's ids before the first dispatch (plan 15 P4). Called only when config.discovery.scout is on. */
+  readonly scout?: (input: ScoutInput) => Promise<ScoutResult>;
 };
 
 export type SubmissionStatus = 'completed' | 'failed' | 'needs_input' | 'blocked' | 'stopped';
@@ -690,6 +698,10 @@ async function submitInScope(prepared: PreparedSubmission, deps: SubmissionDeps)
       warnings.push(...pc.gaps.map((message) => warning('prior_cases', message)));
     }
 
+    // Before putClassification, so a scout gap is stored with the other warnings.
+    const scout = await scoutStep(runId, request, identity.id_chain, names, deps, signal);
+    warnings.push(...(scout?.gaps ?? []).map((message) => warning('scout', message)));
+
     await store.putClassification(
       runId,
       redactPersisted({ decision, id_chain: identity.id_chain, preflight_warnings: warnings }, { names }),
@@ -705,6 +717,8 @@ async function submitInScope(prepared: PreparedSubmission, deps: SubmissionDeps)
       preflight_warnings: warnings,
       redaction_names: names,
       ...(priorCases !== undefined ? { prior_cases: priorCases } : {}),
+      // Masked lines for the root's run section (instruction.ts).
+      ...(scout !== undefined && scout.lines.length > 0 ? { scout: scout.lines } : {}),
     });
   } catch (err) {
     watch.dispose();
@@ -1615,6 +1629,32 @@ async function identityStep(
   }
 }
 
+/**
+ * The scout (plan 15 P4), on the initial submission only: locate on the
+ * intake's ids, counts only. A failure is a gap and never stops the run; a
+ * stop still does. Undefined when the scout is off.
+ */
+async function scoutStep(
+  runId: RunId,
+  request: TriageRequest,
+  chain: IdChain,
+  names: readonly string[],
+  deps: SubmissionDeps,
+  signal: AbortSignal,
+): Promise<ScoutResult | undefined> {
+  if (deps.scout === undefined || deps.config.discovery?.scout !== true) return undefined;
+  const started = Date.now();
+  try {
+    const result = await deps.scout({ runId, idChain: chain, interface: request.interface, window: request.window, redactionNames: names, signal });
+    logRunEvent(runId, 'scout', { durationMs: Date.now() - started, probes: result.probes, values: result.values, gaps: result.gaps.length });
+    return result;
+  } catch (err) {
+    if (signal.aborted) throw err;
+    logRunEvent(runId, 'scout', { durationMs: Date.now() - started, error: className(err) });
+    return { lines: [], gaps: [`scout failed, so where the ids live was not checked before the run: ${failureReason(err)}`], values: [], probes: 0 };
+  }
+}
+
 async function classifyStep(
   runId: RunId,
   request: TriageRequest,
@@ -1930,6 +1970,20 @@ export function submissionDeps(options: SubmissionDepsOptions = {}): SubmissionD
     priorCases: (runId, signal, onUsage) =>
       priorCasesFor(config, store, embedder, runId, { signal, ...(onUsage !== undefined ? { onUsage } : {}) }),
     readAttachment: (bytesRef, signal) => readFile(bytesRef, { signal }),
+    scout: (input) =>
+      runScout(
+        {
+          config,
+          registry,
+          connectors: rt.connectors,
+          runStore: store,
+          audit,
+          fixtures: mock,
+          ...(rt.caseId !== undefined ? { caseId: rt.caseId } : {}),
+          now,
+        },
+        input,
+      ),
   };
 }
 

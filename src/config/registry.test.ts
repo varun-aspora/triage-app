@@ -329,6 +329,40 @@ describe('naive timestamp zone (D73)', () => {
   });
 });
 
+describe('locate exclusions (D98)', () => {
+  test('the shipped registries set none', () => {
+    for (const entity of ENTITIES) expect(shipped(entity).locate).toBeUndefined();
+  });
+
+  test('tables, schema.tables, services and a note load', () => {
+    const docs = shippedDocs((d) => {
+      d.rtl.locate = { exclude_tables: ['audit_log', 'public.events'], exclude_services: ['banking'], note: 'large' };
+    });
+    expect(buildRegistry(config(), docs).spec('rtl').locate).toEqual({
+      exclude_tables: ['audit_log', 'public.events'],
+      exclude_services: ['banking'],
+      note: 'large',
+    });
+  });
+
+  test('a bad table name, an unknown field or an unknown service is refused', () => {
+    const badTable = shippedDocs((d) => {
+      d.rtl.locate = { exclude_tables: ['Public.Events'] };
+    });
+    expect(registryError(() => buildRegistry(config(), badTable)).message).toContain('must be a lowercase table or schema.table');
+    const extra = shippedDocs((d) => {
+      (d.rtl as Record<string, unknown>)['locate'] = { exclude_columns: ['x'] };
+    });
+    expect(registryError(() => buildRegistry(config(), extra)).keys).toEqual(['resources/rtl.entity.json']);
+    const unknown = shippedDocs((d) => {
+      d.rtl.locate = { exclude_services: ['nope'] };
+    });
+    expect(registryError(() => buildRegistry(config(), unknown)).message).toContain(
+      'locate.exclude_services names nope, which is not a service of rtl',
+    );
+  });
+});
+
 describe('field encryption', () => {
   test('a blank SSFB_HARBOR_FIELD_ENC_KEY disables fieldEncryption', () => {
     const fe = registry({ SSFB_HARBOR_FIELD_ENC_KEY: '' }).fieldEncryption('ssfb', 'harbor');

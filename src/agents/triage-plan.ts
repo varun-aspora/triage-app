@@ -53,6 +53,7 @@ import { releaseActions, ROOT_AGENT } from '../runlog/actions.ts';
 import { getRunStore } from '../runstore/index.ts';
 import type { RunStore } from '../runstore/types.ts';
 import { releaseConnectorFailures } from '../tools/_lib/connector-failures.ts';
+import { releaseLocateState } from '../tools/locate.tool.ts';
 import { createToolDeps, type ToolConnectors } from '../tools/_lib/context.ts';
 import { ASK_REQUESTER } from '../tools/ask-requester.tool.ts';
 import {
@@ -612,8 +613,9 @@ export function triageToolContext(runId: RunId, deps: ToolDeps, rt: TriageRuntim
  * Drops the run's in-process state once a response settles: its deps, the
  * escalation store, the connector failure record, the synthesis count, the
  * written-report, opened-question and opened-block marks, the correlation ids
- * seen in logs results, the run action log and repeat cache (D79) and the
- * tripwire's pending task decisions. The metered usage is dropped by the
+ * seen in logs results, the run action log and repeat cache (D79), locate's
+ * probe count and schema catalogues (D98) and the tripwire's pending task
+ * decisions. The metered usage is dropped by the
  * settle code after it is stored (D59). Persistent state and the run store
  * keep what matters.
  */
@@ -627,6 +629,7 @@ export function settleRun(runId: RunId): void {
   releaseConnectorFailures(runId);
   releaseFinishReport(runId);
   releaseObservedIds(runId);
+  releaseLocateState(runId);
   releaseActions(runId);
   installedTripwire()?.forgetRun(runId);
 }

@@ -34,6 +34,7 @@ const PLAIN_NAMES = [
   'finish_report',
   'ask_requester',
   'stop_blocked',
+  'propose_note',
   'activate_skill',
   CODEBASE_NOTE_EVIDENCE,
 ] as const;
@@ -84,10 +85,10 @@ describe('agent.md', () => {
     expect(agent).not.toMatch(/claude|codex|\bTODO\b|\bT\d{2}\.\d+\b|AGENTS\.md|SKILL\.md|\bD\d{2,3}\b/i);
   });
 
-  test('is short: about a hundred lines', () => {
+  test('is short: about a hundred and fifty lines', () => {
     const lines = agent.trimEnd().split('\n').length;
     expect(lines).toBeGreaterThan(80);
-    expect(lines).toBeLessThan(130);
+    expect(lines).toBeLessThan(165);
   });
 
   test('names only the single agent\'s tools, data tools by their name with an entity input', () => {
@@ -142,6 +143,16 @@ describe('agent.md', () => {
       'mask phone numbers, account numbers, PAN, email addresses and names to the last four characters',
     );
     expect(flat).toContain('Nothing leaves the run except the report');
+  });
+
+  test('covers locate, the scout lines, the stuck note and propose_note (plan 15 P3-P6)', () => {
+    expect(flat).toContain('read its Scout lines first');
+    expect(flat).toContain("When an id's home is unknown, call `locate` with it before you guess tables");
+    expect(flat).toContain('`<entity>: nothing` is a real 0 only where it probed');
+    expect(flat).toContain('ends with "Next: ...". Follow it');
+    expect(flat).toContain('stop varying the call. Say what is missing and use `ask_requester` for it, or `stop_blocked`');
+    expect(flat).toContain('call `propose_note` only for something this run confirmed that the notes did not say');
+    expect(flat).toContain('with the tool call ids that show it');
   });
 
   test('carries none of the split rules about briefs, delegates or new ids', () => {

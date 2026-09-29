@@ -162,6 +162,9 @@ describe('run_log', () => {
     expect((await page(root, {})).total).toBe(5);
     expect((await page(root, { tool: 'sql_select' })).lines.map((l) => l.split(' ')[1])).toEqual(['investigate_ssfb', 'investigate_atspl']);
     expect((await page(root, { agent: 'code_walker' })).lines[0]).toContain('repo_grep');
+    // run_log lines end with the call id, which propose_note cites; the briefs leave it out.
+    expect((await page(root, {})).lines[0]).toEndWith('[call toolu_1]');
+    expect(actionBrief(RUN, null).join('\n')).not.toContain('[call ');
     expect((await page(root, { for_entity: 'atspl' })).total).toBe(1);
     const first = await page(root, { limit: 2 });
     expect(first).toMatchObject({ total: 5, next_offset: 2 });

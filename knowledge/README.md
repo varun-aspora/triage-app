@@ -60,6 +60,15 @@ knowledge/
   them, and exits 1. Without the variable it skips; CI runs it that way. After
   updating the skills, run it with `--update` to rewrite the hashes.
 
+## Proposals from runs (D99)
+
+- A run proposes what it learned with `propose_note`. Proposals land in
+  `TRIAGE_PROPOSALS_DIR` (default `./.data/proposals`), one `<run_id>.md` per
+  run, never in this tree, and no run ever reads them.
+- The owner reviews them (`triage proposals`, `triage proposals show <run_id>`)
+  and turns the good ones into a PR against `knowledge/`. Nothing is
+  auto-merged.
+
 ## Which agent gets what
 
 `TRIAGE_AGENT_SHAPE` picks the shape of a run: `split` (the default) or

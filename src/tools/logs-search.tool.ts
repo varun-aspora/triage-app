@@ -465,6 +465,12 @@ function shape(value: unknown, s: Shape): LogsSearchOutput {
   };
 }
 
+// No hits, groups or count: the same test that adds the zero-hit note.
+function foundNothing(out: LogsSearchOutput): boolean {
+  if ('count' in out) return out.count === 0;
+  return out.num_hits === 0 && ('hits' in out ? out.hits.length === 0 : (out.groups?.length ?? 0) === 0);
+}
+
 function summaryOf(entity: Entity, service: string | undefined, out: LogsSearchOutput, transport: QuickwitTransportKind | undefined): string {
   const via = transport === undefined ? '' : ` via ${transport}`;
   const target = `${entity}:${service ?? 'all services'}`;
@@ -579,6 +585,7 @@ async function runLogsSearch(ctx: ToolContext, entity: Entity, args: RunArgs): P
       },
       // The staged file and the audit summary keep every group.
       stage: shapeOf,
+      empty: (value) => foundNothing(shapeOf(value)),
       summary: (value) => summaryOf(entity, data.service, shapeOf(value), transportUsed),
     },
     {

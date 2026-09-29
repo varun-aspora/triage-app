@@ -37,12 +37,12 @@ const home = contractHome(fake);
 let narrow: ContractHome | undefined;
 let b: Booted;
 
-const TRIAGE_TOOLS = ['ask_requester', 'finish_report', 'note_evidence', 'resolve_identity', 'run_log', 'stop_blocked'];
+const TRIAGE_TOOLS = ['ask_requester', 'finish_report', 'note_evidence', 'propose_note', 'resolve_identity', 'run_log', 'stop_blocked'];
 // The sets T06.6 asserts, with the SSFB flags off (the test home leaves them blank).
 // Every investigator reads its own entity's repos; the deep one adds CodeGraph.
 const REPO_TOOLS = ['repo_find', 'repo_grep', 'repo_read', 'repo_tree'];
 const CODEGRAPH_TOOLS = ['code_explore', 'code_impact', 'code_node'];
-const BASE_TOOLS = ['http_call', 'logs_search', 'note_evidence', 'read_staged', 'run_log', 'sql_select', ...REPO_TOOLS];
+const BASE_TOOLS = ['http_call', 'locate', 'logs_search', 'note_evidence', 'propose_note', 'read_staged', 'run_log', 'sql_select', ...REPO_TOOLS];
 const CODE_TOOLS = [...CODEGRAPH_TOOLS, ...REPO_TOOLS];
 const SSFB_ALWAYS = ['detect_silent_reversals', 'get_account_statement'];
 const SSFB_ONLY = [...SSFB_ALWAYS, 'decrypt_fields', 'encrypt_lookup_value'];

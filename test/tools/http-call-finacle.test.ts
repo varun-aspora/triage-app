@@ -239,6 +239,21 @@ describe('mock mode answers from the cbs_call fixture kind', () => {
     expect(env.output.data).toMatchObject({ status: 404, body: 'not found' });
   });
 
+  test('a client error counts as found nothing for the stuck note (P6); auth and throttling do not', async () => {
+    const fixtures = memoryFixtures();
+    const answers = { a: 404, b: 422, c: 403, d: 400 } as const;
+    for (const [suffix, status] of Object.entries(answers)) {
+      fixtures.add('cbs_call', { entity: 'ssfb', method: 'GET', path: `${BALANCE_PATH}${suffix}` }, { status, body: 'no' });
+    }
+    const r = run(world({ mock: true, env: { TRIAGE_STUCK_AFTER: '2' } }), undefined, fixtures);
+    const call = async (suffix: keyof typeof answers) => JSON.stringify(await r.finacle({ path: `${BALANCE_PATH}${suffix}` }));
+    expect(await call('a')).not.toContain('in a row');
+    expect(await call('b')).toContain('2 calls in a row');
+    // A 403 is not found-nothing, so it ends the streak: the next client error starts a new one.
+    expect(await call('c')).not.toContain('in a row');
+    expect(await call('d')).not.toContain('in a row');
+  });
+
   test('a strict mock miss throws, and the connector is not called', async () => {
     const spy = spyConnector();
     const r = run(world({ mock: true }), spy);

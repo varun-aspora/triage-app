@@ -27,7 +27,7 @@ const CBS_FLAG = 'SSFB_CBS_VIA_KUBECTL_ENABLED';
 
 // The repo_* tools are on both investigator variants, scoped to the entity's repos.
 const REPO_TOOLS = ['repo_find', 'repo_grep', 'repo_read', 'repo_tree'];
-const BASE_INVESTIGATOR = ['http_call', 'logs_search', 'note_evidence', 'read_staged', 'run_log', 'sql_select', ...REPO_TOOLS];
+const BASE_INVESTIGATOR = ['http_call', 'locate', 'logs_search', 'note_evidence', 'propose_note', 'read_staged', 'run_log', 'sql_select', ...REPO_TOOLS];
 const SSFB_ALWAYS = ['detect_silent_reversals', 'get_account_statement'];
 const SSFB_CRYPTO = ['decrypt_fields', 'encrypt_lookup_value'];
 // Scoped to ssfb in their module. The crypto tools serve any entity with a field-encryption service (D48).
@@ -39,7 +39,7 @@ const MOUNTS: readonly Mount[] = ['triage', 'investigator', 'investigator_deep',
 // The entity data tools, mounted once on the agent mount with an entity input, or their one entity fixed (D109, D110).
 const PER_ENTITY = ['http_call', 'logs_search', 'sql_select', ...SSFB_ONLY];
 // Shared tools on the agent mount.
-const SHARED_AGENT = ['ask_requester', 'finish_report', 'read_staged', 'resolve_identity', 'run_log', 'stop_blocked', ...CODE_TOOLS];
+const SHARED_AGENT = ['ask_requester', 'finish_report', 'locate', 'propose_note', 'read_staged', 'resolve_identity', 'run_log', 'stop_blocked', ...CODE_TOOLS];
 // note_evidence joins the agent mount through its own module (S2.8); its name is left out of the exact lists here.
 const withoutEvidence = (list: readonly string[]): string[] => list.filter((n) => !n.endsWith('note_evidence'));
 
@@ -137,10 +137,10 @@ describe('per-mount and per-entity membership', () => {
     }
   });
 
-  test('the triage mount holds ask_requester, stop_blocked, resolve_identity, note_evidence, run_log and finish_report only', () => {
+  test('the triage mount holds ask_requester, stop_blocked, resolve_identity, note_evidence, propose_note, run_log and finish_report only', () => {
     for (const h of [plain, allOn]) {
       const set = names(toolsFor('triage', ctxFrom(h, null)));
-      expect(set).toEqual(sorted(['ask_requester', 'finish_report', 'note_evidence', 'resolve_identity', 'run_log', 'stop_blocked']));
+      expect(set).toEqual(sorted(['ask_requester', 'finish_report', 'note_evidence', 'propose_note', 'resolve_identity', 'run_log', 'stop_blocked']));
     }
   });
 

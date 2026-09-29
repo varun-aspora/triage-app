@@ -44,6 +44,8 @@ const ORCHESTRATOR_NAMES = [
   'note_evidence',
   'finish_report',
   'ask_requester',
+  'stop_blocked',
+  'propose_note',
   'run_log',
   'task',
   'activate_skill',
@@ -253,6 +255,18 @@ describe('orchestrator.md', () => {
     expect(text).toMatch(/Cross-entity reasoning happens only here, from the delegates' summaries/);
     expect(text).toMatch(/record it in the gaps|goes into the report's gaps/);
     expect(text).toContain('Always end the run with `finish_report`');
+  });
+
+  test('reads the scout lines, stops a stuck branch and proposes notes (plan 15 P4-P6)', () => {
+    const text = orchestrator.replace(/\s+/g, ' ');
+    expect(text).toContain('Read the Scout lines under This run first');
+    expect(text).toContain('Brief the entities that have hits and name those places in the brief');
+    expect(text).toContain('`<entity>: nothing` is a real 0 only for places that were probed');
+    expect(text).toContain('do not brief a wider search');
+    expect(text).toContain('use `ask_requester` for it, or `stop_blocked` if nobody can give it');
+    expect(text).toContain('call `propose_note` only for something this run confirmed that the notes did not say');
+    // locate is on the investigators only; the root may say they can locate, never call it.
+    expect(toolsOutside(orchestrator, 'triage')).not.toContain('locate');
   });
 
   test('confidence is high, medium or low, with a rubric for each level', () => {

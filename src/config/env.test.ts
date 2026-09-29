@@ -149,6 +149,11 @@ describe('defaults with an empty .env', () => {
     expect(c.budgets.runMaxAttempts).toBe(2);
     expect(c.budgets.httpTimeoutMs).toBe(30000);
     expect(c.budgets.defaultLookbackDays).toBe(30);
+    expect(c.discovery).toEqual({
+      locate: { maxProbesPerRun: 200, maxColumnsPerDb: 40, timeoutMs: 3000 },
+      scout: true,
+      stuckAfter: 4,
+    });
     expect(c.sql).toEqual({
       maxRows: 200,
       statementTimeoutMs: 30000,
@@ -493,6 +498,7 @@ describe('relative paths', () => {
     expect(c.paths.auditLog).toBe(join(home, '.data/audit.jsonl'));
     expect(c.paths.runsDir).toBe(join(home, '.data/runs'));
     expect(c.paths.knowledgeDir).toBe(join(home, 'knowledge'));
+    expect(c.paths.proposalsDir).toBe(join(home, '.data/proposals'));
     expect(c.paths.resourcesDir).toBe(join(home, 'resources'));
     expect(c.paths.reposDir).toBe(join(home, '../repos'));
     expect(c.paths.fixturesDir).toBe('/abs/fixtures');
@@ -627,6 +633,47 @@ describe('sandbox quota, model redaction and derived lead caps (D97, D105, D107)
     expect(c.budgets.maxLeadDepth).toBe(5);
     const err = configError(() => fromRecord({ TRIAGE_MAX_DERIVED_PER_FIELD: '0', TRIAGE_MAX_LEAD_DEPTH: '0' }));
     expect(err.keys).toEqual(['TRIAGE_MAX_DERIVED_PER_FIELD', 'TRIAGE_MAX_LEAD_DEPTH']);
+  });
+});
+
+describe('discovery keys (plan 15: D98, D99, P4, P6)', () => {
+  test('the locate caps and the stuck count are bounded ints', () => {
+    const c = fromRecord({
+      TRIAGE_LOCATE_MAX_PROBES_PER_RUN: '50',
+      TRIAGE_LOCATE_MAX_COLUMNS_PER_DB: '10',
+      TRIAGE_LOCATE_TIMEOUT_MS: '100',
+      TRIAGE_STUCK_AFTER: '2',
+    });
+    expect(c.discovery.locate).toEqual({ maxProbesPerRun: 50, maxColumnsPerDb: 10, timeoutMs: 100 });
+    expect(c.discovery.stuckAfter).toBe(2);
+    const err = configError(() =>
+      fromRecord({
+        TRIAGE_LOCATE_MAX_PROBES_PER_RUN: '0',
+        TRIAGE_LOCATE_MAX_COLUMNS_PER_DB: '0',
+        TRIAGE_LOCATE_TIMEOUT_MS: '99',
+        TRIAGE_STUCK_AFTER: '1',
+      }),
+    );
+    expect(err.keys).toEqual([
+      'TRIAGE_LOCATE_MAX_PROBES_PER_RUN',
+      'TRIAGE_LOCATE_MAX_COLUMNS_PER_DB',
+      'TRIAGE_LOCATE_TIMEOUT_MS',
+      'TRIAGE_STUCK_AFTER',
+    ]);
+    expect(err.message).toContain('at least 100');
+  });
+
+  test('TRIAGE_SCOUT takes on or off and names the key otherwise', () => {
+    expect(fromRecord({ TRIAGE_SCOUT: 'off' }).discovery.scout).toBe(false);
+    expect(fromRecord({ TRIAGE_SCOUT: ' ' }).discovery.scout).toBe(true);
+    const err = configError(() => fromRecord({ TRIAGE_SCOUT: 'true' }));
+    expect(err.keys).toEqual(['TRIAGE_SCOUT']);
+    expect(err.message).toContain('on, off');
+  });
+
+  test('TRIAGE_PROPOSALS_DIR resolves under the home like the runs dir', () => {
+    expect(fromRecord({}).paths.proposalsDir).toBe('/triage/home/.data/proposals');
+    expect(fromRecord({ TRIAGE_PROPOSALS_DIR: '/abs/proposals' }).paths.proposalsDir).toBe('/abs/proposals');
   });
 });
 

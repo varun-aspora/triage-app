@@ -53,7 +53,7 @@ export function runLogPage(ctx: ToolContext, input: RunLogInput): { total: numbe
   return {
     total: matching.length,
     offset,
-    lines: page.map(actionLine),
+    lines: page.map((a) => actionLine(a, true)),
     ...(next < matching.length ? { next_offset: next } : {}),
   };
 }
