@@ -14,6 +14,9 @@ import {
   formatTokenSplit,
   formatUsd,
   headerStatus,
+  hopLabel,
+  hopsSummary,
+  hopStatusLook,
   inferFailure,
   isLongText,
   joinEntityLabels,
@@ -519,5 +522,34 @@ describe('request (D66)', () => {
     expect(isLongText('a\n'.repeat(8).trimEnd())).toBe(false);
     expect(isLongText('a\n'.repeat(9).trimEnd())).toBe(true);
     expect(isLongText('word '.repeat(80))).toBe(true);
+  });
+});
+
+describe('id chain hops', () => {
+  const at = '2026-01-01T00:00:00.000Z';
+  const hop = (from: 'phone_number' | 'aspora_user_id' | 'account_number', to: 'aspora_user_id' | 'account_number' | undefined, status: 'resolved' | 'not_found' | 'skipped') => ({
+    from,
+    ...(to !== undefined ? { to } : {}),
+    source: 'x:y',
+    status,
+    taken_at: at,
+  });
+
+  test('summary names the start and the last resolved id', () => {
+    expect(hopsSummary([hop('phone_number', 'aspora_user_id', 'resolved'), hop('aspora_user_id', 'account_number', 'resolved')])).toBe(
+      '2 hops, from phone number to account number',
+    );
+  });
+
+  test('summary counts failures and handles no resolved target', () => {
+    expect(hopsSummary([hop('phone_number', undefined, 'not_found')])).toBe('1 hop, from phone number, 1 failed');
+    expect(hopsSummary([])).toBe('0 hops');
+  });
+
+  test('labels and tones', () => {
+    expect(hopLabel({ from: 'phone_number', to: 'aspora_user_id' })).toBe('phone number to aspora user id');
+    expect(hopLabel({ from: 'account_number' })).toBe('account number, state only');
+    expect(hopStatusLook('not_found').tone).toBe('rust');
+    expect(hopStatusLook('unverified').tone).toBe('amber');
   });
 });

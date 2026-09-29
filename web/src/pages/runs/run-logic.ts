@@ -4,6 +4,7 @@
 import type {
   Entity,
   EvidenceKey,
+  IdChain,
   KnownIdKey,
   ReportStatus,
   RequestMessage,
@@ -575,4 +576,43 @@ export const YES_NO = (b: boolean): string => (b ? 'Yes' : 'No');
 
 export function capitalise(s: string): string {
   return s === '' ? s : `${s[0]?.toUpperCase()}${s.slice(1)}`;
+}
+
+// ------------------------------------------------------------------ id chain
+
+type Hop = IdChain['hops'][number];
+
+/** Failures are rust, hops that were not checked or not confirmed are amber. */
+export function hopStatusLook(status: Hop['status']): StatusLook {
+  switch (status) {
+    case 'resolved':
+      return { tone: 'neutral', icon: 'check' };
+    case 'not_found':
+    case 'unreachable':
+      return { tone: 'rust', icon: 'x' };
+    case 'unverified':
+      return { tone: 'amber', icon: 'alert' };
+    case 'skipped':
+      return { tone: 'muted', icon: 'dash' };
+  }
+}
+
+const words = (key: string): string => key.replace(/_/g, ' ');
+
+export const hopStatusLabel = (status: Hop['status']): string => words(status);
+
+/** "phone number to aspora user id" for one hop; a hop that produced nothing has no target. */
+export function hopLabel(hop: Pick<Hop, 'from' | 'to'>): string {
+  return hop.to !== undefined ? `${words(hop.from)} to ${words(hop.to)}` : `${words(hop.from)}, state only`;
+}
+
+/** "3 hops, from phone number to account number". The end is the last id a hop produced. */
+export function hopsSummary(hops: readonly Hop[]): string {
+  const [first] = hops;
+  if (first === undefined) return '0 hops';
+  const count = `${hops.length} ${hops.length === 1 ? 'hop' : 'hops'}`;
+  const end = hops.findLast((h) => h.status === 'resolved' && h.to !== undefined)?.to;
+  const path = `, from ${words(first.from)}${end !== undefined ? ` to ${words(end)}` : ''}`;
+  const failed = hops.filter((h) => h.status === 'not_found' || h.status === 'unreachable').length;
+  return `${count}${path}${failed > 0 ? `, ${failed} failed` : ''}`;
 }

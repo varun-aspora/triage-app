@@ -17,6 +17,10 @@ import {
   formatCost,
   formatTokenSplit,
   headerStatus,
+  hopLabel,
+  hopStatusLabel,
+  hopStatusLook,
+  hopsSummary,
   isLongText,
   permalinkHref,
   reportStatusLook,
@@ -307,7 +311,7 @@ export function ClassificationPanel({ decision, full }: { decision: TierDecision
 
 export function IdChainPanel({ chain }: { chain: IdChain }) {
   const ids = Object.entries(chain.ids).filter((e): e is [string, string] => typeof e[1] === 'string');
-  const hops = chain.hops.length;
+  const hops = chain.hops;
   return (
     <Panel title="ID chain" description="Resolved from the thread before classifying." as="div" style={{ padding: 20 }}>
       {ids.length === 0 ? (
@@ -321,8 +325,21 @@ export function IdChainPanel({ chain }: { chain: IdChain }) {
           </KV>
         ))
       )}
+      {hops.length > 0 && (
+        <ul className="runs-hops" aria-label="Hops">
+          {hops.map((h, i) => (
+            <li key={i}>
+              <span>
+                {hopLabel(h)}
+                <span className="muted mono"> via {h.source}</span>
+              </span>
+              <StatusTag look={hopStatusLook(h.status)}>{hopStatusLabel(h.status)}</StatusTag>
+            </li>
+          ))}
+        </ul>
+      )}
       <p className="hint" style={{ margin: '10px 0 0' }}>
-        {hops} {hops === 1 ? 'hop' : 'hops'}. IDs are masked in the stored profile.
+        {hopsSummary(hops)}. IDs are masked in the stored profile.
       </p>
     </Panel>
   );
