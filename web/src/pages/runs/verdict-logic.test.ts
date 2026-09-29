@@ -9,10 +9,12 @@ import {
   canCancel,
   groupFindings,
   isErrorEvent,
+  isStepOrder,
   matchesStepFilter,
   summariseStep,
   toggleMark,
   verdictLabel,
+  visibleSteps,
 } from './verdict-logic.ts';
 
 const findings: FindingRef[] = [
@@ -87,6 +89,16 @@ describe('steps', () => {
     expect(matchesStepFilter(turn, 'model')).toBe(true);
     expect(isErrorEvent(ev(3, 'submission_settled', { outcome: 'aborted' }))).toBe(true);
     expect(isErrorEvent(ev(4, 'submission_settled', { outcome: 'completed' }))).toBe(false);
+  });
+
+  test('visible steps keep the filter and follow the order', () => {
+    const steps = [ev(0, 'phase', { phase: 'preflight' }, 'pipeline'), ev(1, 'turn', {}), ev(2, 'phase', { phase: 'identity' }, 'pipeline')];
+    expect(visibleSteps(steps, 'pipeline', 'asc').map((e) => e.index)).toEqual([0, 2]);
+    expect(visibleSteps(steps, 'pipeline', 'desc').map((e) => e.index)).toEqual([2, 0]);
+    expect(visibleSteps(steps, 'all', 'desc').map((e) => e.index)).toEqual([2, 1, 0]);
+    expect(steps.map((e) => e.index)).toEqual([0, 1, 2]);
+    expect(isStepOrder('desc')).toBe(true);
+    expect(isStepOrder('newest')).toBe(false);
   });
 
   test('summaries pick the fields a person scans for', () => {

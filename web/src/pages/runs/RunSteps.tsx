@@ -13,12 +13,26 @@ import { Notice } from '../../components/Notice.tsx';
 import { Panel } from '../../components/Panel.tsx';
 import { Segmented } from '../../components/Segmented.tsx';
 import { StatusTag } from '../../components/StatusTag.tsx';
-import { appendEvents, isErrorEvent, matchesStepFilter, STEP_FILTERS, type StepFilter, summariseStep } from './verdict-logic.ts';
+import { safeGet, safeSet } from '../../lib/storage.ts';
+import {
+  appendEvents,
+  isErrorEvent,
+  isStepOrder,
+  STEP_FILTERS,
+  STEP_ORDERS,
+  type StepFilter,
+  type StepOrder,
+  summariseStep,
+  visibleSteps,
+} from './verdict-logic.ts';
 
 const POLL_MS = 3000;
 const PAGE = 1000;
+// Remembered so someone watching live runs keeps newest first from run to run.
+const ORDER_KEY = 'triage.steps.order';
 
 const FILTER_LABELS: Record<StepFilter, string> = { all: 'All', pipeline: 'Pipeline', model: 'Model', tools: 'Tools', errors: 'Errors' };
+const ORDER_LABELS: Record<StepOrder, string> = { asc: 'Oldest first', desc: 'Newest first' };
 
 /** The run's events, read every page there is and kept fresh while the run goes on. */
 export function useRunEvents(runId: string, live: boolean): { events: RunEvent[]; error: unknown } {
@@ -82,9 +96,17 @@ export function CollapsedSteps({ events, error, live }: { events: readonly RunEv
 
 function StepsView({ events, error, live }: { events: readonly RunEvent[]; error: unknown; live: boolean }) {
   const [filter, setFilter] = useState<StepFilter>('all');
+  const [order, setOrder] = useState<StepOrder>(() => {
+    const saved = safeGet('local', ORDER_KEY);
+    return isStepOrder(saved) ? saved : 'asc';
+  });
   const [open, setOpen] = useState<ReadonlySet<number>>(new Set());
 
-  const shown = events.filter((e) => matchesStepFilter(e, filter));
+  const shown = visibleSteps(events, filter, order);
+  const changeOrder = (o: StepOrder) => {
+    setOrder(o);
+    safeSet('local', ORDER_KEY, o);
+  };
   const toggle = (i: number) =>
     setOpen((s) => {
       const n = new Set(s);
@@ -96,8 +118,13 @@ function StepsView({ events, error, live }: { events: readonly RunEvent[]; error
   return (
     <Panel
       title="Steps"
-      description={`Every step the run took, oldest first: ${events.length} so far${live ? ', updating while the run goes on' : ''}. Values are masked like the rest of the run.`}
-      actions={<Segmented label="Show" options={STEP_FILTERS.map((f) => ({ value: f, label: FILTER_LABELS[f] }))} value={filter} onChange={setFilter} />}
+      description={`Every step the run took, ${ORDER_LABELS[order].toLowerCase()}: ${events.length} so far${live ? ', updating while the run goes on' : ''}. Values are masked like the rest of the run.`}
+      actions={
+        <>
+          <Segmented label="Order" options={STEP_ORDERS.map((o) => ({ value: o, label: ORDER_LABELS[o] }))} value={order} onChange={changeOrder} />
+          <Segmented label="Show" options={STEP_FILTERS.map((f) => ({ value: f, label: FILTER_LABELS[f] }))} value={filter} onChange={setFilter} />
+        </>
+      }
     >
       {error !== undefined && (
         <Notice variant="warn" title="Could not load the steps" style={{ marginBottom: 12 }}>

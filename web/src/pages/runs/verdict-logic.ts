@@ -147,6 +147,17 @@ export function matchesStepFilter(e: Pick<RunEvent, 'source' | 'type' | 'data'>,
   }
 }
 
+export const STEP_ORDERS = ['asc', 'desc'] as const;
+export type StepOrder = (typeof STEP_ORDERS)[number];
+
+export const isStepOrder = (v: unknown): v is StepOrder => v === 'asc' || v === 'desc';
+
+/** The steps a filter keeps, oldest first or newest first. */
+export function visibleSteps<E extends Pick<RunEvent, 'source' | 'type' | 'data'>>(events: readonly E[], filter: StepFilter, order: StepOrder): E[] {
+  const shown = events.filter((e) => matchesStepFilter(e, filter));
+  return order === 'desc' ? shown.reverse() : shown;
+}
+
 /** Adds a page of lines, ignoring any the list already has. */
 export function appendEvents(have: readonly RunEvent[], page: readonly RunEvent[]): RunEvent[] {
   const last = have.at(-1)?.index ?? -1;
