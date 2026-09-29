@@ -6,6 +6,7 @@ import { runPhaseTone, runStatusOf, runStatusTone } from '../../lib/status.ts';
 import {
   blockedSteps,
   buildStartBody,
+  codeRefHref,
   deriveInvestigators,
   followUpPending,
   formatCalls,
@@ -551,5 +552,26 @@ describe('id chain hops', () => {
     expect(hopLabel({ from: 'account_number' })).toBe('account number, state only');
     expect(hopStatusLook('not_found').tone).toBe('rust');
     expect(hopStatusLook('unverified').tone).toBe('amber');
+  });
+});
+
+describe('codeRefHref', () => {
+  const bases = { harbor: 'https://github.com/Org/harbor' };
+  const commits = [{ repo: 'harbor', commit: 'abc1234' }];
+  const ref = (over: Partial<{ repo: string; file: string; lines: string }> = {}) => ({ repo: 'harbor', file: 'src/a b.go', lines: '10-20', ...over });
+
+  test('pins to the commit and anchors a range', () => {
+    expect(codeRefHref(ref(), bases, commits)).toBe('https://github.com/Org/harbor/blob/abc1234/src/a%20b.go#L10-L20');
+  });
+  test('a single line, and HEAD without a commit', () => {
+    expect(codeRefHref(ref({ lines: '42' }), bases, [])).toBe('https://github.com/Org/harbor/blob/HEAD/src/a%20b.go#L42');
+  });
+  test('free-text lines give no anchor', () => {
+    expect(codeRefHref(ref({ lines: 'whole file' }), bases, commits)).toBe('https://github.com/Org/harbor/blob/abc1234/src/a%20b.go');
+  });
+  test('no base, or a non-https base, stays plain text', () => {
+    expect(codeRefHref(ref({ repo: 'other' }), bases, commits)).toBeUndefined();
+    expect(codeRefHref(ref(), undefined, commits)).toBeUndefined();
+    expect(codeRefHref(ref(), { harbor: 'javascript:alert(1)' }, commits)).toBeUndefined();
   });
 });

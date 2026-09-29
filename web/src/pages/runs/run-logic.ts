@@ -616,3 +616,27 @@ export function hopsSummary(hops: readonly Hop[]): string {
   const failed = hops.filter((h) => h.status === 'not_found' || h.status === 'unreachable').length;
   return `${count}${path}${failed > 0 ? `, ${failed} failed` : ''}`;
 }
+
+/**
+ * A link to a code ref on the git host, pinned to the commit the run read
+ * (else HEAD). Undefined when the repo has no known base or the base is not https.
+ * The file is encoded per segment; lines becomes an anchor only when it is a
+ * number or a range, so free text never lands in the URL.
+ */
+export function codeRefHref(
+  ref: { repo: string; file: string; lines: string },
+  bases: Record<string, string> | undefined,
+  commits: readonly { repo: string; commit: string }[],
+): string | undefined {
+  const base = bases?.[ref.repo];
+  if (base === undefined || !base.startsWith('https://')) return undefined;
+  const rev = commits.find((c) => c.repo === ref.repo)?.commit ?? 'HEAD';
+  const path = ref.file
+    .replace(/^\/+/, '')
+    .split('/')
+    .map(encodeURIComponent)
+    .join('/');
+  const m = /^L?(\d+)(?:\s*[-\u2013]\s*L?(\d+))?$/.exec(ref.lines.trim());
+  const anchor = m === null ? '' : m[2] === undefined ? `#L${m[1]}` : `#L${m[1]}-L${m[2]}`;
+  return `${base}/blob/${rev}/${path}${anchor}`;
+}

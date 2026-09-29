@@ -165,12 +165,27 @@ export function parseBranch(stdout: string): string | undefined {
  * URL may carry credentials.
  */
 export function remoteIdentity(url: string): string | undefined {
+  const parts = remoteParts(url);
+  return parts === undefined ? undefined : `${parts.host}/${parts.path}`.toLowerCase();
+}
+
+/**
+ * The browsable https base of a clone URL, 'https://github.com/org/repo' for
+ * git@github.com:org/repo.git, with the original case kept. Undefined for any
+ * other form. Never carries user info or a port.
+ */
+export function remoteWebBase(url: string): string | undefined {
+  const parts = remoteParts(url);
+  return parts === undefined ? undefined : `https://${parts.host}/${parts.path}`;
+}
+
+function remoteParts(url: string): { host: string; path: string } | undefined {
   const text = url.trim();
   const m = /^[^@/\s]+@([^:/\s]+):([^\s]+)$/.exec(text) ?? /^(?:ssh|https?):\/\/(?:[^@/\s]*@)?([^:/\s]+)(?::\d+)?\/([^\s]+)$/.exec(text);
   if (m === null) return undefined;
   const path = (m[2] as string).replace(/^\/+|\/+$/g, '').replace(/\.git$/i, '');
   if (path === '') return undefined;
-  return `${(m[1] as string).toLowerCase()}/${path.toLowerCase()}`;
+  return { host: m[1] as string, path };
 }
 
 /** A full commit id (sha1 or sha256) from rev-parse, else undefined. */

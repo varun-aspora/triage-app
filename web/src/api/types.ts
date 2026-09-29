@@ -176,6 +176,8 @@ export type RunDetail = {
   submissions: SubmissionView[];
   feedback: FeedbackEntry[];
   report_md?: string;
+  /** Browsable https base per repo in the root cause's code refs. A repo with no entry has no known remote. */
+  code_links?: Record<string, string>;
   /** Tokens and cost of every model call in the run (D59). Absent from a server older than D59. */
   usage?: RunUsageView;
   /** D71: set while the run is running but nobody is working on it. Absent otherwise, and from older servers. */

@@ -536,7 +536,7 @@ function CompletedView({
             <div className="runs-main">
               {from === 'blocked' && resumePanel}
               <CxAnswerSection cx={report.cx_answer} />
-              <RootCauseSection report={report} />
+              <RootCauseSection report={report} codeLinks={run.code_links} />
               <TimelineSection items={report.timeline} />
               <CurrentStateSection items={report.current_state} />
               <ActionsSection actions={report.actions} />

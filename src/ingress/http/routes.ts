@@ -177,6 +177,11 @@ export type TriageRouteDeps = {
    * stalledAfterMs, runsDir, isAlive and this process's Flue leases.
    */
   readonly stalled?: (run: RunRecord) => Promise<Stalled | null>;
+  /**
+   * The browsable https base of a repo ('https://host/org/repo'), or undefined
+   * when its remote is unknown. Left out: the view has no code_links.
+   */
+  readonly codeBase?: (repo: string) => string | undefined;
 };
 
 export type TriageRouteDepsSource = TriageRouteDeps | (() => TriageRouteDeps | Promise<TriageRouteDeps>);
@@ -247,7 +252,7 @@ export function createTriageRoutes(source: TriageRouteDepsSource): Hono {
     if (run === null) return notFound(c);
     // The usage view and the stalled check ask about the same worker pid; it is checked once.
     const isAlive = deps.isAlive !== undefined ? oncePerPid(deps.isAlive) : undefined;
-    return c.json(runView(run, isAlive, await stalledFor(deps, run, isAlive)));
+    return c.json(runView(run, isAlive, await stalledFor(deps, run, isAlive), deps.codeBase));
   });
 
   app.get('/triage/:run_id/events', async (c) => {
@@ -492,7 +497,12 @@ function stalledDeps(deps: TriageRouteDeps, isAlive: ((pid: number) => boolean) 
  * running run whose worker died shows its open usage as incomplete, not live.
  * stalled (D71) is the caller's, from loadStalled; the view reads nothing.
  */
-export function runView(run: RunRecord, isAlive?: (pid: number) => boolean, stalled?: Stalled | null): Record<string, unknown> {
+export function runView(
+  run: RunRecord,
+  isAlive?: (pid: number) => boolean,
+  stalled?: Stalled | null,
+  codeBase?: (repo: string) => string | undefined,
+): Record<string, unknown> {
   // Optional access throughout: older or partial records (and test fixtures)
   // may lack parts of the request or classification.
   const request = run.request as Partial<TriageRequest> | undefined;
@@ -554,7 +564,25 @@ export function runView(run: RunRecord, isAlive?: (pid: number) => boolean, stal
   // A run with no recorded pid is still running as far as anyone can tell.
   const running = status === 'running' && (run.worker_pid === undefined || isAlive === undefined || isAlive(run.worker_pid));
   const usage = summariseUsage(run.usage ?? [], { running });
-  return { run_id: run.run_id, ...redactPersisted(view).value, usage, ...(stalled !== undefined && stalled !== null ? { stalled } : {}) };
+  const links = codeBase !== undefined ? codeLinks(run, codeBase) : {};
+  return {
+    run_id: run.run_id,
+    ...redactPersisted(view).value,
+    usage,
+    ...(Object.keys(links).length > 0 ? { code_links: links } : {}),
+    ...(stalled !== undefined && stalled !== null ? { stalled } : {}),
+  };
+}
+
+/** Web base per repo named in the root cause's code refs. Added after redaction so the URL stays whole. */
+function codeLinks(run: RunRecord, codeBase: (repo: string) => string | undefined): Record<string, string> {
+  const links: Record<string, string> = {};
+  for (const ref of run.report?.root_cause?.code_refs ?? []) {
+    if (ref.repo in links) continue;
+    const base = codeBase(ref.repo);
+    if (base !== undefined) links[ref.repo] = base;
+  }
+  return links;
 }
 
 /** One thread message in the run view. at is present only when the stored ts still parses (the persisted profile masks Slack ts digits). */

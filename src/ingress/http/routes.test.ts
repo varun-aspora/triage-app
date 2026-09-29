@@ -2005,3 +2005,27 @@ describe('POST /triage/:run_id/stop, GET /triage/:run_id/events, feedback on a r
     expect(await (await none.app.request(`/triage/${RUN_A}/events`)).json()).toEqual({ events: [], next: 0, more: false });
   });
 });
+
+describe('runView code_links', () => {
+  const report = {
+    root_cause: {
+      statement: 'x',
+      code_refs: [
+        { repo: 'harbor', file: 'a.go', lines: '1-2' },
+        { repo: 'harbor', file: 'b.go', lines: '3' },
+        { repo: 'unpinned', file: 'c.go', lines: '4' },
+      ],
+    },
+  };
+  const codeBase = (repo: string) => (repo === 'harbor' ? 'https://github.com/Org/harbor' : undefined);
+
+  test('has one base per known repo and leaves out repos with no remote', () => {
+    const view = runView(record(RUN_A, 'completed', report), undefined, undefined, codeBase);
+    expect(view.code_links).toEqual({ harbor: 'https://github.com/Org/harbor' });
+  });
+
+  test('is absent without a lookup or a root cause', () => {
+    expect('code_links' in runView(record(RUN_A, 'completed', report))).toBe(false);
+    expect('code_links' in runView(record(RUN_A, 'created'), undefined, undefined, codeBase)).toBe(false);
+  });
+});
