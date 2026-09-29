@@ -1,6 +1,8 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import type { FlueEvent } from '@flue/runtime';
-import { adjust } from './braintrust.ts';
+import { recorder } from '../../../test/support/fake-tracer.ts';
+import { adjust, nameRoot } from './braintrust.ts';
+import { labelTrace, setTracerForTests } from './index.ts';
 
 const base = { v: 3, eventIndex: 1, timestamp: '2026-09-27T08:00:10.000Z' } as const;
 
@@ -55,5 +57,28 @@ describe('adjust', () => {
     expect(adjust(tool, '2026-09-27T08:00:01.500Z').timestamp).toBe('2026-09-27T08:00:01.510Z');
     expect(tool.timestamp).toBe(base.timestamp);
     expect(adjust(tool)).toBe(tool);
+  });
+});
+
+describe('nameRoot (D100)', () => {
+  afterEach(() => setTracerForTests(undefined));
+  const RUN = '01JRUNAAAAAAAAAAAAAAAAAAAA';
+  const prompt = { type: 'agent', operationId: 'op_1', operationKind: 'prompt' } as const;
+
+  test('renames a root agent span only', async () => {
+    setTracerForTests(recorder().tracer);
+    await labelTrace(RUN, 'answer', async () => ({ category: 'onboarding', subcategory: 'sim_binding' }));
+    const names: unknown[] = [];
+    const span = (parents: string[]) => ({ spanParents: parents, setAttributes: (a: { name?: string }) => void names.push(a.name) });
+
+    nameRoot(prompt, { instanceId: RUN }, span([]));
+    nameRoot(prompt, { instanceId: RUN }, span(['parent']));
+    nameRoot({ type: 'tool', toolCallId: 'c', toolName: 't' }, { instanceId: RUN }, span([]));
+    nameRoot(prompt, {}, span([]));
+    nameRoot(prompt, { instanceId: '01JUNLABELLEDAAAAAAAAAAAAA' }, span([]));
+    expect(names).toEqual([
+      `onboarding:sim_binding · answer · ${RUN} · flue.prompt`,
+      '01JUNLABELLEDAAAAAAAAAAAAA · flue.prompt',
+    ]);
   });
 });

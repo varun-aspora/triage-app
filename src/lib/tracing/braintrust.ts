@@ -2,10 +2,19 @@
 // runs, and SDK spans for the model calls the app makes itself. A span opened
 // inside a Flue tool nests under that tool's span in Braintrust.
 
-import { type FlueEvent, instrument, type PromptUsage } from '@flue/runtime';
-import { braintrustFlueInstrumentation, flush, initLogger, setMaskingFunction, startSpan, withCurrent } from 'braintrust';
+import { type FlueEvent, type FlueExecutionContext, type FlueExecutionOperation, instrument, type PromptUsage } from '@flue/runtime';
+import {
+  braintrustFlueInstrumentation,
+  currentSpan,
+  flush,
+  initLogger,
+  setMaskingFunction,
+  type Span,
+  startSpan,
+  withCurrent,
+} from 'braintrust';
 import type { Config } from '../../config/env.ts';
-import { mask, maskedMessage, type Tracer } from './index.ts';
+import { mask, maskedMessage, traceLabel, type Tracer } from './index.ts';
 import { BRAINTRUST_RUN_ID_KEY } from './keys.ts';
 
 // Tool calls whose start time is held for their end event. A tool still open
@@ -32,6 +41,13 @@ export function installBraintrust(tracing: Config['tracing']): Tracer {
       }
       return inner.observe(adjust(e, startedAt), ctx);
     },
+    interceptor: (op, ctx, next) =>
+      op.type !== 'agent'
+        ? inner.interceptor(op, ctx, next)
+        : inner.interceptor(op, ctx, () => {
+            nameRoot(op, ctx, currentSpan());
+            return next();
+          }),
   });
   return {
     // startSpan rather than traced(): traced() logs the raw error, stack
@@ -69,6 +85,17 @@ export function installBraintrust(tracing: Config['tracing']): Tracer {
     },
     flush: () => flush(),
   };
+}
+
+/**
+ * Renames a trace's root, which the bridge calls `flue.prompt`, to
+ * `topic · kind · run id · flue.prompt` (D100). The bridge runs each agent
+ * operation with its span current. Nested operations keep their names.
+ */
+export function nameRoot(op: FlueExecutionOperation, ctx: FlueExecutionContext, span: Pick<Span, 'spanParents' | 'setAttributes'>): void {
+  if (op.type !== 'agent' || ctx.instanceId === undefined || span.spanParents.length > 0) return;
+  const l = traceLabel(ctx.instanceId);
+  span.setAttributes({ name: [l?.topic, l?.kind, ctx.instanceId, `flue.${op.operationKind}`].filter(Boolean).join(' · ') });
 }
 
 // Two fixes to what Braintrust's Flue bridge logs, until they land upstream (D82).

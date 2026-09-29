@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { recorder } from '../../../test/support/fake-tracer.ts';
-import { flushTracing, installTracing, setTracerForTests, withModelSpan, withRunId } from './index.ts';
+import { flushTracing, installTracing, labelTrace, setTracerForTests, traceLabel, withModelSpan, withRunId } from './index.ts';
 
 afterEach(() => setTracerForTests(undefined));
 
@@ -88,5 +88,36 @@ describe('flushTracing', () => {
     expect(performance.now() - started).toBeLessThan(1000);
     setTracerForTests(recorder(() => Promise.reject(new Error('down'))).tracer);
     await expect(flushTracing(20)).resolves.toBeUndefined();
+  });
+});
+
+describe('labelTrace (D100)', () => {
+  const RUN = '01JRUNAAAAAAAAAAAAAAAAAAAA';
+
+  test('the latest label wins, and the subcategory is masked', async () => {
+    setTracerForTests(recorder().tracer);
+    await labelTrace(RUN, 'initial', async () => ({ category: 'onboarding', subcategory: 'sim_binding' }));
+    await labelTrace(RUN, 'answer', async () => ({ category: 'onboarding', subcategory: 'sim_binding' }));
+    expect(traceLabel(RUN)).toEqual({ topic: 'onboarding:sim_binding', kind: 'answer' });
+    await labelTrace(RUN, 'ask', async () => ({ category: 'auth', subcategory: 'otp to 9876543210' }));
+    expect(traceLabel(RUN)?.topic).not.toContain('9876543210');
+  });
+
+  test('no subcategory or a failed load leaves that part out', async () => {
+    setTracerForTests(recorder().tracer);
+    await labelTrace(RUN, 'resume', async () => ({ category: 'unknown', subcategory: '' }));
+    expect(traceLabel(RUN)).toEqual({ topic: 'unknown', kind: 'resume' });
+    await labelTrace(RUN, 'steer', () => Promise.reject(new Error('store down')));
+    expect(traceLabel(RUN)).toEqual({ topic: '', kind: 'steer' });
+  });
+
+  test('tracing off loads nothing and keeps nothing', async () => {
+    let loads = 0;
+    await labelTrace(RUN, 'initial', async () => {
+      loads += 1;
+      return undefined;
+    });
+    expect(loads).toBe(0);
+    expect(traceLabel(RUN)).toBeUndefined();
   });
 });
