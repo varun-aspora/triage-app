@@ -32,16 +32,18 @@ export function Panel({ title, description, actions, padded = true, children, st
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'flex-start',
+            flexWrap: 'wrap',
             gap: 16,
             margin: padded ? '0 0 14px' : 0,
             padding: padded ? 0 : '16px 16px 12px',
           }}
         >
-          <div>
+          {/* Grows to fill the row; when the actions don't fit beside a readable description they wrap below it. */}
+          <div style={{ flex: '1 1 260px', minWidth: 0 }}>
             {title !== undefined && <h2 style={{ fontSize: 16, fontWeight: 600 }}>{title}</h2>}
             {description !== undefined && <p className="hint" style={{ margin: '4px 0 0' }}>{description}</p>}
           </div>
-          {actions !== undefined && <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>{actions}</div>}
+          {actions !== undefined && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>{actions}</div>}
         </div>
       )}
       {children}

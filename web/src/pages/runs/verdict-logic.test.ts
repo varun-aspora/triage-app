@@ -169,6 +169,14 @@ describe('agentActivity', () => {
     expect(got.size).toBe(2);
   });
 
+  test('the target is what the call looks at, not the first text argument', () => {
+    const got = agentActivity([
+      ev('task_start', { taskId: 't1', agent: 'investigate_ssfb' }),
+      ev('tool_start', { taskId: 't1', toolName: 'logs_search', args: { from: '2d', terms: ['BATCH-0192', 'CUST-00917'] } }),
+    ]);
+    expect(got.get('investigate_ssfb')).toEqual({ failed: false, tool: 'logs_search', target: 'BATCH-0192, CUST-00917' });
+  });
+
   test('a long target is cut and a task with no tool calls has none', () => {
     const got = agentActivity([
       ev('task_start', { taskId: 't1', agent: 'code_walker' }),

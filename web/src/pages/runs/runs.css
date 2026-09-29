@@ -482,3 +482,13 @@
   padding: 6px 0;
   border-top: 1px solid var(--line-soft);
 }
+
+/* Sources are long mono names with no spaces; let them break so the tag stays inside the panel. */
+.runs-hops li > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.runs-hops li > :last-child {
+  flex-shrink: 0;
+}

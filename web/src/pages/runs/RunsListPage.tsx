@@ -90,7 +90,7 @@ export default function RunsListPage() {
       />
 
       <div className="runs-filters">
-        <form onSubmit={openRun} style={{ width: 320, maxWidth: '100%' }} role="search">
+        <form onSubmit={openRun} style={{ width: 420, maxWidth: '100%' }} role="search">
           <Label htmlFor="runs-q">Run id</Label>
           <div style={{ display: 'flex', gap: 8 }}>
             <div style={{ position: 'relative', flex: 1 }}>

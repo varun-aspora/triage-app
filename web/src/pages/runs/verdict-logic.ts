@@ -169,10 +169,24 @@ export type AgentActivity = { failed: boolean; done?: boolean; tool?: string; ta
 
 const MAX_TARGET = 60;
 
-/** The first text argument of a tool call, cut short: enough to tell which table, file or query. */
+// The arguments that say what a call looks at, checked before any other text argument;
+// otherwise logs_search shows its time range ("2d") rather than its terms.
+const TARGET_ARGS = ['sql', 'path', 'pattern', 'glob', 'terms', 'message', 'error', 'service', 'repo'];
+
+const argText = (v: unknown): string | undefined => {
+  if (typeof v === 'string') return v.trim() === '' ? undefined : v;
+  if (Array.isArray(v)) {
+    const parts = v.filter((x): x is string => typeof x === 'string' && x.trim() !== '');
+    return parts.length > 0 ? parts.join(', ') : undefined;
+  }
+  return undefined;
+};
+
+/** The argument that names the table, file or query, cut short. */
 function targetOf(args: unknown): string | undefined {
   if (typeof args !== 'object' || args === null) return undefined;
-  const text = Object.values(args).find((v): v is string => typeof v === 'string' && v.trim() !== '');
+  const a = args as Data;
+  const text = TARGET_ARGS.map((k) => argText(a[k])).find((t) => t !== undefined) ?? Object.values(a).map(argText).find((t) => t !== undefined);
   return text === undefined ? undefined : oneLine(text, MAX_TARGET);
 }
 
