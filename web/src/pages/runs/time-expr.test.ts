@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { formatLocalInput, resolveTimeExpr, toDatetimeLocal } from './time-expr.ts';
+import { resolveTimeExpr, toDatetimeLocal } from './time-expr.ts';
 
 // A fixed local time, so the day rounding does not depend on when the test runs.
 const NOW = new Date(2026, 8, 29, 14, 37, 21, 500).getTime();
@@ -38,7 +38,6 @@ describe('resolveTimeExpr', () => {
   });
 });
 
-test('formatLocalInput and toDatetimeLocal', () => {
-  expect(formatLocalInput(local(2026, 0, 5, 9, 3))).toBe('2026-01-05 09:03');
+test('toDatetimeLocal', () => {
   expect(toDatetimeLocal(local(2026, 0, 5, 9, 3))).toBe('2026-01-05T09:03');
 });

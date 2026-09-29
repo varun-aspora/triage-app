@@ -2,10 +2,11 @@
 // field that take a local time or a relative expression (time-expr.ts). The
 // fields keep the text as typed; buildStartBody resolves it at submit.
 
-import { useEffect, useId, useRef, useState } from 'react';
+import { useId, useRef } from 'react';
 import { FieldError, Hint, Input, Label } from '../../components/Field.tsx';
 import { Icon } from '../../components/Icon.tsx';
 import { formatDateTime } from '../../lib/format.ts';
+import { useNow } from '../../lib/useNow.ts';
 import { RANGE_PRESETS, resolveTimeExpr, toDatetimeLocal } from './time-expr.ts';
 
 type Props = {
@@ -126,13 +127,4 @@ function TimeField({ label, end, placeholder, value, onChange, now, shortcut }: 
       <Hint id={`${id}-hint`}>{preview === '' ? '\u00a0' : preview}</Hint>
     </div>
   );
-}
-
-function useNow(everyMs: number): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), everyMs);
-    return () => clearInterval(t);
-  }, [everyMs]);
-  return now;
 }

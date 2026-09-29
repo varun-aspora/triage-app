@@ -40,12 +40,10 @@ import {
   SlackFetchError,
   templateFieldValues,
   toRawThread,
-  unreadFiles,
   type FetchLike,
   type SlackFetchDeps,
   type SlackThread,
   type SlackThreadRef,
-  type UnreadFile,
 } from './slack.ts';
 import { parseSlackPermalink } from './slack-url.ts';
 import { newRunId } from './ulid.ts';
@@ -94,8 +92,6 @@ export type PreparedSubmission = {
   readonly request: TriageRequest;
   /** Names collected by ingress for the persisted profile. Never stored. */
   readonly redaction_names: readonly string[];
-  /** Thread files ingress did not download (Slack only), so the run can say they were not analysed. */
-  readonly unread_files?: readonly UnreadFile[];
 };
 
 export async function prepareRequest(input: PrepareInput, deps: PrepareDeps): Promise<PreparedSubmission> {
@@ -124,7 +120,7 @@ export async function prepareRequest(input: PrepareInput, deps: PrepareDeps): Pr
       },
     );
     const request = buildTriageRequest({ ...common, kind: 'slack', url: input.url, thread: toRawThread(thread) }, opts);
-    return prepared(runId, request, thread.names, unreadFiles(thread));
+    return prepared(runId, request, thread.names);
   }
 
   let normalised: TriageInput;
@@ -170,13 +166,8 @@ export function prepareDeps(
 
 // ------------------------------------------------------------------ helpers
 
-function prepared(runId: RunId, request: TriageRequest, names: readonly string[], unread: readonly UnreadFile[] = []): PreparedSubmission {
-  return Object.freeze({
-    run_id: runId,
-    request,
-    redaction_names: Object.freeze(dedupeNames(names)),
-    ...(unread.length > 0 ? { unread_files: Object.freeze([...unread]) } : {}),
-  });
+function prepared(runId: RunId, request: TriageRequest, names: readonly string[]): PreparedSubmission {
+  return Object.freeze({ run_id: runId, request, redaction_names: Object.freeze(dedupeNames(names)) });
 }
 
 async function readThreadFile(path: string, deps: PrepareDeps): Promise<unknown> {

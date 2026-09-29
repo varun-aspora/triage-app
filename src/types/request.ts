@@ -41,6 +41,13 @@ export const AttachmentSchema = v.object({
 });
 export type Attachment = v.InferOutput<typeof AttachmentSchema>;
 
+/** A thread file ingress did not download, and why (D102). */
+export const SkippedFileSchema = v.object({
+  name: NonEmptyStringSchema,
+  reason: NonEmptyStringSchema,
+});
+export type SkippedFile = v.InferOutput<typeof SkippedFileSchema>;
+
 export const RequestHintsSchema = v.object({
   entities: v.optional(v.array(EntitySchema)),
   ids: v.optional(KnownIdsSchema),
@@ -58,6 +65,8 @@ export const TriageRequestSchema = v.object({
   source: RequestSourceSchema,
   messages: v.array(ThreadMessageSchema),
   attachments: v.array(AttachmentSchema),
+  // Kept so the run can say which files it did not analyse.
+  skipped_files: v.optional(v.array(SkippedFileSchema)),
   hints: RequestHintsSchema,
   // Default: first message ts minus the lookback days, up to now; hints override.
   window: TimeWindowSchema,

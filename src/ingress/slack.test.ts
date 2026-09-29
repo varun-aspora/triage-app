@@ -151,9 +151,14 @@ describe('fetchSlackThread, real transport with an injected fetch', () => {
     const fileCalls = slack.calls.filter((c) => c.url.hostname === 'files.slack.com').map((c) => c.url.pathname);
     expect(fileCalls).toEqual(['/files-pri/T0SYNTH-F0SYNTH1/screen-1.png']);
 
-    expect(toRawThread(thread).attachments).toEqual([
-      { name: 'screen-1.png', mime: 'image/png', bytes_ref: png?.bytes_ref as string },
-    ]);
+    expect(toRawThread(thread)).toMatchObject({
+      attachments: [{ name: 'screen-1.png', mime: 'image/png', bytes_ref: png?.bytes_ref as string }],
+      skipped_files: [
+        { name: 'statement.pdf', reason: 'over the size limit' },
+        { name: 'huge.jpg', reason: 'over the size limit' },
+        { name: 'elsewhere.png', reason: 'not stored on Slack' },
+      ],
+    });
   });
 
   test('downloads text files and PDFs; a text file may come back under another text type', async () => {

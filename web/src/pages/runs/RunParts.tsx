@@ -95,7 +95,7 @@ export function RunHeader({ run, extraMeta, resuming = false }: { run: RunDetail
     <PageHeader
       title={runTitle(run)}
       documentTitle={`Run ${shortRunId(run.run_id)}`}
-      breadcrumb={[{ label: 'Runs', to: '/runs' }, { label: run.run_id, copy: run.run_id, copyLabel: 'Copy run id' }]}
+      breadcrumb={[{ label: 'Runs', to: '/runs' }, { label: run.run_id, copy: { text: run.run_id, label: 'Copy run id' } }]}
       actions={actions}
     >
       <div className="runs-tags">

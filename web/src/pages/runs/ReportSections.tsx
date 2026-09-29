@@ -1,11 +1,10 @@
 // The report tab of a completed run, section by section as in the wireframe.
 
-import { useState } from 'react';
 import type { Report } from '../../api/types.ts';
 import { Button } from '../../components/Button.tsx';
 import { Panel } from '../../components/Panel.tsx';
 import { Chip } from '../../components/StatusTag.tsx';
-import { copyText } from '../../lib/clipboard.ts';
+import { useCopy } from '../../lib/clipboard.ts';
 import { formatDateTime } from '../../lib/format.ts';
 import { Tag } from './RunParts.tsx';
 import { capitalise } from './run-logic.ts';
@@ -22,17 +21,13 @@ function sourceLabel(src: Report['timeline'][number]['source']): string {
 }
 
 export function CxAnswerSection({ cx }: { cx: Report['cx_answer'] }) {
-  const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle');
-  const copy = async () => {
-    setCopied((await copyText(cx.reply_text)) ? 'ok' : 'fail');
-    setTimeout(() => setCopied('idle'), 2000);
-  };
+  const [copied, copy] = useCopy(cx.reply_text);
   return (
     <Panel
       title="Answer for CX"
       actions={
         cx.reply_text !== '' ? (
-          <Button size="sm" icon={copied === 'ok' ? 'check' : 'copy'} onClick={() => void copy()}>
+          <Button size="sm" icon={copied === 'ok' ? 'check' : 'copy'} onClick={copy}>
             {copied === 'ok' ? 'Copied' : copied === 'fail' ? 'Copy failed' : 'Copy reply'}
           </Button>
         ) : undefined

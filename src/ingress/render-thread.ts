@@ -12,10 +12,9 @@
 // request travels separately, in initialData.
 import { redactModelFacing } from '../gate/redact.ts';
 import type { BlockRecord } from '../types/block.ts';
-import type { DocumentText } from './documents.ts';
 import { KNOWN_ID_KEYS, type KnownIds } from '../types/core.ts';
 import type { InputRequest } from '../types/input-request.ts';
-import type { TriageRequest } from '../types/request.ts';
+import type { SkippedFile, TriageRequest } from '../types/request.ts';
 import type { StalledReason } from '../types/stalled.ts';
 
 /** What happened to the request's screenshots on the way to the dispatch. */
@@ -27,11 +26,23 @@ export type RenderImages = {
   readonly dropReason?: string;
 };
 
-/** The thread's files as text (D102), and the ones that could not be read. */
-export type RenderFiles = {
-  readonly read: readonly DocumentText[];
-  readonly unread: readonly { readonly name: string; readonly reason: string }[];
+/** One thread file as text (D102). */
+export type FileText = {
+  readonly name: string;
+  readonly mime: string;
+  readonly text: string;
+  readonly pages?: number;
+  /** Whether the text was cut to fit the limits. */
+  readonly cut: boolean;
 };
+
+/** The thread's files as text, and the ones that were not read. */
+export type RenderFiles = { readonly read: readonly FileText[]; readonly unread: readonly SkippedFile[] };
+
+/** 'a.docx (type not supported); b.pdf (password protected)': the same words in the message and the report gaps. */
+export function unreadList(unread: readonly SkippedFile[]): string {
+  return unread.map((f) => `${f.name} (${f.reason})`).join('; ');
+}
 
 const NO_FILES: RenderFiles = { read: [], unread: [] };
 
@@ -214,13 +225,12 @@ function fileLines(files: RenderFiles): string[] {
     );
     for (const f of files.read) {
       const meta = [f.name, f.mime, ...(f.pages !== undefined ? [`${f.pages} page${f.pages === 1 ? '' : 's'}`] : [])];
-      if (f.cut > 0) meta.push(`the last ${f.cut} characters were cut`);
+      if (f.cut) meta.push(`cut to the first ${f.text.length} characters`);
       out.push('', `--- file · ${meta.join(' · ')}`, f.text);
     }
   }
   if (files.unread.length > 0) {
-    const list = files.unread.map((f) => `${f.name} (${f.reason})`).join('; ');
-    out.push('', `Files on the thread that could not be read: ${list}. Say in the report that they were not analysed.`);
+    out.push('', `Files on the thread that could not be read: ${unreadList(files.unread)}. Say in the report that they were not analysed.`);
   }
   return out;
 }

@@ -895,7 +895,8 @@ describe('text files and PDFs', () => {
       },
     });
     h.deps = { ...h.deps, readAttachment: async (ref) => files[ref] ?? new Uint8Array() };
-    const p = { ...prepared({ attachments: [csv, pdf, docx] }), unread_files: [{ name: 'huge.pdf', reason: 'over the size limit' }] };
+    const base = prepared({ attachments: [csv, pdf, docx] });
+    const p = { ...base, request: { ...base.request, skipped_files: [{ name: 'huge.pdf', reason: 'over the size limit' }] } };
     await runSubmission(p, h.deps);
     const message = h.flue.dispatches[0]?.message as { attachments?: unknown[] };
     expect(message.attachments).toBeUndefined();
@@ -913,6 +914,27 @@ describe('text files and PDFs', () => {
     // The classifier gets the thread only.
     expect(classified).toHaveLength(1);
     expect(JSON.stringify(classified[0])).not.toContain('card,status');
+  });
+
+  test('files past the run text budget are not read', async () => {
+    const big = (n: number): Attachment => ({ name: `big-${n}.txt`, mime: 'text/plain', bytes_ref: `/synthetic/attachments/big-${n}.txt` });
+    const reads: string[] = [];
+    const h = harness();
+    h.deps = {
+      ...h.deps,
+      readAttachment: async (ref) => {
+        reads.push(ref);
+        return new TextEncoder().encode('x'.repeat(25_000));
+      },
+    };
+    await runSubmission(prepared({ attachments: [big(1), big(2), big(3), big(4)] }), h.deps);
+    // 20,000 characters each: three files fill the 60,000 budget, the fourth is never read.
+    expect(reads).toHaveLength(3);
+    expect(bodyOf(h)).toContain('big-4.txt (over the text limit for the run)');
+    expect(initialDataOf(h).preflight_warnings).toContainEqual({
+      step: 'attachments',
+      message: '3 file(s) were cut to fit the text limit: big-1.txt; big-2.txt; big-3.txt',
+    });
   });
 
   test('a file that fails to read or parse is named, and the run goes on', async () => {

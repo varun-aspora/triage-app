@@ -6,6 +6,8 @@
 // open does not send a stale window. Day rounding uses the viewer's time
 // zone, the same zone the absolute times are read in.
 
+import { pad } from '../../lib/format.ts';
+
 const RELATIVE = /^now((?:[+-]\d+[smhdw])*)(?:\/([mhd]))?$/;
 const OFFSET = /([+-])(\d+)([smhdw])/g;
 const LOCAL = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/;
@@ -60,23 +62,14 @@ function localTime(m: RegExpExecArray): number | undefined {
   return same ? d.getTime() : undefined;
 }
 
-const pad = (n: number): string => String(n).padStart(2, '0');
-
-/** '2026-09-24 14:05' in the viewer's time zone: what the calendar writes into the field. */
-export function formatLocalInput(ms: number): string {
-  const d = new Date(ms);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-/** The value a datetime-local input takes: '2026-09-24T14:05'. */
+/** The value a datetime-local input takes, in the viewer's time zone: '2026-09-24T14:05'. */
 export function toDatetimeLocal(ms: number): string {
-  return formatLocalInput(ms).replace(' ', 'T');
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
-
-export type RangePreset = { readonly label: string; readonly from: string; readonly to: string };
 
 /** Quick ranges above the window fields. Each ends now. */
-export const RANGE_PRESETS: readonly RangePreset[] = [
+export const RANGE_PRESETS: readonly { readonly label: string; readonly from: string; readonly to: string }[] = [
   { label: 'Last 15m', from: 'now-15m', to: 'now' },
   { label: 'Last 1h', from: 'now-1h', to: 'now' },
   { label: 'Last 6h', from: 'now-6h', to: 'now' },

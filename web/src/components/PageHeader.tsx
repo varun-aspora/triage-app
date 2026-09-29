@@ -1,11 +1,11 @@
-import { Fragment, type ReactNode, useEffect, useState } from 'react';
+import { Fragment, type ReactNode } from 'react';
 import { Link } from 'react-router';
-import { copyText } from '../lib/clipboard.ts';
+import { useCopy } from '../lib/clipboard.ts';
 import { usePageTitle } from '../lib/usePageTitle.ts';
-import { Icon } from './Icon.tsx';
+import { Button } from './Button.tsx';
 
-/** copy puts a copy button after the crumb; copyLabel names it for screen readers. */
-export type Crumb = { label: ReactNode; to?: string; copy?: string; copyLabel?: string };
+/** copy puts a copy button after the crumb: the text it copies, and the button's name for screen readers. */
+export type Crumb = { label: ReactNode; to?: string; copy?: { text: string; label: string } };
 
 type Props = {
   title: ReactNode;
@@ -35,7 +35,7 @@ export function PageHeader({ title, documentTitle, description, breadcrumb, acti
                 ) : (
                   <span className="mono">{c.label}</span>
                 )}
-                {c.copy !== undefined && <CopyCrumb text={c.copy} label={c.copyLabel ?? 'Copy'} />}
+                {c.copy !== undefined && <CopyCrumb {...c.copy} />}
               </Fragment>
             ))}
           </nav>
@@ -54,22 +54,17 @@ export function PageHeader({ title, documentTitle, description, breadcrumb, acti
 }
 
 function CopyCrumb({ text, label }: { text: string; label: string }) {
-  const [state, setState] = useState<'idle' | 'ok' | 'fail'>('idle');
-  useEffect(() => {
-    if (state === 'idle') return;
-    const t = setTimeout(() => setState('idle'), 2000);
-    return () => clearTimeout(t);
-  }, [state]);
+  const [state, copy] = useCopy(text);
   const title = state === 'ok' ? 'Copied' : state === 'fail' ? 'Copy failed' : label;
   return (
-    <button
-      type="button"
+    <Button
+      variant="ghost"
+      size="sm"
       className="crumb-copy"
+      icon={state === 'ok' ? 'check' : state === 'fail' ? 'x' : 'copy'}
       aria-label={title}
       title={title}
-      onClick={() => void copyText(text).then((ok) => setState(ok ? 'ok' : 'fail'))}
-    >
-      <Icon name={state === 'ok' ? 'check' : state === 'fail' ? 'x' : 'copy'} size={14} />
-    </button>
+      onClick={copy}
+    />
   );
 }

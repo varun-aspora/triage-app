@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { minimalPdf } from '../../test/support/pdf.ts';
-import { baseMime, capDocuments, DocumentReadError, extractDocumentText, isDocumentMime } from './documents.ts';
+import { attachmentType, baseMime, DocumentReadError, extractDocumentText } from './documents.ts';
 
 const enc = (s: string) => new TextEncoder().encode(s);
 
@@ -15,18 +15,23 @@ async function reason(p: Promise<unknown>): Promise<string> {
 }
 
 describe('types', () => {
-  test('text-like types and PDFs are read, others are not', () => {
-    for (const m of ['text/plain', 'Text/CSV; charset=utf-8', 'application/json', 'application/x-yaml', 'application/pdf']) {
-      expect(isDocumentMime(m)).toBe(true);
-    }
-    for (const m of ['image/png', 'text/html', 'application/zip', 'application/msword']) expect(isDocumentMime(m)).toBe(false);
+  test('each type has a kind and a stored extension; others are not taken', () => {
+    expect(attachmentType('image/png')).toEqual({ kind: 'image', ext: 'png' });
+    expect(attachmentType('Text/CSV; charset=utf-8')).toEqual({ kind: 'text', ext: 'csv' });
+    expect(attachmentType('application/x-yaml')).toEqual({ kind: 'text', ext: 'yaml' });
+    expect(attachmentType('application/pdf')).toEqual({ kind: 'pdf', ext: 'pdf' });
+    for (const m of ['text/html', 'application/zip', 'application/msword', 'image/heic']) expect(attachmentType(m)).toBeUndefined();
     expect(baseMime(' Text/Plain ; charset=utf-8')).toBe('text/plain');
   });
 });
 
 describe('extractDocumentText', () => {
   test('a text file comes back as it is', async () => {
-    expect(await extractDocumentText(enc('id,status\n1,failed\n'), 'text/csv')).toEqual({ text: 'id,status\n1,failed\n' });
+    expect(await extractDocumentText(enc('id,status\n1,failed\n'), 'text/csv')).toEqual({ text: 'id,status\n1,failed\n', cut: false });
+  });
+
+  test('text past maxChars is cut', async () => {
+    expect(await extractDocumentText(enc('abcdef'), 'text/plain', 4)).toEqual({ text: 'abcd', cut: true });
   });
 
   test('a text type holding binary or bad UTF-8 is refused', async () => {
@@ -38,6 +43,7 @@ describe('extractDocumentText', () => {
   test('a PDF gives its text and page count', async () => {
     const got = await extractDocumentText(minimalPdf(['Statement for September', 'UTR 123456789012 failed']), 'application/pdf');
     expect(got.pages).toBe(1);
+    expect(got.cut).toBe(false);
     expect(got.text).toContain('Statement for September');
     expect(got.text).toContain('UTR 123456789012 failed');
   });
@@ -52,12 +58,7 @@ describe('extractDocumentText', () => {
   });
 });
 
-test('capDocuments cuts each file, then the total, first file first', () => {
-  const doc = (name: string, n: number) => ({ name, mime: 'text/plain', text: 'x'.repeat(n) });
-  const out = capDocuments([doc('a', 8), doc('b', 3), doc('c', 5)], 5, 9);
-  expect(out.map((d) => [d.name, d.text.length, d.cut])).toEqual([
-    ['a', 5, 3],
-    ['b', 3, 0],
-    ['c', 1, 4],
-  ]);
+test('a long PDF is cut at maxChars', async () => {
+  const got = await extractDocumentText(minimalPdf(['first line of the statement', 'second line']), 'application/pdf', 10);
+  expect(got).toEqual({ text: 'first line', pages: 1, cut: true });
 });

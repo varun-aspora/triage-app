@@ -34,8 +34,8 @@ import type { AuditSink } from '../gate/audit-sink.ts';
 import type { ResolveIo } from '../mock/resolve.ts';
 import type { MockSettings } from '../mock/settings.ts';
 import { RunIdSchema, type Interface } from '../types/core.ts';
-import type { Attachment } from '../types/request.ts';
-import { baseMime, DOCUMENT_MIMES, TEXT_MIMES } from './documents.ts';
+import type { Attachment, SkippedFile } from '../types/request.ts';
+import { attachmentType, baseMime, UNSUPPORTED_TYPE } from './documents.ts';
 import type { RawThread, ThreadFileMessage } from './normalise.ts';
 
 // ------------------------------------------------------------------ errors
@@ -60,12 +60,6 @@ export class SlackFetchError extends Error {
 
 export const SLACK_API_BASE = 'https://slack.com/api/';
 export const SLACK_AUTH_HOSTS: ReadonlySet<string> = new Set(['slack.com', 'files.slack.com']);
-export const IMAGE_MIMES: Readonly<Record<string, string>> = Object.freeze({
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/gif': 'gif',
-  'image/webp': 'webp',
-});
 export const DEFAULT_MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 /** Stops a cursor loop that never ends. 50 pages of 200 is far past any real thread. */
 export const MAX_PAGES = 50;
@@ -229,30 +223,26 @@ export async function fetchSlackThread(ref: SlackThreadRef, deps: SlackFetchDeps
   return thread;
 }
 
-/** A file the run could not read, and why, in words for the agent and the report. */
-export type UnreadFile = { readonly name: string; readonly reason: string };
-
 const SKIP_TEXT: Readonly<Record<Exclude<SkipReason, 'mock'>, string>> = {
-  not_supported: 'type not supported',
+  not_supported: UNSUPPORTED_TYPE,
   too_large: 'over the size limit',
   refused_host: 'not stored on Slack',
   download_failed: 'download failed',
 };
 
-/** The thread's files that were not downloaded. Mock mode downloads nothing, so its skips are left out. */
-export function unreadFiles(thread: SlackThread): UnreadFile[] {
-  return thread.attachments.flatMap((a) =>
-    a.skipped === undefined || a.skipped === 'mock' ? [] : [{ name: a.name, reason: SKIP_TEXT[a.skipped] }],
-  );
-}
-
-/** The thread in the shape buildTriageRequest takes: only downloaded files become attachments. */
+/**
+ * The thread in the shape buildTriageRequest takes: downloaded files become
+ * attachments, the others skipped_files. Mock mode downloads nothing, so its
+ * skips are left out.
+ */
 export function toRawThread(thread: SlackThread): RawThread {
   const attachments: Attachment[] = [];
+  const skipped: SkippedFile[] = [];
   for (const a of thread.attachments) {
     if (a.bytes_ref !== undefined) attachments.push({ name: a.name, mime: a.mime, bytes_ref: a.bytes_ref });
+    else if (a.skipped !== undefined && a.skipped !== 'mock') skipped.push({ name: a.name, reason: SKIP_TEXT[a.skipped] });
   }
-  return { messages: thread.messages, attachments };
+  return { messages: thread.messages, attachments, ...(skipped.length > 0 ? { skipped_files: skipped } : {}) };
 }
 
 function refuse(channel: string, thread_ts: string, deps: SlackFetchDeps, mockMode: boolean): SlackFetchError | null {
@@ -561,7 +551,7 @@ async function handleFiles(
   const dir = resolve(deps.dataDir, 'attachments', deps.run_id);
   for (const [i, f] of files.entries()) {
     const base = { name: f.name, mime: f.mime, ...(f.size !== undefined ? { size: f.size } : {}) };
-    const ext = IMAGE_MIMES[f.mime] ?? DOCUMENT_MIMES[baseMime(f.mime)];
+    const ext = attachmentType(f.mime)?.ext;
     if (ext === undefined) {
       out.push({ ...base, skipped: 'not_supported' });
       continue;
@@ -605,9 +595,8 @@ async function download(
     deps.signal.throwIfAborted();
     return { skipped: 'download_failed' };
   }
-  const type = baseMime(res.headers.get('content-type') ?? '');
   // Slack answers a missing files:read scope with an HTML page and status 200.
-  if (!res.ok || !sameType(type, baseMime(mime))) {
+  if (!res.ok || !sameType(res.headers.get('content-type') ?? '', mime)) {
     await res.body?.cancel().catch(() => undefined);
     return { skipped: 'download_failed' };
   }
@@ -642,8 +631,9 @@ async function download(
 // (a .log listed as text/x-log comes back as text/plain), so for text files
 // any text type but HTML is taken.
 function sameType(served: string, listed: string): boolean {
-  if (served === listed) return true;
-  return TEXT_MIMES[listed] !== undefined && served.startsWith('text/') && served !== 'text/html';
+  const type = baseMime(served);
+  if (type === baseMime(listed)) return true;
+  return attachmentType(listed)?.kind === 'text' && type.startsWith('text/') && type !== 'text/html';
 }
 
 function str(x: unknown): string {

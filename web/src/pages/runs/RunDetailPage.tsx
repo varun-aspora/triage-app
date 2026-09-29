@@ -14,6 +14,7 @@ import { StatusTag } from '../../components/StatusTag.tsx';
 import { Tabs } from '../../components/Tabs.tsx';
 import { formatDateTime, formatRelative } from '../../lib/format.ts';
 import { useApi } from '../../lib/useApi.ts';
+import { useNow } from '../../lib/useNow.ts';
 import {
   ActionsSection,
   CurrentStateSection,
@@ -108,7 +109,7 @@ export default function RunDetailPage() {
     }
     return (
       <>
-        <PageHeader title="Run" breadcrumb={[{ label: 'Runs', to: '/runs' }, { label: runId, copy: runId, copyLabel: 'Copy run id' }]} />
+        <PageHeader title="Run" breadcrumb={[{ label: 'Runs', to: '/runs' }, { label: runId, copy: { text: runId, label: 'Copy run id' } }]} />
         {error !== undefined ? <ErrorNotice error={error} onRetry={reload} title="Could not load this run" /> : loading && <Loading label="Loading run…" />}
       </>
     );
@@ -161,16 +162,6 @@ export default function RunDetailPage() {
 }
 
 // ------------------------------------------------------------------ running
-
-/** Re-renders on a timer so 'Updated Ns ago' and the live usage label keep moving between polls. */
-function useNow(ms: number): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), ms);
-    return () => clearInterval(t);
-  }, [ms]);
-  return now;
-}
 
 function RunningView({
   run,

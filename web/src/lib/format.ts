@@ -1,6 +1,6 @@
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-const pad = (n: number): string => String(n).padStart(2, '0');
+export const pad = (n: number): string => String(n).padStart(2, '0');
 
 function parse(iso: string): Date | undefined {
   const d = new Date(iso);

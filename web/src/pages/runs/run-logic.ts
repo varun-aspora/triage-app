@@ -137,7 +137,7 @@ export function buildStartBody(form: NewRunForm, now: number): BuildResult {
   if (hasFrom || hasTo) {
     const from = resolveTimeExpr(form.from, now);
     const to = resolveTimeExpr(form.to, now);
-    const unread = [form.from, form.to].find((t) => t.trim() !== '' && resolveTimeExpr(t, now) === undefined);
+    const unread = hasFrom && from === undefined ? form.from : hasTo && to === undefined ? form.to : undefined;
     if (unread !== undefined) errors.time_window = `Could not read "${unread.trim()}". Use a time like 2026-09-24 14:00, or now-1h.`;
     else if (from === undefined || to === undefined) errors.time_window = 'Fill in both ends of the time window, or neither.';
     else if (from > to) errors.time_window = 'The start of the window is after the end.';
