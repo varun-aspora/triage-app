@@ -1378,6 +1378,9 @@ describe('GET /triage/:run_id failed_phase', () => {
       expect('failed_phase' in (await get(harness({ runs: { [RUN_B]: record(RUN_B, 'completed') }, runsDir }), RUN_B))).toBe(false);
       expect('failed_phase' in (await get(harness({ runs: { [RUN_A]: record(RUN_A, 'failed') }, runsDir }), RUN_A))).toBe(false);
       expect('failed_phase' in (await get(harness({ runs: { [RUN_B]: record(RUN_B, 'failed') } }), RUN_B))).toBe(false);
+      // A failed follow-up keeps the earlier report in view, so its log is not read.
+      const report = { status: 'resolved', request: { current_ask: 'x', requested_by: 'ops' } };
+      expect('failed_phase' in (await get(harness({ runs: { [RUN_B]: record(RUN_B, 'failed', report) }, runsDir }), RUN_B))).toBe(false);
     } finally {
       rmSync(runsDir, { recursive: true, force: true });
     }
@@ -2040,6 +2043,12 @@ describe('runView code_links', () => {
   test('has one base per known repo and leaves out repos with no remote', () => {
     const view = runView(record(RUN_A, 'completed', report), undefined, undefined, codeBase);
     expect(view.code_links).toEqual({ harbor: 'https://github.com/Org/harbor' });
+  });
+
+  test('a repo named after an Object.prototype member is looked up like any other', () => {
+    const refs = { root_cause: { statement: 'x', code_refs: [{ repo: 'constructor', file: 'a.go', lines: '1' }] } };
+    const view = runView(record(RUN_A, 'completed', refs), undefined, undefined, (repo) => `https://github.com/Org/${repo}`);
+    expect(view.code_links).toEqual({ constructor: 'https://github.com/Org/constructor' });
   });
 
   test('is absent without a lookup or a root cause', () => {

@@ -282,6 +282,20 @@ describe('deriveInvestigators with activity', () => {
     expect(rows[1]?.detail).toBe('No findings stored yet');
   });
 
+  test('a task that ended without an error and stored nothing shows no findings', () => {
+    const rows = deriveInvestigators(
+      run,
+      new Map([
+        ['investigate_ssfb', { failed: false, done: true, tool: 'sql_select' }],
+        ['investigate_rtl', { failed: false, done: true }],
+      ]),
+    );
+    expect(rows.slice(0, 2).map((r) => [r.state, r.detail])).toEqual([
+      ['no findings', 'Finished after sql_select, nothing stored'],
+      ['no findings', 'Finished without storing findings'],
+    ]);
+  });
+
   test('stored findings win over a failed task', () => {
     const rows = deriveInvestigators({ ...run, evidence: [{ key: 'ssfb', version: 1 }] }, new Map([['investigate_ssfb', { failed: true }]]));
     expect(rows[0]?.state).toBe('findings in');
@@ -599,8 +613,9 @@ describe('id chain hops', () => {
   });
 
   test('labels and tones', () => {
-    expect(hopLabel({ from: 'phone_number', to: 'aspora_user_id' })).toBe('phone number to aspora user id');
-    expect(hopLabel({ from: 'account_number' })).toBe('account number, state only');
+    expect(hopLabel({ from: 'phone_number', to: 'aspora_user_id', status: 'resolved' })).toBe('phone number to aspora user id');
+    expect(hopLabel({ from: 'account_number', status: 'resolved' })).toBe('account number, state only');
+    expect(hopLabel({ from: 'phone_number', status: 'not_found' })).toBe('from phone number');
     expect(hopStatusLook('not_found').tone).toBe('rust');
     expect(hopStatusLook('unverified').tone).toBe('amber');
   });
@@ -624,5 +639,9 @@ describe('codeRefHref', () => {
     expect(codeRefHref(ref({ repo: 'other' }), bases, commits)).toBeUndefined();
     expect(codeRefHref(ref(), undefined, commits)).toBeUndefined();
     expect(codeRefHref(ref(), { harbor: 'javascript:alert(1)' }, commits)).toBeUndefined();
+  });
+  test('a repo named after an Object.prototype member stays plain text', () => {
+    expect(codeRefHref(ref({ repo: 'constructor' }), bases, commits)).toBeUndefined();
+    expect(codeRefHref(ref({ repo: 'toString' }), {}, commits)).toBeUndefined();
   });
 });

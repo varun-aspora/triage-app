@@ -92,6 +92,21 @@ describe('sync progress', () => {
     expect(done['running']).toBeUndefined();
     expect(done['results']).toHaveLength(2);
   });
+
+  test('a sync that throws drops the partial results', async () => {
+    const ok = (repo: string) => ({ repo, status: 'ok' as const, warnings: [], line: `${repo}: ok` });
+    const app = routes({
+      syncRepos: (async (_sel: unknown, d: { onSyncProgress?: (e: unknown) => void }) => {
+        d.onSyncProgress?.({ type: 'planned', repos: ['a', 'b'] });
+        d.onSyncProgress?.({ type: 'finished', result: ok('a') });
+        throw new Error('boom');
+      }) as unknown as ReposRouteDeps['syncRepos'],
+    });
+    await app.request('/repos/sync', post('{}'));
+    const job = await settled(app, 'sync-1');
+    expect(job['status']).toBe('failed');
+    expect(job['results']).toBeUndefined();
+  });
 });
 
 describe('POST /repos/sync', () => {

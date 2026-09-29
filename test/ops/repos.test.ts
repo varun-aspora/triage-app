@@ -222,6 +222,19 @@ describe('syncRepos', () => {
     expect(events).toEqual(['planned harbor', 'started harbor', 'finished harbor ok']);
   });
 
+  test('a progress callback that throws does not fail the sync', async () => {
+    const dir = makeRepo('harbor');
+    const { d } = deps(cleanSyncSteps(dir, 'main', SHA_A), [pin('harbor', { branch: 'main' })]);
+    const report = await syncRepos({}, {
+      ...d,
+      onSyncProgress: () => {
+        throw new Error('boom');
+      },
+    });
+    if (report.status !== 'done') throw new Error('expected done');
+    expect(report.ok).toEqual(['harbor']);
+  });
+
   test('a failure to record the default branch is a warning, not a failed sync', async () => {
     const dir = makeRepo('harbor');
     const steps: FakeStep[] = [

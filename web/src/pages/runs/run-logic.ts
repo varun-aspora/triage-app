@@ -329,7 +329,7 @@ export function inferFailure(run: Pick<RunDetail, 'classification' | 'evidence' 
 export type InvestigatorRow = {
   key: EvidenceKey;
   label: string;
-  state: 'findings in' | 'working' | 'waiting' | 'failed';
+  state: 'findings in' | 'working' | 'waiting' | 'failed' | 'no findings';
   detail: string;
 };
 
@@ -373,12 +373,18 @@ const ACTIVITY_AGENTS: Readonly<Record<EvidenceKey, readonly string[]>> = {
   code: ['code_walker'],
 };
 
-/** Working, or failed if its task errored; the last tool call replaces the "nothing stored" text only when the log has one. */
+/**
+ * Working until its task ends, then failed or finished without findings; the
+ * last tool call replaces the "nothing stored" text only when the log has one.
+ */
 function liveState(activity: ReadonlyMap<string, AgentActivity>, key: EvidenceKey): Pick<InvestigatorRow, 'state' | 'detail'> {
   // The deep pass runs after the plain one, so it is the one to report.
   const latest = ACTIVITY_AGENTS[key].map((a) => activity.get(a)).findLast((a) => a !== undefined);
   const call = latest?.tool === undefined ? undefined : `${latest.tool}${latest.target !== undefined ? ` ${latest.target}` : ''}`;
   if (latest?.failed === true) return { state: 'failed', detail: call === undefined ? 'The task failed' : `The task failed after ${call}` };
+  if (latest?.done === true) {
+    return { state: 'no findings', detail: call === undefined ? 'Finished without storing findings' : `Finished after ${call}, nothing stored` };
+  }
   return { state: 'working', detail: call === undefined ? 'No findings stored yet' : `Last: ${call}` };
 }
 
@@ -397,6 +403,8 @@ export function investigatorLook(state: InvestigatorRow['state']): StatusLook {
       return { tone: 'muted', icon: 'clock' };
     case 'failed':
       return { tone: 'rust', icon: 'x' };
+    case 'no findings':
+      return { tone: 'muted', icon: 'dash' };
   }
 }
 
@@ -646,9 +654,13 @@ const words = (key: string): string => key.replace(/_/g, ' ');
 
 export const hopStatusLabel = (status: Hop['status']): string => words(status);
 
-/** "phone number to aspora user id" for one hop; a hop that produced nothing has no target. */
-export function hopLabel(hop: Pick<Hop, 'from' | 'to'>): string {
-  return hop.to !== undefined ? `${words(hop.from)} to ${words(hop.to)}` : `${words(hop.from)}, state only`;
+/**
+ * "phone number to aspora user id" for one hop. `to` is also absent when the
+ * lookup produced nothing, so only a resolved hop without it is a state read.
+ */
+export function hopLabel(hop: Pick<Hop, 'from' | 'to' | 'status'>): string {
+  if (hop.to !== undefined) return `${words(hop.from)} to ${words(hop.to)}`;
+  return hop.status === 'resolved' ? `${words(hop.from)}, state only` : `from ${words(hop.from)}`;
 }
 
 /** "3 hops, from phone number to account number". The end is the last id a hop produced. */
@@ -673,8 +685,9 @@ export function codeRefHref(
   bases: Record<string, string> | undefined,
   commits: readonly { repo: string; commit: string }[],
 ): string | undefined {
-  const base = bases?.[ref.repo];
-  if (base === undefined || !base.startsWith('https://')) return undefined;
+  // The repo name comes from the model, so a name like "constructor" must not reach Object.prototype.
+  const base = bases !== undefined && Object.hasOwn(bases, ref.repo) ? bases[ref.repo] : undefined;
+  if (typeof base !== 'string' || !base.startsWith('https://')) return undefined;
   const rev = commits.find((c) => c.repo === ref.repo)?.commit ?? 'HEAD';
   const path = ref.file
     .replace(/^\/+/, '')

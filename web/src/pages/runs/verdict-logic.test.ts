@@ -153,7 +153,7 @@ describe('agentActivity', () => {
       ev('task', { taskId: 't2', isError: true }),
     ]);
     expect(got.get('investigate_ssfb')).toEqual({ failed: false, tool: 'sql_select', target: 'select * from t' });
-    expect(got.get('investigate_rtl')).toEqual({ failed: true, tool: 'read_file', target: 'a.ts' });
+    expect(got.get('investigate_rtl')).toEqual({ failed: true, done: true, tool: 'read_file', target: 'a.ts' });
     expect(got.size).toBe(2);
   });
 
@@ -165,5 +165,10 @@ describe('agentActivity', () => {
     ]);
     expect(got.get('code_walker')).toEqual({ failed: false });
     expect(got.get('investigate_atspl')?.target).toHaveLength(61);
+  });
+
+  test('a task that ends without an error is done, not failed', () => {
+    const got = agentActivity([ev('task_start', { taskId: 't1', agent: 'investigate_ssfb' }), ev('task', { taskId: 't1', isError: false })]);
+    expect(got.get('investigate_ssfb')).toEqual({ failed: false, done: true });
   });
 });

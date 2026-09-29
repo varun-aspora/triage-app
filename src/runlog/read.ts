@@ -94,17 +94,24 @@ const PIPELINE_PHASES: readonly string[] = ['preflight', 'identity', 'classifyin
 /**
  * The last pipeline phase the run logged, for a run that failed or was
  * stopped: the run record keeps only the final phase, so this is how the page
- * knows where it stopped. Skips needs_input, blocked, completed and the
- * terminal lines, and a line the run refused because it was stopped. Null when
- * the log has no such line.
+ * knows where it stopped. Skips needs_input, blocked and the terminal lines,
+ * and a line the run refused because it was stopped. Only the latest
+ * submission counts: a completed phase or a resume starts over, so a
+ * follow-up that failed before it logged a phase does not report the earlier
+ * one's. Null when that part of the log has no such line.
  */
 export async function lastPipelinePhase(runsDir: string, runId: string): Promise<string | null> {
   let last: string | null = null;
   for (const line of await readLines(runsDir, runId)) {
+    // Most lines are model and tool events; skip them before parsing, since the log can be several MB.
+    if (!line.includes('"type":"phase"') && !line.includes('"type":"resume"')) continue;
     const e = parseLine(line);
-    if (e?.type !== 'phase') continue;
-    const data = e.data as { phase?: unknown; refused?: unknown } | null;
-    if (data?.refused === undefined && typeof data?.phase === 'string' && PIPELINE_PHASES.includes(data.phase)) last = data.phase;
+    const data = e?.data as { phase?: unknown; refused?: unknown; kind?: unknown } | null | undefined;
+    // A steer joins the response that is running, so it does not start over.
+    if (e?.type === 'resume' && data?.kind === 'resume') last = null;
+    if (e?.type !== 'phase' || data?.refused !== undefined || typeof data?.phase !== 'string') continue;
+    if (data.phase === 'completed') last = null;
+    else if (PIPELINE_PHASES.includes(data.phase)) last = data.phase;
   }
   return last;
 }

@@ -482,9 +482,13 @@ function stalledFor(deps: TriageRouteDeps, run: RunRecord, isAlive: ((pid: numbe
   return loadStalled(run, stalledDeps(deps, isAlive));
 }
 
-/** Where a failed or stopped run got to, from its event log. Undefined when unknown; the page then guesses. */
+/**
+ * Where a failed or stopped run got to, from its event log. Undefined when
+ * unknown; the page then guesses. A run with a report shows that instead, so
+ * its log is not read.
+ */
 async function failedPhaseFor(deps: TriageRouteDeps, run: RunRecord): Promise<string | undefined> {
-  if ((run.phase !== 'failed' && run.phase !== 'stopped') || deps.runsDir === undefined) return undefined;
+  if ((run.phase !== 'failed' && run.phase !== 'stopped') || run.report !== null || deps.runsDir === undefined) return undefined;
   try {
     return (await lastPipelinePhase(deps.runsDir, run.run_id)) ?? undefined;
   } catch {
@@ -591,7 +595,7 @@ export function runView(
 function codeLinks(run: RunRecord, codeBase: (repo: string) => string | undefined): Record<string, string> {
   const links: Record<string, string> = {};
   for (const ref of run.report?.root_cause?.code_refs ?? []) {
-    if (ref.repo in links) continue;
+    if (Object.hasOwn(links, ref.repo)) continue;
     const base = codeBase(ref.repo);
     if (base !== undefined) links[ref.repo] = base;
   }

@@ -109,6 +109,8 @@ export function createReposRoutes(deps: ReposRouteDeps): Hono {
       (err: unknown) => {
         job.status = 'failed';
         delete job.running;
+        // Partial results would read as the whole sync, with the repos that never ran left out.
+        delete job.results;
         job.reason = err instanceof Error ? err.name : 'error';
         job.finished_at = iso();
       },

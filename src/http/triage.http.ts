@@ -7,9 +7,10 @@
 
 import { triageRuntime } from '../agents/triage-plan.ts';
 import { pidAlive } from '../cli/commands/status.command.ts';
+import { repoEnum } from '../config/repos.ts';
 import { createTriageRoutes, startAsk, startResume, type TriageRouteDeps } from '../ingress/http/routes.ts';
 import { remoteWebBase } from '../ops/git.ts';
-import { remoteFor } from '../ops/repos.ts';
+import { defaultRemote, remoteFor } from '../ops/repos.ts';
 import { pinsFor } from '../tools/code/_lib/code-tool.ts';
 import { prepareDeps, prepareRequest } from '../ingress/prepare.ts';
 import { runSubmission, submissionDeps } from '../ingress/submit.ts';
@@ -40,8 +41,11 @@ export function productionDeps(): TriageRouteDeps {
     runsDir: rt.config.paths.runsDir,
     codeBase: (repo) => {
       const pins = pinsFor(rt.config, rt.registry);
-      const pin = pins instanceof Error ? undefined : pins.find((p) => p.repo === repo);
-      return pin === undefined ? undefined : remoteWebBase(remoteFor(pin, rt.config));
+      if (pins instanceof Error) return undefined;
+      const pin = pins.find((p) => p.repo === repo);
+      if (pin !== undefined) return remoteWebBase(remoteFor(pin, rt.config));
+      // Code tools also read registry repos with no pin; those clone from the built remote.
+      return repoEnum(rt.registry, pins).names.includes(repo) ? remoteWebBase(defaultRemote(rt.config, repo)) : undefined;
     },
     // The same check `triage status` uses, so a dead detached worker shows as incomplete, not live.
     isAlive: pidAlive,

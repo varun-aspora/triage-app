@@ -154,7 +154,7 @@ export function appendEvents(have: readonly RunEvent[], page: readonly RunEvent[
 }
 
 /** What one investigator's latest delegate task is doing, read from the event log. */
-export type AgentActivity = { failed: boolean; tool?: string; target?: string };
+export type AgentActivity = { failed: boolean; done?: boolean; tool?: string; target?: string };
 
 const MAX_TARGET = 60;
 
@@ -178,7 +178,7 @@ function taskIdOf(d: Data): string | undefined {
 
 /**
  * Per delegate agent name (investigate_ssfb, code_walker, ...): whether its
- * latest task errored and its latest tool call. A tool event belongs to a task
+ * latest task has ended and errored, and its latest tool call. A tool event belongs to a task
  * by taskId, or by a session id that ends in the task id. Agents whose task
  * never appears in the log are left out.
  */
@@ -198,7 +198,7 @@ export function agentActivity(events: readonly Pick<RunEvent, 'type' | 'data'>[]
     const agent = agentOfTask.get(id);
     const have = agent === undefined ? undefined : out.get(agent);
     if (agent === undefined || have === undefined) continue;
-    if (e.type === 'task') out.set(agent, { ...have, failed: d.isError === true });
+    if (e.type === 'task') out.set(agent, { ...have, done: true, failed: d.isError === true });
     else if (e.type === 'tool_start' && typeof d.toolName === 'string') out.set(agent, { ...have, tool: d.toolName, target: targetOf(d.args) });
   }
   return out;
