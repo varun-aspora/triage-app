@@ -110,7 +110,7 @@ describe('read_staged module', () => {
     expect(conformanceProblems(toolModule, tool)).toEqual([]);
     expect(tool.name).toBe('read_staged');
     expect(tool.harness).toBe(true);
-    expect(toolModule.mounts).toEqual(['investigator']);
+    expect(toolModule.mounts).toEqual(['investigator', 'agent']);
     expect(toolModule.entities).toBe('all');
   });
 

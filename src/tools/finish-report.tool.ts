@@ -29,6 +29,12 @@
 //      cannot loop forever. The count lives in a
 //      module-level map keyed by run id, because Flue re-renders the agent
 //      before every model turn and so builds a fresh tool each time.
+//   4b. On the agent mount (single shape, D109), entities_consulted becomes
+//      the union of the draft's list, the entities with findings and the
+//      entities of the run's ok '<entity>_' data calls in the action log.
+//      The log is released when the run settles, so after a resume the
+//      stored evidence keys are what remains. The split shape keeps the
+//      draft's list.
 //   5. repo_commits: one { repo, commit } per repo in the code evidence, from
 //      the CommitReader (currentCommit, T11.4). A repo without a commit gets
 //      a gap.
@@ -64,6 +70,7 @@ import { maskId } from '../gate/scope.ts';
 import { currentCommit, type CommitResult, type ReposDeps } from '../ops/repos.ts';
 import { mergeGaps, registryNames } from '../report/gaps.ts';
 import { refusalMessage, writeReport, type WriteReportArgs, type WriteReportResult } from '../report/write.ts';
+import { type Action, actionsFor } from '../runlog/actions.ts';
 import { RunNotFoundError, type RunRecord } from '../runstore/types.ts';
 import type { AuditTransport } from '../types/audit.ts';
 import type { PreflightWarning, TriageInit } from '../types/classification.ts';
@@ -73,6 +80,7 @@ import { type IdChain, IdChainSchema, LEAD_LABEL_MAX, type Lead } from '../types
 import { type RepoCommit, type ReportCost, type ReportDraft, ReportDraftSchema, RepoCommitSchema } from '../types/report.ts';
 import { ok, refused, type ToolEnvelope } from '../types/tool-result.ts';
 import type { UsageRow } from '../types/usage.ts';
+import { entitiesQueried } from './note-evidence.tool.ts';
 import type { ToolContext, ToolModule } from './types.ts';
 import type {} from './_lib/context.ts';
 
@@ -160,6 +168,8 @@ export function commitReaderFor(deps: Omit<ReposDeps, 'signal'>): CommitReader {
 export type FinishReportOptions = {
   /** The report writer. Defaults to writeReport (T08.4). */
   readonly writeReport?: (args: WriteReportArgs) => Promise<WriteReportResult>;
+  /** Step 4b: add the run's evidence and data-call entities to entities_consulted. True on the agent mount. */
+  readonly consultedFromRun?: boolean;
 };
 
 // ------------------------------------------------------------------ text
@@ -227,6 +237,20 @@ export function collectFindings(
     const r = byKey.get(k);
     return r === undefined ? [] : [r];
   });
+}
+
+/**
+ * Step 4b: the draft's entities, the entities with findings and the entities
+ * of the ok '<entity>_' data calls in the action log, in ENTITIES order.
+ */
+export function consultedEntities(
+  draft: readonly Entity[],
+  findings: readonly RecordedFindings[],
+  actions: readonly Action[],
+): Entity[] {
+  const seen = new Set<Entity>([...draft, ...entitiesQueried(actions)]);
+  for (const r of findings) if (r.entity !== 'code') seen.add(r.entity);
+  return ENTITIES.filter((e) => seen.has(e));
 }
 
 /** Repos named in the code evidence, in first-seen order. */
@@ -495,6 +519,11 @@ export function createFinishReportTool(ctx: ToolContext, options: FinishReportOp
     }
     signal?.throwIfAborted();
 
+    // 4b. entities_consulted from the run, after synthesis so a rebuilt report gets it too.
+    if (options.consultedFromRun === true) {
+      draft = { ...draft, entities_consulted: consultedEntities(draft.entities_consulted, findings, actionsFor(ctx.runId)) };
+    }
+
     // 5. Commits per repo the code walker read.
     const commits = await readCommits(codeRepos(findings), deps.repoCommit, signal);
 
@@ -561,8 +590,8 @@ export function createFinishReportTool(ctx: ToolContext, options: FinishReportOp
 
 export const toolModule: ToolModule = {
   name: FINISH_REPORT,
-  mounts: ['triage'],
+  mounts: ['triage', 'agent'],
   entities: 'all',
   enabled: () => ({ on: true }),
-  create: (ctx) => createFinishReportTool(ctx),
+  create: (ctx, mount) => createFinishReportTool(ctx, { consultedFromRun: mount === 'agent' }),
 };

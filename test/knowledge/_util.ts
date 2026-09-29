@@ -463,8 +463,12 @@ export const KNOWN_TOOLS: ReadonlySet<string> = new Set([
   ...FRAMEWORK_TOOLS,
 ]);
 
-/** Agent kinds, matching the tool mounts in src/tools/types.ts. */
-export const AGENTS = ['triage', 'investigator', 'investigator_deep', 'code_walker'] as const;
+/**
+ * Agent kinds, matching the tool mounts in src/tools/types.ts. 'agent' is the
+ * single-shape Triage (D109): the split tools under their plain names, since a
+ * note names a data tool without its entity prefix.
+ */
+export const AGENTS = ['triage', 'investigator', 'investigator_deep', 'code_walker', 'agent'] as const;
 export type AgentKind = (typeof AGENTS)[number];
 
 const SKILL_TOOLS = ['activate_skill', 'read_skill_resource'] as const;
@@ -488,6 +492,8 @@ export function allowedTools(agent: AgentKind, entity?: Entity): ReadonlySet<str
     }
     case 'code_walker':
       return new Set([...base, ...CODE_TOOLS, 'note_evidence', 'finish']);
+    case 'agent':
+      return new Set([...base, ...TRIAGE_TOOLS, ...INVESTIGATOR_TOOLS, ...SSFB_EXTRA_TOOLS, ...CODE_TOOLS, 'task']);
   }
 }
 
@@ -530,5 +536,7 @@ export function methodFilesFor(agent: AgentKind, entity?: Entity): string[] {
       return entity ? ['investigator.md', 'logs.md', `logs-${entity}.md`] : ['investigator.md', 'logs.md'];
     case 'code_walker':
       return ['code-walker.md'];
+    case 'agent':
+      return ['agent.md', 'report-format.md', 'logs.md', ...(entity ? [entity] : ENTITIES).map((e) => `logs-${e}.md`)];
   }
 }

@@ -21,7 +21,7 @@ import { EMBEDDING_KEY, parseEmbeddingSpec, type EmbeddingSpec } from '../../emb
 import { embedErrorLabel, probeEmbedder, type Embedder } from '../../embed/index.ts';
 import { loadRulesFile } from '../../gate/rules-file.ts';
 import { ensureConfiguredModels, inRefreshableCatalog, type EnsureResult } from '../../model-refresh.ts';
-import { decisionModel, codeWalkerModel, lookupModel, modelForTier, parseSpec, type ModelLookup } from '../../models.ts';
+import { decisionModel, codeWalkerModel, lookupModel, modelForTier, parseSpec, workerModel, type ModelLookup } from '../../models.ts';
 import { ENTITIES, type Entity } from '../../types/core.ts';
 import { describeError } from './run.ts';
 import type { DoctorCheck, DoctorContext, DoctorStatus, NamedCheck } from './types.ts';
@@ -203,6 +203,11 @@ async function modelsCheck(ctx: DoctorContext): Promise<DoctorCheck[]> {
     rows.push(row('ok', ['MODEL_CODE_WALKER', 'MODEL_TIER_STRONG'], 'MODEL_CODE_WALKER is blank; code_walker uses MODEL_TIER_STRONG'));
   } else {
     rows.push(slotRow(c, 'MODEL_CODE_WALKER', () => codeWalkerModel(c), lookup).row);
+  }
+  if (c.models.worker === undefined) {
+    rows.push(row('ok', ['MODEL_WORKER'], "MODEL_WORKER is blank; the worker uses the run's tier model"));
+  } else {
+    rows.push(slotRow(c, 'MODEL_WORKER', () => workerModel(c) ?? '', lookup).row);
   }
   rows.push(imageRow(strong.spec, lookup));
   rows.push(judgeRow(c));

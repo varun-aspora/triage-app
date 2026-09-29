@@ -23,6 +23,7 @@ import type { ToolDefinition } from '@flue/runtime/tool';
 import { excerpt } from '../connectors/error-text.ts';
 import { redactPersisted } from '../gate/redact.ts';
 import { canonicalJson } from '../mock/key.ts';
+import { splitAgentToolName } from '../tools/agent-name.ts';
 import type { ToolContext } from '../tools/types.ts';
 import type { Entity } from '../types/core.ts';
 import type { ToolEnvelope } from '../types/tool-result.ts';
@@ -39,7 +40,13 @@ export const REPEAT_TTL_MS = 10 * 60_000;
 const ARGS_CHARS = 240;
 const OUTCOME_CHARS = 200;
 // Their arguments are findings, reports or questions, not queries.
-const NO_ARGS: ReadonlySet<string> = new Set(['note_evidence', 'finish_report', 'ask_requester', 'stop_blocked']);
+const NO_ARGS: ReadonlySet<string> = new Set([
+  'note_evidence',
+  'codebase_note_evidence',
+  'finish_report',
+  'ask_requester',
+  'stop_blocked',
+]);
 // Reading the log is not an action worth listing.
 const NOT_LOGGED: ReadonlySet<string> = new Set(['run_log']);
 
@@ -47,7 +54,11 @@ export type Action = {
   readonly at: string;
   readonly agent: string;
   readonly tool: string;
-  /** The calling agent's entity; null for the root and code_walker. */
+  /**
+   * The entity the call was for: the calling investigator's, or on the agent
+   * mount the prefix of a '<entity>_<name>' tool (D109). Null for the entity-free
+   * calls (root tools, code tools, code_walker).
+   */
   readonly entity: Entity | null;
   readonly args: string;
   readonly outcome: string;
@@ -105,11 +116,18 @@ export function actionBrief(runId: string, entity: Entity | null): string[] {
   ];
 }
 
-/** Wraps each tool so every call adds one line to the run's log. The agent name comes from ctx.agent. */
+/**
+ * Wraps each tool so every call adds one line to the run's log. The agent name
+ * comes from ctx.agent. Where ctx has no entity, a '<entity>_<name>' tool of the
+ * agent mount gives the entity; the line keeps the name the model called.
+ */
 export function logActions(tools: readonly ToolDefinition[], ctx: ToolContext): ToolDefinition[] {
   const agent = ctx.agent ?? ROOT_AGENT;
   return tools.map((tool) => {
-    if (NOT_LOGGED.has(tool.name)) return tool;
+    const prefixed = ctx.entity === null ? splitAgentToolName(tool.name) : undefined;
+    const entity = ctx.entity ?? prefixed?.entity ?? null;
+    const bare = prefixed?.name ?? tool.name;
+    if (NOT_LOGGED.has(bare)) return tool;
     const run = tool.run.bind(tool) as (context: never) => Promise<unknown>;
     return {
       ...tool,
@@ -122,8 +140,8 @@ export function logActions(tools: readonly ToolDefinition[], ctx: ToolContext): 
             at: ctx.deps.now().toISOString(),
             agent,
             tool: tool.name,
-            entity: ctx.entity,
-            args: NO_ARGS.has(tool.name) ? '' : excerpt(safe(argsText(data)), ARGS_CHARS),
+            entity,
+            args: NO_ARGS.has(bare) ? '' : excerpt(safe(argsText(data)), ARGS_CHARS),
             outcome: excerpt(safe(outcome), OUTCOME_CHARS),
           });
         };

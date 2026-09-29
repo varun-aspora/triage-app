@@ -213,7 +213,7 @@ describe('ask_requester', () => {
 
   test('module: the triage mount only, unmounted when the limit is 0, and conforms', async () => {
     expect(toolModule.name).toBe(ASK_REQUESTER);
-    expect(toolModule.mounts).toEqual(['triage']);
+    expect(toolModule.mounts).toEqual(['triage', 'agent']);
     expect(toolModule.entities).toBe('all');
     const on = makeToolContext({ entity: null, env: { TRIAGE_MAX_ASKS_PER_RUN: '2' } });
     expect(toolModule.enabled(on, 'triage')).toEqual({ on: true });

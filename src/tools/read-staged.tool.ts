@@ -257,8 +257,8 @@ export function readStagedTool(ctx: ToolContext, opts: ReadStagedOptions = {}): 
 
 export const toolModule: ToolModule = {
   name: READ_STAGED,
-  // investigator_deep inherits it. The single agent's mount comes later (plan 16 S2.2).
-  mounts: ['investigator'],
+  // investigator_deep inherits it; shared on the agent mount (D109).
+  mounts: ['investigator', 'agent'],
   entities: 'all',
   enabled(ctx) {
     if (stageProfileFor(ctx.config) === null) return { on: false, reason: `sandbox provider ${ctx.config.sandbox.provider} is not staged into` };

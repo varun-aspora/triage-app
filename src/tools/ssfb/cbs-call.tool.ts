@@ -194,8 +194,9 @@ async function runCbsCall(
 
 export const toolModule: ToolModule = {
   name: NAME,
-  mounts: ['investigator'],
+  mounts: ['investigator', 'agent'],
   entities: [SSFB],
+  perEntity: true,
   enabled: (ctx) => cbsCallEnabled(ctx),
   create: (ctx) =>
     defineTool({

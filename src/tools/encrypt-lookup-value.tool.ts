@@ -63,8 +63,9 @@ export function renderCiphertext(kind: string, value: unknown): Record<string, u
 
 export const toolModule: ToolModule = {
   name: NAME,
-  mounts: ['investigator'],
+  mounts: ['investigator', 'agent'],
   entities: 'all',
+  perEntity: true,
   enabled: (ctx) => fieldCryptoEnabled(ctx),
   create: (ctx) => {
     const services = fieldServices(ctx);

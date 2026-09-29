@@ -240,7 +240,7 @@ describe('input schema', () => {
     const ctx = makeToolContext({ entity: 'rtl' });
     expect(toolModule.enabled(ctx, 'investigator')).toEqual({ on: true });
     expect(() => toolModule.create(ctx, 'investigator')).not.toThrow();
-    expect(toolModule.mounts).toEqual(['investigator']);
+    expect(toolModule.mounts).toEqual(['investigator', 'agent']);
     expect(toolModule.entities).toBe('all');
   });
 

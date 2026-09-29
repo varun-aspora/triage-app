@@ -11,6 +11,7 @@ import { createRunBudget, releaseRunBudget, type RunBudget } from '../gate/budge
 import type { Persisted } from '../gate/redact.ts';
 import type { MockLayer } from '../mock/index.ts';
 import { createFakeModel } from '../mock/fake-model.ts';
+import { logActions, releaseActions } from '../runlog/actions.ts';
 import { ReportSchema as FullReportSchema } from '../report/schema.ts';
 import type { WriteReportArgs, WriteReportResult } from '../report/write.ts';
 import {
@@ -31,6 +32,7 @@ import type { UsageRow } from '../types/usage.ts';
 import { makeTestConfig, makeToolContext } from '../../test/support/fake-tool-context.ts';
 import {
   computeCost,
+  consultedEntities,
   createFinishReportTool,
   FINISH_REPORT,
   FinishReportInputSchema,
@@ -319,6 +321,7 @@ function setup(opts: SetupOptions = {}): Setup {
     releaseRunBudget(runId);
     releaseEscalation(runId);
     releaseFinishReport(runId);
+    releaseActions(runId);
   });
   const tier = opts.tier ?? 'mid';
   const initialData =
@@ -351,19 +354,22 @@ async function call(s: Setup, data: unknown, signal: AbortSignal = new AbortCont
 // ------------------------------------------------------------------ module
 
 describe('finish_report module', () => {
-  test('is mounted on triage only, as a harness tool with a conforming input', () => {
+  test('is mounted on triage and agent, as a harness tool with a conforming input', () => {
     expect(toolModule.name).toBe(FINISH_REPORT);
-    expect(toolModule.mounts).toEqual(['triage']);
+    expect(toolModule.mounts).toEqual(['triage', 'agent']);
     const ctx = makeToolContext({ config });
-    const tool = toolModule.create(ctx, 'triage');
-    expect(tool.name).toBe(FINISH_REPORT);
-    expect((tool as { harness?: boolean }).harness).toBe(true);
-    expect(conformanceProblems(toolModule, tool)).toEqual([]);
+    for (const mount of ['triage', 'agent'] as const) {
+      const tool = toolModule.create(ctx, mount);
+      expect(tool.name).toBe(FINISH_REPORT);
+      expect((tool as { harness?: boolean }).harness).toBe(true);
+      expect(conformanceProblems(toolModule, tool)).toEqual([]);
+    }
   });
 
-  test('the generated tool list puts it on triage and not on the delegates', () => {
+  test('the generated tool list puts it on triage and agent and not on the delegates', () => {
     const triage = toolsFor('triage', makeToolContext({ config })).map((t) => t.name);
     expect(triage).toContain(FINISH_REPORT);
+    expect(toolsFor('agent', makeToolContext({ config })).map((t) => t.name)).toContain(FINISH_REPORT);
     const investigator = toolsFor('investigator_deep', makeToolContext({ config, entity: 'ssfb' })).map((t) => t.name);
     expect(investigator).not.toContain(FINISH_REPORT);
     const walker = toolsFor('code_walker', makeToolContext({ config })).map((t) => t.name);
@@ -946,5 +952,114 @@ describe('finish_report: initialData', () => {
 
     expect(s.harness.calls).toHaveLength(1);
     expect(writer.spy.calls[0]!.draft.gaps).toContain('preflight ssfb tunnel: tunnel is down (fix: triage tunnel up ssfb)');
+  });
+});
+
+// ------------------------------------------------------------------ entities_consulted
+
+/** Adds one line to the run's action log, the way logActions records a mounted tool's call. */
+async function logged(s: Setup, tool: string, status: 'ok' | 'refused'): Promise<void> {
+  const fakeTool = {
+    name: tool,
+    description: 'test tool',
+    input: v.object({}),
+    run: async () => ({ output: status === 'ok' ? { status, data: { row_count: 1 } } : { status, message: 'not allowed' } }),
+  } as unknown as ToolDefinition;
+  const [wrapped] = logActions([fakeTool], makeToolContext({ runId: s.runId, config, deps: s.deps }));
+  await (wrapped!.run as (c: unknown) => Promise<unknown>)({ data: {}, toolCallId: 'call_0', log: console });
+}
+
+describe('finish_report: entities_consulted (D109)', () => {
+  test('on the agent mount it is the union of the draft, the evidence keys and the ok data calls', async () => {
+    const writer = fakeWriter();
+    const s = setup({ tier: 'strong', options: { writeReport: writer.writeReport, consultedFromRun: true } });
+    // The sample draft lists ssfb only.
+    expect(baseDraft('strong').entities_consulted).toEqual(['ssfb']);
+    putEvidence(s.store, 'rtl', entityFindings('high'));
+    putEvidence(s.store, 'code', codeFindings([]));
+    await logged(s, 'atspl_logs_search', 'ok');
+
+    const out = await call(s, baseDraft('strong'));
+
+    expect(out.output.status).toBe('ok');
+    expect(writer.spy.calls[0]!.draft.entities_consulted).toEqual(['ssfb', 'atspl', 'rtl']);
+  });
+
+  test('a refused data call and a shared tool add nothing', async () => {
+    const writer = fakeWriter();
+    const s = setup({ tier: 'strong', options: { writeReport: writer.writeReport, consultedFromRun: true } });
+    await logged(s, 'rtl_sql_select', 'refused');
+    await logged(s, 'repo_grep', 'ok');
+
+    await call(s, baseDraft('strong'));
+
+    expect(writer.spy.calls[0]!.draft.entities_consulted).toEqual(['ssfb']);
+  });
+
+  test('after the action log is released the stored evidence keys still count', async () => {
+    const writer = fakeWriter();
+    const s = setup({ tier: 'strong', options: { writeReport: writer.writeReport, consultedFromRun: true } });
+    await logged(s, 'atspl_sql_select', 'ok');
+    putEvidence(s.store, 'atspl', entityFindings('high'));
+    releaseActions(s.runId);
+
+    await call(s, { ...baseDraft('strong'), entities_consulted: [] });
+
+    expect(writer.spy.calls[0]!.draft.entities_consulted).toEqual(['atspl']);
+  });
+
+  test('a report rebuilt by strong synthesis gets the union too', async () => {
+    const writer = fakeWriter();
+    const s = setup({
+      tier: 'cheap',
+      options: { writeReport: writer.writeReport, consultedFromRun: true },
+      respond: async () => ({ data: { ...strongDraft(), entities_consulted: [] } }),
+    });
+    putEvidence(s.store, 'rtl', entityFindings('low'));
+
+    await call(s, baseDraft('cheap'));
+
+    expect(s.harness.calls).toHaveLength(1);
+    expect(writer.spy.calls[0]!.draft.entities_consulted).toEqual(['rtl']);
+  });
+
+  test('the split shape keeps the draft list', async () => {
+    const writer = fakeWriter();
+    const s = setup({ tier: 'strong', options: { writeReport: writer.writeReport } });
+    putEvidence(s.store, 'rtl', entityFindings('high'));
+    await logged(s, 'atspl_logs_search', 'ok');
+
+    await call(s, baseDraft('strong'));
+
+    expect(writer.spy.calls[0]!.draft.entities_consulted).toEqual(['ssfb']);
+  });
+
+  test('the module adds the run entities on the agent mount only', async () => {
+    for (const [mount, want] of [
+      ['agent', ['ssfb', 'rtl']],
+      ['triage', ['ssfb']],
+    ] as const) {
+      const s = setup({ tier: 'strong' });
+      putEvidence(s.store, 'rtl', entityFindings('high'));
+      const tool = toolModule.create(makeToolContext({ runId: s.runId, config, deps: s.deps }), mount);
+
+      const out = await call({ ...s, tool }, baseDraft('strong'));
+
+      expect(out.output.status).toBe('ok');
+      expect(s.store.reports[0]!.report.entities_consulted).toEqual([...want]);
+    }
+  });
+
+  test('consultedEntities lists each entity once, in ENTITIES order, and leaves out code', () => {
+    const at = '2026-09-24T09:10:00.000Z';
+    const got = consultedEntities(
+      ['rtl', 'rtl'],
+      [
+        { entity: 'code', findings: codeFindings(['harbor']) },
+        { entity: 'rtl', findings: entityFindings('high') },
+      ],
+      [{ at, agent: 'worker', tool: 'ssfb_cbs_call', entity: null, args: '', outcome: 'ok status=200' }],
+    );
+    expect(got).toEqual(['ssfb', 'rtl']);
   });
 });

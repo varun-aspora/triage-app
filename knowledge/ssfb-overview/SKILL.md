@@ -1,6 +1,6 @@
 ---
 name: ssfb-overview
-description: SSFB (Shivalik bank) map for the orchestrator. The id chain from thread ids to harbor forms, harbor customers and rhythm accounts, which service owns which part of NRI banking, the join keys between services, and the services with no triage data access (audit, eventbus). Use it to read the resolve_identity result, pick the SSFB services in play and write the investigate_ssfb brief.
+description: SSFB (Shivalik bank) map. The id chain from thread ids to harbor forms, harbor customers and rhythm accounts, which service owns which part of NRI banking, the join keys between services, and the services with no triage data access (audit, eventbus). Use it to read the resolve_identity result, pick the SSFB services in play and plan the SSFB reads.
 metadata:
   kind: overview
   entity: ssfb
@@ -17,13 +17,14 @@ owns Part 2, the CBS tail: customer (CIF) creation, account creation, device
 and SIM binding and MPIN.
 
 `resolve_identity` runs the id chain below and returns it with a status per
-hop. Anything past the chain (logs, statements, document state) is work for
-`investigate_ssfb` or `investigate_ssfb_deep`, which read the `ssfb-<service>`
-notes.
+hop. Anything past the chain (logs, statements, document state) needs the
+SSFB data tools and the `ssfb-<service>` notes, which the SSFB investigator
+holds when the run has one.
 
 ## ID chain
 
-A run knows seven ids. Only these names are used in the chain and the brief:
+A run knows seven ids. Only these names are used in the chain and the run's
+Known ids:
 
 | Id | What it is |
 |---|---|
@@ -67,8 +68,8 @@ parameterised statement.
 them. There is no device hop. For a device or SIM case of a user who never
 verified, the device id comes from the RTL app-server logs (see
 `rtl-overview`), not from guardian; for a user who verified once, go from the
-user to guardian. The SSFB investigator has the ssfb-guardian note; name it in
-the brief.
+user to guardian. The ssfb-guardian note, which the SSFB investigator has
+when the run has one, covers that lookup.
 
 Basic state read with the chain: harbor customer `state` and `sub_state`,
 `account_forms.status_v2`, and the rhythm account status and debit flag. Each
@@ -76,7 +77,7 @@ carries `taken_at`. A hop that could not be reached is marked `unreachable`;
 treat what it would have returned as a gap, not as "no rows".
 
 A user can have several forms (retries, re-onboarding) and a customer usually
-has two accounts (NRE and NRO). Keep all of them in the brief; do not pick one
+has two accounts (NRE and NRO). Keep all of them in play; do not pick one
 unless the thread names it.
 
 ## Which id goes where
@@ -131,8 +132,8 @@ with different data.
 ```
 
 If the digital form never reaches `signed`, customer creation never starts and
-nothing logs an error. The SSFB investigator has the state machines in the
-ssfb-harbor note; name it in the brief.
+nothing logs an error. The ssfb-harbor note, which the SSFB investigator has
+when the run has one, holds the state machines.
 
 ## Which services are in play
 
@@ -158,7 +159,7 @@ writes events from other services into an append-only store, partitioned by
 database or API key for audit, so triage can read only its logs and its code.
 If a case needs "no history for this entity", say that the audit store was not
 readable and record it as a gap. Rows in `events_default` would mean a missing
-partition, which is a code_walker question at most.
+partition, which is a question for the audit code at most.
 
 **eventbus** (log service `eventbus`). A Java service that takes platform
 events and dispatches them through one handler per destination type: Kafka,

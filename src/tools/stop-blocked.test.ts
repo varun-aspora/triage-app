@@ -365,7 +365,7 @@ describe('stop_blocked', () => {
 
   test('module: the triage mount only, always on, and conforms', () => {
     expect(toolModule.name).toBe(STOP_BLOCKED);
-    expect(toolModule.mounts).toEqual(['triage']);
+    expect(toolModule.mounts).toEqual(['triage', 'agent']);
     expect(toolModule.entities).toBe('all');
     const ctx = makeToolContext({ entity: null });
     expect(toolModule.enabled(ctx, 'triage')).toEqual({ on: true });

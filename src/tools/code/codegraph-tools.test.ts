@@ -172,7 +172,7 @@ describe('module shape', () => {
   test('four tools, mounted on code_walker and investigator_deep, named after their files', () => {
     expect(TOOLS.map((t) => t.module.name)).toEqual(['code_explore', 'code_node', 'code_impact']);
     for (const { module } of TOOLS) {
-      expect([...module.mounts]).toEqual(['code_walker', 'investigator_deep']);
+      expect([...module.mounts]).toEqual(['code_walker', 'investigator_deep', 'agent']);
       expect(module.entities).toBe('all');
     }
   });

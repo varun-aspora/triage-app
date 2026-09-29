@@ -16,6 +16,7 @@ import {
   DEPLOY_MODE_KEY,
   HOME_KEY,
   KEY_BY_NAME,
+  AGENT_SHAPES,
   PROVIDER_KEYS,
   RENAMED_KEYS,
   THINKING_LEVELS,
@@ -33,11 +34,14 @@ export type GitProtocol = 'ssh' | 'https';
 export type UiEnv = 'production' | 'non-production';
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 export type TracingMode = (typeof TRACING_MODES)[number];
+export type AgentShape = (typeof AGENT_SHAPES)[number];
 
 export type Config = {
   readonly home: string;
   readonly display: { readonly envLabel?: string };
   readonly entities: readonly string[];
+  /** D109: the shape a new run starts with; a run keeps the shape it started with. */
+  readonly agentShape: AgentShape;
   readonly paths: {
     readonly resourcesDir: string;
     readonly dataDir: string;
@@ -70,6 +74,10 @@ export type Config = {
     readonly maxTasksPerRun: number;
     /** Questions to the requester per run (ask_requester); 0 leaves the tool unmounted. */
     readonly maxAsksPerRun: number;
+    /** D109: tool calls per worker in the single shape. */
+    readonly maxToolCallsPerWorker: number;
+    /** S1.4: the root agent's context is compacted back under this many tokens. */
+    readonly maxPromptTokens: number;
     readonly maxResponseBytesPerCall: number;
     readonly maxBytesPerRun: number;
     /** D90: bytes of one sql_select result the model sees; the full rows are staged. */
@@ -97,6 +105,8 @@ export type Config = {
     readonly tierMid?: string;
     readonly tierStrong?: string;
     readonly codeWalker?: string;
+    /** D108: the single shape's worker; blank means the run's tier model. */
+    readonly worker?: string;
     readonly thinkingCheap: ThinkingLevel;
     readonly thinkingMid: ThinkingLevel;
     readonly thinkingStrong: ThinkingLevel;
@@ -195,6 +205,7 @@ export function configFromRecord(
     home: root,
     display: { envLabel: r.str('TRIAGE_ENV_LABEL') },
     entities: r.csv('TRIAGE_ENTITIES').map((e) => e.toLowerCase()),
+    agentShape: r.enumOf<AgentShape>('TRIAGE_AGENT_SHAPE'),
     paths: {
       resourcesDir: join(root, 'resources'),
       dataDir: r.requiredPath('TRIAGE_DATA_DIR'),
@@ -230,6 +241,8 @@ export function configFromRecord(
       maxCodeCallsPerRun: r.requiredInt('TRIAGE_MAX_CODE_CALLS_PER_RUN'),
       maxTasksPerRun: r.requiredInt('TRIAGE_MAX_TASKS_PER_RUN'),
       maxAsksPerRun: r.requiredInt('TRIAGE_MAX_ASKS_PER_RUN'),
+      maxToolCallsPerWorker: r.requiredInt('TRIAGE_MAX_TOOL_CALLS_PER_WORKER'),
+      maxPromptTokens: r.requiredInt('TRIAGE_MAX_PROMPT_TOKENS'),
       maxResponseBytesPerCall: r.requiredInt('TRIAGE_MAX_RESPONSE_BYTES_PER_CALL'),
       maxBytesPerRun: r.requiredInt('TRIAGE_MAX_BYTES_PER_RUN'),
       maxModelBytesPerCall: r.requiredInt('TRIAGE_MAX_MODEL_BYTES_PER_CALL'),
@@ -257,6 +270,7 @@ export function configFromRecord(
       tierMid: r.str('MODEL_TIER_MID'),
       tierStrong: r.str('MODEL_TIER_STRONG'),
       codeWalker: r.str('MODEL_CODE_WALKER'),
+      worker: r.str('MODEL_WORKER'),
       thinkingCheap: r.enumOf<ThinkingLevel>('MODEL_THINKING_CHEAP'),
       thinkingMid: r.enumOf<ThinkingLevel>('MODEL_THINKING_MID'),
       thinkingStrong: r.enumOf<ThinkingLevel>('MODEL_THINKING_STRONG'),

@@ -589,8 +589,9 @@ export function logsSearchTool(ctx: ToolContext): ToolDefinition {
 
 export const toolModule: ToolModule = {
   name: LOGS_SEARCH,
-  mounts: ['investigator'],
+  mounts: ['investigator', 'agent'],
   entities: 'all',
+  perEntity: true,
   // Always mounted: a blank Quickwit config answers "not configured" so the
   // investigator records the gap instead of guessing (HLD 02 §1.2).
   enabled: () => ({ on: true }),

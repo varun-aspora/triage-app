@@ -84,6 +84,40 @@ describe('the action log', () => {
   });
 });
 
+describe('the agent mount (D109)', () => {
+  const rtlSql = fakeTool('rtl_sql_select', () => ok({ rows: [{}], row_count: 1 }, () => NOW));
+  const ssfbNote = fakeTool('ssfb_note_evidence', () => ok({ evidence_id: 'ssfb@v2' }, () => NOW));
+
+  test('a prefixed call from a context without an entity is logged under the prefix entity and the called name', async () => {
+    await callAs(ctxFor('triage', null), rtlSql, { service: 'banking', sql: 'SELECT 1' });
+    await callAs(ctxFor('worker', null), fakeTool('repo_grep', () => ok({ matches: [1] }, () => NOW)), { pattern: 'x' });
+    const [sqlLine, grepLine] = actionsFor(RUN);
+    expect(sqlLine).toMatchObject({ agent: 'triage', tool: 'rtl_sql_select', entity: 'rtl' });
+    expect(grepLine).toMatchObject({ agent: 'worker', tool: 'repo_grep', entity: null });
+    // The rtl brief shows the call; the ssfb brief does not.
+    expect(actionBrief(RUN, 'rtl').join('\n')).toContain('triage rtl_sql_select {"service":"banking","sql":"SELECT 1"} -> ok rows=1');
+    expect(actionBrief(RUN, 'ssfb').join('\n')).not.toContain('rtl_sql_select');
+  });
+
+  test('NO_ARGS and NOT_LOGGED read the bare name', async () => {
+    await callAs(ctxFor('triage', null), ssfbNote, { summary: 'long findings' });
+    await callAs(ctxFor('triage', null), fakeTool('codebase_note_evidence', () => ok({ evidence_id: 'code@v1' }, () => NOW)), {
+      summary: 'long findings',
+    });
+    expect(actionsFor(RUN)).toEqual([
+      expect.objectContaining({ tool: 'ssfb_note_evidence', entity: 'ssfb', args: '' }),
+      expect.objectContaining({ tool: 'codebase_note_evidence', entity: null, args: '' }),
+    ]);
+    const log = fakeTool('rtl_run_log', () => ok({}, () => NOW));
+    expect(logActions([log], ctxFor('triage', null))[0]).toBe(log);
+  });
+
+  test("an investigator's own entity wins over a name that looks prefixed", async () => {
+    await callAs(ctxFor('investigate_ssfb', 'ssfb'), rtlSql, {});
+    expect(actionsFor(RUN)[0]!.entity).toBe('ssfb');
+  });
+});
+
 describe('run_log', () => {
   async function seed(): Promise<void> {
     await callAs(ctxFor('triage', null), fakeTool('resolve_identity', () => ok({ ids: {} }, () => NOW)), { phone_number: PHONE });
@@ -111,6 +145,13 @@ describe('run_log', () => {
     const last = await page(root, { offset: 4, limit: 2 });
     expect(last.lines).toHaveLength(1);
     expect(last.next_offset).toBeUndefined();
+  });
+
+  test('a bare tool filter also matches the prefixed calls of the agent mount', async () => {
+    await callAs(ctxFor('triage', null), fakeTool('rtl_sql_select', () => ok({ rows: [], row_count: 0 }, () => NOW)), { sql: 'SELECT 1' });
+    const root = ctxFor('triage', null);
+    expect((await page(root, { tool: 'sql_select' })).lines[0]).toContain('rtl_sql_select');
+    expect((await page(root, { tool: 'rtl_sql_select' })).total).toBe(1);
   });
 
   test("an investigator sees its own entity's lines and the entity-free ones only", async () => {

@@ -89,7 +89,7 @@ describe('detect_silent_reversals module', () => {
   test('SSFB investigators only, and the conformance checks pass', () => {
     expect(toolModule.name).toBe('detect_silent_reversals');
     expect(toolModule.entities).toEqual(['ssfb']);
-    expect(toolModule.mounts).toEqual(['investigator']);
+    expect(toolModule.mounts).toEqual(['investigator', 'agent']);
     const w = world({ mock: true });
     expect(conformanceProblems(toolModule, toolModule.create(w.ctx, 'investigator'))).toEqual([]);
   });

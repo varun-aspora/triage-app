@@ -434,8 +434,9 @@ function create(ctx: ToolContext): ToolDefinition {
 
 export const toolModule: ToolModule = {
   name: SQL_SELECT,
-  mounts: ['investigator'],
+  mounts: ['investigator', 'agent'],
   entities: 'all',
+  perEntity: true,
   enabled(ctx) {
     if (ctx.entity === null) return { on: false, reason: 'sql_select needs an entity' };
     if (!ctx.registry.isEnabled(ctx.entity)) return { on: false, reason: `${ctx.entity} is not in TRIAGE_ENTITIES` };

@@ -52,6 +52,8 @@ export const DEPLOY_MODE_KEY = 'TRIAGE_DEPLOY_MODE';
 
 export const TRACING_MODES = ['off', 'otlp', 'braintrust'] as const;
 export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+/** D109: split is the Triage root with investigator and code_walker subagents; single is one agent plus an on-demand worker. */
+export const AGENT_SHAPES = ['split', 'single'] as const;
 
 /** Provider credentials copied into process.env for pi-ai by applyProviderEnv. */
 export const PROVIDER_KEYS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY'] as const;
@@ -68,6 +70,8 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'TRIAGE_RUNS_DIR', type: 'path', group: 'runtime', default: './.data/runs' },
   { name: 'TRIAGE_REPOS_DIR', type: 'path', group: 'runtime', example: './data/repos' },
   { name: 'TRIAGE_KNOWLEDGE_DIR', type: 'path', group: 'runtime', default: './knowledge' },
+  // D109: which agent shape a new run uses. A run keeps the shape it started with.
+  { name: 'TRIAGE_AGENT_SHAPE', type: 'enum', group: 'runtime', default: 'split', values: AGENT_SHAPES },
 
   // Flue persistence (D38). TRIAGE_DB_URL is a path for sqlite and a DSN for postgres.
   { name: 'TRIAGE_DB_PROVIDER', type: 'enum', group: 'persistence', default: 'sqlite', values: ['sqlite', 'postgres'] },
@@ -102,6 +106,10 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'TRIAGE_MAX_CODE_CALLS_PER_RUN', type: 'int', group: 'budgets', default: '400', min: 1 },
   { name: 'TRIAGE_MAX_TASKS_PER_RUN', type: 'int', group: 'budgets', default: '12', min: 0 },
   { name: 'TRIAGE_MAX_ASKS_PER_RUN', type: 'int', group: 'budgets', default: '10', min: 0 },
+  // D109: tool calls one worker may make in the single shape; the run's limits still apply.
+  { name: 'TRIAGE_MAX_TOOL_CALLS_PER_WORKER', type: 'int', group: 'budgets', default: '40', min: 1 },
+  // S1.4: the prompt size the root agent's context is compacted back under (reserve = window - this).
+  { name: 'TRIAGE_MAX_PROMPT_TOKENS', type: 'int', group: 'budgets', default: '60000', min: 10_000 },
   { name: 'TRIAGE_MAX_RESPONSE_BYTES_PER_CALL', type: 'int', group: 'budgets', default: '1048576', min: 1 },
   { name: 'TRIAGE_MAX_BYTES_PER_RUN', type: 'int', group: 'budgets', default: '20971520', min: 1 },
   // D90: what the model sees from one sql_select result, apart from the transport caps above.
@@ -126,7 +134,8 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'TRIAGE_SQL_RETRY_DELAY_MS', type: 'int', group: 'sql', default: '1000', min: 0, max: 60_000 },
   { name: 'TRIAGE_SQL_RETRY_MAX_DELAY_MS', type: 'int', group: 'sql', default: '5000', min: 0, max: 600_000 },
 
-  // Models. Specs are parsed by src/models.ts; blank MODEL_CODE_WALKER falls back to the strong tier there.
+  // Models. Specs are parsed by src/models.ts; blank MODEL_CODE_WALKER falls back to the strong tier there,
+  // and blank MODEL_WORKER means the worker uses the run's tier model (D108).
   // The decision model used for classification and id extraction (D69). The id extraction needs a
   // decision model spec (typesafe/... or openrouter/typesafe/...); any other model makes it read the
   // template labels. It was called MODEL_CLASSIFIER; RENAMED_KEYS makes an old .env fail to load.
@@ -135,6 +144,7 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'MODEL_TIER_MID', type: 'string', group: 'models', example: 'openai/gpt-6-sol' },
   { name: 'MODEL_TIER_STRONG', type: 'string', group: 'models', example: 'openai/gpt-6-sol' },
   { name: 'MODEL_CODE_WALKER', type: 'string', group: 'models', example: 'openai/gpt-6-sol' },
+  { name: 'MODEL_WORKER', type: 'string', group: 'models' },
   { name: 'MODEL_THINKING_CHEAP', type: 'enum', group: 'models', example: 'low', default: 'off', values: THINKING_LEVELS },
   { name: 'MODEL_THINKING_MID', type: 'enum', group: 'models', example: 'medium', default: 'low', values: THINKING_LEVELS },
   { name: 'MODEL_THINKING_STRONG', type: 'enum', group: 'models', default: 'high', values: THINKING_LEVELS },

@@ -266,7 +266,7 @@ describe('sql_select: schema', () => {
   });
 
   test('mounted for investigators (and deep), not for triage or code_walker', () => {
-    expect(toolModule.mounts).toEqual(['investigator']);
+    expect(toolModule.mounts).toEqual(['investigator', 'agent']);
     expect(toolModule.enabled(makeToolContext({ entity: null }), 'triage')).toEqual({
       on: false,
       reason: 'sql_select needs an entity',

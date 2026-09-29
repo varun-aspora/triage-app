@@ -181,7 +181,7 @@ export function createStopBlockedTool(ctx: ToolContext): ToolDefinition {
 
 export const toolModule: ToolModule = {
   name: STOP_BLOCKED,
-  mounts: ['triage'],
+  mounts: ['triage', 'agent'],
   entities: 'all',
   enabled: () => ({ on: true }),
   create: (ctx) => createStopBlockedTool(ctx),

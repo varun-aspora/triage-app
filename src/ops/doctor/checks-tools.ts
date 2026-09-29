@@ -1,8 +1,9 @@
 // Doctor check: which tools each agent would get (HLD §7 Doctor).
 //
-// One ok row per mount lists the tool names toolsFor() mounts: triage and
-// code_walker once, and investigator plus investigator_deep's extras per
-// enabled entity. Tools that are off get a separate disabled row with the
+// One ok row per mount lists the tool names toolsFor() mounts: triage,
+// code_walker and agent (the single shape, D109, with its '<entity>_<name>'
+// tools) once, and investigator plus investigator_deep's extras per enabled
+// entity. Tools that are off get a separate disabled row with the
 // reason each module gives, which names env keys only. create() builds the
 // tool definitions and never touches run dependencies, so no I/O happens.
 
@@ -65,7 +66,7 @@ async function mountedTools(ctx: DoctorContext): Promise<DoctorCheck[]> {
   const rows: DoctorCheck[] = [];
 
   const tc = toolContext(ctx, registry, null);
-  for (const mount of ['triage', 'code_walker'] as const) {
+  for (const mount of ['triage', 'code_walker', 'agent'] as const) {
     const names = listing.toolsFor(mount, tc).map((t) => t.name);
     rows.push({ id: ID, status: 'ok', key_names: [], message: `${mount}: ${list(names)}` });
     const off = offRow(listing, mount, tc);

@@ -380,7 +380,7 @@ async function runHttpCall(ctx: ToolContext, services: ServiceLists, flue: HttpR
   // Only a listed service name goes into audit lines and messages. A known
   // service that is not offered still gets its not-configured answer.
   const serviceName = services.known.includes(service) ? service : 'unknown';
-  if (entity === null) throw new Error('http_call needs an investigator entity');
+  if (entity === null) throw new Error('http_call needs an entity in the tool context');
   const facts = serviceName === 'unknown' ? undefined : serviceFacts(ctx, entity, serviceName);
 
   let plan: CallPlan | undefined;
@@ -508,17 +508,18 @@ function inputSchema(services: readonly string[]) {
 }
 
 const DESCRIPTION =
-  "Calls the investigator entity's admin API for one service and returns status, the body cut to a size cap, " +
+  "Calls the entity's admin API for one service and returns status, the body cut to a size cap, " +
   "rule_index and taken_at. Give a path relative to the service, never a URL. GET and HEAD work; other methods " +
   'are refused unless the rules file allows them. Ids in the path, query or body must be in the ID chain. ' +
   'Auth and the customer header are added for you. The full body is also written to /data/<call id>.json.';
 
 export const toolModule: ToolModule = Object.freeze({
   name: HTTP_CALL_TOOL,
-  mounts: Object.freeze(['investigator'] as const),
+  mounts: Object.freeze(['investigator', 'agent'] as const),
   entities: 'all' as const,
+  perEntity: true as const,
   enabled(ctx: ToolContext) {
-    if (ctx.entity === null) return { on: false, reason: 'http_call needs an investigator entity' } as const;
+    if (ctx.entity === null) return { on: false, reason: 'http_call needs an entity' } as const;
     if (offeredServices(ctx).filter((s) => s !== CBS_SERVICE).length === 0) {
       return { on: false, reason: `${ctx.entity} has no HTTP API service configured` } as const;
     }

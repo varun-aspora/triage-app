@@ -1,6 +1,6 @@
 ---
 name: atspl-overview
-description: ATSPL at a glance - its two services (package for physical delivery, pulse for the staff ops console), how ATSPL joins to SSFB harbor, and when to send a brief to investigate_atspl. Use when a case involves a welcome letter, a debit card or other parcel delivery, or staff being unable to action something in the ops console.
+description: ATSPL at a glance - its two services (package for physical delivery, pulse for the staff ops console), how ATSPL joins to SSFB harbor, and when ATSPL is in play. Use when a case involves a welcome letter, a debit card or other parcel delivery, or staff being unable to action something in the ops console.
 metadata:
   kind: overview
   entity: atspl
@@ -65,18 +65,17 @@ canopy is not in the registry and is not investigated (unverified: it shows up i
 A manual re-trigger goes through harbor's admin API (trigger-delivery for the
 customer), so it is an SSFB action, not an ATSPL one.
 
-## When to brief investigate_atspl
+## When ATSPL is in play
 
 - A welcome letter or debit card was not delivered, or the overseas
-  communication address is not active after KYC. Send
+  communication address is not active after KYC. Look up
   `customer_id = <customer_id>` (package `external_ref_id` holds the same
-  value) with services `package`, and name the harbor address id in the
-  question if the thread gives one. Ask for the delivery rows, the vendor events in
-  their exact text, and how many other customers hit the same failure in the
-  window.
+  value) in `package`, with the harbor address id if the thread gives one.
+  Get the delivery rows, the vendor events in their exact text, and how many
+  other customers hit the same failure in the window.
 - Staff cannot action a KYC review, RFI or change request in the ops console.
-  Check harbor state on SSFB first, because pulse only proxies harbor. Brief
-  `investigate_atspl` with services `pulse` only when harbor looks healthy.
+  Check harbor state on SSFB first, because pulse only proxies harbor. Read
+  ATSPL `pulse` only when harbor looks healthy.
 
-Do not brief ATSPL for onboarding step problems in the app. Those are RTL
+ATSPL is not in play for onboarding step problems in the app. Those are RTL
 (`ASPORA_RTL` steps) or SSFB (`SHIVALIK_BANK` steps).

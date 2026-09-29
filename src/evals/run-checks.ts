@@ -13,6 +13,7 @@ import { JOURNEY_FIELDS } from '../gate/scope.ts';
 import { canonicalJson } from '../mock/key.ts';
 import { REUSED_MARK } from '../runlog/actions.ts';
 import type { RunEventLine } from '../runlog/event-log.ts';
+import { bareToolName } from '../tools/agent-name.ts';
 import type { AuditLine } from '../types/audit.ts';
 import type { Report } from '../types/report.ts';
 
@@ -106,7 +107,7 @@ export function ranAgainRepeats(events: readonly RunEventLine[]): ToolCallEvent[
   const out: ToolCallEvent[] = [];
   for (const c of toolCallsOf(events)) {
     const output = c.result === undefined || c.result.isError ? undefined : outputOf(c.result.value);
-    if (NOT_DATA_TOOLS.has(c.name) || output?.status !== 'ok') continue;
+    if (NOT_DATA_TOOLS.has(bareToolName(c.name)) || output?.status !== 'ok') continue;
     const key = `${c.name} ${canonicalJson(c.args ?? null)}`;
     const reused = typeof output.message === 'string' && output.message.includes(REUSED_MARK);
     if (seen.has(key) && !reused) out.push(c);
@@ -131,7 +132,8 @@ function logValues(args: unknown): [field: string, value: string][] {
 /**
  * logs_search message, error and any_of message values not found in a result
  * the run had before the call (a hit, a code read, a skill) or in a knowledge
- * file. Matching ignores case and runs of whitespace.
+ * file. Matching ignores case and runs of whitespace. The agent mount's
+ * '<entity>_logs_search' calls count too (D109).
  */
 export function untracedLogValues(events: readonly RunEventLine[], knowledge: readonly string[]): { tool_call: string; field: string }[] {
   const known = norm(knowledge.join('\n'));
@@ -140,7 +142,8 @@ export function untracedLogValues(events: readonly RunEventLine[], knowledge: re
   for (const e of events) {
     const d = dataOf(e);
     if (e.type === 'tool') seen += `\n${norm(stringsIn(d.result).join('\n'))}`;
-    if (e.type !== 'tool_start' || d.toolName !== 'logs_search' || typeof d.toolCallId !== 'string') continue;
+    if (e.type !== 'tool_start' || typeof d.toolCallId !== 'string') continue;
+    if (typeof d.toolName !== 'string' || bareToolName(d.toolName) !== 'logs_search') continue;
     for (const [field, value] of logValues(d.args)) {
       const n = norm(value);
       if (!known.includes(n) && !seen.includes(n)) out.push({ tool_call: d.toolCallId, field });

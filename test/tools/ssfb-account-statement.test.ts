@@ -51,7 +51,7 @@ describe('get_account_statement module', () => {
   test('SSFB investigators only, and the conformance checks pass', () => {
     expect(toolModule.name).toBe('get_account_statement');
     expect(toolModule.entities).toEqual(['ssfb']);
-    expect(toolModule.mounts).toEqual(['investigator']);
+    expect(toolModule.mounts).toEqual(['investigator', 'agent']);
     const w = world({ mock: true });
     const tool = toolModule.create(w.ctx, 'investigator');
     expect(tool.name).toBe('get_account_statement');

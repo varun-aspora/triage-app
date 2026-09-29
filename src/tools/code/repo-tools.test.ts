@@ -253,7 +253,7 @@ describe('resolveInRepo', () => {
 describe('tool modules', () => {
   test('mount on code_walker and investigator (deep inherits it) and pass the input-schema conformance rules', () => {
     for (const m of REPO_MODULES) {
-      expect(m.mounts).toEqual(['code_walker', 'investigator']);
+      expect(m.mounts).toEqual(['code_walker', 'investigator', 'agent']);
       const ctx = makeToolContext({ config: home.config, registry: home.registry });
       expect(m.enabled(ctx, 'code_walker')).toEqual({ on: true });
       // create() must not touch deps: the default fake deps throw on any access.

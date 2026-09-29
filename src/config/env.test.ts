@@ -135,6 +135,10 @@ describe('defaults with an empty .env', () => {
     expect(c.budgets.maxLogCallsPerRun).toBe(50);
     expect(c.budgets.maxCodeCallsPerRun).toBe(400);
     expect(c.budgets.maxTasksPerRun).toBe(12);
+    expect(c.budgets.maxToolCallsPerWorker).toBe(40);
+    expect(c.budgets.maxPromptTokens).toBe(60000);
+    expect(c.agentShape).toBe('split');
+    expect(c.models.worker).toBeUndefined();
     expect(c.budgets.maxResponseBytesPerCall).toBe(1048576);
     expect(c.budgets.maxBytesPerRun).toBe(20971520);
     expect(c.budgets.runTimeoutMs).toBe(900000);
@@ -572,6 +576,29 @@ describe('MODEL_DECISION', () => {
 
   test('MODEL_CLASSIFIER left blank is not an error', () => {
     expect(fromRecord({ MODEL_CLASSIFIER: '  ', MODEL_DECISION: 'faux/classifier' }).models.decision).toBe('faux/classifier');
+  });
+});
+
+describe('single agent keys (D108, D109)', () => {
+  test('TRIAGE_AGENT_SHAPE takes split or single and names the key otherwise', () => {
+    expect(fromRecord({ TRIAGE_AGENT_SHAPE: 'single' }).agentShape).toBe('single');
+    expect(fromRecord({ TRIAGE_AGENT_SHAPE: '' }).agentShape).toBe('split');
+    const err = configError(() => fromRecord({ TRIAGE_AGENT_SHAPE: 'one' }));
+    expect(err.keys).toEqual(['TRIAGE_AGENT_SHAPE']);
+    expect(err.message).toContain('split, single');
+  });
+
+  test('MODEL_WORKER is read into models.worker; blank means inherit', () => {
+    expect(fromRecord({ MODEL_WORKER: 'openrouter/vendor/model-x' }).models.worker).toBe('openrouter/vendor/model-x');
+    expect(fromRecord({ MODEL_WORKER: ' ' }).models.worker).toBeUndefined();
+  });
+
+  test('the worker call cap and the prompt budget are bounded ints', () => {
+    const c = fromRecord({ TRIAGE_MAX_TOOL_CALLS_PER_WORKER: '15', TRIAGE_MAX_PROMPT_TOKENS: '80000' });
+    expect(c.budgets.maxToolCallsPerWorker).toBe(15);
+    expect(c.budgets.maxPromptTokens).toBe(80000);
+    const err = configError(() => fromRecord({ TRIAGE_MAX_TOOL_CALLS_PER_WORKER: '0', TRIAGE_MAX_PROMPT_TOKENS: '500' }));
+    expect(err.keys).toEqual(['TRIAGE_MAX_TOOL_CALLS_PER_WORKER', 'TRIAGE_MAX_PROMPT_TOKENS']);
   });
 });
 

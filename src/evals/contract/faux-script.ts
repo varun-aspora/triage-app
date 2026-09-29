@@ -22,6 +22,10 @@
 //   alone would send the synthesis turn to the root queue. That call is told
 //   apart by its user message, which starts with the synthesis prompt's first
 //   line (SYNTHESIS_MARK). It is checked before the system prompt.
+// - The single shape (TRIAGE_AGENT_SHAPE=single, D103) has two callers of
+//   its own. Its root renders '## Fixed rules' and '## One agent' and never
+//   the brief skeleton; it routes to 'root' like the split root. The worker
+//   delegate renders the '## This worker' footer, checked before the root.
 // T10.5, T10.6 and T10.9 script their turns per caller with this module.
 //
 // A call whose caller has no turns left fails with a 'fake model:' message
@@ -44,7 +48,9 @@ export const SYNTHESIS_MARK = 'You are writing the final triage report for a ban
 export const PROMPT_MARKERS = Object.freeze({
   rootRules: '## Fixed rules',
   rootBrief: '## Brief skeleton for this run',
+  rootSingle: '## One agent',
   delegate: '## This delegate',
+  worker: '## This worker',
   deep: 'You are the deep variant',
   codeWalker: 'You have no database, API or log tools',
 });
@@ -54,6 +60,7 @@ export type FauxCaller =
   | 'classifier'
   | 'root'
   | 'synthesis'
+  | 'worker'
   | 'code_walker'
   | `investigate_${Entity}`
   | `investigate_${Entity}_deep`;
@@ -62,6 +69,7 @@ export const FAUX_CALLERS: readonly FauxCaller[] = Object.freeze([
   'classifier',
   'root',
   'synthesis',
+  'worker',
   'code_walker',
   ...ENTITIES.flatMap((e) => [`investigate_${e}` as const, `investigate_${e}_deep` as const]),
 ]);
@@ -129,13 +137,16 @@ export function callerOf(context: Pick<Context, 'systemPrompt' | 'messages'>): F
   // harness.prompt() carries the root's system prompt, so check its user text first.
   if (userTextsOf(context.messages).some((t) => t.trimStart().startsWith(SYNTHESIS_MARK))) return 'synthesis';
   if (system.includes(CLASSIFIER_PROMPT_MARKER)) return 'classifier';
+  if (system.includes(PROMPT_MARKERS.worker)) return 'worker';
   if (system.includes(PROMPT_MARKERS.delegate)) {
     if (system.includes(PROMPT_MARKERS.codeWalker)) return 'code_walker';
     const entity = DELEGATE_ENTITY.exec(system)?.[1] as Entity | undefined;
     if (entity === undefined) throw new FakeModelError('a delegate prompt names no entity');
     return system.includes(PROMPT_MARKERS.deep) ? `investigate_${entity}_deep` : `investigate_${entity}`;
   }
-  if (system.includes(PROMPT_MARKERS.rootRules) && system.includes(PROMPT_MARKERS.rootBrief)) return 'root';
+  if (system.includes(PROMPT_MARKERS.rootRules) && (system.includes(PROMPT_MARKERS.rootBrief) || system.includes(PROMPT_MARKERS.rootSingle))) {
+    return 'root';
+  }
   throw new FakeModelError('a model call came from an agent the faux script does not know');
 }
 

@@ -13,6 +13,7 @@ import * as v from 'valibot';
 import { actionLine, actionsFor, visibleTo } from '../runlog/actions.ts';
 import { ENTITIES } from '../types/core.ts';
 import { ok, type ToolEnvelope } from '../types/tool-result.ts';
+import { bareToolName } from './agent-name.ts';
 import type { ToolContext, ToolModule } from './types.ts';
 import type {} from './_lib/context.ts';
 
@@ -44,7 +45,7 @@ const DESCRIPTION =
 export function runLogPage(ctx: ToolContext, input: RunLogInput): { total: number; offset: number; lines: string[]; next_offset?: number } {
   const matching = actionsFor(ctx.runId)
     .filter(visibleTo(ctx.entity))
-    .filter((a) => input.tool === undefined || a.tool === input.tool)
+    .filter((a) => input.tool === undefined || a.tool === input.tool || bareToolName(a.tool) === input.tool)
     .filter((a) => input.agent === undefined || a.agent === input.agent)
     .filter((a) => input.for_entity === undefined || a.entity === input.for_entity);
   const offset = input.offset ?? 0;
@@ -72,7 +73,7 @@ function create(ctx: ToolContext): ToolDefinition {
 
 export const toolModule: ToolModule = {
   name: RUN_LOG,
-  mounts: ['triage', 'investigator', 'investigator_deep', 'code_walker'],
+  mounts: ['triage', 'investigator', 'investigator_deep', 'code_walker', 'agent'],
   entities: 'all',
   enabled: () => ({ on: true }),
   create,

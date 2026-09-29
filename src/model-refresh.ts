@@ -23,6 +23,7 @@ export function configuredModels(config: Config): { key: string; spec: string }[
     ['MODEL_TIER_MID', m.tierMid],
     ['MODEL_TIER_STRONG', m.tierStrong],
     ['MODEL_CODE_WALKER', m.codeWalker],
+    ['MODEL_WORKER', m.worker],
     ['TRIAGE_EVAL_JUDGE_MODEL', config.evals.judgeModel],
   ];
   return pairs.flatMap(([key, spec]) => (spec === undefined ? [] : [{ key, spec }]));

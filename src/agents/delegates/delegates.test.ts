@@ -6,14 +6,14 @@ import type { SkillDefinition, SubagentDefinition } from '@flue/runtime';
 import type { ToolDefinition } from '@flue/runtime/tool';
 import { ConfigError } from '../../config/errors.ts';
 import { clearRunDeadline, setRunDeadline } from '../../gate/budget.ts';
-import { allToolModules, FORBIDDEN_INPUT_KEYS } from '../../tools/index.ts';
+import { allToolModules, FORBIDDEN_INPUT_KEYS, toolsFor } from '../../tools/index.ts';
 import { logActions, releaseActions } from '../../runlog/actions.ts';
 import type { ToolDeps } from '../../tools/types.ts';
 import { ENTITIES, type Entity } from '../../types/core.ts';
 import { ok } from '../../types/tool-result.ts';
 import { makeTestHome, REPO_ROOT, type TestHome } from '../../../test/support/home.ts';
 import { throwingDeps } from '../../../test/support/fake-tool-context.ts';
-import { loadKnowledge, type Knowledge } from '../skills.ts';
+import { loadKnowledge, rootSkills, type Knowledge } from '../skills.ts';
 import { CODE_WALKER_NAME, codeWalkerFor, codeWalkerMounts } from './code-walker.ts';
 import {
   DEEP_THINKING,
@@ -25,6 +25,7 @@ import {
   type DelegateEnv,
   type DelegateHooks,
 } from './investigator.ts';
+import { capToolCalls, rootOnlyTool, WORKER_NAME, WORKER_REPLY_LINES, workerFor, workerMounts } from './worker.ts';
 
 const STRONG = 'anthropic/claude-opus-4-1';
 const CODE_WALKER_SPEC = 'openai/gpt-5';
@@ -47,7 +48,14 @@ let knowledge: Knowledge;
 let reposDir: string;
 const homes: TestHome[] = [];
 
-type HomeOptions = { flags?: boolean; codeWalker?: string; strong?: string; entities?: readonly Entity[] };
+type HomeOptions = {
+  flags?: boolean;
+  codeWalker?: string;
+  strong?: string;
+  worker?: string;
+  workerCalls?: number;
+  entities?: readonly Entity[];
+};
 
 function home(opts: HomeOptions = {}): TestHome {
   const overrides: Record<string, string> = {
@@ -55,6 +63,8 @@ function home(opts: HomeOptions = {}): TestHome {
     TRIAGE_REPOS_DIR: reposDir,
   };
   if (opts.codeWalker !== undefined) overrides.MODEL_CODE_WALKER = opts.codeWalker;
+  if (opts.worker !== undefined) overrides.MODEL_WORKER = opts.worker;
+  if (opts.workerCalls !== undefined) overrides.TRIAGE_MAX_TOOL_CALLS_PER_WORKER = String(opts.workerCalls);
   if (opts.flags === true) {
     overrides.SSFB_HARBOR_FIELD_ENC_KEY = FAKE_ENC_KEY;
     overrides.SSFB_CBS_VIA_KUBECTL_ENABLED = 'true';
@@ -261,6 +271,7 @@ describe('model-visible schemas', () => {
         [investigatorName(e, true), investigatorMounts(e, RUN, { env, deep: true }).tools],
       ]),
       [CODE_WALKER_NAME, codeWalkerMounts(RUN, { env }).tools],
+      [WORKER_NAME, workerMounts(RUN, { env }).tools],
     ];
     let scanned = 0;
     for (const [delegate, tools] of sets) {
@@ -413,6 +424,143 @@ describe('delegate body', () => {
   });
 });
 
+describe('worker (single shape, D103)', () => {
+  const ROOT_ONLY = ['finish_report', 'ask_requester', 'stop_blocked', 'resolve_identity'];
+  const isEvidenceTool = (name: string): boolean => name.includes('note_') && name.endsWith('_evidence');
+
+  test('the definition is named worker, frozen, and describes the job and the reply', () => {
+    const def = workerFor(RUN, { env: envOf(home()) });
+    expect(def.name).toBe('worker');
+    expect(WORKER_NAME).toBe('worker');
+    expect(Object.isFrozen(def)).toBe(true);
+    expect(def.description).toContain(`at most ${WORKER_REPLY_LINES} lines, the /data files it wrote and the calls it made`);
+    expect(def.description).toContain('/data');
+  });
+
+  test('MODEL_WORKER blank: no model override, so the worker inherits the tier model', () => {
+    const def = workerFor(RUN, { env: envOf(home({ worker: '' })) });
+    expect(Object.hasOwn(def, 'model')).toBe(false);
+    expect(Object.hasOwn(def, 'thinkingLevel')).toBe(false);
+  });
+
+  test('MODEL_WORKER set: the worker runs on it; a TypeSafe decision model is refused', () => {
+    expect(workerFor(RUN, { env: envOf(home({ worker: CODE_WALKER_SPEC })) }).model).toBe(CODE_WALKER_SPEC);
+    expect(() => workerFor(RUN, { env: envOf(home({ worker: 'openrouter/typesafe/jev-1.13' })) })).toThrow(ConfigError);
+  });
+
+  test('tools: the agent mount minus the ending tools, resolve_identity and every evidence tool', () => {
+    const env = envOf(home({ flags: true }));
+    const names = namesOf(workerMounts(RUN, { env }).tools);
+    const agentMount = namesOf(toolsFor('agent', delegateContext(RUN, null, env, WORKER_NAME)));
+    expect(sorted(names)).toEqual(sorted(agentMount.filter((n) => !ROOT_ONLY.includes(n) && !isEvidenceTool(n))));
+    for (const e of ENTITIES) for (const io of ENTITY_IO) expect(names).toContain(`${e}_${io}`);
+    for (const name of [...CODE_TOOLS, 'run_log', 'read_staged']) expect(names).toContain(name);
+    for (const name of ROOT_ONLY) expect(names).not.toContain(name);
+    expect(names.filter(isEvidenceTool)).toEqual([]);
+    expect(agentMount.filter(isEvidenceTool).length).toBeGreaterThan(0);
+    for (const name of ENTITY_IO) expect(names).not.toContain(name);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  test('rootOnlyTool covers the ending tools, resolve_identity and every evidence tool name', () => {
+    for (const name of [...ROOT_ONLY, 'note_evidence', 'rtl_note_evidence', 'ssfb_note_evidence', 'codebase_note_evidence', 'note_code_evidence']) {
+      expect({ name, off: rootOnlyTool(name) }).toEqual({ name, off: true });
+    }
+    for (const name of ['rtl_sql_select', 'repo_read', 'code_explore', 'run_log', 'read_staged']) {
+      expect({ name, off: rootOnlyTool(name) }).toEqual({ name, off: false });
+    }
+  });
+
+  test('an entity outside TRIAGE_ENTITIES gets no tools, notes or logs note', () => {
+    const env = envOf(home({ entities: ['rtl'] }));
+    const mounts = workerMounts(RUN, { env });
+    const names = namesOf(mounts.tools);
+    expect(names).toContain('rtl_sql_select');
+    expect(names.some((n) => n.startsWith('ssfb_') || n.startsWith('atspl_'))).toBe(false);
+    expect(mounts.skills.some((s) => s.name.startsWith('ssfb-') || s.name.startsWith('atspl-'))).toBe(false);
+    expect(mounts.instructions).toContain('# RTL logs');
+    expect(mounts.instructions).not.toContain('# SSFB logs');
+  });
+
+  test('skills are the single root set; the method text is the logs notes and the worker footer', () => {
+    const env = envOf(home());
+    const hooks = recorder();
+    const text = render(workerFor(RUN, { env, hooks }));
+    expect(hooks.skills.map((s) => s.name)).toEqual(rootSkills(ENTITIES, knowledge, 'single').map((s) => s.name));
+    expect(hooks.tools.length).toBeGreaterThan(15);
+    for (const heading of ['# Logs', '# SSFB logs', '# ATSPL logs', '# RTL logs']) expect(text).toContain(heading);
+    expect(text).not.toContain('# Investigator');
+    expect(text).not.toContain('## This delegate');
+  });
+
+  test('the instruction ends with the reply contract, the call limit and the action log', () => {
+    const env = envOf(home({ workerCalls: 7 }));
+    const text = workerMounts(RUN, { env }).instructions;
+    const footer = text.slice(text.indexOf('## This worker'));
+    expect(text).toContain('\n## This worker\n');
+    expect(footer).toContain('Do only that job');
+    expect(footer).toContain('under /data');
+    expect(footer).toContain(`Reply with the answer in at most ${WORKER_REPLY_LINES} lines, then the /data file paths you wrote and the tool calls you made`);
+    expect(footer).toContain('Tool calls allowed in this task: 7.');
+    expect(footer).toContain('- Tools mounted: ');
+    expect(footer).toContain('rtl_sql_select');
+    expect(footer).toContain('## Already done in this run');
+    expect(footer).not.toContain('- Finish by');
+  });
+
+  test('with a recorded deadline the footer says to finish by deadline - 2W (D87)', () => {
+    const env = envOf(home());
+    const runId = 'run_delegates_worker_deadline_0001';
+    setRunDeadline(runId, Date.parse('2026-09-28T08:15:00Z'), 240_000);
+    try {
+      expect(workerMounts(runId, { env }).instructions).toContain('\n- Finish by 2026-09-28T08:07:00Z\n');
+    } finally {
+      clearRunDeadline(runId);
+    }
+  });
+
+  test('the per-task cap is shared by all tools and refuses later calls with the reason', async () => {
+    const env = envOf(home());
+    const now = () => new Date('2026-09-28T04:30:18.000Z');
+    const ctx = { runId: RUN, entity: null, agent: WORKER_NAME, config: env.config, registry: env.registry, deps: { now } as unknown as ToolDeps };
+    let ran = 0;
+    const fake = (name: string) => ({ name, run: async () => (ran++, ok({ name })) }) as unknown as ToolDefinition;
+    const call = (t: ToolDefinition): Promise<unknown> => (t.run as (c: unknown) => Promise<unknown>)({ data: {}, toolCallId: 't' });
+    const [a, b] = capToolCalls([fake('rtl_sql_select'), fake('repo_read')], 2, ctx);
+    expect(((await call(a!)) as { output: { status: string } }).output.status).toBe('ok');
+    expect(((await call(b!)) as { output: { status: string } }).output.status).toBe('ok');
+    const third = (await call(a!)) as { output: { status: string; message: string; taken_at: string } };
+    expect(third.output.status).toBe('refused');
+    expect(third.output.message).toContain('used its 2 tool calls (TRIAGE_MAX_TOOL_CALLS_PER_WORKER)');
+    expect(third.output.message).toContain('reply with what you have');
+    expect(third.output.taken_at).toBe('2026-09-28T04:30:18.000Z');
+    expect(ran).toBe(2);
+    // A new task renders again and gets its own count.
+    const [fresh] = capToolCalls([fake('repo_read')], 2, ctx);
+    expect(((await call(fresh!)) as { output: { status: string } }).output.status).toBe('ok');
+  });
+
+  test('the render calls a deps getter once per task and mounts no subagent', () => {
+    let calls = 0;
+    const env = envOf(home(), () => {
+      calls++;
+      return throwingDeps();
+    });
+    const def = workerFor(RUN, { env, hooks: recorder() });
+    expect(calls).toBe(0);
+    render(def);
+    render(def);
+    expect(calls).toBe(2);
+    const source = readFileSync(join(import.meta.dir, 'worker.ts'), 'utf8');
+    expect(source).not.toMatch(/\buseSubagent\b/);
+  });
+
+  test('a bad run id is refused', () => {
+    const env = envOf(home());
+    expect(() => workerFor('../etc', { env })).toThrow(DelegateError);
+  });
+});
+
 describe('refusals', () => {
   test("an alias such as 'shivalik' or an unknown id is not an entity", () => {
     const env = envOf(home());
@@ -437,12 +585,12 @@ describe('refusals', () => {
 });
 
 describe('static checks', () => {
-  const files = ['investigator.ts', 'code-walker.ts'].map((f) => ({
+  const files = ['investigator.ts', 'code-walker.ts', 'worker.ts'].map((f) => ({
     file: f,
     text: readFileSync(join(import.meta.dir, f), 'utf8'),
   }));
 
-  test('no agent directive in either module', () => {
+  test('no agent directive in any delegate module', () => {
     for (const { file, text } of files) {
       expect({ file, directive: /['"]use agent['"]/.test(text) }).toEqual({ file, directive: false });
     }

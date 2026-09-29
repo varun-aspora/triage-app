@@ -1,17 +1,25 @@
 'use agent';
-// The Triage root agent (HLD 02 §1.1, LLD 04 §2.4; D3, D10, D23, D42, D45).
+// The Triage root agent (HLD 02 §1.1, LLD 04 §2.4; D3, D10, D23, D42, D45,
+// D103, D109).
 //
 // The run id is the instance id: ingress starts each run with
-// init(Triage, { id: run_id }) and the TriageInit as initialData. Each render:
-// - the tier model and its thinking level, once (useModel);
+// init(Triage, { id: run_id }) and the TriageInit as initialData. The run's
+// shape (TRIAGE_AGENT_SHAPE, kept from the saved plan so a run never switches)
+// picks what the root mounts. Each render:
+// - the tier model and its thinking level, once (useModel); in single shape
+//   also the compaction settings from compactionFor (S1.4);
 // - the one sandbox, once (useSandbox); delegates inherit it;
-// - the method text as an always-on instruction;
-// - toolsFor('triage'): resolve_identity, note_evidence and finish_report
-//   only, so the root has no entity I/O of its own;
-// - per enabled entity (all of them, not only the hinted ones, so a
-//   follow-up can reach any entity), investigate_<e>, investigate_<e>_deep
-//   and the <e>-overview skill; then code_walker and the patterns and
-//   frontend-routing skills.
+// - the method text as an always-on instruction (single: the shape's note and
+//   the prefixed tools per entity);
+// - split: toolsFor('triage'): resolve_identity, note_evidence and
+//   finish_report and the other ending tools only, so the root has no entity
+//   I/O of its own; per enabled entity (all of them, not only the hinted
+//   ones, so a follow-up can reach any entity), investigate_<e>,
+//   investigate_<e>_deep and the <e>-overview skill; then code_walker and the
+//   patterns and frontend-routing skills;
+// - single: toolsFor('agent'), every enabled entity's '<entity>_<tool>' data
+//   tools plus the shared ones; the worker subagent; every enabled entity's
+//   notes plus repo-map, patterns, frontend-routing and codegraph-limits.
 // The choices themselves live in triage-plan.ts, which is unit tested.
 //
 // Persistent state: plan, evidence_index and escalation (mirrored from the
@@ -50,6 +58,7 @@ import type { IdChain } from '../types/id-chain.ts';
 import { codeWalkerFor } from './delegates/code-walker.ts';
 import { deployManifestLines } from './deploy-manifests.ts';
 import { type DelegateEnv, investigatorFor } from './delegates/investigator.ts';
+import { workerFor } from './delegates/worker.ts';
 import type { Escalation } from './escalation.ts';
 import { methodText } from './instruction.ts';
 import { rootSkills } from './skills.ts';
@@ -61,6 +70,7 @@ import {
   calledBlocked,
   calledFinish,
   durabilityAtImport,
+  entityToolNames,
   type EvidenceIndexEntry,
   FINISH_REQUIRED_BODY,
   FINISH_REQUIRED_SIGNAL,
@@ -82,35 +92,43 @@ import {
 export function Triage({ id }: AgentProps): string {
   const init = useInitialData<TriageInit>();
   const rt = triageRuntime();
-  const plan = triagePlan(init, rt.config, rt.registry);
+  const [savedPlan, setPlan] = usePersistentState<PlanState | null>('plan', null);
+  const plan = triagePlan(init, rt.config, rt.registry, { saved: savedPlan, knowledge: rt.knowledge });
+  const single = plan.shape === 'single';
 
-  useModel(plan.model, { thinkingLevel: plan.thinkingLevel });
+  useModel(plan.model, { thinkingLevel: plan.thinkingLevel, ...(plan.compaction !== undefined ? { compaction: plan.compaction } : {}) });
   useSandbox(rt.sandbox);
-
-  const services = Object.fromEntries(plan.entities.map((e) => [e, rt.registry.services(e)]));
-  const deployManifests = deployManifestLines(rt.config, rt.registry, plan.entities);
-  const times = runTimes(id);
-  const finishBy = times === undefined ? {} : { finishBy: times.finishBy };
-  useInstruction(
-    methodText(init, { entities: plan.entities, focus: plan.focus, services, deployManifests, knowledge: rt.knowledge, ...finishBy }),
-  );
 
   const [savedChain, setSavedChain] = usePersistentState<IdChain | null>('id_chain', null);
   const deps = runDepsFor(id, init, rt, savedChain ?? undefined);
   const answered = answerChainOf(useDelivery());
   if (answered !== null) widenIdChain(deps, mergeIdChains(deps.idChain(), answered));
   const rootCtx = triageToolContext(id, deps, rt);
-  for (const tool of logActions(toolsFor('triage', rootCtx), rootCtx)) useTool(watchFinishReport(id, tool));
+  const rootTools = single ? toolsFor('agent', rootCtx) : toolsFor('triage', rootCtx);
+  for (const tool of logActions(rootTools, rootCtx)) useTool(watchFinishReport(id, tool));
+
+  // After the tools, so the single shape's run section lists the prefixed tools actually mounted.
+  const services = Object.fromEntries(plan.entities.map((e) => [e, rt.registry.services(e)]));
+  const deployManifests = deployManifestLines(rt.config, rt.registry, plan.entities);
+  const times = runTimes(id);
+  const finishBy = times === undefined ? {} : { finishBy: times.finishBy };
+  const shaped = single ? { shape: plan.shape, entityTools: entityToolNames(rootTools.map((t) => t.name), plan.entities) } : {};
+  useInstruction(
+    methodText(init, { entities: plan.entities, focus: plan.focus, services, deployManifests, knowledge: rt.knowledge, ...finishBy, ...shaped }),
+  );
 
   const env: DelegateEnv = { config: rt.config, registry: rt.registry, deps, knowledge: rt.knowledge };
-  for (const entity of plan.entities) {
-    useSubagent(investigatorFor(entity, id, { env }));
-    useSubagent(investigatorFor(entity, id, { deep: true, env }));
+  if (single) {
+    useSubagent(workerFor(id, { env }));
+  } else {
+    for (const entity of plan.entities) {
+      useSubagent(investigatorFor(entity, id, { env }));
+      useSubagent(investigatorFor(entity, id, { deep: true, env }));
+    }
+    useSubagent(codeWalkerFor(id, { env }));
   }
-  useSubagent(codeWalkerFor(id, { env }));
-  for (const skill of rootSkills(plan.entities, rt.knowledge)) useSkill(skill);
+  for (const skill of rootSkills(plan.entities, rt.knowledge, plan.shape)) useSkill(skill);
 
-  const [savedPlan, setPlan] = usePersistentState<PlanState | null>('plan', null);
   const [evidenceIndex, setEvidenceIndex] = usePersistentState<EvidenceIndexEntry[]>('evidence_index', []);
   const [escalation, setEscalation] = usePersistentState<Escalation>('escalation', { triggered: false, reasons: [] });
   const [retries, setRetries] = usePersistentState<number>('finish_retries', 0);

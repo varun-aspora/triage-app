@@ -17,6 +17,7 @@ import { type TriageInit, TriageInitSchema } from '../types/classification.ts';
 import { ENTITIES, type Entity, type Tier } from '../types/core.ts';
 import type { IdChain, Lead } from '../types/id-chain.ts';
 import { INPUT_ANSWER_CHAIN_ATTR, INPUT_ANSWER_SIGNAL } from '../types/input-request.ts';
+import { compactionFor } from '../models.ts';
 import { makeTestHome, REPO_ROOT, type TestHome } from '../../test/support/home.ts';
 import { escalationFor } from './escalation.ts';
 import { rootAgents } from './index.ts';
@@ -33,6 +34,7 @@ import {
   durabilityAtImport,
   durabilityFor,
   enabledEntitiesFor,
+  entityToolNames,
   focusEntitiesFor,
   FINISH_REQUIRED_SIGNAL,
   finishDecision,
@@ -40,11 +42,13 @@ import {
   lazyRunStore,
   MAX_FINISH_SIGNALS,
   mirrorOf,
+  type PlanState,
   planState,
   reportWrittenFor,
   runDepsFor,
   sameMirror,
   settleRun,
+  shapeFor,
   TRIAGE_AGENT_NAME,
   triagePlan,
   triageRuntime,
@@ -297,6 +301,85 @@ describe('triagePlan: entities, delegates and skills', () => {
     expect(JSON.parse(JSON.stringify(state))).toEqual(state);
     expect(state.entities).toEqual(['ssfb', 'atspl', 'rtl']);
     expect(state.focus).toEqual(['ssfb']);
+  });
+});
+
+describe('triagePlan: shape (D109)', () => {
+  const SPLIT_DELEGATES = [
+    'investigate_ssfb',
+    'investigate_ssfb_deep',
+    'investigate_atspl',
+    'investigate_atspl_deep',
+    'investigate_rtl',
+    'investigate_rtl_deep',
+    'code_walker',
+  ];
+
+  test('TRIAGE_AGENT_SHAPE defaults to split: investigators, code_walker and no compaction', () => {
+    const h = home();
+    const plan = triagePlan(init(), h.config, h.registry, { knowledge });
+    expect(plan.shape).toBe('split');
+    expect(plan.delegates).toEqual(SPLIT_DELEGATES);
+    expect(plan.compaction).toBeUndefined();
+    expect(Object.hasOwn(plan, 'compaction')).toBe(false);
+    expect(planState(plan).shape).toBe('split');
+  });
+
+  test('single: the worker is the only delegate, every enabled entity note is planned, and the root compacts', () => {
+    const h = home(['ssfb', 'rtl'], { TRIAGE_AGENT_SHAPE: 'single' });
+    const plan = triagePlan(init({ hints: ['rtl'] }), h.config, h.registry, { knowledge });
+    expect(plan.shape).toBe('single');
+    expect(plan.entities).toEqual(['ssfb', 'rtl']);
+    expect(plan.focus).toEqual(['rtl']);
+    expect(plan.delegates).toEqual(['worker']);
+    const notesOf = (e: Entity): string[] => [...knowledge.skills.keys()].filter((n) => n.startsWith(`${e}-`));
+    const entityNotes = [...notesOf('ssfb'), ...notesOf('rtl')];
+    expect(plan.skills).toEqual([...entityNotes, 'repo-map', 'patterns', 'frontend-routing', 'codegraph-limits']);
+    expect(plan.skills).toContain('rtl-nri-onboarding');
+    expect(plan.skills.some((n) => n.startsWith('atspl-'))).toBe(false);
+    expect(plan.compaction).toEqual(compactionFor(plan.model, h.config) as never);
+    expect(plan.compaction?.reserveTokens).toBeGreaterThan(0);
+    expect(plan.compaction?.keepRecentTokens).toBeUndefined();
+    const state = planState(plan);
+    expect(state.shape).toBe('single');
+    expect(JSON.parse(JSON.stringify(state))).toEqual(state);
+  });
+
+  test('the saved plan keeps its shape whatever TRIAGE_AGENT_SHAPE says now', () => {
+    const splitHome = home(undefined, { TRIAGE_AGENT_SHAPE: 'split' });
+    const singleHome = home(undefined, { TRIAGE_AGENT_SHAPE: 'single' });
+    const savedSplit = planState(triagePlan(init(), splitHome.config, splitHome.registry, { knowledge }));
+    const savedSingle = planState(triagePlan(init(), singleHome.config, singleHome.registry, { knowledge }));
+
+    const stillSplit = triagePlan(init(), singleHome.config, singleHome.registry, { saved: savedSplit, knowledge });
+    expect(stillSplit.shape).toBe('split');
+    expect(stillSplit.delegates).toEqual(SPLIT_DELEGATES);
+    expect(stillSplit.compaction).toBeUndefined();
+
+    const stillSingle = triagePlan(init(), splitHome.config, splitHome.registry, { saved: savedSingle, knowledge });
+    expect(stillSingle.shape).toBe('single');
+    expect(stillSingle.delegates).toEqual(['worker']);
+
+    // A plan saved before the shape existed belongs to a split run.
+    const { shape: _dropped, ...legacy } = savedSplit;
+    const old: PlanState = legacy;
+    expect(triagePlan(init(), singleHome.config, singleHome.registry, { saved: old, knowledge }).shape).toBe('split');
+  });
+
+  test('entityToolNames groups the prefixed tools by entity and leaves the shared ones out', () => {
+    expect(entityToolNames(['rtl_sql_select', 'repo_read', 'ssfb_logs_search', 'rtl_logs_search', 'run_log', 'codebase_note_evidence'])).toEqual({
+      rtl: ['rtl_sql_select', 'rtl_logs_search'],
+      ssfb: ['ssfb_logs_search'],
+    });
+    expect(entityToolNames([])).toEqual({});
+    // An enabled entity with no mounted tool gets an empty list, not the default names.
+    expect(entityToolNames(['rtl_sql_select'], ['ssfb', 'rtl'])).toEqual({ ssfb: [], rtl: ['rtl_sql_select'] });
+  });
+
+  test('shapeFor: no saved plan means the config value', () => {
+    expect(shapeFor({ agentShape: 'single' })).toBe('single');
+    expect(shapeFor({ agentShape: 'single' }, null)).toBe('single');
+    expect(shapeFor({ agentShape: 'split' }, null)).toBe('split');
   });
 });
 
@@ -602,6 +685,15 @@ describe('triage.agent.ts', () => {
     expect(source.match(/\buseSandbox\(/g)).toHaveLength(1);
     expect(source).toContain("toolsFor('triage'");
     for (const io of ['sql_select', 'http_call', 'logs_search']) expect(source).not.toContain(io);
+  });
+
+  test('the single shape mounts toolsFor(agent) and the worker instead of the investigators', () => {
+    expect(source).toContain("toolsFor('agent', rootCtx)");
+    expect(source.match(/\buseSubagent\(workerFor\(/g)).toHaveLength(1);
+    expect(source).toContain('rootSkills(plan.entities, rt.knowledge, plan.shape)');
+    expect(source).toContain('compaction: plan.compaction');
+    // The shape comes from the saved plan, so it is read before the plan is built.
+    expect(source.indexOf("usePersistentState<PlanState | null>('plan'")).toBeLessThan(source.indexOf('triagePlan('));
   });
 
   test('src files use no Bun APIs', () => {

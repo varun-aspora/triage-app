@@ -50,6 +50,12 @@ describe('ranAgainRepeats', () => {
     expect(ranAgainRepeats([...call('logs_search', q, refused), ...call('logs_search', q)])).toEqual([]);
     expect(ranAgainRepeats([...call('logs_search', q), ...call('logs_search', { ...q, order: 'oldest' })])).toEqual([]);
     expect(ranAgainRepeats([...call('note_evidence', {}), ...call('note_evidence', {})])).toEqual([]);
+    expect(ranAgainRepeats([...call('ssfb_note_evidence', {}), ...call('ssfb_note_evidence', {})])).toEqual([]);
+  });
+
+  test("the agent mount's prefixed calls repeat per entity", () => {
+    expect(ranAgainRepeats([...call('rtl_logs_search', q), ...call('rtl_logs_search', q)]).map((c) => c.name)).toEqual(['rtl_logs_search']);
+    expect(ranAgainRepeats([...call('rtl_logs_search', q), ...call('ssfb_logs_search', q)])).toEqual([]);
   });
 });
 
@@ -71,6 +77,14 @@ describe('untracedLogValues', () => {
       ...call('logs_search', { terms: [USER] }, { status: 'ok', data: { hits: [{ error: 'sim not found' }] } }),
     ];
     expect(untracedLogValues(events, knowledge)).toEqual([{ tool_call: 'guess', field: 'error' }]);
+  });
+
+  test("the agent mount's <entity>_logs_search calls are checked too; other tools are not", () => {
+    const events = [
+      ...call('rtl_logs_search', { message: 'made up rtl line' }, { status: 'ok', data: {} }, 'rtl_guess'),
+      ...call('rtl_sql_select', { message: 'not a log search' }, { status: 'ok', data: {} }, 'sql'),
+    ];
+    expect(untracedLogValues(events, knowledge)).toEqual([{ tool_call: 'rtl_guess', field: 'message' }]);
   });
 });
 

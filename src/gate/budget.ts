@@ -12,7 +12,7 @@ export const BUDGET_EXHAUSTED_MESSAGE = 'budget exhausted, finish with what you 
 
 // These tools let the model wrap up, so they pass even after exhaustion and
 // are not counted.
-export const BUDGET_EXEMPT_TOOLS: readonly string[] = ['finish_report', 'note_evidence'];
+export const BUDGET_EXEMPT_TOOLS: readonly string[] = ['finish_report', 'note_evidence', 'codebase_note_evidence'];
 
 // Code tools read local repos only. With a codeCap they count against that
 // cap instead of maxToolCalls (D78). A new code tool joins by name here.

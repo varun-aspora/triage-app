@@ -302,7 +302,7 @@ describe('resolve_identity: schema', () => {
   });
 
   test('mounted on triage only, picked up by the generated tool list, create() and enabled() never touch deps', () => {
-    expect(toolModule.mounts).toEqual(['triage']);
+    expect(toolModule.mounts).toEqual(['triage', 'agent']);
     expect(allToolNames()).toContain(RESOLVE_IDENTITY);
     for (const { mount, entity } of conformanceCases(toolModule)) {
       const ctx = makeToolContext({ entity });

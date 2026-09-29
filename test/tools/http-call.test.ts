@@ -171,7 +171,7 @@ function harborFixture(path: string, method = 'GET', result: unknown = { status:
 describe('http_call module', () => {
   test('is picked up by the generated tool list and mounted on investigators', () => {
     expect(allToolNames()).toContain('http_call');
-    expect(toolModule.mounts).toEqual(['investigator']);
+    expect(toolModule.mounts).toEqual(['investigator', 'agent']);
     expect(toolModule.entities).toBe('all');
   });
 

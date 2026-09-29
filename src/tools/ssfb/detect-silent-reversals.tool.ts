@@ -334,6 +334,7 @@ export const toolModule: ToolModule = Object.freeze({
   name: DETECT_SILENT_REVERSALS,
   mounts: SSFB_MOUNTS,
   entities: [SSFB],
+  perEntity: true,
   enabled: () => ({ on: true }) as const,
   create(ctx: ToolContext): ToolDefinition {
     return defineTool({

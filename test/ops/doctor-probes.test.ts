@@ -689,6 +689,6 @@ describe('mounted tools check', () => {
     const config = makeConfig();
     const report = await runDoctor([mountedToolsCheck], { config });
     const ok = report.checks.filter((c) => c.id === 'tools' && c.status === 'ok' && c.entity === undefined);
-    expect(ok.map((c) => c.message.split(':')[0])).toEqual(['triage', 'code_walker']);
+    expect(ok.map((c) => c.message.split(':')[0])).toEqual(['triage', 'code_walker', 'agent']);
   });
 });

@@ -10,11 +10,12 @@ import type { Config } from '../config/env.ts';
 import type { Registry } from '../config/registry.ts';
 import type { Entity } from '../types/core.ts';
 
-export const MOUNTS = ['triage', 'investigator', 'investigator_deep', 'code_walker'] as const;
+export const MOUNTS = ['triage', 'investigator', 'investigator_deep', 'code_walker', 'agent'] as const;
 
 /**
  * Which agent a tool set is built for. 'investigator_deep' gets every
- * 'investigator' tool plus its own.
+ * 'investigator' tool plus its own. 'agent' is the single shape (D109): the
+ * one Triage agent and its worker.
  */
 export type Mount = (typeof MOUNTS)[number];
 
@@ -27,7 +28,11 @@ export interface ToolDeps {}
 
 export type ToolContext = {
   readonly runId: string;
-  /** The investigator's entity; null for the triage and code_walker mounts. */
+  /**
+   * The entity the tool is built for: the investigator's, or on the agent
+   * mount the one a perEntity module was built for. Null for the triage and
+   * code_walker mounts and for shared tools on the agent mount.
+   */
   readonly entity: Entity | null;
   /** The mounting agent: 'triage' or the delegate's name. For the run action log (D79). */
   readonly agent?: string;
@@ -44,6 +49,13 @@ export interface ToolModule {
   readonly mounts: readonly Mount[];
   /** 'all', or the only entities whose investigators get this tool. */
   readonly entities: 'all' | readonly Entity[];
+  /**
+   * On the agent mount, the module is built once per enabled entity (limited
+   * by `entities`), with that entity in ctx.entity, and named '<entity>_<name>'.
+   * Audit, budget, scope and fixture keys keep the bare name. Other mounts
+   * ignore it.
+   */
+  readonly perEntity?: true;
   /** Cheap and pure: decides whether the tool is mounted for this context. */
   enabled(ctx: ToolContext, mount: Mount): ToolEnabled;
   /**

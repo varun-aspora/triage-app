@@ -19,21 +19,39 @@
 // The triage root has no entity, and the run store keys evidence by entity or
 // 'code', so on the triage mount the call is refused and the model is told to
 // let the delegate record its own findings.
+//
+// Single shape (D109): the module is perEntity, so the agent mount gets one
+// '<entity>_note_evidence' per enabled entity, each built with its entity in
+// the closure. Code findings go through codebase_note_evidence
+// (codebase-note-evidence.tool.ts), a shared tool built here with the 'code'
+// key; its name ends in _note_evidence like the others, so the worker, which
+// gets no evidence tool, leaves it out with them.
+//
+// On the agent mount a call is refused unless the run has queried what it
+// records: an ok '<entity>_' data call (or a repo_* / code_* call for code)
+// in the run action log, or an earlier stored version of the same key. The
+// action log is released when the run settles, so after a resume the stored
+// key is what lets the agent add a version without querying again.
 
 import { defineTool, type ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
 import type { RecordedFindings } from '../agents/escalation.ts';
 import { makeAuditLine } from '../gate/audit.ts';
+import { CODE_TOOLS } from '../gate/budget.ts';
 import { type Persisted, redactModelFacing, redactPersisted } from '../gate/redact.ts';
+import { type Action, actionsFor } from '../runlog/actions.ts';
 import { RunStoreRedactionError, type Findings } from '../runstore/types.ts';
 import type { AuditTransport } from '../types/audit.ts';
 import type { Entity } from '../types/core.ts';
 import { CodeFindingsSchema, EntityFindingsSchema } from '../types/findings.ts';
 import { ok, refused, type ToolEnvelope } from '../types/tool-result.ts';
+import { splitAgentToolName } from './agent-name.ts';
 import type { Mount, ToolContext, ToolModule } from './types.ts';
 import type {} from './_lib/context.ts';
 
 export const NOTE_EVIDENCE = 'note_evidence';
+/** The agent mount's tool for code findings (D109). */
+export const CODEBASE_NOTE_EVIDENCE = 'codebase_note_evidence';
 
 /** Most failing paths listed in a refusal. The rest are counted. */
 const MAX_LISTED_PATHS = 12;
@@ -57,16 +75,68 @@ const TRIAGE_REFUSAL =
   'Refused: the orchestrator has no entity to record findings under. Ask the investigate_<entity> ' +
   'or code_walker delegate to record them with note_evidence.';
 
+const agentEntityDescription = (e: Entity): string =>
+  `Save your findings for ${e} as EntityFindings: evidence items with source, at, query_or_path and ` +
+  'summary; a timeline; hypotheses; confidence high|medium|low; gaps; and suggested_next_entity. ' +
+  `Only ${e} findings go here, after a ${e}_* call returned a result; another entity's findings go to ` +
+  'its own <entity>_note_evidence tool. When the cause sits in another entity, set suggested_next_entity to it: two ' +
+  'entity records that each blame their own entity count as conflicting hypotheses. A later call ' +
+  'stores a new version. Returns evidence_id and version.';
+
+const AGENT_CODE_DESCRIPTION =
+  'Save your code findings as CodeFindings: claims with repo, file, lines and what_it_shows, an ' +
+  'optional matches_known_pattern, and confidence high|medium|low. Only after a repo_* or code_* call ' +
+  'returned a result; data findings go to the <entity>_note_evidence tools. A later call stores a new ' +
+  'version. Returns evidence_id and version.';
+
+const notQueriedRefusal = (e: Entity): string =>
+  `Refused: no ${e}_* data call has returned a result in this run, so there is nothing to record under ` +
+  `${e}. Query ${e} first, or save these findings with the <entity>_note_evidence tool of the entity ` +
+  'you queried.';
+
+const CODE_NOT_READ_REFUSAL =
+  'Refused: no repo_* or code_* call has returned a result in this run, so there are no code findings ' +
+  `to record. Read the code first, then call ${CODEBASE_NOTE_EVIDENCE} again.`;
+
+// `checkQueried`: on the agent mount, the run must have queried the key first.
 type Plan =
-  | { readonly kind: 'entity'; readonly key: Entity }
-  | { readonly kind: 'code'; readonly key: 'code' }
+  | { readonly kind: 'entity'; readonly key: Entity; readonly checkQueried: boolean }
+  | { readonly kind: 'code'; readonly key: 'code'; readonly checkQueried: boolean }
   | { readonly kind: 'triage'; readonly key: null };
 
+type Recording = Exclude<Plan, { kind: 'triage' }>;
+
 function planFor(ctx: ToolContext, mount: Mount): Plan {
-  if (mount === 'code_walker') return { kind: 'code', key: 'code' };
+  if (mount === 'code_walker') return { kind: 'code', key: 'code', checkQueried: false };
   if (mount === 'triage') return { kind: 'triage', key: null };
   if (ctx.entity === null) throw new Error(`note_evidence on mount ${mount} needs an entity in the tool context`);
-  return { kind: 'entity', key: ctx.entity };
+  return { kind: 'entity', key: ctx.entity, checkQueried: mount === 'agent' };
+}
+
+// A reused result counts: the data was read earlier in the run.
+const OK_OUTCOME = /^ok\b/;
+
+/**
+ * The entity a logged call read, from its '<entity>_' prefix on the agent
+ * mount (D109). Null for shared tools and for the evidence tools themselves.
+ */
+export function queriedEntity(action: Pick<Action, 'tool'>): Entity | null {
+  const split = splitAgentToolName(action.tool);
+  return split === undefined || split.name === NOTE_EVIDENCE ? null : split.entity;
+}
+
+/** Entities with at least one ok '<entity>_' data call in the action log. */
+export function entitiesQueried(actions: readonly Action[]): Set<Entity> {
+  const found = new Set<Entity>();
+  for (const a of actions) {
+    const entity = queriedEntity(a);
+    if (entity !== null && OK_OUTCOME.test(a.outcome)) found.add(entity);
+  }
+  return found;
+}
+
+function codeRead(actions: readonly Action[]): boolean {
+  return actions.some((a) => CODE_TOOLS.includes(a.tool) && OK_OUTCOME.test(a.outcome));
 }
 
 /** The input schema the model sees for a mount. */
@@ -86,9 +156,9 @@ function listPaths(paths: readonly string[]): string {
 }
 
 function describe(plan: Plan): string {
-  if (plan.kind === 'code') return CODE_DESCRIPTION;
   if (plan.kind === 'triage') return TRIAGE_DESCRIPTION;
-  return ENTITY_DESCRIPTION;
+  if (plan.kind === 'code') return plan.checkQueried ? AGENT_CODE_DESCRIPTION : CODE_DESCRIPTION;
+  return plan.checkQueried ? agentEntityDescription(plan.key) : ENTITY_DESCRIPTION;
 }
 
 type Checked =
@@ -97,7 +167,7 @@ type Checked =
 
 // Parses with the mount's schema and pairs the output with its evidence key,
 // so the escalation record is typed by the mount rather than by a cast.
-function check(plan: Exclude<Plan, { kind: 'triage' }>, data: unknown): Checked {
+function check(plan: Recording, data: unknown): Checked {
   if (plan.kind === 'code') {
     const parsed = v.safeParse(CodeFindingsSchema, data);
     return parsed.success
@@ -110,13 +180,20 @@ function check(plan: Exclude<Plan, { kind: 'triage' }>, data: unknown): Checked 
     : { ok: false, paths: failingPaths(parsed.issues) };
 }
 
-function create(ctx: ToolContext, mount: Mount): ToolDefinition {
-  const plan = planFor(ctx, mount);
+/** codebase_note_evidence: CodeFindings under the 'code' key, with the agent mount's check. */
+export function createCodeEvidenceTool(ctx: ToolContext): ToolDefinition {
+  return build(ctx, { kind: 'code', key: 'code', checkQueried: true }, CODEBASE_NOTE_EVIDENCE);
+}
 
+function create(ctx: ToolContext, mount: Mount): ToolDefinition {
+  return build(ctx, planFor(ctx, mount), NOTE_EVIDENCE);
+}
+
+function build(ctx: ToolContext, plan: Plan, name: string): ToolDefinition {
   return defineTool({
-    name: NOTE_EVIDENCE,
+    name,
     description: describe(plan),
-    input: noteEvidenceSchema(mount),
+    input: plan.kind === 'code' ? CodeFindingsSchema : EntityFindingsSchema,
     run: async ({ data, signal }): Promise<ToolEnvelope> => {
       signal?.throwIfAborted();
       const deps = ctx.deps;
@@ -136,7 +213,7 @@ function create(ctx: ToolContext, mount: Mount): ToolDefinition {
               ts: now().toISOString(),
               interface: deps.run.interface,
               entity: ctx.entity,
-              tool: NOTE_EVIDENCE,
+              tool: name,
               decision,
               ...(reason !== undefined ? { reason } : {}),
               service: 'evidence',
@@ -150,19 +227,33 @@ function create(ctx: ToolContext, mount: Mount): ToolDefinition {
           ),
         );
       };
+      // The action log first; the store only when the log has no such call.
+      const wasQueried = async (recording: Recording): Promise<boolean> => {
+        const actions = actionsFor(ctx.runId);
+        const inLog = recording.kind === 'code' ? codeRead(actions) : entitiesQueried(actions).has(recording.key);
+        if (inLog) return true;
+        const run = await deps.runStore.getRun(ctx.runId);
+        return run?.evidence[recording.key] !== undefined;
+      };
       const refuse = (message: string, reason: string): ToolEnvelope => {
-        audit('deny', 'refused', `note_evidence ${where}: refused`, reason);
+        audit('deny', 'refused', `${name} ${where}: refused`, reason);
         return refused(redactModelFacing(message), now);
       };
 
       if (plan.kind === 'triage') return refuse(TRIAGE_REFUSAL, 'no entity on the triage mount');
+      if (plan.checkQueried && !(await wasQueried(plan))) {
+        return plan.kind === 'code'
+          ? refuse(CODE_NOT_READ_REFUSAL, 'no code read in this run')
+          : refuse(notQueriedRefusal(plan.key), `${plan.key} not queried in this run`);
+      }
+      signal?.throwIfAborted();
 
       const checked = check(plan, data);
       if (!checked.ok) {
         const paths = listPaths(checked.paths);
         const shape = plan.kind === 'code' ? 'CodeFindings' : 'EntityFindings';
         return refuse(
-          `Refused: the findings do not match ${shape} at ${paths}. Fix those fields and call note_evidence again.`,
+          `Refused: the findings do not match ${shape} at ${paths}. Fix those fields and call ${name} again.`,
           `schema: ${paths}`,
         );
       }
@@ -179,7 +270,7 @@ function create(ctx: ToolContext, mount: Mount): ToolDefinition {
         if (err instanceof RunStoreRedactionError) {
           return refuse(
             `Refused: the findings still contain ${err.patterns.join(', ')} after masking. ` +
-              'Remove those values from the text and call note_evidence again.',
+              `Remove those values from the text and call ${name} again.`,
             `redaction: ${err.patterns.join(', ')}`,
           );
         }
@@ -192,7 +283,7 @@ function create(ctx: ToolContext, mount: Mount): ToolDefinition {
       deps.escalation.record({ ...checked.record, findings: safe.value } as RecordedFindings);
 
       const evidenceId = `${plan.key}@v${version}`;
-      audit('allow', 'ok', `note_evidence ${evidenceId} confidence ${confidence}`);
+      audit('allow', 'ok', `${name} ${evidenceId} confidence ${confidence}`);
       return ok({ evidence_id: evidenceId, version }, now);
     },
   });
@@ -200,8 +291,9 @@ function create(ctx: ToolContext, mount: Mount): ToolDefinition {
 
 export const toolModule: ToolModule = {
   name: NOTE_EVIDENCE,
-  mounts: ['triage', 'investigator', 'investigator_deep', 'code_walker'],
+  mounts: ['triage', 'investigator', 'investigator_deep', 'code_walker', 'agent'],
   entities: 'all',
+  perEntity: true,
   enabled: () => ({ on: true }),
   create,
 };

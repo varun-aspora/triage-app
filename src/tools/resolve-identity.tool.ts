@@ -412,7 +412,7 @@ const HOP_ENTITIES = [...new Set(Object.values(IDENTITY_STATEMENTS).map((s) => s
 
 export const toolModule: ToolModule = {
   name: RESOLVE_IDENTITY,
-  mounts: ['triage'],
+  mounts: ['triage', 'agent'],
   entities: 'all',
   enabled(ctx) {
     if (HOP_ENTITIES.some((e) => ctx.registry.isEnabled(e))) return { on: true };

@@ -1,6 +1,6 @@
 ---
 name: rtl-overview
-description: RTL at a glance - it owns NRI onboarding Part 1 (before CBS) through workflow-op, banking-service and kyc-service; the join keys to SSFB harbor; the separate RTL copy of workflow-op; what is out of scope; and when to brief investigate_rtl. Use when a user is stuck on an onboarding step owned by ASPORA_RTL, KYC or eVisa is not passing, or CBS creation never started.
+description: RTL at a glance - it owns NRI onboarding Part 1 (before CBS) through workflow-op, banking-service and kyc-service; the join keys to SSFB harbor; the separate RTL copy of workflow-op; what is out of scope; and when RTL is in play. Use when a user is stuck on an onboarding step owned by ASPORA_RTL, KYC or eVisa is not passing, or CBS creation never started.
 metadata:
   kind: overview
   entity: rtl
@@ -53,8 +53,8 @@ that, guardian (SSFB) runs device and SIM binding. Until SIM binding is
 VERIFIED, harbor has no form with the user's id, so an empty harbor lookup for
 a user stuck there is expected; the device id is the key to follow. It is in
 the app-server logs (`x-device-id`), found by the `aspora_user_id`.
-investigate_rtl has the `rtl-nri-onboarding` note for the whole journey and
-its first queries.
+The `rtl-nri-onboarding` note, which the RTL investigator has when the run
+has one, covers the whole journey and its first queries.
 
 ## Data access
 
@@ -83,7 +83,7 @@ no runs.
 One link is not documented: which `kyc_inquiries` column joins to the Aspora
 user id or the harbor form_id (unverified: no source states it).
 
-## When to brief investigate_rtl
+## When RTL is in play
 
 - The step the user is stuck on has `workflowOwner = ASPORA_RTL`.
 - No harbor form exists yet, or it is still open or submitted.
@@ -93,6 +93,6 @@ user id or the harbor form_id (unverified: no source states it).
 - CBS creation never started: the Part-1 handoff endpoint on banking-service
   should be ruled out before blaming harbor.
 
-Send the ids you have (`account_form_id`, `aspora_user_id`) and name the services in
-play (`workflow`, `banking`, `kyc`). If RTL is not indicated, the report says
-so.
+Start from the ids you have (`account_form_id`, `aspora_user_id`) and the
+services in play (`workflow`, `banking`, `kyc`). If RTL is not indicated, the
+report says so.

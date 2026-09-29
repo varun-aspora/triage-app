@@ -64,6 +64,8 @@ export type FakeModelEnv = {
   readonly MODEL_TIER_MID: string;
   readonly MODEL_TIER_STRONG: string;
   readonly MODEL_CODE_WALKER: string;
+  /** Blank, so the worker inherits the run's faux tier model (D108). */
+  readonly MODEL_WORKER: string;
 };
 
 /** One scripted response: a fixed assistant message or a factory. */
@@ -119,6 +121,8 @@ const MODEL_ENV: FakeModelEnv = Object.freeze({
   MODEL_TIER_STRONG: spec('strong'),
   // code_walker runs on the strong tier by default (T06.1).
   MODEL_CODE_WALKER: spec('strong'),
+  // Blank clears a MODEL_WORKER in the home's .env, so the worker uses the faux tier model.
+  MODEL_WORKER: '',
 });
 
 const ROUTER = Symbol('fake-model-router');
