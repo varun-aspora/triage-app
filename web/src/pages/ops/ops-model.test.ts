@@ -83,6 +83,9 @@ describe('repos model', () => {
     expect(countsLine(27, 1, 1)).toBe('27 ok · 1 skipped · 1 failed');
     expect(problemNames({ skipped: ['vance-android'], failed: ['engage', 'x'] })).toBe('skipped: vance-android · failed: engage, x');
     expect(problemNames({ skipped: [], failed: [] })).toBe('');
+    expect(
+      problemNames({ skipped: ['vance-android'], failed: ['engage', 'x'], reasons: { 'vance-android': 'dirty', engage: 'the git host is unreachable' } }),
+    ).toBe('skipped: vance-android (local changes) · failed: engage (the git host is unreachable), x');
     expect(triggerLabel('http')).toBe('HTTP');
     expect(triggerLabel('timer')).toBe('the timer');
   });

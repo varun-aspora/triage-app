@@ -63,11 +63,21 @@ export function countsLine(ok: number, skipped: number, failed: number): string 
   return `${ok} ok · ${skipped} skipped · ${failed} failed`;
 }
 
-/** The names behind the skipped and failed counts, for the Result card. Empty when all went well. */
-export function problemNames(last: Pick<SyncState, 'skipped' | 'failed'>): string {
+/**
+ * The repos behind the skipped and failed counts, with why when the record has it, for the Result card.
+ * Records from before reasons were kept give names only. Empty when all went well.
+ */
+export function problemNames(last: Pick<SyncState, 'skipped' | 'failed' | 'reasons'>): string {
+  const withReason = (name: string) => {
+    const reason = last.reasons?.[name];
+    if (reason === undefined) return name;
+    // 'dirty' is the sync's shorthand; the repo table calls it local changes.
+    return `${name} (${reason === 'dirty' ? 'local changes' : reason})`;
+  };
+  const list = (names: readonly string[]) => names.map(withReason).join(', ');
   const parts: string[] = [];
-  if (last.skipped.length > 0) parts.push(`skipped: ${last.skipped.join(', ')}`);
-  if (last.failed.length > 0) parts.push(`failed: ${last.failed.join(', ')}`);
+  if (last.skipped.length > 0) parts.push(`skipped: ${list(last.skipped)}`);
+  if (last.failed.length > 0) parts.push(`failed: ${list(last.failed)}`);
   return parts.join(' · ');
 }
 

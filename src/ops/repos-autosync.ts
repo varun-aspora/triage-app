@@ -64,6 +64,8 @@ export const SyncStateSchema = v.object({
   ok: v.array(v.string()),
   skipped: v.array(v.string()),
   failed: v.array(v.string()),
+  /** Why each skipped or failed repo was left out, by repo name. Absent in records written before reasons were kept. */
+  reasons: v.optional(v.record(v.string(), v.string())),
 });
 export type SyncState = v.InferOutput<typeof SyncStateSchema>;
 
@@ -93,6 +95,10 @@ export function readSyncState(reposDir: string): SyncState | undefined {
 function stateAfter(report: Extract<SyncReport, { status: 'done' }>, trigger: SyncTrigger, at: string, before: SyncState | undefined): SyncState {
   const good = report.ok.length > 0 || report.failed.length === 0;
   const lastOk = good ? at : before?.last_ok_at;
+  const reasons: Record<string, string> = {};
+  for (const r of report.results) {
+    if (r.status !== 'ok' && r.reason !== undefined) reasons[r.repo] = r.reason;
+  }
   return {
     last_attempt_at: at,
     ...(lastOk !== undefined ? { last_ok_at: lastOk } : {}),
@@ -100,6 +106,7 @@ function stateAfter(report: Extract<SyncReport, { status: 'done' }>, trigger: Sy
     ok: [...report.ok],
     skipped: [...report.skipped],
     failed: [...report.failed],
+    ...(Object.keys(reasons).length > 0 ? { reasons } : {}),
   };
 }
 

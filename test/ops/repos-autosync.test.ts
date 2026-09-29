@@ -114,6 +114,15 @@ describe('syncDue', () => {
 // ------------------------------------------------------------ syncing and the state file
 
 describe('syncIfDue and syncNow', () => {
+  test('the record keeps a reason per skipped and failed repo, and reads old records without them', async () => {
+    await syncIfDue('cli', deps(done(['harbor'], ['rhythm'], ['android'])).d);
+    expect(readSyncState(reposDir)?.reasons).toEqual({ rhythm: 'x', android: 'dirty' });
+
+    writeFileSync(join(reposDir, SYNC_STATE_FILE), JSON.stringify(state({ skipped: ['android'] })));
+    expect(readSyncState(reposDir)).toMatchObject({ skipped: ['android'] });
+    expect(readSyncState(reposDir)?.reasons).toBeUndefined();
+  });
+
   test('a first run syncs and records a good sync', async () => {
     const { d, counter } = deps(done(['harbor', 'rhythm']));
     const r = await syncIfDue('run', d);
@@ -150,7 +159,7 @@ describe('syncIfDue and syncNow', () => {
   test('some repos failing still counts as a good sync; every repo failing does not', async () => {
     const partial = deps(done(['harbor'], ['rhythm']));
     await syncIfDue('run', partial.d);
-    expect(readSyncState(reposDir)).toMatchObject({ last_ok_at: new Date(T0).toISOString(), failed: ['rhythm'] });
+    expect(readSyncState(reposDir)).toMatchObject({ last_ok_at: new Date(T0).toISOString(), failed: ['rhythm'], reasons: { rhythm: 'x' } });
 
     rmSync(join(reposDir, SYNC_STATE_FILE));
     const all = deps(done([], ['harbor', 'rhythm']));

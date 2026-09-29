@@ -337,6 +337,8 @@ export type SyncState = {
   ok: string[];
   skipped: string[];
   failed: string[];
+  /** By repo name. Absent in records written before reasons were kept. */
+  reasons?: Record<string, string>;
 };
 
 /** GET /repos row, camelCase as served. */
