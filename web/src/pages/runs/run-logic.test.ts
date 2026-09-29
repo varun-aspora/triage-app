@@ -149,6 +149,17 @@ describe('buildStartBody', () => {
     expect(Object.keys(r.errors).sort()).toEqual(['entities', 'ids', 'requested_by', 'thread', 'time_window']);
     const reversed = buildStartBody({ ...baseForm, from: '2026-09-25T00:00', to: '2026-09-24T00:00' }, 0);
     expect(reversed.ok).toBe(false);
+    const unread = buildStartBody({ ...baseForm, from: 'yesterday', to: 'now' }, 0);
+    expect(unread.ok).toBe(false);
+    if (!unread.ok) expect(unread.errors.time_window).toContain('"yesterday"');
+  });
+
+  test('relative window ends resolve against the submit time', () => {
+    const now = Date.UTC(2026, 8, 29, 10, 0);
+    const r = buildStartBody({ ...baseForm, from: 'now-1h', to: 'now' }, now);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.body.time_window).toEqual({ from: '2026-09-29T09:00:00.000Z', to: '2026-09-29T10:00:00.000Z' });
   });
 });
 

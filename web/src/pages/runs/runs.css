@@ -411,3 +411,58 @@
   color: var(--muted);
   margin: 0 0 4px;
 }
+
+/* Time window on the new run form */
+.runs-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 12px;
+}
+
+.runs-preset {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.runs-preset:hover {
+  background: var(--surface-sunk);
+  color: var(--text);
+}
+
+.runs-preset[aria-pressed='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.runs-time-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  position: relative;
+}
+
+/* The native picker is kept only to open the calendar; the text field holds the value. */
+.runs-time-native {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.runs-time-row .runs-text-btn {
+  flex-shrink: 0;
+  font-size: 13px;
+  padding: 0 8px;
+}
