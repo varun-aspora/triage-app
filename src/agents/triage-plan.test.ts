@@ -213,9 +213,9 @@ describe('triagePlan: model and thinking', () => {
     expect(() => triagePlan(init({ tier: 'mid' }), h.config, h.registry)).toThrow(/MODEL_TIER_MID/);
   });
 
-  test('an openrouter tier model is refused', () => {
-    const h = home(undefined, { MODEL_TIER_CHEAP: 'openrouter/some-model' });
-    expect(() => triagePlan(init({ tier: 'cheap' }), h.config, h.registry)).toThrow(/openrouter/);
+  test('a TypeSafe decision model on a tier is refused', () => {
+    const h = home(undefined, { MODEL_TIER_CHEAP: 'openrouter/typesafe/jev-1.13' });
+    expect(() => triagePlan(init({ tier: 'cheap' }), h.config, h.registry)).toThrow(/MODEL_DECISION only/);
   });
 });
 

@@ -9,22 +9,19 @@
 // With TRIAGE_HOME unset (vite build, --help) the import registers nothing and
 // does not throw.
 //
-// Spec rules (D1, D41, D42):
+// Spec rules (D1, D41, D42, D101):
 // - A spec is 'provider/model', split at the first '/'.
 // - anthropic and openai are pi-ai built-ins and always accepted.
-// - openrouter and typesafe are third parties, accepted for MODEL_DECISION
-//   only. openrouter takes chat models and TypeSafe decision models
-//   ('openrouter/typesafe/<model>'); typesafe takes 'typesafe/<model>', which
+// - openrouter takes chat models in every slot (D101), and TypeSafe decision
+//   models ('openrouter/typesafe/<model>') in MODEL_DECISION only.
+// - typesafe takes 'typesafe/<model>' in MODEL_DECISION only, which
 //   src/decisions/registry.ts routes to TypeSafe directly.
 // - ollama needs OLLAMA_BASE_URL.
 // - Any other provider must already be registered with setProvider (faux in tests).
 // Errors name the env key, never its value. Nothing here makes a network call.
 
-import { createProvider, type Model } from '@earendil-works/pi-ai';
+import { createProvider } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
-import { anthropicProvider } from '@earendil-works/pi-ai/providers/anthropic';
-import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
-import { openrouterProvider } from '@earendil-works/pi-ai/providers/openrouter';
 import { setProvider } from '@flue/runtime';
 // Not in the public entry: hasProvider and resolveModel read the same registry setProvider writes.
 import { hasProvider, resolveModel } from '@flue/runtime/internal';
@@ -32,7 +29,7 @@ import { loadConfig, type Config, type ThinkingLevel } from './config/env.ts';
 import { ConfigError } from './config/errors.ts';
 import { HOME_KEY } from './config/keys.ts';
 import { isDecisionSpec } from './decisions/registry.ts';
-import { registerCachedModels } from './model-catalog.ts';
+import { BUILTINS, registerCachedModels } from './model-catalog.ts';
 import type { Tier } from './types/core.ts';
 
 export type ModelSpec = { readonly provider: string; readonly modelId: string };
@@ -44,17 +41,8 @@ export type ModelMetadata = { readonly input: readonly string[] };
 export type ModelLookup = (spec: string) => ModelMetadata | undefined;
 
 const OLLAMA = 'ollama';
-const OPENROUTER = 'openrouter';
 const TYPESAFE = 'typesafe';
 const OLLAMA_KEY = 'OLLAMA_BASE_URL';
-
-// pi-ai built-in catalogs this project uses. Built lazily; they are static lists.
-type Catalog = () => { getModels(): readonly Model<any>[] };
-const BUILTIN_CATALOGS: ReadonlyMap<string, Catalog> = new Map<string, Catalog>([
-  ['anthropic', anthropicProvider],
-  ['openai', openaiProvider],
-  ['openrouter', openrouterProvider],
-]);
 
 const TIER_KEYS: Readonly<Record<Tier, string>> = {
   cheap: 'MODEL_TIER_CHEAP',
@@ -84,7 +72,7 @@ export function thinkingForTier(tier: Tier, config: Config = activeConfig()): Th
 
 /**
  * The decision model spec: the classifier and the ingress id extraction (D69).
- * The only slot where openrouter and typesafe are allowed (D41).
+ * The only slot where decision models (typesafe/*, openrouter/typesafe/*) are allowed (D41).
  */
 export function decisionModel(config: Config = activeConfig()): string {
   return checkSpec('MODEL_DECISION', config.models.decision, config, true);
@@ -115,7 +103,7 @@ export function lookupModel(spec: string): ModelMetadata | undefined {
       return undefined;
     }
   }
-  const catalog = BUILTIN_CATALOGS.get(parsed.provider);
+  const catalog = BUILTINS.get(parsed.provider);
   return catalog?.().getModels().find((m) => m.id === parsed.modelId);
 }
 
@@ -183,30 +171,24 @@ export function ollamaProvider(baseUrl: string, ids: readonly string[], apiKey: 
   });
 }
 
-function checkSpec(key: string, spec: string | undefined, config: Config, allowThirdParty: boolean): string {
+function checkSpec(key: string, spec: string | undefined, config: Config, decisionSlot: boolean): string {
   if (spec === undefined) throw ConfigError.of(key, 'is not set');
   const parsed = parseSpec(spec);
   if (parsed === undefined) throw ConfigError.of(key, "must be a 'provider/model' spec");
+  if (isDecisionSpec(spec)) {
+    if (decisionSlot) return spec;
+    throw ConfigError.of(key, 'may not use a TypeSafe decision model; those are allowed for MODEL_DECISION only (D41)');
+  }
   const { provider } = parsed;
-  if (provider === OPENROUTER) {
-    if (allowThirdParty) return spec;
-    throw ConfigError.of(key, 'may not use openrouter; openrouter is allowed for MODEL_DECISION only (D41)');
-  }
-  if (provider === TYPESAFE) {
-    if (!allowThirdParty) {
-      throw ConfigError.of(key, 'may not use typesafe; typesafe is allowed for MODEL_DECISION only (D41)');
-    }
-    if (!isDecisionSpec(spec)) throw ConfigError.of(key, "must be 'typesafe/<model>' with no further '/'");
-    return spec;
-  }
+  if (provider === TYPESAFE) throw ConfigError.of(key, "must be 'typesafe/<model>' with no further '/'");
   if (provider === OLLAMA) {
     if (config.providers.ollamaBaseUrl === undefined) {
       throw ConfigError.of(key, `uses the ollama provider but ${OLLAMA_KEY} is blank`);
     }
     return spec;
   }
-  if (BUILTIN_CATALOGS.has(provider) || hasProvider(provider)) return spec;
-  throw ConfigError.of(key, 'names a provider that is not built in (anthropic, openai) and not registered with setProvider');
+  if (BUILTINS.has(provider) || hasProvider(provider)) return spec;
+  throw ConfigError.of(key, `names a provider that is not built in (${[...BUILTINS.keys()].join(', ')}) and not registered with setProvider`);
 }
 
 // ---------------------------------------------------------------- import side effect

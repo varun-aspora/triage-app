@@ -66,12 +66,14 @@ describe('triage models refresh', () => {
     expect(paths).toContain('models refresh');
   });
 
-  test('refreshes both providers and lists the added models', async () => {
+  test('refreshes every provider and lists the added models', async () => {
     const calls: string[] = [];
     const r = await cli([], fakeFetch(calls));
     expect(r.code).toBe(EXIT.OK);
-    expect(calls.sort()).toEqual([`${PI_AI_CATALOG_BASE}anthropic.json`, `${PI_AI_CATALOG_BASE}openai.json`]);
-    expect(r.out).toBe(`anthropic: no models beyond the installed pi-ai\nopenai: ${NEW_ID}\n`);
+    expect(calls.sort()).toEqual(['anthropic', 'openai', 'openrouter'].map((p) => `${PI_AI_CATALOG_BASE}${p}.json`));
+    expect(r.out).toBe(
+      `anthropic: no models beyond the installed pi-ai\nopenai: ${NEW_ID}\nopenrouter: no models beyond the installed pi-ai\n`,
+    );
   });
 
   test('--provider and --json', async () => {
@@ -94,7 +96,7 @@ describe('triage models refresh', () => {
     const calls: string[] = [];
     const r = await cli(['--provider', 'ollama'], fakeFetch(calls));
     expect(r.code).toBe(EXIT.USAGE);
-    expect(r.err).toContain('--provider must be one of anthropic, openai');
+    expect(r.err).toContain('--provider must be one of anthropic, openai, openrouter');
     expect(calls).toEqual([]);
   });
 });

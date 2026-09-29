@@ -318,14 +318,23 @@ describe('models check', () => {
     expect(rs.every((r) => r.status === 'ok' || r.status === 'disabled')).toBe(true);
   });
 
-  test('openrouter on a tier is fail; on the classifier it is ok', async () => {
-    const rs = await models({ MODEL_TIER_MID: 'openrouter/x', MODEL_DECISION: 'openrouter/x', OPENROUTER_API_KEY: 'fake-or-key-01' });
-    expect(slot(rs, 'MODEL_TIER_MID')?.status).toBe('fail');
+  test('an openrouter chat model on a tier is ok (D101); a TypeSafe decision model is ok on the classifier only', async () => {
+    const rs = await models(
+      {
+        MODEL_TIER_MID: 'openrouter/google/gemini-3.7-flash',
+        MODEL_TIER_STRONG: 'openrouter/typesafe/jev-1.13',
+        MODEL_DECISION: 'openrouter/typesafe/jev-1.13',
+        OPENROUTER_API_KEY: 'fake-or-key-01',
+      },
+      { modelLookup: (spec) => (spec.includes('typesafe') ? undefined : { input: ['text', 'image'] }) },
+    );
+    expect(slot(rs, 'MODEL_TIER_MID')?.status).toBe('ok');
+    expect(slot(rs, 'MODEL_TIER_STRONG')?.status).toBe('fail');
     expect(slot(rs, 'MODEL_DECISION')?.status).toBe('ok');
   });
 
   test('openrouter on the classifier with a blank OPENROUTER_API_KEY is fail', async () => {
-    const rs = await models({ MODEL_DECISION: 'openrouter/x', OPENROUTER_API_KEY: '' });
+    const rs = await models({ MODEL_DECISION: 'openrouter/typesafe/jev-1.13', OPENROUTER_API_KEY: '' });
     expect(slot(rs, 'MODEL_DECISION')).toMatchObject({ status: 'fail', key_names: ['MODEL_DECISION', 'OPENROUTER_API_KEY'] });
   });
 

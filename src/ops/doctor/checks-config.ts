@@ -20,8 +20,7 @@ import {
 import { EMBEDDING_KEY, parseEmbeddingSpec, type EmbeddingSpec } from '../../embed/spec.ts';
 import { embedErrorLabel, probeEmbedder, type Embedder } from '../../embed/index.ts';
 import { loadRulesFile } from '../../gate/rules-file.ts';
-import { REFRESHABLE_PROVIDERS } from '../../model-catalog.ts';
-import { ensureConfiguredModels, type EnsureResult } from '../../model-refresh.ts';
+import { ensureConfiguredModels, inRefreshableCatalog, type EnsureResult } from '../../model-refresh.ts';
 import { decisionModel, codeWalkerModel, lookupModel, modelForTier, parseSpec, type ModelLookup } from '../../models.ts';
 import { ENTITIES, type Entity } from '../../types/core.ts';
 import { describeError } from './run.ts';
@@ -182,7 +181,7 @@ function slotRow(config: Config, key: string, validate: () => string, lookup: Mo
     return { row: row('fail', [...err.keys], err.problems.map((p) => `${p.key} ${p.reason}`).join('; ')) };
   }
   const provider = parseSpec(spec)?.provider ?? '';
-  if (REFRESHABLE_PROVIDERS.includes(provider) && lookup(spec) === undefined) {
+  if (inRefreshableCatalog(spec) && lookup(spec) === undefined) {
     // The spec is still returned, so the image row reports it too.
     return { row: row('fail', [key], `${key} is not in the ${provider} catalog, even after a catalog refresh`), spec };
   }

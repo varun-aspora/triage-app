@@ -104,7 +104,7 @@ describe('tier mapping', () => {
   });
 
   test('the fallback reports MODEL_TIER_STRONG when the strong spec is refused', () => {
-    const err = configError(() => models.codeWalkerModel(cfg({ ...BASE, MODEL_TIER_STRONG: `openrouter/${SEED}/x` })));
+    const err = configError(() => models.codeWalkerModel(cfg({ ...BASE, MODEL_TIER_STRONG: `typesafe/${SEED}` })));
     expect(err.keys).toEqual(['MODEL_TIER_STRONG']);
   });
 
@@ -151,16 +151,20 @@ describe('refused specs', () => {
       const err = configError(() => call(cfg({ ...BASE, [key]: `typesafe/${SEED}` })));
       expect(err.keys).toEqual([key]);
       expect(err.message).toContain(key);
-      expect(err.message).toContain('typesafe is allowed for MODEL_DECISION only');
+      expect(err.message).toContain('allowed for MODEL_DECISION only');
       expect(err.message).not.toContain(SEED);
     });
 
-    test(`openrouter in ${key} is refused and the error names the key only`, () => {
-      const err = configError(() => call(cfg({ ...BASE, [key]: `openrouter/${SEED}/model` })));
+    test(`a TypeSafe decision model through openrouter in ${key} is refused and the error names the key only`, () => {
+      const err = configError(() => call(cfg({ ...BASE, [key]: `openrouter/typesafe/${SEED}` })));
       expect(err.keys).toEqual([key]);
       expect(err.message).toContain(key);
       expect(err.message).toContain('D41');
       expect(err.message).not.toContain(SEED);
+    });
+
+    test(`an openrouter chat model in ${key} is accepted (D101)`, () => {
+      expect(call(cfg({ ...BASE, [key]: 'openrouter/google/gemini-3.7-flash' }))).toBe('openrouter/google/gemini-3.7-flash');
     });
   }
 
