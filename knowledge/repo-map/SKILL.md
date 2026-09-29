@@ -36,6 +36,8 @@ path to pass.
 | `engage` | atspl | `atspl:engage` | Go | Callback requests, survey responses and the user waitlist. Has a Kafka consumer. |
 | `banking-service` | rtl | `rtl:banking` | Go | The pre-CBS part of NRI onboarding (NRI, eVisa and survey modules). Harbor pulls the pre-CBS form data from it. |
 | `kyc-service` | rtl | `rtl:kyc` | Java (Gradle) | System of record for Persona KYC inquiries and eVisa. |
+| `verification-service` | rtl | `rtl:verification` | Java (Gradle) | KYC verification through the Sumsub, Persona, EFR and ComplyCube providers, with SQS event processing. Logs only in the registry, no database key. The service key is `verification`. |
+| `app-server` | rtl | `rtl:appserver` | Java (Gradle) | The core backend monolith behind the mobile app: remittances, user management, KYC, payments, referrals, support chat and the app APIs. Logs only in the registry, no database key; its log lines carry the device id and app headers of each request. The service key is `appserver`. |
 | `munin` | rtl | none | Java (Gradle) | Ingests a user's inbound email from consented channels (Google OAuth), stores each raw message as an `.eml` in S3 with one index row, and hands it to the downstream identity leg. An API server and a worker. No registry service, so code only. |
 | `x-ray` | rtl | none | TypeScript (Flue) | The Munin identity-leg agent. A run API (`POST /v1/runs`) that turns the messages Munin fetched into one validated identity record per leg; passport is the first leg. No registry service, so code only. |
 
