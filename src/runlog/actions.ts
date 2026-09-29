@@ -2,13 +2,14 @@
 //
 // Action log: one compact line per tool call in the run, from the root and
 // every delegate: time, agent, tool, the arguments and a one-line outcome
-// (rows, hits, groups, status, refusal reason, evidence id). Both text parts
-// pass the persisted redaction profile before they are stored, so the log
-// holds what events.jsonl may hold and nothing more. logActions() wraps the
-// tools each agent mounts, so no tool records itself. events.jsonl stays the
-// durable copy; this in-memory copy exists because a delegate's brief is
-// rendered synchronously at delegation time, while that file is written
-// through a setImmediate queue.
+// (rows, hits, groups, status, refusal reason, evidence id). A call a sandbox
+// script made (D112) is logged under the agent whose bash ran it, marked
+// '(script)'. Both text parts pass the persisted redaction profile before
+// they are stored, so the log holds what events.jsonl may hold and nothing
+// more. logActions() wraps the tools each agent mounts, so no tool records
+// itself. events.jsonl stays the durable copy; this in-memory copy exists
+// because a delegate's brief is rendered synchronously at delegation time,
+// while that file is written through a setImmediate queue.
 //
 // Repeat cache: runIoTool stores the ok envelope of a call that opted in
 // (IoToolSpec.repeat) under its repeat key, and an exact repeat within
@@ -32,6 +33,12 @@ import type {} from '../tools/_lib/context.ts';
 
 /** The agent name of the root's own calls. */
 export const ROOT_AGENT = 'triage';
+/**
+ * Set in a tool's run context when a sandbox script made the call (D112,
+ * src/agents/script-commands.ts). A symbol, so wrappers that spread the
+ * context keep it.
+ */
+export const SCRIPT_CALL = Symbol('scriptCall');
 /** Lines a delegate's brief carries; run_log reads the rest. */
 export const BRIEF_LINES = 60;
 /** How long an ok result may be reused. */
@@ -68,6 +75,8 @@ export type Action = {
   readonly outcome: string;
   /** Flue's id for the call, so propose_note can check the evidence it cites (D99). */
   readonly toolCallId?: string;
+  /** Set when a sandbox script made the call (D112); the agent is still the one whose bash ran it. */
+  readonly script?: true;
 };
 
 type Repeat = { readonly envelope: ToolEnvelope; readonly by: string; readonly at: string };
@@ -99,7 +108,7 @@ export function clockOf(iso: string): string {
 export function actionLine(a: Action, withCall = false): string {
   // withCall: run_log shows the call id, which propose_note cites as evidence; briefs leave it out to save tokens.
   const call = withCall && a.toolCallId !== undefined ? ` [call ${a.toolCallId}]` : '';
-  return `${clockOf(a.at)} ${a.agent} ${a.tool}${a.args !== '' ? ` ${a.args}` : ''} -> ${a.outcome}${call}`;
+  return `${clockOf(a.at)} ${a.agent}${a.script === true ? ' (script)' : ''} ${a.tool}${a.args !== '' ? ` ${a.args}` : ''} -> ${a.outcome}${call}`;
 }
 
 /** What one agent may see: its own entity's calls and the entity-free ones (root, code_walker); all for null. */
@@ -138,7 +147,7 @@ export function logActions(tools: readonly ToolDefinition[], ctx: ToolContext): 
     return {
       ...tool,
       async run(context: never) {
-        const { data, toolCallId } = context as { data?: unknown; toolCallId?: unknown };
+        const { data, toolCallId, [SCRIPT_CALL]: script } = context as { data?: unknown; toolCallId?: unknown; [SCRIPT_CALL]?: unknown };
         const entity = ctx.entity ?? entityOfCall(mark, data) ?? null;
         const add = (outcome: string): void => {
           const names = ctx.deps.run.redactionNames;
@@ -154,6 +163,7 @@ export function logActions(tools: readonly ToolDefinition[], ctx: ToolContext): 
               : excerpt(safe(argsText(data, mark?.picked === true ? entity : null)), ARGS_CHARS),
             outcome: excerpt(safe(outcome), OUTCOME_CHARS),
             ...(typeof toolCallId === 'string' ? { toolCallId } : {}),
+            ...(script === true ? { script: true as const } : {}),
           });
         };
         try {

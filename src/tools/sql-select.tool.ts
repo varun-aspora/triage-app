@@ -307,6 +307,7 @@ async function runSqlSelect(ctx: ToolContext, entity: Entity, services: readonly
   const systemic = data.scope === 'systemic';
   const check = validateSelect(data.sql);
   const cap = deps.budget.clampRows(ctx.config.sql.maxRows);
+  const cut = (answer: Answer): boolean => answer.truncated === true || answer.rows.length > cap;
   const where = `${entity}:${service}`;
   let plan: Plan | undefined;
 
@@ -378,7 +379,7 @@ async function runSqlSelect(ctx: ToolContext, entity: Entity, services: readonly
             ...(answer.columns !== undefined ? { columns: answer.columns } : {}),
             rows,
             row_count: rows.length,
-            truncated: answer.truncated === true || answer.rows.length > cap,
+            truncated: cut(answer),
           },
           ctx.config.budgets.maxModelBytesPerCall,
         );
@@ -388,9 +389,10 @@ async function runSqlSelect(ctx: ToolContext, entity: Entity, services: readonly
         records: parseAnswer(value).rows.slice(0, cap),
         ...(check.ok && check.rowKeys !== undefined ? { rowKeys: check.rowKeys } : {}),
       }),
+      // truncated stays in the file: a sandbox script reads it as the whole result (D112).
       stage: (value) => {
         const answer = parseAnswer(value);
-        return { service, ...(answer.columns !== undefined ? { columns: answer.columns } : {}), rows: answer.rows };
+        return { service, ...(answer.columns !== undefined ? { columns: answer.columns } : {}), rows: answer.rows, ...(cut(answer) ? { truncated: true } : {}) };
       },
       // A count that comes back as 0 is still a row: only 0 rows is found nothing (P6).
       empty: (value) => parseAnswer(value).rows.length === 0,

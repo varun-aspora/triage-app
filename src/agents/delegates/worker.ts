@@ -11,10 +11,11 @@
 // and the shared code, run_log and read_staged tools) minus the tools only
 // the root may call: finish_report, ask_requester, stop_blocked,
 // resolve_identity and both evidence tools. Like every delegate body it
-// cannot mount a subagent. Skills: the same notes as the single root
-// (rootSkills(..., 'single')). Method text:
-// logs.md and logs-<e>.md for the enabled entities, then the '## This worker'
-// footer.
+// cannot mount a subagent. The sandbox's script commands (D112) run through
+// these tools for the task, so a script's calls count against its cap.
+// Skills: the same notes as the single root (rootSkills(..., 'single')).
+// Method text: logs.md and logs-<e>.md for the enabled entities, then the
+// '## This worker' footer.
 //
 // Model: MODEL_WORKER when set, else the run's tier model (no override).
 // Each task may make TRIAGE_MAX_TOOL_CALLS_PER_WORKER tool calls; later
@@ -118,6 +119,10 @@ export function workerMounts(runId: RunId, options: { readonly env: DelegateEnv 
     '',
     '- Do only that job. Do not widen it or start another line of inquiry; name anything else you noticed in one line of the reply.',
     '- Write bulk output (rows, hits, file lists) to files under /data and read slices of them. Never paste it into the reply.',
+    // D112: the same commands the Triage agent's note describes, bound to this task's tools.
+    '- In bash, sql_select, logs_search, http_call and locate are also commands: the tool input as JSON (with entity) as one argument or on stdin; ' +
+      'the full result as JSON on stdout (exit 0; a note, if any, on stderr), a refusal on stderr (exit 1; 2 when the run budget is spent). ' +
+      'Each command call is one of your tool calls, with the same scope and log. Write their output to /data and loop over a few dozen ids at most.',
     `- Reply with the answer in at most ${WORKER_REPLY_LINES} lines, then the /data file paths you wrote and the tool calls you made (tool and main arguments). Say what you could not check and why.`,
     '- You cannot record evidence, resolve identities, ask the requester or end the run. The Triage agent does that from your reply.',
     `- Entities: ${entities.join(', ')}. A data tool takes the entity to query (for example sql_select with entity "${entities[0] ?? 'rtl'}") and each call reaches only that entity; the tool description lists each entity's services. The SSFB-only tools take no entity.`,

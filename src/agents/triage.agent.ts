@@ -8,7 +8,8 @@
 // picks what the root mounts. Each render:
 // - the tier model and its thinking level, once (useModel); in single shape
 //   also the compaction settings from compactionFor (S1.4);
-// - the one sandbox, once (useSandbox); delegates inherit it;
+// - the one sandbox, once (useSandbox); delegates inherit it. Its script
+//   commands (D112) run through the tools mounted here (bindRootTools);
 // - the method text as an always-on instruction (single: the shape's note and
 //   the entity tools per entity);
 // - split: toolsFor('triage'): resolve_identity, note_evidence and
@@ -61,6 +62,7 @@ import { type DelegateEnv, investigatorFor } from './delegates/investigator.ts';
 import { workerFor } from './delegates/worker.ts';
 import type { Escalation } from './escalation.ts';
 import { methodText } from './instruction.ts';
+import { bindRootTools } from './script-commands.ts';
 import { rootSkills } from './skills.ts';
 import {
   answerChainOf,
@@ -105,7 +107,9 @@ export function Triage({ id }: AgentProps): string {
   if (answered !== null) widenIdChain(deps, mergeIdChains(deps.idChain(), answered));
   const rootCtx = triageToolContext(id, deps, rt);
   const rootTools = single ? toolsFor('agent', rootCtx) : toolsFor('triage', rootCtx);
-  for (const tool of logActions(rootTools, rootCtx)) useTool(watchFinishReport(id, tool));
+  const mounted = logActions(rootTools, rootCtx).map((tool) => watchFinishReport(id, tool));
+  for (const tool of mounted) useTool(tool);
+  bindRootTools(id, mounted);
 
   // After the tools, so the single shape's run section lists the entity tools actually mounted.
   const services = Object.fromEntries(plan.entities.map((e) => [e, rt.registry.services(e)]));

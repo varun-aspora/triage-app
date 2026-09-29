@@ -97,6 +97,25 @@ full result is in `/data`. Read slices of it with `read_staged` (a jq filter
 or a line range) instead of running the call again, and count or group in the
 filter. Put the `/data` path in the evidence item's `raw_ref`.
 
+## Scripts can query
+
+In `bash`, `sql_select`, `logs_search`, `http_call` and `locate` are commands:
+the tool's input as JSON (with `entity`) as one argument or on stdin, the
+full result as JSON on stdout (exit 0; a note, if any, on stderr), a refusal
+or error on stderr (exit 1; 2 when the run's budget is spent). Each call is a
+tool call, with the same scope, budget and audit and a run log line marked
+`(script)`; ids in its result become leads. Write results to `/data` and print
+only counts: `bash` output is cut. A command has a time limit, so loop over a
+few dozen ids at most. If the commands are not found, this sandbox has none.
+
+```sh
+jq -r '.[]' /data/ids.json | while read -r id; do
+  jq -nc --arg id "$id" '{entity: "rtl", service: "workflow", sql: "SELECT id, status FROM workflow_executions WHERE reference_id = $1", params: [$id]}' \
+    | sql_select > "/data/wf-$id.json" || echo "$id refused" >&2
+done
+jq -s 'map(.rows | length)' /data/wf-*.json
+```
+
 ## Workers
 
 Use `worker` for a bulk job that would fill your context: tallying many log

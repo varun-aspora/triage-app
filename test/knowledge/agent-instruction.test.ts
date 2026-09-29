@@ -85,10 +85,11 @@ describe('agent.md', () => {
     expect(agent).not.toMatch(/claude|codex|\bTODO\b|\bT\d{2}\.\d+\b|AGENTS\.md|SKILL\.md|\bD\d{2,3}\b/i);
   });
 
-  test('is short: about a hundred and fifty lines', () => {
+  // Raised from 165 for the Scripts can query section and its example (D112).
+  test('is short: under a hundred and eighty lines', () => {
     const lines = agent.trimEnd().split('\n').length;
     expect(lines).toBeGreaterThan(80);
-    expect(lines).toBeLessThan(165);
+    expect(lines).toBeLessThan(180);
   });
 
   test('names only the single agent\'s tools, data tools by their name with an entity input', () => {

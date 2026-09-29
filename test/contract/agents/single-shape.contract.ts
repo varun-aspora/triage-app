@@ -18,6 +18,9 @@
 // - the routers (this harness and src/evals/contract/faux-script.ts) route
 //   the real single root prompt as the root and the worker prompt as
 //   'worker'.
+// - script commands (D112): the root's bash runs sql_select and the worker's
+//   bash runs logs_search as sandbox commands, each through its own agent's
+//   tools, which the run log shows.
 //
 // A test home keeps every DSN and Quickwit key blank, and the tool pipeline
 // answers not configured before it looks for a fixture. As in the SIM and
@@ -363,6 +366,48 @@ describe('single shape: one scripted run', () => {
     const run = await b.store.getRun(id);
     expect(run?.report).not.toBeNull();
     expect(run?.report?.entities_consulted).toEqual(['rtl']);
+  });
+});
+
+// ------------------------------------------------------------------ script commands (D112)
+
+describe('single shape: script commands in the sandbox', () => {
+  const sqlJson = JSON.stringify({ entity: 'rtl', service: 'workflow', sql: WORKFLOW_SQL, params: [LEAD] });
+  let s: ReturnType<typeof scriptAgents>;
+  let result: Awaited<ReturnType<typeof runTriage>>;
+
+  beforeAll(async () => {
+    const id = nextRunId('single_script');
+    const init = initWithLead(id);
+    await createRun(b.store, init);
+    s = scriptAgents(fake, {
+      triage: [
+        toolCall('bash', { command: `sql_select '${sqlJson}' | jq -r '.rows[0].current_step_identifier'` }),
+        toolCall('task', { agent: 'worker', prompt: `Job: count appserver log lines for ${LEAD} with a script.\nIds: ${LEAD}` }),
+        finish(reportDraft(init)),
+        text('report written'),
+      ],
+      worker: [
+        toolCall('bash', { command: `logs_search '${JSON.stringify(COUNT_INPUT)}' | jq -r '.count'` }),
+        toolCall('run_log', {}),
+        text(WORKER_REPLY),
+      ],
+    });
+    result = await runTriage(b.Triage, id, init);
+  });
+
+  test("the root's and the worker's scripts reach the fixtures through their own tools", () => {
+    expect(result.ok).toBe(true);
+    expect(fake.failures()).toEqual([]);
+    expect(s.left()).toEqual({ triage: 0, worker: 0 });
+    const rootBash = (s.callsFor('triage')[1] as SeenCall).toolResults.find((r) => r.toolName === 'bash');
+    expect(rootBash?.text).toContain('KYC_REVIEW');
+    const workerBash = (s.callsFor('worker')[1] as SeenCall).toolResults.find((r) => r.toolName === 'bash');
+    expect(workerBash?.text).toMatch(/(^|\n)3(\n|$)/);
+    // Flue's task path binds the worker's tools to its bash: the run log names each script call's agent.
+    const log = (s.callsFor('worker')[2] as SeenCall).toolResults.find((r) => r.toolName === 'run_log');
+    expect(log?.text).toContain('triage (script) sql_select');
+    expect(log?.text).toContain('worker (script) logs_search');
   });
 });
 

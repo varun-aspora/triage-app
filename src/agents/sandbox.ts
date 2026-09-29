@@ -4,8 +4,11 @@
 // - virtual (the default when unset): just-bash with no network (curl and
 //   wget are not even registered), python3 only when TRIAGE_SANDBOX_PYTHON is
 //   true, the hardened resource limits, and a per-command timeout of
-//   TRIAGE_SANDBOX_TIMEOUT_MS. Its filesystem is in memory except for two
-//   mounts (D105):
+//   TRIAGE_SANDBOX_TIMEOUT_MS. It has four extra commands (D112): sql_select,
+//   logs_search, http_call and locate, which the triage-app process runs
+//   through the calling agent's own tool (src/agents/script-commands.ts), so a
+//   script reaches only what a tool call could, through the same gates. Its
+//   filesystem is in memory except for two mounts (D105):
 //   - /data is the run's own directory on disk,
 //     <TRIAGE_RUNS_DIR>/<run id>/sandbox/ (mode 700). Flue creates the
 //     sandbox again on every submission with the run id, so the same run
@@ -19,7 +22,9 @@
 //   import inside createSandbox(), so nothing is fetched until an agent
 //   initializes. A blank API key or an SDK that does not load throws
 //   'sandbox not configured'. There is no fallback to another backend. They
-//   still get a new, empty sandbox on every submission.
+//   still get a new, empty sandbox on every submission, and have no script
+//   commands: the commands run in this process, which a remote shell cannot
+//   call.
 // - local, or any other value: refused. local() is not an isolation
 //   boundary. The config loader refuses it too; this is the second check.
 //
@@ -53,6 +58,7 @@ import {
 import * as v from 'valibot';
 import { type Config, loadConfig, rawKeyState } from '../config/env.ts';
 import { RunIdSchema } from '../types/core.ts';
+import { scriptCommands } from './script-commands.ts';
 
 export const SANDBOX_PROVIDER_KEY = 'TRIAGE_SANDBOX_PROVIDER';
 export const SANDBOX_PROVIDERS = ['virtual', 'e2b', 'daytona'] as const;
@@ -214,6 +220,7 @@ function virtualFactory(config: Config, options: SandboxFactoryOptions): Sandbox
         () =>
           new Bash({
             fs,
+            customCommands: scriptCommands(id),
             python: config.sandbox.python,
             executionLimitProfile: 'hardened',
             defenseInDepth: options.defenseInDepth ?? true,

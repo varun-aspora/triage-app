@@ -232,13 +232,34 @@ to `/data/<call_id>.json` in the sandbox.
   `read`, `grep` and `glob` work on the same files. `write` and `edit` are for
   scratch files only.
 - The sandbox has no network and no access to the host. It cannot reach any
-  entity system; the typed tools are the only way in.
+  entity system except through the script commands below, which are your
+  typed tools.
 - Files in `/data` are kept for the whole run, across a question to the
   requester and a resume. Only saved evidence reaches the report, so anything
   you need goes into `note_evidence`. Put the `/data` path in the evidence
   item's `raw_ref`.
 - On some deployments the staged text is masked. If ids in `/data` look masked,
   work from the tool summary instead of joining on them.
+
+## Scripts can query
+
+In `bash`, `sql_select`, `logs_search`, `http_call` and `locate` are commands:
+the tool's input as JSON (no entity: it is yours) as one argument or on
+stdin, the full result as JSON on stdout (exit 0; a note, if any, on stderr),
+a refusal or error on stderr (exit 1; 2 when the run's budget is spent). Each
+call is one of your tool calls, with the same scope, budget and audit and a
+run log line marked `(script)`; ids in its result become leads. Write results
+to `/data` and print only counts: `bash` output is cut. A command has a time
+limit, so loop over a few dozen ids at most. If the commands are not found,
+this sandbox has none.
+
+```sh
+jq -r '.[]' /data/ids.json | while read -r id; do
+  jq -nc --arg id "$id" '{service: "workflow", sql: "SELECT id, status FROM workflow_executions WHERE reference_id = $1", params: [$id]}' \
+    | sql_select > "/data/wf-$id.json" || echo "$id refused" >&2
+done
+jq -s 'map(.rows | length)' /data/wf-*.json
+```
 
 ## SSFB extras
 

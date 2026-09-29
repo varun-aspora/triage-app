@@ -19,7 +19,8 @@
 // The second half wires one run:
 // - triageRuntime() loads config, registry and knowledge once per process,
 //   builds the connectors (real mode only), the sandbox factory and a run
-//   store handle, and installs the tripwire (the safety gate). Token usage
+//   store handle, and installs the tripwire (the safety gate) and, on the
+//   virtual sandbox, the script command scopes (D112). Token usage
 //   is counted by the usage meter that bootRuntime installs (D59);
 //   finish_report reads it through runUsageInMemory.
 //   configureTriageRuntime() replaces any of these (tests, eval driver).
@@ -75,6 +76,7 @@ import { investigatorName } from './delegates/investigator.ts';
 import { WORKER_NAME } from './delegates/worker.ts';
 import { type Escalation, type EscalationSnapshot, escalationFor, releaseEscalation } from './escalation.ts';
 import { sandboxFactory } from './sandbox.ts';
+import { installScriptScope, releaseRootTools } from './script-commands.ts';
 import { currentKnowledge, type Knowledge, loadKnowledge, rootSkills } from './skills.ts';
 import { logRunEvent, setRunRedactionNames } from '../runlog/event-log.ts';
 import { runUsageInMemory } from '../usage/meter.ts';
@@ -469,6 +471,8 @@ function buildRuntime(o: TriageRuntimeOptions): TriageRuntime {
       tripwireOptionsFor(config, registry, audit, { interfaceOf: (runId) => runInterfaces.get(runId) ?? 'cli' }),
     );
   }
+  // Only the virtual sandbox has script commands (D112).
+  if (config.sandbox.provider === 'virtual') installScriptScope();
   const repoCommit = o.repoCommit ?? (real ? commitReaderFor({ config, runner: createExecRunner() }) : undefined);
   return Object.freeze({
     config,
@@ -631,5 +635,6 @@ export function settleRun(runId: RunId): void {
   releaseObservedIds(runId);
   releaseLocateState(runId);
   releaseActions(runId);
+  releaseRootTools(runId);
   installedTripwire()?.forgetRun(runId);
 }
