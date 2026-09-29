@@ -28,7 +28,6 @@ export function EnvBanner({ session }: { session?: Session }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <span style={{ width: 8, height: 8, borderRadius: 4, background: '#ffffff' }} />
         <span style={{ fontWeight: 600, letterSpacing: '0.08em' }}>{theme.name}</span>
-        {session?.env_label !== undefined && <span className="mono">{session.env_label}</span>}
       </div>
       {note !== undefined && <span>{note}</span>}
     </div>

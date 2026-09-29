@@ -89,8 +89,6 @@ export function createUiRoutes(deps: UiRouteDeps): Hono {
       mock_mode: config.mock.enabled,
       entities: enabledEntities(),
       allow_slack_post: config.http.allowSlackPost,
-      // Only here, not in the public config.json: the label names the deployment.
-      env_label: config.display.envLabel,
     });
   });
 
