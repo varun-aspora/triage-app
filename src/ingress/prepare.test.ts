@@ -131,7 +131,7 @@ describe('slack input', () => {
       ],
       attachments: [
         { name: 'shot.png', mime: 'image/png', bytes_ref: '/synthetic/1.png' },
-        { name: 'log.txt', mime: 'text/plain', skipped: 'not_image' },
+        { name: 'notes.docx', mime: 'application/msword', skipped: 'not_supported' },
       ],
       names: ['Ravi Kumar', 'Ops Bot'],
     };
@@ -152,6 +152,7 @@ describe('slack input', () => {
     expect(p.request.source).toMatchObject({ kind: 'slack', channel_id: 'C0SYNTH01', thread_ts: '1695460000.123456' });
     expect(p.request.attachments).toEqual([{ name: 'shot.png', mime: 'image/png', bytes_ref: '/synthetic/1.png' }]);
     expect(p.redaction_names).toEqual(['Ravi Kumar', 'Ops Bot']);
+    expect(p.unread_files).toEqual([{ name: 'notes.docx', reason: 'type not supported' }]);
     // The names ride next to the request, not inside it.
     expect(Object.keys(p.request)).not.toContain('redaction_names');
   });

@@ -17,6 +17,7 @@ export const PIPELINE_EVENT_TYPES = [
   'run_created',
   'preflight',
   'identity',
+  'attachments',
   'classifier',
   'classification',
   'phase',

@@ -12,9 +12,11 @@
 //    Mock mode answers from the fixture and never calls fetch; a strict miss
 //    throws FixtureMissError. Real mode calls conversations.replies with
 //    cursor pagination and users.info once per author.
-// 3. In real mode only, downloads png, jpeg, gif and webp files up to
+// 3. In real mode only, downloads png, jpeg, gif and webp images, and the
+//    text-like files and PDFs of src/ingress/documents.ts (D102), up to
 //    maxAttachmentBytes into <dataDir>/attachments/<run_id>/ and returns
-//    their paths as bytes_ref. Other files are listed with no bytes_ref.
+//    their paths as bytes_ref. Other files are listed with no bytes_ref and
+//    the reason they were skipped.
 // 4. Writes one audit line for the read (target SLACK_BOT_TOKEN).
 //
 // The Authorization header is added in one place, and only for https
@@ -33,6 +35,7 @@ import type { ResolveIo } from '../mock/resolve.ts';
 import type { MockSettings } from '../mock/settings.ts';
 import { RunIdSchema, type Interface } from '../types/core.ts';
 import type { Attachment } from '../types/request.ts';
+import { baseMime, DOCUMENT_MIMES, TEXT_MIMES } from './documents.ts';
 import type { RawThread, ThreadFileMessage } from './normalise.ts';
 
 // ------------------------------------------------------------------ errors
@@ -76,9 +79,9 @@ export const TEMPLATE_NAME_FIELDS: readonly string[] = Object.freeze(['raised by
 
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
-export type SkipReason = 'not_image' | 'too_large' | 'refused_host' | 'download_failed' | 'mock';
+export type SkipReason = 'not_supported' | 'too_large' | 'refused_host' | 'download_failed' | 'mock';
 
-/** One file on a thread message. bytes_ref is set only for a downloaded image. */
+/** One file on a thread message. bytes_ref is set only for a downloaded image, text file or PDF. */
 export type SlackAttachment = {
   readonly name: string;
   readonly mime: string;
@@ -105,7 +108,7 @@ export type SlackFetchDeps = {
   readonly mock: { readonly settings: Pick<MockSettings, 'mockMode'>; readonly resolveIo: ResolveIo };
   readonly audit: AuditSink;
   readonly maxAttachmentBytes: number;
-  /** config.paths.dataDir. Images go to <dataDir>/attachments/<run_id>/. */
+  /** config.paths.dataDir. Downloaded files go to <dataDir>/attachments/<run_id>/. */
   readonly dataDir: string;
   readonly run_id: string;
   readonly interface: Interface;
@@ -226,7 +229,24 @@ export async function fetchSlackThread(ref: SlackThreadRef, deps: SlackFetchDeps
   return thread;
 }
 
-/** The thread in the shape buildTriageRequest takes: only downloaded images become attachments. */
+/** A file the run could not read, and why, in words for the agent and the report. */
+export type UnreadFile = { readonly name: string; readonly reason: string };
+
+const SKIP_TEXT: Readonly<Record<Exclude<SkipReason, 'mock'>, string>> = {
+  not_supported: 'type not supported',
+  too_large: 'over the size limit',
+  refused_host: 'not stored on Slack',
+  download_failed: 'download failed',
+};
+
+/** The thread's files that were not downloaded. Mock mode downloads nothing, so its skips are left out. */
+export function unreadFiles(thread: SlackThread): UnreadFile[] {
+  return thread.attachments.flatMap((a) =>
+    a.skipped === undefined || a.skipped === 'mock' ? [] : [{ name: a.name, reason: SKIP_TEXT[a.skipped] }],
+  );
+}
+
+/** The thread in the shape buildTriageRequest takes: only downloaded files become attachments. */
 export function toRawThread(thread: SlackThread): RawThread {
   const attachments: Attachment[] = [];
   for (const a of thread.attachments) {
@@ -541,9 +561,9 @@ async function handleFiles(
   const dir = resolve(deps.dataDir, 'attachments', deps.run_id);
   for (const [i, f] of files.entries()) {
     const base = { name: f.name, mime: f.mime, ...(f.size !== undefined ? { size: f.size } : {}) };
-    const ext = IMAGE_MIMES[f.mime];
+    const ext = IMAGE_MIMES[f.mime] ?? DOCUMENT_MIMES[baseMime(f.mime)];
     if (ext === undefined) {
-      out.push({ ...base, skipped: 'not_image' });
+      out.push({ ...base, skipped: 'not_supported' });
       continue;
     }
     if (f.size !== undefined && f.size > deps.maxAttachmentBytes) {
@@ -585,9 +605,9 @@ async function download(
     deps.signal.throwIfAborted();
     return { skipped: 'download_failed' };
   }
-  const type = (res.headers.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase() ?? '';
+  const type = baseMime(res.headers.get('content-type') ?? '');
   // Slack answers a missing files:read scope with an HTML page and status 200.
-  if (!res.ok || type !== mime) {
+  if (!res.ok || !sameType(type, baseMime(mime))) {
     await res.body?.cancel().catch(() => undefined);
     return { skipped: 'download_failed' };
   }
@@ -616,6 +636,14 @@ async function download(
     return { skipped: 'download_failed' };
   }
   return { bytes: Buffer.concat(chunks, total) };
+}
+
+// Slack may serve a text file under another text type than the one it lists
+// (a .log listed as text/x-log comes back as text/plain), so for text files
+// any text type but HTML is taken.
+function sameType(served: string, listed: string): boolean {
+  if (served === listed) return true;
+  return TEXT_MIMES[listed] !== undefined && served.startsWith('text/') && served !== 'text/html';
 }
 
 function str(x: unknown): string {
