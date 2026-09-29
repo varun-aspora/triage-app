@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ApiError } from '../../api/client.ts';
 import { getRunEvents } from '../../api/endpoints.ts';
 import type { RunEvent } from '../../api/types.ts';
+import { Button } from '../../components/Button.tsx';
 import { describeError } from '../../components/LoadState.tsx';
 import { Notice } from '../../components/Notice.tsx';
 import { Panel } from '../../components/Panel.tsx';
@@ -19,11 +20,10 @@ const PAGE = 1000;
 
 const FILTER_LABELS: Record<StepFilter, string> = { all: 'All', pipeline: 'Pipeline', model: 'Model', tools: 'Tools', errors: 'Errors' };
 
-export function StepsPanel({ runId, live }: { runId: string; live: boolean }) {
+/** The run's events, read every page there is and kept fresh while the run goes on. */
+export function useRunEvents(runId: string, live: boolean): { events: RunEvent[]; error: unknown } {
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [error, setError] = useState<unknown>(undefined);
-  const [filter, setFilter] = useState<StepFilter>('all');
-  const [open, setOpen] = useState<ReadonlySet<number>>(new Set());
   const next = useRef(0);
   const liveRef = useRef(live);
   liveRef.current = live;
@@ -58,6 +58,31 @@ export function StepsPanel({ runId, live }: { runId: string; live: boolean }) {
     };
     // A change of live starts over, so the lines written as the run settled are read once more.
   }, [runId, live]);
+
+  return { events, error };
+}
+
+export function StepsPanel({ runId, live }: { runId: string; live: boolean }) {
+  const { events, error } = useRunEvents(runId, live);
+  return <StepsView events={events} error={error} live={live} />;
+}
+
+/** The running view keeps the log shut so the page stays short; the events are read either way, for the investigator rows. */
+export function CollapsedSteps({ events, error, live }: { events: readonly RunEvent[]; error: unknown; live: boolean }) {
+  const [shown, setShown] = useState(false);
+  return (
+    <>
+      <Button size="sm" aria-expanded={shown} onClick={() => setShown((s) => !s)} style={{ alignSelf: 'flex-start' }}>
+        {shown ? 'Hide steps' : 'Show steps'} ({events.length})
+      </Button>
+      {shown && <StepsView events={events} error={error} live={live} />}
+    </>
+  );
+}
+
+function StepsView({ events, error, live }: { events: readonly RunEvent[]; error: unknown; live: boolean }) {
+  const [filter, setFilter] = useState<StepFilter>('all');
+  const [open, setOpen] = useState<ReadonlySet<number>>(new Set());
 
   const shown = events.filter((e) => matchesStepFilter(e, filter));
   const toggle = (i: number) =>

@@ -22,6 +22,7 @@ import { ENTITY_LABELS } from '../../lib/constants.ts';
 import { formatDateTime, formatRelative, formatTokens } from '../../lib/format.ts';
 import { runStatusOf, runStatusTone, type StatusLook } from '../../lib/status.ts';
 import { resolveTimeExpr } from './time-expr.ts';
+import type { AgentActivity } from './verdict-logic.ts';
 
 // ------------------------------------------------------------------ list
 
@@ -328,7 +329,7 @@ export function inferFailure(run: Pick<RunDetail, 'classification' | 'evidence' 
 export type InvestigatorRow = {
   key: EvidenceKey;
   label: string;
-  state: 'findings in' | 'working' | 'waiting';
+  state: 'findings in' | 'working' | 'waiting' | 'failed';
   detail: string;
 };
 
@@ -337,10 +338,13 @@ const BEFORE_DISPATCH: readonly RunPhase[] = ['created', 'preflight', 'identity'
 /**
  * One row per investigator for the running view: the entities the classifier
  * expects plus any entity that has already stored evidence, then the code
- * walker. There is no live per-agent status, so this is inferred from stored
- * evidence versions.
+ * walker. State comes from stored evidence versions; the last tool call and a
+ * failed task are read from the event log when it has them.
  */
-export function deriveInvestigators(run: Pick<RunDetail, 'classification' | 'evidence' | 'phase'>): InvestigatorRow[] {
+export function deriveInvestigators(
+  run: Pick<RunDetail, 'classification' | 'evidence' | 'phase'>,
+  activity: ReadonlyMap<string, AgentActivity> = new Map(),
+): InvestigatorRow[] {
   const version = new Map(run.evidence.map((e) => [e.key, e.version]));
   const likely = run.classification?.proposed.entities_likely ?? [];
   const entities = (Object.keys(ENTITY_LABELS) as Entity[]).filter((e) => likely.includes(e) || version.has(e));
@@ -350,16 +354,37 @@ export function deriveInvestigators(run: Pick<RunDetail, 'classification' | 'evi
     const v = version.get(e);
     if (v !== undefined) return { key: e, label: `${ENTITY_LABELS[e]} investigator`, state: 'findings in', detail: `Version ${v} stored` };
     return started
-      ? { key: e, label: `${ENTITY_LABELS[e]} investigator`, state: 'working', detail: 'No findings stored yet' }
+      ? { key: e, label: `${ENTITY_LABELS[e]} investigator`, ...liveState(activity, e) }
       : { key: e, label: `${ENTITY_LABELS[e]} investigator`, state: 'waiting', detail: 'Starts after classification' };
   });
   const code = version.get('code');
   rows.push(
     code !== undefined
       ? { key: 'code', label: 'Code walker', state: 'findings in', detail: `Version ${code} stored` }
-      : { key: 'code', label: 'Code walker', state: 'waiting', detail: 'Starts when an investigator asks for code' },
+      : { key: 'code', label: 'Code walker', ...codeState(activity) },
   );
   return rows;
+}
+
+const ACTIVITY_AGENTS: Readonly<Record<EvidenceKey, readonly string[]>> = {
+  ssfb: ['investigate_ssfb', 'investigate_ssfb_deep'],
+  atspl: ['investigate_atspl', 'investigate_atspl_deep'],
+  rtl: ['investigate_rtl', 'investigate_rtl_deep'],
+  code: ['code_walker'],
+};
+
+/** Working, or failed if its task errored; the last tool call replaces the "nothing stored" text only when the log has one. */
+function liveState(activity: ReadonlyMap<string, AgentActivity>, key: EvidenceKey): Pick<InvestigatorRow, 'state' | 'detail'> {
+  // The deep pass runs after the plain one, so it is the one to report.
+  const latest = ACTIVITY_AGENTS[key].map((a) => activity.get(a)).findLast((a) => a !== undefined);
+  const call = latest?.tool === undefined ? undefined : `${latest.tool}${latest.target !== undefined ? ` ${latest.target}` : ''}`;
+  if (latest?.failed === true) return { state: 'failed', detail: call === undefined ? 'The task failed' : `The task failed after ${call}` };
+  return { state: 'working', detail: call === undefined ? 'No findings stored yet' : `Last: ${call}` };
+}
+
+function codeState(activity: ReadonlyMap<string, AgentActivity>): Pick<InvestigatorRow, 'state' | 'detail'> {
+  if (activity.get('code_walker') === undefined) return { state: 'waiting', detail: 'Starts when an investigator asks for code' };
+  return liveState(activity, 'code');
 }
 
 export function investigatorLook(state: InvestigatorRow['state']): StatusLook {
@@ -370,6 +395,8 @@ export function investigatorLook(state: InvestigatorRow['state']): StatusLook {
       return { tone: 'info', icon: 'spinner' };
     case 'waiting':
       return { tone: 'muted', icon: 'clock' };
+    case 'failed':
+      return { tone: 'rust', icon: 'x' };
   }
 }
 

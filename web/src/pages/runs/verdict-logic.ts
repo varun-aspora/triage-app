@@ -153,6 +153,57 @@ export function appendEvents(have: readonly RunEvent[], page: readonly RunEvent[
   return [...have, ...page.filter((e) => e.index > last)];
 }
 
+/** What one investigator's latest delegate task is doing, read from the event log. */
+export type AgentActivity = { failed: boolean; tool?: string; target?: string };
+
+const MAX_TARGET = 60;
+
+/** The first text argument of a tool call, cut short: enough to tell which table, file or query. */
+function targetOf(args: unknown): string | undefined {
+  if (typeof args !== 'object' || args === null) return undefined;
+  const text = Object.values(args).find((v): v is string => typeof v === 'string' && v.trim() !== '');
+  return text === undefined ? undefined : oneLine(text, MAX_TARGET);
+}
+
+function oneLine(text: string, max: number): string {
+  const one = text.replace(/\s+/g, ' ').trim();
+  return one.length > max ? `${one.slice(0, max)}…` : one;
+}
+
+function taskIdOf(d: Data): string | undefined {
+  if (typeof d.taskId === 'string') return d.taskId;
+  const session = typeof d.session === 'string' ? d.session : '';
+  return session.startsWith('task:') ? session.slice(session.lastIndexOf(':') + 1) : undefined;
+}
+
+/**
+ * Per delegate agent name (investigate_ssfb, code_walker, ...): whether its
+ * latest task errored and its latest tool call. A tool event belongs to a task
+ * by taskId, or by a session id that ends in the task id. Agents whose task
+ * never appears in the log are left out.
+ */
+export function agentActivity(events: readonly Pick<RunEvent, 'type' | 'data'>[]): Map<string, AgentActivity> {
+  const agentOfTask = new Map<string, string>();
+  const out = new Map<string, AgentActivity>();
+  for (const e of events) {
+    const d = dataOf(e);
+    const id = taskIdOf(d);
+    if (id === undefined) continue;
+    if (e.type === 'task_start' && typeof d.agent === 'string') {
+      agentOfTask.set(id, d.agent);
+      // A later task of the same agent (a deep pass) replaces the earlier one.
+      out.set(d.agent, { failed: false });
+      continue;
+    }
+    const agent = agentOfTask.get(id);
+    const have = agent === undefined ? undefined : out.get(agent);
+    if (agent === undefined || have === undefined) continue;
+    if (e.type === 'task') out.set(agent, { ...have, failed: d.isError === true });
+    else if (e.type === 'tool_start' && typeof d.toolName === 'string') out.set(agent, { ...have, tool: d.toolName, target: targetOf(d.args) });
+  }
+  return out;
+}
+
 const MAX_EXCERPT = 180;
 
 /** One line a person scans for; the full event is one click away. Mirrors src/runlog/summary.ts. */
@@ -296,6 +347,5 @@ function excerpt(value: unknown): string {
       text = '';
     }
   }
-  const one = text.replace(/\s+/g, ' ').trim();
-  return one.length > MAX_EXCERPT ? `${one.slice(0, MAX_EXCERPT)}…` : one;
+  return oneLine(text, MAX_EXCERPT);
 }

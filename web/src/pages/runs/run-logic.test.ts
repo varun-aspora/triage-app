@@ -252,6 +252,42 @@ describe('deriveInvestigators', () => {
   });
 });
 
+describe('deriveInvestigators with activity', () => {
+  const run = { phase: 'investigating', classification: decision(['ssfb', 'rtl']), evidence: [] } as Pick<RunDetail, 'phase' | 'classification' | 'evidence'>;
+
+  test('the last tool call replaces the placeholder, a failed task shows as failed', () => {
+    const rows = deriveInvestigators(
+      run,
+      new Map([
+        ['investigate_ssfb', { failed: false, tool: 'sql_select', target: 'select 1' }],
+        ['investigate_rtl', { failed: true, tool: 'quickwit_search' }],
+      ]),
+    );
+    expect(rows.map((r) => [r.state, r.detail])).toEqual([
+      ['working', 'Last: sql_select select 1'],
+      ['failed', 'The task failed after quickwit_search'],
+      ['waiting', 'Starts when an investigator asks for code'],
+    ]);
+  });
+
+  test('the deep pass is the one reported; no activity keeps the current text', () => {
+    const rows = deriveInvestigators(
+      run,
+      new Map([
+        ['investigate_ssfb', { failed: true }],
+        ['investigate_ssfb_deep', { failed: false, tool: 'read_file' }],
+      ]),
+    );
+    expect(rows[0]).toMatchObject({ state: 'working', detail: 'Last: read_file' });
+    expect(rows[1]?.detail).toBe('No findings stored yet');
+  });
+
+  test('stored findings win over a failed task', () => {
+    const rows = deriveInvestigators({ ...run, evidence: [{ key: 'ssfb', version: 1 }] }, new Map([['investigate_ssfb', { failed: true }]]));
+    expect(rows[0]?.state).toBe('findings in');
+  });
+});
+
 test('runningSteps', () => {
   expect(runningSteps('created').preflight).toBe('current');
   const s = runningSteps('investigating');

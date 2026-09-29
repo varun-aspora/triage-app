@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router';
 import { ApiError } from '../../api/client.ts';
 import { getRun } from '../../api/endpoints.ts';
@@ -37,9 +37,9 @@ import {
 } from './block-logic.ts';
 import { BlockHistoryPanel, BlockPanel, ResumeForm, ResumePanel } from './RunBlock.tsx';
 import { AskForm, SlackPostPanel } from './RunForms.tsx';
-import { StepsPanel } from './RunSteps.tsx';
+import { CollapsedSteps, StepsPanel, useRunEvents } from './RunSteps.tsx';
 import { VerdictPanel } from './RunVerdict.tsx';
-import { verdictLabel } from './verdict-logic.ts';
+import { agentActivity, verdictLabel } from './verdict-logic.ts';
 import { ClassificationPanel, Dash, EvidencePanel, IdChainPanel, KV, PhaseStepper, RequestPanel, RunHeader, UsagePanel } from './RunParts.tsx';
 import {
   blockedSteps,
@@ -178,7 +178,10 @@ function RunningView({
   resuming: boolean;
 }) {
   const now = useNow(1000);
-  const investigators = deriveInvestigators(run);
+  const { events, error: eventsError } = useRunEvents(run.run_id, true);
+  // useNow re-renders every second; only a new page of events changes the activity.
+  const activity = useMemo(() => agentActivity(events), [events]);
+  const investigators = deriveInvestigators(run, activity);
   // A note while it investigates (D72), or Resume once it stalled (D71); nothing before the first dispatch or while it waits on an answer.
   // While a stalled run's resume is in flight the Resume form stays, disabled, so it cannot be sent twice.
   const from = resuming ? 'stalled' : resumeFrom(run);
@@ -231,7 +234,7 @@ function RunningView({
           </Panel>
           <VerdictPanel run={run} onSaved={onChanged} />
           <PreflightWarnings run={run} />
-          <StepsPanel runId={run.run_id} live />
+          <CollapsedSteps events={events} error={eventsError} live />
         </div>
         <aside className="runs-side">
           <RequestPanel run={run} />

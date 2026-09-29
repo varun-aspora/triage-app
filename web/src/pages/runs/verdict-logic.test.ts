@@ -3,6 +3,7 @@ import { isErrorEvent as srcIsErrorEvent } from '../../../../src/runlog/errors.t
 import { ERROR_EVENT_CASES } from '../../../../test/support/error-event-cases.ts';
 import type { FindingRef, RunEvent } from '../../api/types.ts';
 import {
+  agentActivity,
   appendEvents,
   buildVerdictBody,
   canCancel,
@@ -136,5 +137,33 @@ describe('lifecycle summaries', () => {
     expect(summariseStep(ev('server_shutdown', { signal: 'SIGTERM', active_runs: 2, attempt: 1, phase: 'investigating' }))).toBe(
       'server stopped (SIGTERM) · 2 active runs · in investigating · attempt 1',
     );
+  });
+});
+
+describe('agentActivity', () => {
+  const ev = (type: string, data: Record<string, unknown>) => ({ type, data });
+
+  test('maps tool calls to the agent of their task and reports failures', () => {
+    const got = agentActivity([
+      ev('task_start', { taskId: 't1', agent: 'investigate_ssfb', prompt: 'x' }),
+      ev('task_start', { taskId: 't2', agent: 'investigate_rtl', prompt: 'x' }),
+      ev('tool_start', { taskId: 't1', toolName: 'sql_select', args: { sql: 'select   *\nfrom t' } }),
+      ev('tool_start', { session: 'task:default:t2', toolName: 'read_file', args: { path: 'a.ts' } }),
+      ev('tool_start', { session: 'default', toolName: 'note_evidence', args: {} }),
+      ev('task', { taskId: 't2', isError: true }),
+    ]);
+    expect(got.get('investigate_ssfb')).toEqual({ failed: false, tool: 'sql_select', target: 'select * from t' });
+    expect(got.get('investigate_rtl')).toEqual({ failed: true, tool: 'read_file', target: 'a.ts' });
+    expect(got.size).toBe(2);
+  });
+
+  test('a long target is cut and a task with no tool calls has none', () => {
+    const got = agentActivity([
+      ev('task_start', { taskId: 't1', agent: 'code_walker' }),
+      ev('task_start', { taskId: 't2', agent: 'investigate_atspl' }),
+      ev('tool_start', { taskId: 't2', toolName: 'grep', args: { pattern: 'a'.repeat(100) } }),
+    ]);
+    expect(got.get('code_walker')).toEqual({ failed: false });
+    expect(got.get('investigate_atspl')?.target).toHaveLength(61);
   });
 });
