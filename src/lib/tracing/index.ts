@@ -19,9 +19,14 @@
 // Ingress and embedRun wrap each run in withRunId (D91), so every span they
 // open carries the run id under the key Flue's own spans use for their
 // instance id, and one filter joins the Flue traces with the app's.
+//
+// Each submission is its own Flue trace; dispatchAndSettle labels the run so
+// an adapter can name that trace's root (D100). Span names are not masked, so
+// a label carries no customer ids.
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Config } from '../../config/env.ts';
+import type { Classification } from '../../types/classification.ts';
 import { redactPersisted } from '../../gate/redact.ts';
 
 export type ModelSpan = {
@@ -57,6 +62,32 @@ export function withRunId<T>(runId: string, fn: () => T): T {
   // scope is skipped and ALS context tracking never turns on.
   return active === undefined ? fn() : runScope.run(runId, fn);
 }
+
+/** What names a run's traces (D100): the classifier's topic, masked, and the submission kind. */
+export type TraceLabel = { readonly topic: string; readonly kind: string };
+
+// Runs labelled in this process. A long-lived server keeps the newest only.
+const MAX_LABELS = 1000;
+const labels = new Map<string, TraceLabel>();
+
+/**
+ * Labels the run's traces from here on. The topic is loaded only with tracing
+ * on, and a failed load leaves it out.
+ */
+export async function labelTrace(
+  runId: string,
+  kind: string,
+  topic: () => Promise<Pick<Classification, 'category' | 'subcategory'> | undefined>,
+): Promise<void> {
+  if (active === undefined) return;
+  const t = await topic().catch(() => undefined);
+  const sub = t?.subcategory ? String(mask(t.subcategory)) : '';
+  labels.delete(runId);
+  labels.set(runId, { topic: [t?.category, sub].filter(Boolean).join(':'), kind });
+  if (labels.size > MAX_LABELS) labels.delete(labels.keys().next().value as string);
+}
+
+export const traceLabel = (runId: string): TraceLabel | undefined => labels.get(runId);
 
 /** Masks a value the way every stored copy of a run is masked. */
 export const mask = (value: unknown): unknown => redactPersisted(value).value;
@@ -108,4 +139,5 @@ export async function flushTracing(timeoutMs = 3000): Promise<void> {
 /** Tests install a stand-in tracer, or undefined to turn tracing off again. */
 export function setTracerForTests(tracer: Tracer | undefined): void {
   active = tracer;
+  labels.clear();
 }

@@ -17,7 +17,7 @@ import { decide, yesNo } from '../decisions/decide.ts';
 import { fakeDecisionProvider } from '../decisions/fake.ts';
 import { createEmbedder, HASH_MODEL, type Embedder } from '../embed/index.ts';
 import { isPersisted, redactPersisted } from '../gate/redact.ts';
-import { setTracerForTests } from '../lib/tracing/index.ts';
+import { setTracerForTests, traceLabel } from '../lib/tracing/index.ts';
 import { embedRun, type EmbedRunResult } from '../runstore/embed-run.ts';
 import { createFolderRunStore, folderRunStoreFromConfig } from '../runstore/folder.ts';
 import { RunNotFoundError, RunStoppedError, type RunStore } from '../runstore/types.ts';
@@ -2753,5 +2753,17 @@ describe('run id on model spans (D91)', () => {
       ['decide', 'classify', RUN_ID],
       ['embeddings', undefined, RUN_ID],
     ]);
+  });
+});
+
+describe('trace names (D100)', () => {
+  afterEach(() => setTracerForTests(undefined));
+
+  test('a dispatch labels the run with its topic and submission kind', async () => {
+    setTracerForTests(recorder().tracer);
+    const h = harness({ classify: async () => goodClassification() });
+
+    expect((await runSubmission(prepared(), h.deps)).status).toBe('completed');
+    expect(traceLabel(RUN_ID)).toEqual({ topic: 'card:charge not reflected', kind: 'initial' });
   });
 });

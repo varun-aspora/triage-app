@@ -192,7 +192,7 @@ import { embedderFor, type EmbedUsage, type Embedder, type FetchLike, HASH_MODEL
 import { createJsonlAuditSink } from '../gate/audit-sink.ts';
 import { clearRunDeadline, runTimes, setRunDeadline } from '../gate/budget.ts';
 import { checkEgress, redactModelFacing, redactPersisted } from '../gate/redact.ts';
-import { withRunId } from '../lib/tracing/index.ts';
+import { labelTrace, withRunId } from '../lib/tracing/index.ts';
 import { createMockLayer } from '../mock/index.ts';
 import { acceptsImages, modelForTier } from '../models.ts';
 import { netTcpConnect } from '../ops/doctor/probes.ts';
@@ -1041,6 +1041,7 @@ async function dispatchAndSettle(
       setRunDeadline(runId, startedAt + runTimeoutMs, wrapUpMs);
       ownDeadline = true;
     }
+    await labelTrace(runId, submission.kind, async () => (await store.getRun(runId))?.classification?.decision.proposed);
     handle = deps.dispatcher.init(deps.agent, initOptions);
     receipt = await handle.dispatch(request);
     logRunEvent(runId, 'dispatch', { submission_seq: seq, kind: submission.kind, submission_id: receipt.submissionId });
