@@ -133,7 +133,7 @@ describe('fetchSlackThread, real transport with an injected fetch', () => {
     expect(d.audit.lines[0]).toMatchObject({ tool: 'slack_read', transport: 'real', target: 'SLACK_BOT_TOKEN', decision: 'allow', exit: 0 });
   });
 
-  test('downloads only image mimes under the cap; other files are listed with no bytes_ref', async () => {
+  test('downloads supported files under the cap; other files are listed with no bytes_ref', async () => {
     const slack = fakeSlack();
     const d = deps({ fetch: slack.fetch });
     const thread = await fetchSlackThread(REF, d);
@@ -143,7 +143,7 @@ describe('fetchSlackThread, real transport with an injected fetch', () => {
     expect(png?.bytes_ref).toBe(join(d.dataDir, 'attachments', RUN_ID, '1.png'));
     expect(new Uint8Array(readFileSync(png?.bytes_ref as string))).toEqual(PNG_BYTES);
 
-    expect(byName['statement.pdf']).toEqual({ name: 'statement.pdf', mime: 'application/pdf', size: 2048, skipped: 'not_image' });
+    expect(byName['statement.pdf']).toEqual({ name: 'statement.pdf', mime: 'application/pdf', size: 2048, skipped: 'too_large' });
     expect(byName['huge.jpg']).toMatchObject({ skipped: 'too_large' });
     expect(byName['huge.jpg']?.bytes_ref).toBeUndefined();
 
@@ -151,9 +151,43 @@ describe('fetchSlackThread, real transport with an injected fetch', () => {
     const fileCalls = slack.calls.filter((c) => c.url.hostname === 'files.slack.com').map((c) => c.url.pathname);
     expect(fileCalls).toEqual(['/files-pri/T0SYNTH-F0SYNTH1/screen-1.png']);
 
-    expect(toRawThread(thread).attachments).toEqual([
-      { name: 'screen-1.png', mime: 'image/png', bytes_ref: png?.bytes_ref as string },
-    ]);
+    expect(toRawThread(thread)).toMatchObject({
+      attachments: [{ name: 'screen-1.png', mime: 'image/png', bytes_ref: png?.bytes_ref as string }],
+      skipped_files: [
+        { name: 'statement.pdf', reason: 'over the size limit' },
+        { name: 'huge.jpg', reason: 'over the size limit' },
+        { name: 'elsewhere.png', reason: 'not stored on Slack' },
+      ],
+    });
+  });
+
+  test('downloads text files and PDFs; a text file may come back under another text type', async () => {
+    const files = [
+      { id: 'F1', name: 'app.log', mimetype: 'text/x-log', size: 10, url_private: 'https://files.slack.com/files-pri/T0-F1/app.log' },
+      { id: 'F2', name: 'stmt.pdf', mimetype: 'application/pdf', size: 10, url_private: 'https://files.slack.com/files-pri/T0-F2/stmt.pdf' },
+      { id: 'F3', name: 'notes.docx', mimetype: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', size: 10, url_private: 'https://files.slack.com/files-pri/T0-F3/notes.docx' },
+      { id: 'F4', name: 'data.csv', mimetype: 'text/csv', size: 10, url_private: 'https://files.slack.com/files-pri/T0-F4/data.csv' },
+    ];
+    const parent = { ...PAGE1.messages[0], files };
+    const slack = fakeSlack({
+      route: (url) => {
+        if (url.pathname === '/api/conversations.replies') return json({ ok: true, has_more: false, messages: [parent] });
+        if (url.pathname.endsWith('/app.log')) return new Response('boot ok', { headers: { 'content-type': 'text/plain; charset=utf-8' } });
+        if (url.pathname.endsWith('/stmt.pdf')) return new Response('%PDF-1.4', { headers: { 'content-type': 'application/pdf' } });
+        // The listed type is text/csv; an HTML page is still refused.
+        if (url.pathname.endsWith('/data.csv')) return new Response('<html>sign in</html>', { headers: { 'content-type': 'text/html' } });
+        return undefined;
+      },
+    });
+    const d = deps({ fetch: slack.fetch });
+    const thread = await fetchSlackThread(REF, d);
+    const byName = Object.fromEntries(thread.attachments.map((a) => [a.name, a]));
+    expect(byName['app.log']?.bytes_ref).toBe(join(d.dataDir, 'attachments', RUN_ID, '1.log'));
+    expect(readFileSync(byName['app.log']?.bytes_ref as string, 'utf8')).toBe('boot ok');
+    expect(byName['stmt.pdf']?.bytes_ref).toBe(join(d.dataDir, 'attachments', RUN_ID, '2.pdf'));
+    expect(byName['notes.docx']).toMatchObject({ skipped: 'not_supported' });
+    expect(byName['data.csv']).toMatchObject({ skipped: 'download_failed' });
+    expect(slack.calls.some((c) => c.url.pathname.endsWith('/notes.docx'))).toBe(false);
   });
 
   test('a body larger than the cap is dropped even when the listed size is small', async () => {
@@ -326,7 +360,7 @@ describe('mock mode', () => {
     expect(thread.names).toContain('Synth Raiser');
     expect(thread.attachments).toEqual([
       { name: 'screen-1.png', mime: 'image/png', size: 8, skipped: 'mock' },
-      { name: 'statement.pdf', mime: 'application/pdf', size: 2048, skipped: 'not_image' },
+      { name: 'statement.pdf', mime: 'application/pdf', size: 2048, skipped: 'too_large' },
     ]);
     expect(d.audit.lines).toHaveLength(1);
     expect(d.audit.lines[0]).toMatchObject({ transport: 'mock', target: 'SLACK_BOT_TOKEN', decision: 'allow', exit: 0 });

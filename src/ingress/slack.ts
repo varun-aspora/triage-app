@@ -12,9 +12,11 @@
 //    Mock mode answers from the fixture and never calls fetch; a strict miss
 //    throws FixtureMissError. Real mode calls conversations.replies with
 //    cursor pagination and users.info once per author.
-// 3. In real mode only, downloads png, jpeg, gif and webp files up to
+// 3. In real mode only, downloads png, jpeg, gif and webp images, and the
+//    text-like files and PDFs of src/ingress/documents.ts (D102), up to
 //    maxAttachmentBytes into <dataDir>/attachments/<run_id>/ and returns
-//    their paths as bytes_ref. Other files are listed with no bytes_ref.
+//    their paths as bytes_ref. Other files are listed with no bytes_ref and
+//    the reason they were skipped.
 // 4. Writes one audit line for the read (target SLACK_BOT_TOKEN).
 //
 // The Authorization header is added in one place, and only for https
@@ -32,7 +34,8 @@ import type { AuditSink } from '../gate/audit-sink.ts';
 import type { ResolveIo } from '../mock/resolve.ts';
 import type { MockSettings } from '../mock/settings.ts';
 import { RunIdSchema, type Interface } from '../types/core.ts';
-import type { Attachment } from '../types/request.ts';
+import type { Attachment, SkippedFile } from '../types/request.ts';
+import { attachmentType, baseMime, UNSUPPORTED_TYPE } from './documents.ts';
 import type { RawThread, ThreadFileMessage } from './normalise.ts';
 
 // ------------------------------------------------------------------ errors
@@ -57,12 +60,6 @@ export class SlackFetchError extends Error {
 
 export const SLACK_API_BASE = 'https://slack.com/api/';
 export const SLACK_AUTH_HOSTS: ReadonlySet<string> = new Set(['slack.com', 'files.slack.com']);
-export const IMAGE_MIMES: Readonly<Record<string, string>> = Object.freeze({
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/gif': 'gif',
-  'image/webp': 'webp',
-});
 export const DEFAULT_MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 /** Stops a cursor loop that never ends. 50 pages of 200 is far past any real thread. */
 export const MAX_PAGES = 50;
@@ -76,9 +73,9 @@ export const TEMPLATE_NAME_FIELDS: readonly string[] = Object.freeze(['raised by
 
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
-export type SkipReason = 'not_image' | 'too_large' | 'refused_host' | 'download_failed' | 'mock';
+export type SkipReason = 'not_supported' | 'too_large' | 'refused_host' | 'download_failed' | 'mock';
 
-/** One file on a thread message. bytes_ref is set only for a downloaded image. */
+/** One file on a thread message. bytes_ref is set only for a downloaded image, text file or PDF. */
 export type SlackAttachment = {
   readonly name: string;
   readonly mime: string;
@@ -105,7 +102,7 @@ export type SlackFetchDeps = {
   readonly mock: { readonly settings: Pick<MockSettings, 'mockMode'>; readonly resolveIo: ResolveIo };
   readonly audit: AuditSink;
   readonly maxAttachmentBytes: number;
-  /** config.paths.dataDir. Images go to <dataDir>/attachments/<run_id>/. */
+  /** config.paths.dataDir. Downloaded files go to <dataDir>/attachments/<run_id>/. */
   readonly dataDir: string;
   readonly run_id: string;
   readonly interface: Interface;
@@ -226,13 +223,26 @@ export async function fetchSlackThread(ref: SlackThreadRef, deps: SlackFetchDeps
   return thread;
 }
 
-/** The thread in the shape buildTriageRequest takes: only downloaded images become attachments. */
+const SKIP_TEXT: Readonly<Record<Exclude<SkipReason, 'mock'>, string>> = {
+  not_supported: UNSUPPORTED_TYPE,
+  too_large: 'over the size limit',
+  refused_host: 'not stored on Slack',
+  download_failed: 'download failed',
+};
+
+/**
+ * The thread in the shape buildTriageRequest takes: downloaded files become
+ * attachments, the others skipped_files. Mock mode downloads nothing, so its
+ * skips are left out.
+ */
 export function toRawThread(thread: SlackThread): RawThread {
   const attachments: Attachment[] = [];
+  const skipped: SkippedFile[] = [];
   for (const a of thread.attachments) {
     if (a.bytes_ref !== undefined) attachments.push({ name: a.name, mime: a.mime, bytes_ref: a.bytes_ref });
+    else if (a.skipped !== undefined && a.skipped !== 'mock') skipped.push({ name: a.name, reason: SKIP_TEXT[a.skipped] });
   }
-  return { messages: thread.messages, attachments };
+  return { messages: thread.messages, attachments, ...(skipped.length > 0 ? { skipped_files: skipped } : {}) };
 }
 
 function refuse(channel: string, thread_ts: string, deps: SlackFetchDeps, mockMode: boolean): SlackFetchError | null {
@@ -541,9 +551,9 @@ async function handleFiles(
   const dir = resolve(deps.dataDir, 'attachments', deps.run_id);
   for (const [i, f] of files.entries()) {
     const base = { name: f.name, mime: f.mime, ...(f.size !== undefined ? { size: f.size } : {}) };
-    const ext = IMAGE_MIMES[f.mime];
+    const ext = attachmentType(f.mime)?.ext;
     if (ext === undefined) {
-      out.push({ ...base, skipped: 'not_image' });
+      out.push({ ...base, skipped: 'not_supported' });
       continue;
     }
     if (f.size !== undefined && f.size > deps.maxAttachmentBytes) {
@@ -585,9 +595,8 @@ async function download(
     deps.signal.throwIfAborted();
     return { skipped: 'download_failed' };
   }
-  const type = (res.headers.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase() ?? '';
   // Slack answers a missing files:read scope with an HTML page and status 200.
-  if (!res.ok || type !== mime) {
+  if (!res.ok || !sameType(res.headers.get('content-type') ?? '', mime)) {
     await res.body?.cancel().catch(() => undefined);
     return { skipped: 'download_failed' };
   }
@@ -616,6 +625,15 @@ async function download(
     return { skipped: 'download_failed' };
   }
   return { bytes: Buffer.concat(chunks, total) };
+}
+
+// Slack may serve a text file under another text type than the one it lists
+// (a .log listed as text/x-log comes back as text/plain), so for text files
+// any text type but HTML is taken.
+function sameType(served: string, listed: string): boolean {
+  const type = baseMime(served);
+  if (type === baseMime(listed)) return true;
+  return attachmentType(listed)?.kind === 'text' && type.startsWith('text/') && type !== 'text/html';
 }
 
 function str(x: unknown): string {

@@ -32,10 +32,12 @@ import {
 } from '../types/core.ts';
 import {
   AttachmentSchema,
+  SkippedFileSchema,
   TriageRequestSchema,
   type Attachment,
   type RequestHints,
   type RequestSource,
+  type SkippedFile,
   type ThreadMessage,
   type TriageRequest,
 } from '../types/request.ts';
@@ -100,6 +102,8 @@ export type RequestBody = v.InferOutput<typeof RequestBodySchema>;
 export type RawThread = {
   readonly messages: readonly ThreadFileMessage[];
   readonly attachments?: readonly Attachment[];
+  /** Files on the thread that were not downloaded. */
+  readonly skipped_files?: readonly SkippedFile[];
 };
 
 // ------------------------------------------------------------------- input
@@ -323,6 +327,7 @@ type Extracted = {
   source: RequestSource;
   raw: readonly ThreadFileMessage[];
   attachments: readonly Attachment[];
+  skippedFiles?: readonly SkippedFile[];
   requestedBy?: string;
   file: Pick<ThreadFile, 'ids' | 'entities' | 'tier'>;
   timeWindow?: InputHints['time_window'];
@@ -354,7 +359,11 @@ function extract(input: TriageInput, opts: NormaliseOptions): Extracted {
     case 'slack': {
       const link = parseSlackPermalink(input.url);
       const thread = parseOrThrow(
-        v.object({ messages: ThreadFileSchema.entries.messages, attachments: v.optional(v.array(AttachmentSchema)) }),
+        v.object({
+          messages: ThreadFileSchema.entries.messages,
+          attachments: v.optional(v.array(AttachmentSchema)),
+          skipped_files: v.optional(v.array(SkippedFileSchema)),
+        }),
         input.thread,
         'thread',
       );
@@ -362,6 +371,7 @@ function extract(input: TriageInput, opts: NormaliseOptions): Extracted {
         source: { kind: 'slack', channel_id: link.channel_id, thread_ts: link.thread_ts, permalink: link.permalink },
         raw: thread.messages,
         attachments: [...(thread.attachments ?? []), ...attachments],
+        ...(thread.skipped_files !== undefined ? { skippedFiles: thread.skipped_files } : {}),
         file: {},
       };
     }
@@ -407,6 +417,7 @@ export function buildTriageRequest(input: TriageInput, opts: NormaliseOptions): 
     source: { ...x.source },
     messages: messages.map((m) => ({ ...m })),
     attachments: x.attachments.map((a) => ({ name: a.name, mime: a.mime, bytes_ref: a.bytes_ref })),
+    ...(x.skippedFiles !== undefined && x.skippedFiles.length > 0 ? { skipped_files: x.skippedFiles.map((f) => ({ ...f })) } : {}),
     hints,
     window: { ...window },
     received_at: opts.now.toISOString(),

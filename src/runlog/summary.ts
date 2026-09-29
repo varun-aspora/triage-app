@@ -86,6 +86,8 @@ function lifecycleSummary(type: string, d: Data): string | undefined {
       const ids = ((d.id_chain ?? {}) as Data).ids;
       return `${Object.keys((ids ?? {}) as object).length} ids, ${count(d.gaps)} gaps in ${ms(d.durationMs)}`;
     }
+    case 'attachments':
+      return `${num(d.images)} images · ${count(d.files)} files as text · ${count(d.unread)} not read`;
     case 'classifier': {
       const c = (d.classification ?? {}) as Data;
       return `${str(c.category)} · proposed ${str(c.tier_proposed)} in ${ms(d.durationMs)}`;

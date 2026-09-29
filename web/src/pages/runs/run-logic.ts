@@ -20,6 +20,7 @@ import type {
 import { ENTITY_LABELS } from '../../lib/constants.ts';
 import { formatDateTime, formatRelative, formatTokens } from '../../lib/format.ts';
 import { runStatusOf, runStatusTone, type StatusLook } from '../../lib/status.ts';
+import { resolveTimeExpr } from './time-expr.ts';
 
 // ------------------------------------------------------------------ list
 
@@ -78,7 +79,7 @@ export type NewRunForm = {
   tierMode: 'auto' | 'choose';
   tier: Tier;
   ids: readonly IdRow[];
-  /** datetime-local values, in the viewer's time zone. */
+  /** Time expressions (time-expr.ts), resolved against the submit time. */
   from: string;
   to: string;
 };
@@ -87,13 +88,6 @@ export type NewRunForm = {
 export type FormField = 'thread' | 'context' | 'requested_by' | 'entities' | 'tier' | 'ids' | 'time_window';
 
 export type BuildResult = { ok: true; body: StartRunBody } | { ok: false; errors: Partial<Record<FormField, string>> };
-
-/** datetime-local value to ISO, or undefined when it does not parse. */
-export function localToIso(value: string): string | undefined {
-  if (value.trim() === '') return undefined;
-  const ms = new Date(value).getTime();
-  return Number.isNaN(ms) ? undefined : new Date(ms).toISOString();
-}
 
 /**
  * The POST /triage body. Auto fields are left out so the agent decides; empty
@@ -141,11 +135,13 @@ export function buildStartBody(form: NewRunForm, now: number): BuildResult {
   const hasFrom = form.from.trim() !== '';
   const hasTo = form.to.trim() !== '';
   if (hasFrom || hasTo) {
-    const from = localToIso(form.from);
-    const to = localToIso(form.to);
-    if (from === undefined || to === undefined) errors.time_window = 'Fill in both ends of the time window, or neither.';
-    else if (Date.parse(from) > Date.parse(to)) errors.time_window = 'The start of the window is after the end.';
-    else timeWindow = { from, to };
+    const from = resolveTimeExpr(form.from, now);
+    const to = resolveTimeExpr(form.to, now);
+    const unread = hasFrom && from === undefined ? form.from : hasTo && to === undefined ? form.to : undefined;
+    if (unread !== undefined) errors.time_window = `Could not read "${unread.trim()}". Use a time like 2026-09-24 14:00, or now-1h.`;
+    else if (from === undefined || to === undefined) errors.time_window = 'Fill in both ends of the time window, or neither.';
+    else if (from > to) errors.time_window = 'The start of the window is after the end.';
+    else timeWindow = { from: new Date(from).toISOString(), to: new Date(to).toISOString() };
   }
 
   if (Object.keys(errors).length > 0 || thread === undefined) return { ok: false, errors };

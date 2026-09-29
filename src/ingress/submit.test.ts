@@ -30,6 +30,7 @@ import { flushRunEventLog, installRunEventLog, uninstallRunEventLog } from '../r
 import { readRunEvents } from '../runlog/read.ts';
 import { sampleBlock, sampleInputRequest } from '../runstore/contract.ts';
 import type { Attachment } from '../types/request.ts';
+import { minimalPdf } from '../../test/support/pdf.ts';
 import type { UsageRow } from '../types/usage.ts';
 import type { Stalled } from '../types/stalled.ts';
 import type { RunPhase, RunRecord } from '../runstore/types.ts';
@@ -870,6 +871,84 @@ describe('screenshots', () => {
     const message = h.flue.dispatches[0]?.message as { kind: string; attachments?: unknown };
     expect(message.kind).toBe('user');
     expect(message.attachments).toBeUndefined();
+  });
+});
+
+// ------------------------------------------------------------------ files
+
+describe('text files and PDFs', () => {
+  const csv: Attachment = { name: 'txns.csv', mime: 'text/csv', bytes_ref: '/synthetic/attachments/1.csv' };
+  const pdf: Attachment = { name: 'stmt.pdf', mime: 'application/pdf', bytes_ref: '/synthetic/attachments/2.pdf' };
+  const docx: Attachment = { name: 'notes.docx', mime: 'application/msword', bytes_ref: '/synthetic/attachments/3.docx' };
+  const files: Record<string, Uint8Array> = {
+    [csv.bytes_ref]: new TextEncoder().encode(`card,status\n${PAN},failed\n`),
+    [pdf.bytes_ref]: minimalPdf(['Statement for September']),
+    [docx.bytes_ref]: new Uint8Array([0x50, 0x4b]),
+  };
+
+  test('their text follows the thread in the message; unread files become warnings', async () => {
+    const classified: unknown[] = [];
+    const h = harness({
+      classify: async (input) => {
+        classified.push(input);
+        return goodClassification();
+      },
+    });
+    h.deps = { ...h.deps, readAttachment: async (ref) => files[ref] ?? new Uint8Array() };
+    const base = prepared({ attachments: [csv, pdf, docx] });
+    const p = { ...base, request: { ...base.request, skipped_files: [{ name: 'huge.pdf', reason: 'over the size limit' }] } };
+    await runSubmission(p, h.deps);
+    const message = h.flue.dispatches[0]?.message as { attachments?: unknown[] };
+    expect(message.attachments).toBeUndefined();
+    const body = bodyOf(h);
+    expect(body).toContain('--- file · txns.csv · text/csv');
+    expect(body).toContain('card,status');
+    expect(body).not.toContain(PAN);
+    expect(body).toContain('--- file · stmt.pdf · application/pdf · 1 page');
+    expect(body).toContain('Statement for September');
+    expect(body).toContain('could not be read: huge.pdf (over the size limit); notes.docx (type not supported)');
+    expect(initialDataOf(h).preflight_warnings).toContainEqual({
+      step: 'attachments',
+      message: '2 file(s) were not analysed: huge.pdf (over the size limit); notes.docx (type not supported)',
+    });
+    // The classifier gets the thread only.
+    expect(classified).toHaveLength(1);
+    expect(JSON.stringify(classified[0])).not.toContain('card,status');
+  });
+
+  test('files past the run text budget are not read', async () => {
+    const big = (n: number): Attachment => ({ name: `big-${n}.txt`, mime: 'text/plain', bytes_ref: `/synthetic/attachments/big-${n}.txt` });
+    const reads: string[] = [];
+    const h = harness();
+    h.deps = {
+      ...h.deps,
+      readAttachment: async (ref) => {
+        reads.push(ref);
+        return new TextEncoder().encode('x'.repeat(25_000));
+      },
+    };
+    await runSubmission(prepared({ attachments: [big(1), big(2), big(3), big(4)] }), h.deps);
+    // 20,000 characters each: three files fill the 60,000 budget, the fourth is never read.
+    expect(reads).toHaveLength(3);
+    expect(bodyOf(h)).toContain('big-4.txt (over the text limit for the run)');
+    expect(initialDataOf(h).preflight_warnings).toContainEqual({
+      step: 'attachments',
+      message: '3 file(s) were cut to fit the text limit: big-1.txt; big-2.txt; big-3.txt',
+    });
+  });
+
+  test('a file that fails to read or parse is named, and the run goes on', async () => {
+    const h = harness();
+    h.deps = {
+      ...h.deps,
+      readAttachment: async (ref) => {
+        if (ref === csv.bytes_ref) throw new Error('ENOENT');
+        return new TextEncoder().encode('not a pdf');
+      },
+    };
+    const result = await runSubmission(prepared({ attachments: [csv, pdf] }), h.deps);
+    expect(result.status).toBe('completed');
+    expect(bodyOf(h)).toContain('txns.csv (could not be read); stmt.pdf (not a readable PDF)');
   });
 });
 

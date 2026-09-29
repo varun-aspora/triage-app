@@ -69,6 +69,13 @@
 // images_dropped, and a warning tells the report that screenshots were not
 // analysed.
 //
+// Text files and PDFs (D102) go in the same message as text, after the
+// thread, within MAX_FILE_TEXT_CHARS each and MAX_FILES_TEXT_CHARS in all
+// (src/ingress/documents.ts). A file that could not be read, and a thread
+// file ingress did not download (request.skipped_files), is named in the
+// message and becomes a warning, so the report lists it as not analysed. The
+// classifier sees neither.
+//
 // Gaps with no other home (identity gaps, dropped screenshots, prior-case
 // retrieval) go into preflight_warnings with their own step name, because
 // that is the list the report copies into its gaps.
@@ -227,7 +234,7 @@ import {
 import { type Entity, type Interface, type KnownIds, RunIdSchema, type RunId, type Tier } from '../types/core.ts';
 import type { IdChain } from '../types/id-chain.ts';
 import { INPUT_ANSWER_CHAIN_ATTR, INPUT_ANSWER_SIGNAL, type InputRequest, QuestionIdSchema } from '../types/input-request.ts';
-import type { Attachment, TriageRequest } from '../types/request.ts';
+import type { Attachment, SkippedFile, TriageRequest } from '../types/request.ts';
 import type { Stalled } from '../types/stalled.ts';
 import type { UsageRow } from '../types/usage.ts';
 import {
@@ -244,7 +251,27 @@ import {
 import { type IdentityUsage, type IngressIdentity, NO_IDS_GAP, resolveIngressIdentity } from './identity.ts';
 import { IngressInputError } from './normalise.ts';
 import type { PreparedSubmission } from './prepare.ts';
-import { renderAnswer, renderAsk, renderResume, renderSteer, renderThread, type RenderImages, type ResumeFrom } from './render-thread.ts';
+import {
+  attachmentType,
+  baseMime,
+  DocumentReadError,
+  extractDocumentText,
+  MAX_FILE_TEXT_CHARS,
+  MAX_FILES_TEXT_CHARS,
+  UNSUPPORTED_TYPE,
+} from './documents.ts';
+import {
+  renderAnswer,
+  renderAsk,
+  renderResume,
+  renderSteer,
+  renderThread,
+  unreadList,
+  type FileText,
+  type RenderFiles,
+  type RenderImages,
+  type ResumeFrom,
+} from './render-thread.ts';
 import { currentLease, DEFAULT_STALLED_AFTER_MS, loadStalled, STALLABLE_PHASES, stalledSubjectOf } from './stalled.ts';
 
 // ------------------------------------------------------------------ types
@@ -548,7 +575,6 @@ export const DEFAULT_USAGE_FLUSH_MS = 10_000;
 /** The model recorded for the mock hash embedder's calls: faux/*, so the usage view marks the run fake. */
 export const HASH_USAGE_MODEL = 'faux/hash-embed';
 
-const IMAGE_MIME = /^image\/(png|jpeg|gif|webp)$/;
 const NO_IMAGES_REASON = 'the model for this tier does not accept images';
 
 // ------------------------------------------------------------------ submit
@@ -580,6 +606,7 @@ async function submitInScope(prepared: PreparedSubmission, deps: SubmissionDeps)
   let initialData: TriageInit;
   let images: DeliveredAttachment[];
   let render: RenderImages;
+  let files: RenderFiles;
   try {
     const warnings: PreflightWarning[] = [];
 
@@ -609,9 +636,15 @@ async function submitInScope(prepared: PreparedSubmission, deps: SubmissionDeps)
       ...(identity.extraction ?? {}),
     });
 
-    const loaded = await loadImages(request.attachments, deps, signal);
-    if (loaded.failed > 0) {
-      warnings.push(warning('attachments', `${loaded.failed} screenshot(s) could not be read and were left out`));
+    const loaded = await loadAttachments(request.attachments, deps, signal);
+    files = { read: loaded.files, unread: [...(request.skipped_files ?? []), ...loaded.unread] };
+    warnings.push(...fileWarnings(files));
+    if (request.attachments.length > 0 || files.unread.length > 0) {
+      logRunEvent(runId, 'attachments', {
+        images: loaded.images.length,
+        files: loaded.files.map((f) => ({ mime: f.mime, chars: f.text.length, cut: f.cut, ...(f.pages !== undefined ? { pages: f.pages } : {}) })),
+        unread: files.unread.map((f) => f.reason),
+      });
     }
 
     await advance(store, runId, 'classifying');
@@ -675,7 +708,7 @@ async function submitInScope(prepared: PreparedSubmission, deps: SubmissionDeps)
 
   const message: DeliveredMessage = {
     kind: 'user',
-    body: renderThread(request, render),
+    body: renderThread(request, render, files),
     ...(images.length > 0 ? { attachments: images } : {}),
   };
   return dispatchAndSettle(
@@ -1589,22 +1622,56 @@ function withPatternMatch(
   return match === null ? classification : { ...classification, matched_pattern_id: match.matched_pattern_id };
 }
 
-type LoadedImages = { readonly images: DeliveredAttachment[]; readonly failed: number };
+type LoadedAttachments = {
+  readonly images: DeliveredAttachment[];
+  readonly files: FileText[];
+  /** Files that could not be read, images included. */
+  readonly unread: SkippedFile[];
+};
 
-async function loadImages(attachments: readonly Attachment[], deps: SubmissionDeps, signal: AbortSignal): Promise<LoadedImages> {
+async function loadAttachments(attachments: readonly Attachment[], deps: SubmissionDeps, signal: AbortSignal): Promise<LoadedAttachments> {
   const images: DeliveredAttachment[] = [];
-  let failed = 0;
+  const files: FileText[] = [];
+  const unread: SkippedFile[] = [];
+  let textLeft = MAX_FILES_TEXT_CHARS;
   for (const a of attachments) {
-    if (!IMAGE_MIME.test(a.mime)) continue;
+    const kind = attachmentType(a.mime)?.kind;
+    if (kind === undefined) {
+      unread.push({ name: a.name, reason: UNSUPPORTED_TYPE });
+      continue;
+    }
+    // Files past the run's text budget are not read at all.
+    if (kind !== 'image' && textLeft === 0) {
+      unread.push({ name: a.name, reason: 'over the text limit for the run' });
+      continue;
+    }
     try {
       const bytes = await deps.readAttachment(a.bytes_ref, signal);
-      images.push({ type: 'image', data: Buffer.from(bytes).toString('base64'), mimeType: a.mime, filename: a.name });
+      if (kind === 'image') {
+        images.push({ type: 'image', data: Buffer.from(bytes).toString('base64'), mimeType: a.mime, filename: a.name });
+        continue;
+      }
+      const got = await extractDocumentText(bytes, a.mime, Math.min(MAX_FILE_TEXT_CHARS, textLeft));
+      textLeft -= got.text.length;
+      files.push({ name: a.name, mime: baseMime(a.mime), ...got });
     } catch (err) {
       if (signal.aborted) throw err;
-      failed += 1;
+      unread.push({ name: a.name, reason: err instanceof DocumentReadError ? err.reason : 'could not be read' });
     }
   }
-  return { images, failed };
+  return { images, files, unread };
+}
+
+function fileWarnings(files: RenderFiles): PreflightWarning[] {
+  const out: PreflightWarning[] = [];
+  if (files.unread.length > 0) {
+    out.push(warning('attachments', `${files.unread.length} file(s) were not analysed: ${unreadList(files.unread)}`));
+  }
+  const cut = files.read.filter((f) => f.cut);
+  if (cut.length > 0) {
+    out.push(warning('attachments', `${cut.length} file(s) were cut to fit the text limit: ${cut.map((f) => f.name).join('; ')}`));
+  }
+  return out;
 }
 
 function safeAccepts(deps: SubmissionDeps, tier: Tier): boolean {

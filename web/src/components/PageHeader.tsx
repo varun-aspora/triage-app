@@ -1,8 +1,11 @@
 import { Fragment, type ReactNode } from 'react';
 import { Link } from 'react-router';
+import { useCopy } from '../lib/clipboard.ts';
 import { usePageTitle } from '../lib/usePageTitle.ts';
+import { Button } from './Button.tsx';
 
-export type Crumb = { label: ReactNode; to?: string };
+/** copy puts a copy button after the crumb: the text it copies, and the button's name for screen readers. */
+export type Crumb = { label: ReactNode; to?: string; copy?: { text: string; label: string } };
 
 type Props = {
   title: ReactNode;
@@ -32,6 +35,7 @@ export function PageHeader({ title, documentTitle, description, breadcrumb, acti
                 ) : (
                   <span className="mono">{c.label}</span>
                 )}
+                {c.copy !== undefined && <CopyCrumb {...c.copy} />}
               </Fragment>
             ))}
           </nav>
@@ -46,5 +50,21 @@ export function PageHeader({ title, documentTitle, description, breadcrumb, acti
       </div>
       {actions !== undefined && <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>{actions}</div>}
     </header>
+  );
+}
+
+function CopyCrumb({ text, label }: { text: string; label: string }) {
+  const [state, copy] = useCopy(text);
+  const title = state === 'ok' ? 'Copied' : state === 'fail' ? 'Copy failed' : label;
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      className="crumb-copy"
+      icon={state === 'ok' ? 'check' : state === 'fail' ? 'x' : 'copy'}
+      aria-label={title}
+      title={title}
+      onClick={copy}
+    />
   );
 }

@@ -24,6 +24,7 @@ import {
   newIdempotencyKey,
 } from './run-logic.ts';
 import { useRememberedName } from './remembered-name.ts';
+import { TimeWindowFields } from './TimeWindowFields.tsx';
 import './runs.css';
 
 const STEPS: readonly [string, string][] = [
@@ -332,18 +333,7 @@ export default function NewRunPage() {
                 {errors.ids !== undefined && <FieldError>{errors.ids}</FieldError>}
               </div>
 
-              <div>
-                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                  <Field label="Time window from" optional className="runs-grow" id="nr-from">
-                    <Input type="datetime-local" value={from} onChange={(e) => setFrom(e.target.value)} />
-                  </Field>
-                  <Field label="to" className="runs-grow" id="nr-to">
-                    <Input type="datetime-local" value={to} onChange={(e) => setTo(e.target.value)} />
-                  </Field>
-                </div>
-                <p className="hint">Your local time. Set both ends or leave both empty.</p>
-                {errors.time_window !== undefined && <FieldError>{errors.time_window}</FieldError>}
-              </div>
+              <TimeWindowFields from={from} to={to} onFrom={setFrom} onTo={setTo} error={errors.time_window} />
             </div>
           </Panel>
 
