@@ -108,7 +108,7 @@ export default function RunDetailPage() {
     }
     return (
       <>
-        <PageHeader title="Run" breadcrumb={[{ label: 'Runs', to: '/runs' }, { label: runId }]} />
+        <PageHeader title="Run" breadcrumb={[{ label: 'Runs', to: '/runs' }, { label: runId, copy: runId, copyLabel: 'Copy run id' }]} />
         {error !== undefined ? <ErrorNotice error={error} onRetry={reload} title="Could not load this run" /> : loading && <Loading label="Loading run…" />}
       </>
     );

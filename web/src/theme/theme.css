@@ -288,6 +288,28 @@ table.table {
   cursor: not-allowed;
 }
 
+/* Icon-only copy button after a breadcrumb */
+.crumb-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-left: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--muted);
+  vertical-align: middle;
+  cursor: pointer;
+}
+
+.crumb-copy:hover {
+  background: var(--surface-sunk);
+  color: var(--text);
+}
+
 /* Spinner used by status tags and loading states */
 @keyframes spin {
   to {

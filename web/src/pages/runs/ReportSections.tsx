@@ -5,8 +5,8 @@ import type { Report } from '../../api/types.ts';
 import { Button } from '../../components/Button.tsx';
 import { Panel } from '../../components/Panel.tsx';
 import { Chip } from '../../components/StatusTag.tsx';
+import { copyText } from '../../lib/clipboard.ts';
 import { formatDateTime } from '../../lib/format.ts';
-import { copyText } from './browser.ts';
 import { Tag } from './RunParts.tsx';
 import { capitalise } from './run-logic.ts';
 

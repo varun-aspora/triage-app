@@ -1,8 +1,11 @@
-import { Fragment, type ReactNode } from 'react';
+import { Fragment, type ReactNode, useEffect, useState } from 'react';
 import { Link } from 'react-router';
+import { copyText } from '../lib/clipboard.ts';
 import { usePageTitle } from '../lib/usePageTitle.ts';
+import { Icon } from './Icon.tsx';
 
-export type Crumb = { label: ReactNode; to?: string };
+/** copy puts a copy button after the crumb; copyLabel names it for screen readers. */
+export type Crumb = { label: ReactNode; to?: string; copy?: string; copyLabel?: string };
 
 type Props = {
   title: ReactNode;
@@ -32,6 +35,7 @@ export function PageHeader({ title, documentTitle, description, breadcrumb, acti
                 ) : (
                   <span className="mono">{c.label}</span>
                 )}
+                {c.copy !== undefined && <CopyCrumb text={c.copy} label={c.copyLabel ?? 'Copy'} />}
               </Fragment>
             ))}
           </nav>
@@ -46,5 +50,26 @@ export function PageHeader({ title, documentTitle, description, breadcrumb, acti
       </div>
       {actions !== undefined && <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>{actions}</div>}
     </header>
+  );
+}
+
+function CopyCrumb({ text, label }: { text: string; label: string }) {
+  const [state, setState] = useState<'idle' | 'ok' | 'fail'>('idle');
+  useEffect(() => {
+    if (state === 'idle') return;
+    const t = setTimeout(() => setState('idle'), 2000);
+    return () => clearTimeout(t);
+  }, [state]);
+  const title = state === 'ok' ? 'Copied' : state === 'fail' ? 'Copy failed' : label;
+  return (
+    <button
+      type="button"
+      className="crumb-copy"
+      aria-label={title}
+      title={title}
+      onClick={() => void copyText(text).then((ok) => setState(ok ? 'ok' : 'fail'))}
+    >
+      <Icon name={state === 'ok' ? 'check' : state === 'fail' ? 'x' : 'copy'} size={14} />
+    </button>
   );
 }
