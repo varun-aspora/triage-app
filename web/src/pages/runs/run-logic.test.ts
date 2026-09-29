@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import type { RunDetail, RunRequest, RunUsageView, TierDecision, UsageTotals } from '../../api/types.ts';
+import { RUN_PHASES } from '../../lib/constants.ts';
 import { formatDateTime } from '../../lib/format.ts';
-import { runStatusTone } from '../../lib/status.ts';
+import { runPhaseTone, runStatusOf, runStatusTone } from '../../lib/status.ts';
 import {
   blockedSteps,
   buildStartBody,
@@ -293,6 +294,15 @@ describe('reports held by a steer (D72)', () => {
     const live = [s(1, 'initial', false), s(2, 'steer', false)];
     expect(live.map((x) => submissionReportLabel(live, x.seq))).toEqual(['No', 'No']);
     expect(submissionReportLabel(subs, 9)).toBe('No');
+  });
+});
+
+describe('running tone', () => {
+  test('every running phase is info with a spinner; blocked stays amber', () => {
+    for (const phase of RUN_PHASES.filter((p) => runStatusOf(p) === 'running')) {
+      expect(runPhaseTone(phase)).toEqual({ tone: 'info', icon: 'spinner' });
+    }
+    expect(runPhaseTone('blocked').tone).toBe('amber');
   });
 });
 

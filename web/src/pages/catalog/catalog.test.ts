@@ -6,6 +6,7 @@ import {
   envKeyProblem,
   guideMatches,
   guideName,
+  guideStatusTone,
   knownEnvState,
   leftoverErrors,
   matchesInOtherEntities,
@@ -67,6 +68,14 @@ describe('names', () => {
     expect(guideName('service', 'rtl', 'reminder')).toBe('rtl-reminder');
     expect(guideName('overview', 'atspl', 'ignored')).toBe('atspl-overview');
     expect(oneLine('a\nb\r\n  c')).toBe('a b c');
+  });
+});
+
+describe('guideStatusTone', () => {
+  test('ported is info, written neutral, stub amber', () => {
+    expect(guideStatusTone('ported').tone).toBe('info');
+    expect(guideStatusTone('written').tone).toBe('neutral');
+    expect(guideStatusTone('stub').tone).toBe('amber');
   });
 });
 

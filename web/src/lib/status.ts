@@ -20,7 +20,7 @@ export function runStatusTone(status: RunStatus): StatusLook {
     case 'failed':
       return { tone: 'rust', icon: 'x' };
     case 'running':
-      return { tone: 'amber', icon: 'spinner' };
+      return { tone: 'info', icon: 'spinner' };
     case 'stopped':
       return { tone: 'muted', icon: 'dash' };
     case 'blocked':
