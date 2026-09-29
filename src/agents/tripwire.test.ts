@@ -144,6 +144,7 @@ describe('allowlist', () => {
       'note_evidence',
       'read',
       'read_skill_resource',
+      'read_staged',
       'repo_find',
       'repo_grep',
       'repo_read',

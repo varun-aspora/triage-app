@@ -23,6 +23,7 @@ import {
 } from '../runstore/types.ts';
 import type { PreflightWarning, TriageInit } from '../types/classification.ts';
 import type { Tier } from '../types/core.ts';
+import type { IdChain } from '../types/id-chain.ts';
 import type { CodeFindings, EntityFindings } from '../types/findings.ts';
 import type { Report, ReportDraft } from '../types/report.ts';
 import { ToolEnvelopeSchema, type ToolEnvelope } from '../types/tool-result.ts';
@@ -32,6 +33,7 @@ import {
   computeCost,
   createFinishReportTool,
   FINISH_REPORT,
+  FinishReportInputSchema,
   MAX_SYNTHESIS_PASSES,
   NO_USAGE_GAP,
   SYNTHESIS_SKIPPED_GAP,
@@ -259,6 +261,7 @@ type SetupOptions = {
   options?: FinishReportOptions;
   respond?: () => Promise<unknown>;
   maxToolCalls?: number;
+  idChain?: IdChain;
 };
 
 /** One usage row as the meter gives it: a faux model priced at $0 unless overridden. */
@@ -329,7 +332,7 @@ function setup(opts: SetupOptions = {}): Setup {
     escalation,
     run: { interface: 'cli', redactionNames: opts.runNames ?? [] },
     now: () => NOW,
-    idChain: () => ({ ids: {}, hops: [], basic_state: [] }),
+    idChain: () => opts.idChain ?? { ids: {}, hops: [], basic_state: [] },
     ...(initialData !== undefined ? { initialData } : {}),
     usage: opts.usage ?? (() => [usageRow()]),
     ...(opts.repoCommit !== undefined ? { repoCommit: opts.repoCommit } : {}),
@@ -389,6 +392,52 @@ describe('finish_report: writeReport refusals', () => {
     expect(deny.decision).toBe('deny');
     expect(deny.tool).toBe(FINISH_REPORT);
     expect(JSON.stringify(s.audit.lines)).not.toContain('98765');
+  });
+
+  test('the report lead list is filled from the run chain with masked values; the model cannot write it (D96)', async () => {
+    const uuid = 'b4e7d2a9-1c3f-4a6b-8e5d-9f2a0c1b3d47';
+    const chain: IdChain = {
+      ids: {},
+      hops: [],
+      basic_state: [],
+      leads: [
+        { value: uuid, kind: 'uuid', source: 'thread', label: 'Alphadesk user ID', at: { message: 0, offset: 20 }, status: 'seed' },
+        { value: '+919876543210', kind: 'phone', source: 'answer', label: 'Synth Person phone', status: 'seed' },
+        { value: 'ops.user@example.com', kind: 'email', source: 'hint', key: 'customer_id', status: 'seed' },
+        { value: '000011112222', kind: 'digits', source: 'thread', status: 'seed' },
+      ],
+    };
+    const s = setup({ idChain: chain, runNames: ['Synth Person'] });
+    const draft = baseDraft();
+    // A lead list the model wrote itself is replaced.
+    draft.id_chain = { ...draft.id_chain, leads: [{ value: 'c0ffee00-1c3f-4a6b-8e5d-9f2a0c1b3d47', kind: 'uuid', source: 'thread', status: 'seed' }] };
+
+    const out = await call(s, draft);
+
+    expect(out.output.status).toBe('ok');
+    const leads = s.store.reports[0]!.report.id_chain.leads ?? [];
+    expect(leads.map((l) => [l.value, l.kind, l.source])).toEqual([
+      ['uuid:***3d47', 'uuid', 'thread'],
+      ['phone:***3210', 'phone', 'answer'],
+      ['email:***.com', 'email', 'hint'],
+      ['digits:***2222', 'digits', 'thread'],
+    ]);
+    expect(leads[0]).toMatchObject({ label: 'Alphadesk user ID', at: { message: 0, offset: 20 } });
+    expect(leads[1]?.label).not.toContain('Synth Person');
+    const stored = JSON.stringify(s.store.reports[0]);
+    for (const raw of [uuid, '9876543210', 'ops.user@example.com', '000011112222', 'c0ffee00']) expect(stored).not.toContain(raw);
+  });
+
+  test('a lead list the model writes in a shape LeadSchema refuses does not get the draft refused (D96)', async () => {
+    expect(Object.keys(FinishReportInputSchema.entries.id_chain.entries)).not.toContain('leads');
+    const s = setup();
+    const draft = { ...baseDraft() } as Record<string, unknown> & { id_chain: object };
+    draft.id_chain = { ...draft.id_chain, leads: [{ value: 'x', kind: 'name', label: 'l'.repeat(200) }] };
+
+    const out = await call(s, draft);
+
+    expect(out.output.status).toBe('ok');
+    expect(s.store.reports[0]!.report.id_chain.leads).toBeUndefined();
   });
 
   test('a schema refusal lists the schema path and stores nothing', async () => {

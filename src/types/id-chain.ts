@@ -1,5 +1,6 @@
 // IdChain: the ids resolved deterministically before the classifier, the hops
-// that produced them and the basic state read alongside (LLD 04 §2.2).
+// that produced them, the basic state read alongside (LLD 04 §2.2) and the
+// leads from the requester's text (D96).
 import * as v from 'valibot';
 import { KnownIdKeySchema, KnownIdsSchema, NonEmptyStringSchema, TakenAtSchema } from './core.ts';
 
@@ -66,9 +67,49 @@ export const IdHopsSchema = v.pipe(
   v.array(IdHopSchema),
 );
 
+// A lead is an id-shaped value the requester wrote that no known id key took
+// (D96). The four kinds match the scope rule's id shapes (src/gate/id-patterns.ts).
+export const LEAD_KINDS = ['uuid', 'digits', 'phone', 'email'] as const;
+export const LeadKindSchema = v.picklist(LEAD_KINDS);
+export type LeadKind = v.InferOutput<typeof LeadKindSchema>;
+
+// Where the requester wrote it: the thread, an ask_requester answer, or hints.ids.
+export const LEAD_SOURCES = ['thread', 'answer', 'hint'] as const;
+export const LeadSourceSchema = v.picklist(LEAD_SOURCES);
+export type LeadSource = v.InferOutput<typeof LeadSourceSchema>;
+
+export const LEAD_STATUSES = ['seed'] as const;
+export const LeadStatusSchema = v.picklist(LEAD_STATUSES);
+export type LeadStatus = v.InferOutput<typeof LeadStatusSchema>;
+
+export const LEAD_LABEL_MAX = 60;
+
+export const LeadSchema = v.object({
+  // Lowercase UUID or email, bare digits, or '+' and the digits of a phone.
+  value: NonEmptyStringSchema,
+  kind: LeadKindSchema,
+  source: LeadSourceSchema,
+  // The text before the value on its line, such as 'Alphadesk user ID'. One line.
+  label: v.optional(v.pipe(v.string(), v.maxLength(LEAD_LABEL_MAX), v.regex(/^[^\r\n]*$/))),
+  // Where it was found: the message index as given and the character offset in its text.
+  at: v.optional(
+    v.object({
+      message: v.pipe(v.number(), v.integer(), v.minValue(0)),
+      offset: v.pipe(v.number(), v.integer(), v.minValue(0)),
+    }),
+  ),
+  // The known id key that holds the same value, when one does.
+  key: v.optional(KnownIdKeySchema),
+  // A seed is in scope as soon as it is in the chain.
+  status: LeadStatusSchema,
+});
+export type Lead = v.InferOutput<typeof LeadSchema>;
+
 export const IdChainSchema = v.object({
   ids: KnownIdsSchema,
   hops: IdHopsSchema,
   basic_state: v.array(BasicStateItemSchema),
+  // Optional, so chains stored before D96 still parse.
+  leads: v.optional(v.array(LeadSchema)),
 });
 export type IdChain = v.InferOutput<typeof IdChainSchema>;

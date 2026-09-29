@@ -21,8 +21,8 @@
     },
     {
       "key": "aspora_user_id",
-      "description": "The user's id in the Aspora app (a UUID). The same value is harbor account_forms.external_user_ref.",
-      "question": "Which value in the message is the user's Aspora user id? Pick none if the message does not give one.",
+      "description": "The user's id in the Aspora app (a UUID). CX tickets label it 'Alphadesk user ID'. The same value is harbor account_forms.external_user_ref and RTL workflow_executions.reference_id with reference_type USER.",
+      "question": "Which value in the message is the user's Aspora user id (CX tickets call it 'Alphadesk user ID')? Pick none if the message does not give one.",
       "pattern": "(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])",
       "normalise": "none",
       "labels": ["aspora user id", "aspora userid", "aspora user", "alphadesk user id", "user id", "userid"]
@@ -30,7 +30,7 @@
     {
       "key": "customer_id",
       "description": "The SSFB customer_id (a UUID, harbor customer.customer_id). Not the CIF id.",
-      "question": "Which value in the message is the SSFB customer id? It is not the CIF id. Pick none if the message does not give one.",
+      "question": "Which value in the message is the SSFB customer id (CX tickets call it 'Horus Customer ID')? It is not the CIF id. Pick none if the message does not give one.",
       "pattern": "(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])",
       "normalise": "none",
       "labels": ["horus customer id", "ssfb customer id", "customer id"]
@@ -38,7 +38,7 @@
     {
       "key": "account_form_id",
       "description": "The SSFB account form id (a UUID, harbor account_forms.form_id; also the NSTP application id and the workflow reference id).",
-      "question": "Which value in the message is the account form id (also called form id or NSTP application id)? Pick none if the message does not give one.",
+      "question": "Which value in the message is the account form id (also called form id, NSTP application id, or 'Horus NSTP Application ID' in CX tickets)? Pick none if the message does not give one.",
       "pattern": "(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])",
       "normalise": "none",
       "labels": ["nstp application id", "account form id", "form id"]

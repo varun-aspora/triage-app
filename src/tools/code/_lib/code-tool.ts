@@ -1,6 +1,6 @@
 // What repo_read and repo_grep share: the repo picklist, the enabled() rule
 // and the run wrapper (signal, budget, audit line, model-facing redaction,
-// envelope). They read local disk only, so they do not go through the mock
+// result cap, envelope). They read local disk only, so they do not go through the mock
 // layer: in mock mode they read the same TRIAGE_REPOS_DIR and the audit line
 // says transport mock (D19, D42).
 
@@ -14,6 +14,7 @@ import type { AuditTransport } from '../../../types/audit.ts';
 import type { Entity } from '../../../types/core.ts';
 import { ok, refused, type ToolEnvelope } from '../../../types/tool-result.ts';
 import type { ToolContext, ToolEnabled } from '../../types.ts';
+import { fitModelResult, modelBytes, stageRows, type StagingHarness } from '../../_lib/pipeline.ts';
 import { type DocsTarget, repoDocsFor } from './repo-docs.ts';
 // Brings in the ToolDeps fields (budget, audit, fixtures, ...).
 import type {} from '../../_lib/context.ts';
@@ -78,6 +79,9 @@ export type CodeRunSpec = {
   readonly signal?: AbortSignal;
   /** The work itself. Only called after the budget allowed the call. */
   readonly work: () => Promise<CodeOutcome>;
+  /** With toolCallId, lets an over-cap result be staged to /data (D104). Without them it is only summarised. */
+  readonly harness?: StagingHarness;
+  readonly toolCallId?: string;
 };
 
 /**
@@ -135,7 +139,15 @@ export async function runCodeTool(spec: CodeRunSpec): Promise<ToolEnvelope> {
   const docs = outcome.docs !== undefined ? await repoDocsFor(ctx, outcome.docs, spec.signal) : undefined;
   const data = docs !== undefined && isRecord(outcome.data) ? { ...outcome.data, ...docs.fields } : outcome.data;
   const safe = asJson(redactModelFacing(data));
-  const bytes = deps.budget.accountBytes(Math.max(1, Buffer.byteLength(JSON.stringify(safe))));
+  // The result cap (D104): what is over it is summarised, and only the summary counts as sent.
+  const { harness, toolCallId } = spec;
+  const capped = await fitModelResult(safe, {
+    cap: ctx.config.budgets.maxModelBytesPerCall,
+    ...(harness !== undefined && toolCallId !== undefined
+      ? { stage: () => stageRows(harness, toolCallId, data, ctx.config, { names: deps.run.redactionNames }) }
+      : { notStaged: 'this tool does not stage' }),
+  });
+  const bytes = deps.budget.accountBytes(Math.max(1, modelBytes(capped)));
   if (!bytes.ok) {
     deps.escalation.markBudgetExhausted();
     audit('deny', 'refused', outcome.summary, `budget: ${bytes.reason}`);
@@ -143,7 +155,7 @@ export async function runCodeTool(spec: CodeRunSpec): Promise<ToolEnvelope> {
   }
   docs?.commit();
   audit('allow', 'ok', outcome.summary);
-  return ok(safe, now);
+  return ok(capped, now);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

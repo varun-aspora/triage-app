@@ -9,6 +9,7 @@ import {
   MAX_TERMS,
   PAGE_SIZE,
   QwArgError,
+  RAW_MAX_HITS,
   assertQwSafe,
   buildLogsQuery,
   escapeTerm,
@@ -331,6 +332,19 @@ describe('buildLogsQuery: mode, paging and projection', () => {
     const r = ok({ ...H, terms: ['x'], max_hits: 10_000 });
     expect(r.maxHits).toBe(250);
     expect(r.notes).toEqual([expect.stringContaining('clamped to 250')]);
+  });
+
+  test('raw clamps max_hits to 20 with a note; 20 or fewer is kept', () => {
+    // No max_hits given: the page is 20 and the note does not say clamped.
+    const r = ok({ ...H, terms: ['x'], raw: true });
+    expect(r.maxHits).toBe(RAW_MAX_HITS);
+    expect(r.notes).toEqual(['raw pages hold at most 20 hits; name columns to read more per page']);
+    expect(ok({ ...H, terms: ['x'], raw: true, max_hits: 10_000 }).notes).toEqual([expect.stringContaining('clamped to 20 because raw')]);
+    expect(ok({ ...H, terms: ['x'], raw: true, max_hits: 5 })).toMatchObject({ maxHits: 5, notes: [] });
+    // Under a smaller entity page the page size note applies.
+    expect(ok({ ...H, terms: ['x'], raw: true, max_hits: 30 }, { ...CFG, maxHits: 10 }).notes).toEqual([expect.stringContaining('the page size for')]);
+    // The raw cap does not touch a search without raw.
+    expect(ok({ ...H, terms: ['x'] })).toMatchObject({ maxHits: PAGE_SIZE, notes: [] });
   });
 
   test('a lower entity cap lowers the page', () => {

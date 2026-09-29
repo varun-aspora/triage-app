@@ -94,6 +94,7 @@ function runSection(
     ...deployManifests,
     `- Named in the request: ${focusLine}`,
     `- Known ids: ${ids}`,
+    ...leadsLine(init),
     `- Classification: ${classificationLine(init)}`,
     `- Id chain: ${hopsLine(init)}`,
     // Absolute, so the text stays the same across the submission's renders and the prompt cache holds.
@@ -209,6 +210,30 @@ function knownIds(init: TriageInit): string {
     return value === undefined ? [] : [`${key} = ${clean(value)}`];
   });
   return parts.length > 0 ? parts.join(', ') : 'none resolved yet';
+}
+
+/** Most leads the run section lists; the rest are counted. */
+export const MAX_LISTED_LEADS = 10;
+
+// The id-shaped values the requester wrote (D96); each is usable as is. A
+// lead the Known ids line already shows under its key is left out.
+function leadsLine(init: TriageInit): string[] {
+  const known: KnownIds = { ...init.request.hints.ids, ...init.id_chain.ids };
+  const leads = (init.id_chain.leads ?? []).filter((lead) => {
+    const held = lead.key === undefined ? undefined : known[lead.key];
+    return held === undefined || compact(held) !== compact(lead.value);
+  });
+  if (leads.length === 0) return [];
+  const parts = leads
+    .slice(0, MAX_LISTED_LEADS)
+    .map((lead) => `${clean(lead.label ?? lead.kind)}: ${clean(lead.value)}${lead.key !== undefined ? ` (${lead.key})` : ''}`);
+  const more = leads.length > MAX_LISTED_LEADS ? ` (+${leads.length - MAX_LISTED_LEADS} more)` : '';
+  return [`- Leads: ${parts.join('; ')}${more}`];
+}
+
+// A value without case, spaces or phone punctuation, so '+971 50' matches '97150'.
+function compact(value: string): string {
+  return value.toLowerCase().replace(/[\s+().-]/g, '');
 }
 
 // Ids come from thread text, so keep them on one line and short: a value

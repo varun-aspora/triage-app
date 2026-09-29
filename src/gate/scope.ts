@@ -1,7 +1,10 @@
 // Scope rule (HLD 02 §3, D26, birds-eye rule 10). Every id-shaped value a
 // data tool is asked to use must belong to the run's ID chain, so the
-// investigation stays on the ticket's customer and ids smuggled in through the
-// thread text are refused. The only way around it is an explicit systemic
+// investigation stays on the ticket's customer. The chain's ids are in scope,
+// and so is every seed lead (D96): an id-shaped value the requester wrote in
+// the thread, an ask_requester answer or hints.ids, whether or not a known id
+// key took it. Model text and tool results never add a value; an id that
+// appears only there is refused. The only way around it is an explicit systemic
 // SQL call, which is limited to aggregate-only select lists. A systemic
 // logs_search is limited to count, group_by or count_distinct and still has
 // its ids checked, because a multi-field group_by over one customer's id is
@@ -81,8 +84,9 @@ function groupOf(kind: IdKind): Group {
 }
 
 // The values one chain entry adds. A phone adds both its full digits and its
-// last 10, so the chain can hold it with or without the country code.
-function chainValues(key: KnownIdKey, value: string): { group: Group; value: string }[] {
+// last 10, so the chain can hold it with or without the country code. The
+// identity step compares leads with the same forms (D96).
+export function chainValues(key: KnownIdKey | undefined, value: string): { group: Group; value: string }[] {
   const out: { group: Group; value: string }[] = [];
   for (const found of extractIdShaped(value)) {
     out.push({ group: groupOf(found.kind), value: found.normalised });
@@ -97,17 +101,22 @@ function chainValues(key: KnownIdKey, value: string): { group: Group; value: str
 
 function build(base: ScopeSet | undefined, chain: IdChain): ScopeSet {
   const groups = { uuid: new Set(base?.uuid), num: new Set(base?.num), email: new Set(base?.email) };
-  // Only chain.ids carries values; hops name keys only. Every id is taken
-  // whatever the status of the hop that produced it.
+  // chain.ids and chain.leads carry values; hops name keys only. Every id is
+  // taken whatever the status of the hop that produced it.
   for (const [key, value] of Object.entries(chain.ids)) {
     if (typeof value !== 'string') continue;
     for (const entry of chainValues(key as KnownIdKey, value)) groups[entry.group].add(entry.value);
   }
+  for (const lead of chain.leads ?? []) {
+    if (lead.status !== 'seed') continue;
+    for (const entry of chainValues(lead.key, lead.value)) groups[entry.group].add(entry.value);
+  }
   return Object.freeze(groups);
 }
 
-// Built from the IdChain only. There is deliberately no way to add a value
-// from the thread text or the model.
+// Built from the IdChain only: its ids and its seed leads, which come from
+// the requester's own text (D96). There is deliberately no way to add a value
+// from model text or a tool result.
 export function createScopeSet(idChain: IdChain): ScopeSet {
   return build(undefined, idChain);
 }

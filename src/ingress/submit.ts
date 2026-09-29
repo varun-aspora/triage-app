@@ -92,9 +92,14 @@
 // answerRun(run_id, input, deps) is the way back: it closes the open
 // question with who answered (or skipped) and when, and dispatches the
 // answer as a triage.input_answer signal on the same instance. Ids the
-// person gave go through the ingress identity step first, and the resulting
-// chain rides in the signal's attributes, where the root merges it into the
-// run's scope (D26). Free text never widens scope.
+// person gave, and the answer text as a message, go through the ingress
+// identity step first, and the resulting chain rides in the signal's
+// attributes, where the root merges it into the run's scope (D26). The
+// answer is requester text, so its id-shaped values come back as leads with
+// source 'answer' and join scope as seeds (D96). A text-only answer skips the
+// identity step and takes its leads from requesterLeads, which cannot fail.
+// The decision call here is not counted in the run's usage: there is no
+// intake bucket after dispatch.
 //
 // A response can also end on stop_blocked (D55): the tool stores the block
 // and moves the run to blocked, and read() returns as for a completed
@@ -248,7 +253,7 @@ import {
   type UsageBucket,
   usageVersion,
 } from '../usage/meter.ts';
-import { type IdentityUsage, type IngressIdentity, NO_IDS_GAP, resolveIngressIdentity } from './identity.ts';
+import { type IdentityUsage, type IngressIdentity, isNoIdsGap, requesterLeads, resolveIngressIdentity } from './identity.ts';
 import { IngressInputError } from './normalise.ts';
 import type { PreparedSubmission } from './prepare.ts';
 import {
@@ -774,22 +779,17 @@ async function answerInScope(runId: string, input: AnswerInput, deps: AnswerDeps
   if (questionId !== open.question_id) throw new RunNotWaitingError(runId, questionId);
 
   const signal = deps.signal ?? new AbortController().signal;
-  const ids = input.ids ?? {};
-  let chain: IdChain | undefined;
-  const gaps: string[] = [];
-  if (Object.keys(ids).length > 0) {
-    if (deps.identity === undefined) throw new SubmissionInputError('ids need the identity step in the deps');
-    const identity = await identityStep(
-      { request_id: runId, interface: run.request.interface, messages: [], hints: { ids } },
-      [],
-      deps as Pick<SubmissionDeps, 'identity'>,
-      signal,
-    );
-    chain = identity.id_chain;
-    gaps.push(...identity.gaps.filter((g) => g !== NO_IDS_GAP));
-  }
-
   const now = deps.now ?? (() => new Date());
+  const ids = input.ids ?? {};
+  if (Object.keys(ids).length > 0 && deps.identity === undefined) throw new SubmissionInputError('ids need the identity step in the deps');
+  const messages = answer === '' ? [] : [{ ts: now().toISOString(), author: by, text: answer, is_parent: false }];
+  const { chain, gaps } = await answerChain(
+    { request_id: runId, interface: run.request.interface, messages, hints: { ids } },
+    runRedactionNames(runId),
+    deps,
+    signal,
+  );
+
   await deps.store.resolveInputRequest(
     runId,
     questionId,
@@ -812,6 +812,39 @@ async function answerInScope(runId: string, input: AnswerInput, deps: AnswerDeps
     { id: runId },
     deps,
   );
+}
+
+type AnswerChain = { readonly chain: IdChain | undefined; readonly gaps: readonly string[] };
+
+/**
+ * The chain an answer adds. Ids the person gave go through the identity step,
+ * with the answer text as a message. A text-only answer does not call it: its
+ * leads come from requesterLeads, which is pure and cannot fail. When the
+ * step fails without being loud, the answer's leads still ride along with a
+ * gap. An answer with no id and no lead adds nothing, so no chain rides along.
+ */
+async function answerChain(
+  request: Pick<TriageRequest, 'request_id' | 'interface' | 'messages' | 'hints'>,
+  names: readonly string[],
+  deps: AnswerDeps,
+  signal: AbortSignal,
+): Promise<AnswerChain> {
+  const fallback = (gaps: readonly string[]): AnswerChain => {
+    const { leads } = requesterLeads(request, {}, names, 'answer');
+    return { chain: leads.length > 0 ? { ids: {}, hops: [], basic_state: [], leads } : undefined, gaps };
+  };
+  if (deps.identity === undefined || Object.keys(request.hints.ids ?? {}).length === 0) return fallback([]);
+  try {
+    const identity = await deps.identity(request, { redactionNames: names, signal });
+    const leads = identity.id_chain.leads?.map((lead) => (lead.source === 'thread' ? { ...lead, source: 'answer' as const } : lead));
+    return {
+      chain: { ...identity.id_chain, ...(leads !== undefined ? { leads } : {}) },
+      gaps: identity.gaps.filter((g) => !isNoIdsGap(g)),
+    };
+  } catch (err) {
+    if (signal.aborted || LOUD_IDENTITY_ERRORS.has(className(err))) throw err;
+    return fallback([`identity step did not run on the answer's ids (${className(err)}); they are in scope but were not resolved`]);
+  }
 }
 
 // ------------------------------------------------------------------ resume

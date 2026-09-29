@@ -3,7 +3,7 @@
 //
 //   signal -> repeat -> budget -> scope -> gate -> not configured
 //   -> mock or real -> audit -> stage to /data -> model-facing redaction
-//   -> envelope
+//   -> result cap -> envelope
 //
 // Repeat (D79): a tool that sets spec.repeat opts into the run's repeat
 // cache (src/runlog/actions.ts). An exact repeat of an earlier ok call in the
@@ -27,6 +27,13 @@
 // to /data/<toolCallId>.json in the sandbox. On the virtual sandbox it writes
 // model-facing text; e2b and daytona leave the machine, so they get
 // persisted-profile text only (D45).
+//
+// The result cap (D104) is owned here too: after redaction, a result whose
+// JSON is over TRIAGE_MAX_MODEL_BYTES_PER_CALL is replaced by a summary
+// (capModelResult) that keeps the counts, the first few rows or hits and the
+// staged_file path, and says how to read the rest with read_staged or how
+// to narrow the call. runCodeTool calls the same helper, so repo_* results
+// are capped the same way.
 
 import type { FlueLogger, Sandbox } from '@flue/runtime';
 import type { Config } from '../../config/env.ts';
@@ -141,6 +148,12 @@ export type IoToolSpec<K extends FixtureKind, T> = {
    * read of "now", a write). Leave it out for tools with side effects.
    */
   readonly repeat?: () => unknown;
+  /**
+   * The tool's own summary when the result is over the cap (D104). Leave it
+   * out for the generic one. It passes the model-facing redaction, and gets
+   * the over_cap fields and the note added.
+   */
+  readonly overCap?: (value: T, cap: number) => unknown;
 };
 
 /** The sandbox surface staging needs: a harness tool's harness. */
@@ -558,24 +571,191 @@ export async function runIoTool<K extends FixtureKind, T>(
   });
 
   // 8. Stage the full result. A failure is logged and does not fail the call.
-  let stagedPath: string | undefined;
+  let staged: StageResult | undefined;
   if (spec.stage !== undefined) {
     step('stage');
-    const staged = await stageRows(ctx.harness, ctx.toolCallId, spec.stage(value), toolContext.config, {
-      names,
-      log: ctx.log,
-    });
-    if (staged.staged) stagedPath = staged.path;
+    staged = await stageRows(ctx.harness, ctx.toolCallId, spec.stage(value), toolContext.config, { names, log: ctx.log });
   }
+  const stagedPath = staged?.staged === true ? staged.path : undefined;
 
-  // 9. Model-facing redaction, then 10. the envelope.
+  // 9. Model-facing redaction, the result cap (D104), then 10. the envelope.
+  // An over-cap result of a tool that stages nothing gets its rendered value
+  // staged now, so the summary can still point at a file.
   const rendered = spec.render(value);
   const data = stagedPath !== undefined && isPlainObject(rendered) ? { ...rendered, staged_file: stagedPath } : rendered;
-  const envelope = finish((safe) => ok(asJson(safe), now), data);
+  step('redact');
+  const safe = asJson(redactModelFacing(data));
+  const cap = toolContext.config.budgets.maxModelBytesPerCall;
+  const overCap = spec.overCap;
+  const capped = await fitModelResult(safe, {
+    cap,
+    ...(stagedPath !== undefined ? { stagedFile: stagedPath } : {}),
+    ...(staged === undefined
+      ? { stage: () => stageRows(ctx.harness, ctx.toolCallId, rendered, toolContext.config, { names, log: ctx.log }) }
+      : !staged.staged
+        ? { notStaged: staged.reason }
+        : {}),
+    ...(overCap !== undefined ? { custom: () => asJson(redactModelFacing(overCap(value, cap))) } : {}),
+  });
+  step('envelope');
+  const envelope = ok(capped, now);
   if (repeatKey !== undefined) {
     rememberRepeat(toolContext.runId, repeatKey, envelope, toolContext.agent ?? 'an earlier call', now().toISOString());
   }
   return envelope;
+}
+
+// ------------------------------------------------------------------ result cap (D104)
+
+// Fields an over-cap summary keeps as they are: counts, the query, paging and
+// notes, plus the other keys the run action log reads (outcomeOf in
+// src/runlog/actions.ts).
+const OVER_CAP_KEEP: ReadonlySet<string> = new Set([
+  'service',
+  'row_count',
+  'num_hits',
+  'count',
+  'tally_base',
+  'truncated',
+  'status',
+  'query',
+  'window',
+  'offset',
+  'next_offset',
+  'notes',
+  'distinct',
+  'matches',
+  'evidence_id',
+]);
+// Arrays already ordered by count: their summary is the top items.
+const OVER_CAP_TOP: ReadonlySet<string> = new Set(['groups', 'message_groups']);
+// The summary's own fields, which a tool's result or custom summary cannot override.
+const OVER_CAP_HEAD = ['over_cap', 'bytes', 'cap', 'staged_file', 'note'];
+/** Long strings in a summary are cut to this many characters. */
+export const OVER_CAP_STRING_CHARS = 200;
+/** A body (http_call) is cut to this many characters. */
+export const OVER_CAP_BODY_CHARS = 2048;
+// Items kept from each array, tried in order until the summary fits.
+const OVER_CAP_ITEMS = [20, 10, 5, 3, 1, 0];
+// Nesting below this depth is shown as cut JSON text.
+const OVER_CAP_DEPTH = 3;
+const NARROW = 'count or group_by first, fewer columns, a shorter window';
+
+/** The UTF-8 byte length of a value's JSON, as the model gets it. */
+export function modelBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value ?? null));
+}
+
+export type OverCapOptions = {
+  /** TRIAGE_MAX_MODEL_BYTES_PER_CALL. */
+  readonly cap: number;
+  /** The file with the full result. Defaults to the result's own staged_file. */
+  readonly stagedFile?: string;
+  /** Why nothing was staged, when there is no file. */
+  readonly notStaged?: string;
+  /** A tool's own summary, already redacted (IoToolSpec.overCap). */
+  readonly custom?: unknown;
+};
+
+/**
+ * The redacted result as it is when its JSON fits the cap, otherwise a
+ * summary that does: over_cap, bytes, cap and staged_file, the fields in
+ * OVER_CAP_KEEP as they are, every array as { total, first } (or top), long
+ * strings cut, a body cut to about 2 KB, and a note on what to do next.
+ * Fewer items are kept until it fits. Pure.
+ */
+export function capModelResult(safe: unknown, opts: OverCapOptions): unknown {
+  const bytes = modelBytes(safe);
+  if (bytes <= opts.cap) return safe;
+  const own = isPlainObject(safe) && typeof safe.staged_file === 'string' ? safe.staged_file : undefined;
+  const file = opts.stagedFile ?? own;
+  const head = { over_cap: true, bytes, cap: opts.cap, ...(file !== undefined ? { staged_file: file } : {}) };
+  const note =
+    file !== undefined
+      ? `Over ${opts.cap} bytes; the full result is in staged_file. Read a slice with read_staged (jq or lines), or narrow the call: ${NARROW}.`
+      : `Over ${opts.cap} bytes and not staged (${opts.notStaged ?? 'nothing to stage'}); narrow the call: ${NARROW}.`;
+  const fits = (value: unknown): boolean => modelBytes(value) <= opts.cap;
+
+  if (isPlainObject(opts.custom)) {
+    const summary = { ...head, ...withoutHead(opts.custom), note };
+    if (fits(summary)) return summary;
+  }
+  const base = opts.custom !== undefined ? opts.custom : safe;
+  for (const items of OVER_CAP_ITEMS) {
+    const summary = { ...head, ...summarise(base, items), note };
+    if (fits(summary)) return summary;
+  }
+  // Still too big (a huge query or notes): the numbers only.
+  const numbers = isPlainObject(base)
+    ? Object.fromEntries(Object.entries(base).filter(([k, v]) => OVER_CAP_KEEP.has(k) && (typeof v === 'number' || typeof v === 'boolean')))
+    : {};
+  const last = { ...head, ...numbers, note };
+  return fits(last) ? last : { ...head, note };
+}
+
+export type FitOptions = Omit<OverCapOptions, 'custom'> & {
+  /** Stages the full result, called only when it is over the cap and nothing is staged. */
+  readonly stage?: () => Promise<StageResult>;
+  /** The tool's own summary, redacted. Called only when over the cap. */
+  readonly custom?: () => unknown;
+};
+
+/** capModelResult, staging the full result first when it is over the cap and has no file yet. */
+export async function fitModelResult(safe: unknown, opts: FitOptions): Promise<unknown> {
+  if (modelBytes(safe) <= opts.cap) return safe;
+  let stagedFile = opts.stagedFile;
+  let notStaged = opts.notStaged;
+  if (stagedFile === undefined && opts.stage !== undefined) {
+    const staged = await opts.stage();
+    if (staged.staged) stagedFile = staged.path;
+    else notStaged = staged.reason;
+  }
+  return capModelResult(safe, {
+    cap: opts.cap,
+    ...(stagedFile !== undefined ? { stagedFile } : {}),
+    ...(notStaged !== undefined ? { notStaged } : {}),
+    ...(opts.custom !== undefined ? { custom: opts.custom() } : {}),
+  });
+}
+
+function withoutHead(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([k]) => !OVER_CAP_HEAD.includes(k)));
+}
+
+/** text cut to chars characters, with its full length shown after the cut. */
+export function cutText(text: string, chars: number): string {
+  return text.length <= chars ? text : `${text.slice(0, chars)}… [${text.length} chars]`;
+}
+
+// The top-level fields of a summary, keeping `items` of each array.
+function summarise(value: unknown, items: number): Record<string, unknown> {
+  if (Array.isArray(value)) return { items: listSummary(value, items, 'first') };
+  if (typeof value === 'string') return { text: cutText(value, OVER_CAP_BODY_CHARS) };
+  if (!isPlainObject(value)) return { value };
+  const out: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(withoutHead(value))) {
+    if (OVER_CAP_KEEP.has(key)) out[key] = field;
+    else if (Array.isArray(field)) out[key] = listSummary(field, items, OVER_CAP_TOP.has(key) ? 'top' : 'first');
+    else if (key === 'body') out[key] = cutText(typeof field === 'string' ? field : JSON.stringify(field) ?? '', OVER_CAP_BODY_CHARS);
+    else out[key] = shrink(field, items, 1);
+  }
+  return out;
+}
+
+function listSummary(list: readonly unknown[], items: number, label: 'first' | 'top'): Record<string, unknown> {
+  return { total: list.length, [label]: list.slice(0, items).map((item) => shrink(item, items, 1)) };
+}
+
+// Strings cut, arrays kept to `items`, deep nesting shown as cut JSON text.
+function shrink(value: unknown, items: number, depth: number): unknown {
+  if (typeof value === 'string') return cutText(value, OVER_CAP_STRING_CHARS);
+  if (value === null || typeof value !== 'object') return value;
+  if (depth >= OVER_CAP_DEPTH) return cutText(JSON.stringify(value) ?? '', OVER_CAP_STRING_CHARS);
+  if (Array.isArray(value)) {
+    const kept = value.slice(0, items).map((item) => shrink(item, items, depth + 1));
+    return value.length <= items ? kept : { total: value.length, first: kept };
+  }
+  return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, shrink(v, items, depth + 1)]));
 }
 
 // The repeat cache key: tool, target and the facts spec.repeat returns, as

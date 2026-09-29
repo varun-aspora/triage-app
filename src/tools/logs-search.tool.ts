@@ -17,6 +17,10 @@
 //
 // The window defaults to the request window, both ends are always sent, and
 // it is returned with the query that was built (D76).
+//
+// Results are shaped at the source (plan 16 S1.2, D104): the model gets the
+// top GROUP_TOP_N groups with keys cut to GROUP_KEY_CHARS, raw pages hold at
+// most RAW_MAX_HITS documents, and the staged file keeps the full result.
 
 import { defineTool, type ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
@@ -40,15 +44,17 @@ import {
   normalizeMessage,
   PAGE_SIZE,
   quickwitGateConfig,
+  RAW_MAX_HITS,
   type LogsQuery,
   type QuickwitGateConfig,
 } from '../gate/quickwit.ts';
 import { resolveWindow } from '../gate/quickwit-window.ts';
+import { redactModelFacing } from '../gate/redact.ts';
 import { observeCorrelationIds, observeJourneyKeys, type LogsMode } from '../gate/scope.ts';
 import { semanticKey } from '../mock/key.ts';
 import type { Entity, TimeWindow } from '../types/core.ts';
 import type { ToolEnvelope } from '../types/tool-result.ts';
-import { type GateDecision, runIoTool, type BackingRef, type StagingHarness } from './_lib/pipeline.ts';
+import { cutText, type GateDecision, runIoTool, type BackingRef, type StagingHarness } from './_lib/pipeline.ts';
 import type { ToolContext, ToolModule } from './types.ts';
 import { observedScopeOf, scopeSetOf } from './_lib/context.ts';
 
@@ -65,6 +71,14 @@ export const LOGS_SEARCH = 'logs_search';
 export const LOGS_SERVICE = 'logs';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Groups the model sees; the staged file keeps all of them (plan 16 S1.2). */
+export const GROUP_TOP_N = 25;
+/** Characters of a group key the model sees. */
+export const GROUP_KEY_CHARS = 200;
+
+// Fields whose values are whole log lines: grouping by them turns normalize on.
+const WHOLE_LINE_FIELDS: ReadonlySet<string> = new Set(['message', 'error', 'raw_message']);
 
 const Text = v.pipe(v.string(), v.minLength(1), v.maxLength(512));
 const FieldName = v.pipe(v.string(), v.minLength(1), v.maxLength(64));
@@ -130,14 +144,19 @@ export const LogsSearchInputSchema = v.strictObject({
     v.pipe(v.number(), v.integer(), v.minValue(1), v.description('Most hits to return. Clamped to the page size.')),
   ),
   columns: v.optional(v.pipe(v.array(FieldName), v.maxLength(10), v.description('Extra fields to show in each hit, such as status or User-Agent.'))),
-  raw: v.optional(v.pipe(v.boolean(), v.description('Return whole log documents instead of the listed fields.'))),
+  raw: v.optional(
+    v.pipe(v.boolean(), v.description(`Return whole log documents instead of the listed fields, at most ${RAW_MAX_HITS} per page.`)),
+  ),
   count: v.optional(v.pipe(v.boolean(), v.description('Return the number of matching lines only.'))),
   group_by: v.optional(
     v.pipe(
       v.array(FieldName),
       v.minLength(1),
       v.maxLength(4),
-      v.description('1 to 4 fields to group by, such as ["service"] or ["message", "error"]. Returns counts per value.'),
+      v.description(
+        '1 to 4 fields to group by, such as ["service"] or ["message", "error"]. Returns counts per value. ' +
+          'message, error and raw_message turn normalize on.',
+      ),
     ),
   ),
   count_distinct: v.optional(v.pipe(FieldName, v.description('Field whose distinct values are counted, such as customer_id.'))),
@@ -156,6 +175,10 @@ export type LogsSearchOutput = LogsSearchData & {
   readonly query: string;
   /** With normalize on a hits search: the hits folded by normalised error or message. */
   readonly message_groups?: readonly LogGroup[];
+  /** Model-facing only: how many groups (or message_groups) there are in all. */
+  readonly group_count?: number;
+  /** Model-facing only: the groups past the top GROUP_TOP_N and the hits they hold. */
+  readonly groups_omitted?: { readonly groups: number; readonly hits: number };
 };
 
 function description(ctx: ToolContext, entity: Entity): string {
@@ -180,12 +203,17 @@ function description(ctx: ToolContext, entity: Entity): string {
       'pass offset for the next page. The tool never fetches the next page itself.',
     'Every query sends both ends of its window: without from/to it is the request window ' +
       `(${defaultLookbackDays} days before the thread's first message up to when the request came in), and the window used is returned. Times are UTC.`,
+    'Start with count, or group_by on service/level, to size the result, then read hits with named columns.',
     `Over ${limit} hits the call returns early with the count and no hits: narrow the window or add a filter, or use count or group_by first. ` +
       `group_by (up to 4 fields) and count_distinct tally at most ${limit} hits. At most ${maxLogCallsPerRun} logs_search calls per run.`,
     'Id-shaped values must come from the brief or the ID chain. ' +
       'For counts across customers set scope: "systemic" together with count, group_by or count_distinct; ids are still checked.',
     'Returns hits (the listed fields plus columns, or whole documents with raw) with offset and next_offset, a count, or groups ' +
       '(key is the group_by values joined with " | ") and distinct with tally_base, plus num_hits, window, the query sent, truncated and notes. ' +
+      `raw returns at most ${RAW_MAX_HITS} hits per page. ` +
+      'group_by on message or error returns whole lines as keys: use normalize to fold ids and numbers out of them (it is on by default there). ' +
+      `groups return the top ${GROUP_TOP_N} with keys cut to ${GROUP_KEY_CHARS} characters, with group_count and groups_omitted; ` +
+      'the full list is in the staged file. ' +
       'The full result is also written to /data/<call id>.json in the sandbox. A 0-hit result says what to try next.',
     '"Refused" means the query was not run or Quickwit rejected it: fix what the message says and retry. ' +
       '"did not answer" carries the reason: retry once or narrow the window. "not configured" means logs are not set up ' +
@@ -295,6 +323,51 @@ export function foldGroups(groups: readonly LogGroup[]): LogGroup[] {
     .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key));
 }
 
+/**
+ * The model-facing groups: the top GROUP_TOP_N (the list is already largest
+ * first) with each key cut to GROUP_KEY_CHARS. Each key is redacted before
+ * the cut, because a cut can split an email or a card number so the later
+ * model-facing redaction no longer matches it. Cut keys that end up equal
+ * stay separate groups. The staged file and the audit line keep the full list.
+ */
+export function forModel(out: LogsSearchOutput): LogsSearchOutput {
+  if ('groups' in out && out.groups !== undefined) {
+    const { top, fields } = topGroups(out.groups, out.notes);
+    return { ...out, ...fields, groups: top };
+  }
+  if (out.message_groups !== undefined) {
+    const { top, fields } = topGroups(out.message_groups, out.notes);
+    return { ...out, ...fields, message_groups: top };
+  }
+  return out;
+}
+
+// The shown groups with their keys cut, and the counts and note that go with
+// them. The staged file is named only "when present" because staging can
+// fail or be off.
+function topGroups(
+  all: readonly LogGroup[],
+  notes: readonly string[] | undefined,
+): { top: LogGroup[]; fields: Pick<LogsSearchOutput, 'group_count' | 'groups_omitted' | 'notes'> } {
+  const shown = all.slice(0, GROUP_TOP_N).map((g) => ({ key: redactModelFacing(g.key), count: g.count }));
+  const omitted = all.slice(GROUP_TOP_N);
+  const cut = shown.some((g) => g.key.length > GROUP_KEY_CHARS);
+  const note =
+    omitted.length > 0 || cut
+      ? `${shown.length} of ${all.length} groups shown; keys cut to ${GROUP_KEY_CHARS} chars; ` +
+        'staged_file (when present) has all groups; group by service or level, or use normalize'
+      : undefined;
+  const merged = [...(notes ?? []), ...(note !== undefined ? [note] : [])];
+  return {
+    top: shown.map((g) => ({ key: cutText(g.key, GROUP_KEY_CHARS), count: g.count })),
+    fields: {
+      group_count: all.length,
+      groups_omitted: { groups: omitted.length, hits: omitted.reduce((sum, g) => sum + g.count, 0) },
+      ...(merged.length > 0 ? { notes: merged } : {}),
+    },
+  };
+}
+
 function messageGroups(hits: readonly LogHit[]): LogGroup[] {
   const groups: LogGroup[] = [];
   for (const hit of hits) {
@@ -310,6 +383,8 @@ type Shape = {
   readonly normalize: boolean;
   /** Added to notes when the result has 0 hits. */
   readonly zeroNote: string;
+  /** Tool notes added to every result, such as normalize turned on. */
+  readonly notes: readonly string[];
 };
 
 // The same shaping for a fixture and a real result: this call's window,
@@ -327,7 +402,7 @@ function shape(value: unknown, s: Shape): LogsSearchOutput {
         ]
       : [];
   const common = (total: number) => {
-    const notes = [...s.query.notes, ...(total === 0 ? [s.zeroNote, ...absent] : [])];
+    const notes = [...s.query.notes, ...s.notes, ...(total === 0 ? [s.zeroNote, ...absent] : [])];
     return { query: s.query.query, window: s.window, ...(notes.length > 0 ? { notes } : {}) };
   };
   const numHits = typeof rest.num_hits === 'number' ? rest.num_hits : 0;
@@ -392,7 +467,12 @@ async function runLogsSearch(ctx: ToolContext, entity: Entity, args: RunArgs): P
   const requestWindow = requestWindowOf(ctx, now);
   const target = targetOf(ctx, entity);
   const queryInput = queryInputOf(data);
-  const normalize = data.normalize === true;
+  // Keys of whole lines are almost all distinct until ids and numbers are folded out.
+  const autoNormalize = data.normalize === undefined && data.group_by?.some((f) => WHOLE_LINE_FIELDS.has(f)) === true;
+  const normalize = data.normalize === true || autoNormalize;
+  const toolNotes = autoNormalize
+    ? ['normalize turned on because group_by has message, error or raw_message; pass normalize: false to keep ids']
+    : [];
 
   let query: LogsQuery | undefined;
   let window: TimeWindow | undefined;
@@ -420,7 +500,7 @@ async function runLogsSearch(ctx: ToolContext, entity: Entity, args: RunArgs): P
 
   const shapeOf = (value: unknown): LogsSearchOutput => {
     const r = ready();
-    return shape(value, { query: r.query, window: r.window, normalize, zeroNote: zeroHitsNote(data) });
+    return shape(value, { query: r.query, window: r.window, normalize, zeroNote: zeroHitsNote(data), notes: toolNotes });
   };
 
   return runIoTool<'logs_search', unknown>(
@@ -471,8 +551,9 @@ async function runLogsSearch(ctx: ToolContext, entity: Entity, args: RunArgs): P
           observeCorrelationIds(ctx.runId, out.hits);
           observeJourneyKeys(ctx.runId, LOGS_SEARCH, data, scopeSetOf(deps), out.hits);
         }
-        return out;
+        return forModel(out);
       },
+      // The staged file and the audit summary keep every group.
       stage: shapeOf,
       summary: (value) => summaryOf(entity, data.service, shapeOf(value), transportUsed),
     },

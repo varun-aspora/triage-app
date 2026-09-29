@@ -8,14 +8,14 @@ import * as v from 'valibot';
 import { ConfigError } from '../config/errors.ts';
 import type { RunStore } from '../runstore/types.ts';
 import { connectorFailuresFor, recordConnectorFailure } from '../tools/_lib/connector-failures.ts';
-import { mergeIdChains, widenIdChain } from '../tools/_lib/context.ts';
+import { mergeIdChains, scopeSetOf, widenIdChain } from '../tools/_lib/context.ts';
 import { ASK_REQUESTER } from '../tools/ask-requester.tool.ts';
 import { FINISH_REPORT, synthesisPassesFor } from '../tools/finish-report.tool.ts';
 import { toolsFor } from '../tools/index.ts';
 import { STOP_BLOCKED } from '../tools/stop-blocked.tool.ts';
 import { type TriageInit, TriageInitSchema } from '../types/classification.ts';
 import { ENTITIES, type Entity, type Tier } from '../types/core.ts';
-import type { IdChain } from '../types/id-chain.ts';
+import type { IdChain, Lead } from '../types/id-chain.ts';
 import { INPUT_ANSWER_CHAIN_ATTR, INPUT_ANSWER_SIGNAL } from '../types/input-request.ts';
 import { makeTestHome, REPO_ROOT, type TestHome } from '../../test/support/home.ts';
 import { escalationFor } from './escalation.ts';
@@ -730,6 +730,36 @@ describe('ask_requester as a valid end of a response', () => {
     // Pure: the inputs are untouched.
     expect(base.hops).toHaveLength(1);
     expect(extra.ids.customer_id).toBeUndefined();
+  });
+
+  test('mergeIdChains merges the leads of both, one per kind and value, and answerChainOf reads them (D96)', () => {
+    const seed = (value: string, source: Lead['source']): Lead => ({ value, kind: 'uuid', source, status: 'seed' });
+    const U1 = '11111111-1111-4111-8111-111111111111';
+    const U2 = '22222222-2222-4222-8222-222222222222';
+    const base: IdChain = { ids: {}, hops: [], basic_state: [], leads: [seed(U1, 'thread')] };
+    const extra: IdChain = { ids: {}, hops: [], basic_state: [], leads: [seed(U1, 'answer'), seed(U2, 'answer')] };
+    expect(mergeIdChains(base, extra).leads).toEqual([seed(U1, 'thread'), seed(U2, 'answer')]);
+    // Chains without leads stay without them.
+    expect('leads' in mergeIdChains({ ids: {}, hops: [], basic_state: [] }, { ids: {}, hops: [], basic_state: [] })).toBe(false);
+    const attributes = { question_id: 'q1', [INPUT_ANSWER_CHAIN_ATTR]: JSON.stringify(extra) };
+    expect(answerChainOf({ kind: 'signal', type: INPUT_ANSWER_SIGNAL, body: 'x', attributes })?.leads).toEqual(extra.leads);
+  });
+
+  test('widenIdChain keeps the leads a new chain leaves out, and the seeds stay in scope', () => {
+    const h = home();
+    useTestRuntime(h);
+    const runId = nextRunId();
+    const data = init({ runId });
+    const U3 = '33333333-3333-4333-8333-333333333333';
+    const lead: Lead = { value: U3, kind: 'uuid', source: 'thread', label: 'Alphadesk user ID', status: 'seed' };
+    const deps = runDepsFor(runId, { ...data, id_chain: { ...data.id_chain, leads: [lead] } });
+    expect(scopeSetOf(deps).uuid.has(U3)).toBe(true);
+    // resolve_identity writes a chain of ids, hops and state only.
+    const { leads: _leads, ...plain } = deps.idChain();
+    widenIdChain(deps, { ...plain, ids: { ...plain.ids, account_id: 'acct-test-7' } });
+    expect(deps.idChain().leads).toEqual([lead]);
+    expect(scopeSetOf(deps).uuid.has(U3)).toBe(true);
+    settleRun(runId);
   });
 
   test('runDepsFor seeds the chain from a saved one when given, on the first render of the run only', () => {

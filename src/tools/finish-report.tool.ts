@@ -8,7 +8,12 @@
 //
 // run(), in order:
 //   1. Re-check the draft shape (Flue parses it first; this keeps the check in
-//      our hands). A bad shape is refused with the failing paths.
+//      our hands). A bad shape is refused with the failing paths. The input
+//      schema has no id_chain.leads: code fills them from the run chain's
+//      leads (D96), values masked with maskId and labels through the
+//      persisted profile, so the model never writes the list and the egress
+//      check has nothing to refuse there. Synthesis pins id_chain, so the
+//      list survives it.
 //   2. Read the run through the RunStore: its evidence (latest version per
 //      key), its classification record and its created_at.
 //   3. Compute escalation with computeEscalation() over the stored findings
@@ -55,6 +60,7 @@ import * as v from 'valibot';
 import { computeEscalation, type Escalation, type RecordedFindings } from '../agents/escalation.ts';
 import { makeAuditLine } from '../gate/audit.ts';
 import { redactModelFacing, redactPersisted } from '../gate/redact.ts';
+import { maskId } from '../gate/scope.ts';
 import { currentCommit, type CommitResult, type ReposDeps } from '../ops/repos.ts';
 import { mergeGaps, registryNames } from '../report/gaps.ts';
 import { refusalMessage, writeReport, type WriteReportArgs, type WriteReportResult } from '../report/write.ts';
@@ -63,6 +69,7 @@ import type { AuditTransport } from '../types/audit.ts';
 import type { PreflightWarning, TriageInit } from '../types/classification.ts';
 import { ENTITIES, type Entity, type RunId, type Tier } from '../types/core.ts';
 import type { CodeFindings, EntityFindings } from '../types/findings.ts';
+import { type IdChain, IdChainSchema, LEAD_LABEL_MAX, type Lead } from '../types/id-chain.ts';
 import { type RepoCommit, type ReportCost, type ReportDraft, ReportDraftSchema, RepoCommitSchema } from '../types/report.ts';
 import { ok, refused, type ToolEnvelope } from '../types/tool-result.ts';
 import type { UsageRow } from '../types/usage.ts';
@@ -87,6 +94,31 @@ export function synthesisPassesFor(runId: RunId): number {
 /** Drops a run's synthesis count when the run settles. Returns true when one existed. */
 export function releaseFinishReport(runId: RunId): boolean {
   return synthesisPasses.delete(runId);
+}
+
+/**
+ * The draft as the model writes it: id_chain has no leads, because code fills
+ * them (withRunLeads). A leads list the model sends anyway is stripped by the
+ * parse, so its shape cannot get the draft refused.
+ */
+export const FinishReportInputSchema = v.object({
+  ...ReportDraftSchema.entries,
+  id_chain: v.omit(IdChainSchema, ['leads']),
+});
+
+/** The draft with id_chain.leads replaced by the run chain's leads, masked. */
+export function withRunLeads(draft: ReportDraft, chain: IdChain, names: readonly string[]): ReportDraft {
+  const { leads: _written, ...idChain } = draft.id_chain;
+  const leads = (chain.leads ?? []).map((lead): Lead => {
+    // A mask can be longer than the text it hides; the label stays within its cap.
+    const label = lead.label === undefined ? undefined : redactPersisted(lead.label, { names }).value.slice(0, LEAD_LABEL_MAX);
+    return {
+      ...lead,
+      value: maskId({ kind: lead.kind, normalised: lead.value }),
+      ...(label !== undefined ? { label } : {}),
+    };
+  });
+  return { ...draft, id_chain: leads.length > 0 ? { ...idChain, leads } : idChain };
 }
 
 /** Most failing paths listed in a shape refusal. The rest are counted. */
@@ -138,7 +170,7 @@ const DESCRIPTION =
   'not confirmed), scope, status, cx_answer, actions, suggested_fix (commands for a human, with ' +
   '$VAR placeholders for hosts and tokens), confidence and its reason, evidence_ladder, ' +
   'entities_consulted, gaps, escalated, escalation_reasons and images_seen. Do not pass run_id, ' +
-  'repo_commits or cost; they are filled for you. Mask ids in free text (keep at most the last four ' +
+  'repo_commits, cost or id_chain.leads; they are filled for you. Mask ids in free text (keep at most the last four ' +
   'digits behind ****) and leave out names, phones and emails. If the report is refused, the reply ' +
   'lists the fields to fix; fix them and call finish_report again. Returns where the report was written.';
 
@@ -400,7 +432,7 @@ export function createFinishReportTool(ctx: ToolContext, options: FinishReportOp
     };
 
     // 1. Shape.
-    const parsed = v.safeParse(ReportDraftSchema, data);
+    const parsed = v.safeParse(FinishReportInputSchema, data);
     if (!parsed.success) {
       const paths = listPaths(failingPaths(parsed.issues));
       return refuse(
@@ -408,7 +440,7 @@ export function createFinishReportTool(ctx: ToolContext, options: FinishReportOp
         `shape: ${paths}`,
       );
     }
-    let draft: ReportDraft = parsed.output;
+    let draft: ReportDraft = withRunLeads(parsed.output, deps.idChain(), names);
 
     // 2. The run as stored.
     const record = await deps.runStore.getRun(ctx.runId);
@@ -521,7 +553,7 @@ export function createFinishReportTool(ctx: ToolContext, options: FinishReportOp
   return defineTool({
     name: FINISH_REPORT,
     description: DESCRIPTION,
-    input: ReportDraftSchema,
+    input: FinishReportInputSchema,
     harness: true,
     run: (context) => run(context),
   });

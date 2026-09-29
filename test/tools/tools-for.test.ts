@@ -26,7 +26,7 @@ const CBS_FLAG = 'SSFB_CBS_VIA_KUBECTL_ENABLED';
 
 // The repo_* tools are on both investigator variants, scoped to the entity's repos.
 const REPO_TOOLS = ['repo_find', 'repo_grep', 'repo_read', 'repo_tree'];
-const BASE_INVESTIGATOR = ['http_call', 'logs_search', 'note_evidence', 'run_log', 'sql_select', ...REPO_TOOLS];
+const BASE_INVESTIGATOR = ['http_call', 'logs_search', 'note_evidence', 'read_staged', 'run_log', 'sql_select', ...REPO_TOOLS];
 const SSFB_ALWAYS = ['detect_silent_reversals', 'get_account_statement'];
 const SSFB_CRYPTO = ['decrypt_fields', 'encrypt_lookup_value'];
 // Scoped to ssfb in their module. The crypto tools serve any entity with a field-encryption service (D48).

@@ -111,7 +111,9 @@ export type ResolveIdentityInput = v.InferOutput<ReturnType<typeof inputSchema>>
 const description =
   'Resolve ids that surfaced mid-run (for example a form id in a log line) through the fixed ID-chain lookups ' +
   'and add them to the run ID chain, so later investigator calls may use them. You pass ids only; the lookups ' +
-  'are fixed. Each id comes back with a status: in_chain (already known, re-resolved), linked (a lookup tied ' +
+  'are fixed. An id that appears in the requester\'s text (the thread, hints or an ask_requester answer) is in ' +
+  'the chain already as a lead, so other tools accept it; resolve it only to find the ids it leads to. ' +
+  'Each id comes back with a status: in_chain (already known, re-resolved), linked (a lookup tied ' +
   'it to the run customer, so it and the ids it led to were added), unverified (it resolved but nothing ties ' +
   'it to the run customer; it was NOT added and other tools will refuse it), not_found, or unreachable (a ' +
   'database did not answer; errors says why). Returns the updated id_chain with per-hop status and taken_at, ' +

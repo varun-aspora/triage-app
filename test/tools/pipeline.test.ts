@@ -16,13 +16,17 @@ import type { RunStore } from '../../src/runstore/types.ts';
 import { connectorFailuresFor, releaseConnectorFailures } from '../../src/tools/_lib/connector-failures.ts';
 import { createToolDeps, widenIdChain } from '../../src/tools/_lib/context.ts';
 import {
+  capModelResult,
   type IoRunContext,
   type IoToolSpec,
+  modelBytes,
+  OVER_CAP_BODY_CHARS,
   runIoTool,
   stagePath,
   stageRows,
   type StagingHarness,
 } from '../../src/tools/_lib/pipeline.ts';
+import { runCodeTool } from '../../src/tools/code/_lib/code-tool.ts';
 import type { ToolContext, ToolDeps } from '../../src/tools/types.ts';
 import type { AuditLine } from '../../src/types/audit.ts';
 import type { IdChain } from '../../src/types/id-chain.ts';
@@ -1092,5 +1096,163 @@ describe('tool errors reach the model', () => {
     expect(connectorFailuresFor(h.runId)).toEqual([
       { system: 'ssfb:harbor', tool: 'sql_select', code: 'unreachable', at: FIXED_NOW.toISOString() },
     ]);
+  });
+});
+
+// ------------------------------------------------------------------ result cap (D104)
+
+describe('result cap (D104)', () => {
+  const CAP = 24_576;
+  type Summary = Record<string, unknown> & { over_cap?: boolean; note?: string; staged_file?: string };
+
+  // A spec that returns `value` as it is, for results of any shape.
+  function bigSpec(h: Harness, value: unknown, extra: Partial<IoToolSpec<'sql_select', unknown>> = {}): IoToolSpec<'sql_select', unknown> {
+    const { input, backing, scope, gate, fixture } = sqlSpec(h);
+    return { tool: 'sql_select', service: 'harbor', input, backing, scope, gate, fixture, real: async () => value, render: (x) => x, ...extra };
+  }
+
+  // Like a logs_search group_by over a long message field: about 1.3 MB.
+  const GROUPS = Array.from({ length: 5000 }, (_, i) => ({ key: `upstream call failed while reading the ledger, attempt ${i}: ${'z'.repeat(200)}`, count: 5000 - i }));
+  const GROUPED = { groups: GROUPS, tally_base: 90_000, num_hits: 90_000, query: 'service:harbor AND level:ERROR', window: { from: 'a', to: 'b' }, truncated: false };
+  // Like a raw logs_search hit page: about 300 KB.
+  const HITS = Array.from({ length: 600 }, (_, i) => ({ timestamp: `2026-09-23T10:${String(i % 60).padStart(2, '0')}:00Z`, level: 'ERROR', message: `request ${i} failed: ${'m'.repeat(440)}` }));
+  const HIT_PAGE = { hits: HITS, offset: 0, next_offset: 600, num_hits: 4200, query: 'service:harbor', truncated: true };
+
+  test('the synthetic results are the sizes the plan names', () => {
+    expect(modelBytes(GROUPED)).toBeGreaterThan(1_300_000);
+    expect(modelBytes(HIT_PAGE)).toBeGreaterThan(300_000);
+  });
+
+  test('a 1.3 MB group_by result becomes a summary under the cap with staged_file and the note', async () => {
+    const h = setup({ env: REAL });
+    const { harness, written } = fakeHarness(h);
+    const env = await runIoTool(bigSpec(h, GROUPED, { stage: (x) => x }), runCtx(h, { harness }));
+    expectEnvelope(env);
+    const data = env.output.data as Summary & { groups: { total: number; top: { key: string; count: number }[] } };
+    expect(modelBytes(data)).toBeLessThanOrEqual(CAP);
+    expect(data).toMatchObject({ over_cap: true, cap: CAP, staged_file: '/data/toolu_01ABCdef.json', tally_base: 90_000, num_hits: 90_000, truncated: false });
+    expect(data.bytes).toBeGreaterThan(1_300_000);
+    expect(data.note).toContain('the full result is in staged_file');
+    expect(data.note).toContain('read_staged');
+    expect(data.groups.total).toBe(5000);
+    expect(data.groups.top.length).toBeGreaterThan(0);
+    expect(data.groups.top[0]?.count).toBe(5000);
+    expect(data.groups.top[0]?.key.startsWith('upstream call failed')).toBe(true);
+    expect(data.groups.top[0]?.key).toContain('chars]');
+    // The staged file has everything, written once.
+    expect(written).toHaveLength(1);
+    expect((JSON.parse(written[0]?.text ?? '{}') as typeof GROUPED).groups).toHaveLength(5000);
+  });
+
+  test('a 300 KB hit page from a tool that stages nothing is staged now and summarised', async () => {
+    const h = setup({ env: REAL });
+    const { harness, written } = fakeHarness(h);
+    const env = await runIoTool(bigSpec(h, HIT_PAGE), runCtx(h, { harness }));
+    const data = env.output.data as Summary & { hits: { total: number; first: { message: string }[] } };
+    expect(modelBytes(data)).toBeLessThanOrEqual(CAP);
+    expect(data).toMatchObject({ over_cap: true, staged_file: '/data/toolu_01ABCdef.json', num_hits: 4200, offset: 0, next_offset: 600, truncated: true });
+    expect(data.note).toContain('read_staged');
+    expect(data.hits.total).toBe(600);
+    expect(data.hits.first.length).toBeGreaterThan(0);
+    expect(data.hits.first[0]?.message.length).toBeLessThan(260);
+    expect(written).toHaveLength(1);
+    expect((JSON.parse(written[0]?.text ?? '{}') as typeof HIT_PAGE).hits).toHaveLength(600);
+  });
+
+  test('without a harness the summary says it was not staged and to narrow the call', async () => {
+    const h = setup({ env: REAL });
+    const env = await runIoTool(bigSpec(h, HIT_PAGE), runCtx(h));
+    const data = env.output.data as Summary;
+    expect(modelBytes(data)).toBeLessThanOrEqual(CAP);
+    expect(data.staged_file).toBeUndefined();
+    expect(data.note).toContain('not staged (no harness); narrow the call');
+  });
+
+  test('a small result is unchanged', async () => {
+    const h = setup({ env: REAL });
+    const { harness } = fakeHarness(h);
+    const small = { rows: [{ id: CUSTOMER }], row_count: 1, truncated: false };
+    const env = await runIoTool(bigSpec(h, small, { stage: (x) => x }), runCtx(h, { harness }));
+    expect(env.output.data).toEqual({ ...small, staged_file: '/data/toolu_01ABCdef.json' });
+  });
+
+  test("a tool's overCap summary is used, with the over_cap fields and the note added", async () => {
+    const h = setup({ env: REAL });
+    const { harness } = fakeHarness(h);
+    const env = await runIoTool(
+      bigSpec(h, GROUPED, { stage: (x) => x, overCap: (_value, cap) => ({ groups_total: 5000, cap_seen: cap, bytes: -1 }) }),
+      runCtx(h, { harness }),
+    );
+    const data = env.output.data as Summary;
+    expect(data).toMatchObject({ over_cap: true, cap: CAP, groups_total: 5000, cap_seen: CAP, staged_file: '/data/toolu_01ABCdef.json' });
+    // The summary's own fields win over the tool's.
+    expect(data.bytes).toBeGreaterThan(1_300_000);
+    expect(data.note).toContain('read_staged');
+  });
+
+  test('the repeat cache keeps the capped envelope', async () => {
+    const h = setup({ env: REAL });
+    const { harness } = fakeHarness(h);
+    const spec = bigSpec(h, HIT_PAGE, { repeat: () => ({ q: 1 }) });
+    await runIoTool(spec, runCtx(h, { harness }));
+    const again = await runIoTool(spec, runCtx(h, { harness }));
+    expect(h.audit.lines.at(-1)).toMatchObject({ exit: 'reused' });
+    expect(again.output.data).toMatchObject({ over_cap: true, staged_file: '/data/toolu_01ABCdef.json' });
+    expect(modelBytes(again.output.data)).toBeLessThanOrEqual(CAP);
+  });
+
+  test('the summary is measured after redaction and keeps redacted values', async () => {
+    const h = setup({ env: REAL });
+    const rows = Array.from({ length: 400 }, () => ({ email: EMAIL, note: 'n'.repeat(100) }));
+    const env = await runIoTool(bigSpec(h, { rows, row_count: 400 }), runCtx(h));
+    expect(JSON.stringify(env.output.data)).not.toContain('priya.sharma@');
+    expect(env.output.data).toMatchObject({ over_cap: true, row_count: 400 });
+  });
+
+  test('capModelResult cuts a body to about 2 KB and falls back to the numbers when a kept field is huge', () => {
+    const body = capModelResult({ status: 200, body: 'b'.repeat(40_000) }, { cap: 4096, stagedFile: '/data/x.json' }) as Summary & { body: string };
+    expect(body).toMatchObject({ over_cap: true, status: 200, staged_file: '/data/x.json' });
+    expect(body.body.length).toBeLessThanOrEqual(OVER_CAP_BODY_CHARS + 20);
+    const huge = capModelResult({ query: 'q'.repeat(10_000), num_hits: 7, hits: [] }, { cap: 2048, notStaged: 'no harness' }) as Summary;
+    expect(modelBytes(huge)).toBeLessThanOrEqual(2048);
+    expect(huge).toMatchObject({ over_cap: true, num_hits: 7 });
+    expect(huge.query).toBeUndefined();
+    expect(capModelResult([1, 2, 3], { cap: 1024 })).toEqual([1, 2, 3]);
+  });
+
+  describe('runCodeTool', () => {
+    const bigFile = { repo: 'harbor', path: 'src/big.ts', text: 'const x = 1;\n'.repeat(10_000) };
+
+    test('an over-cap repo result is summarised, and only the summary counts as sent', async () => {
+      const h = setup({ env: REAL });
+      const env = await runCodeTool({ tool: 'repo_read', ctx: h.ctx, work: async () => ({ ok: true, data: bigFile, summary: 'repo_read harbor' }) });
+      expectEnvelope(env);
+      const data = env.output.data as Summary & { text: string };
+      expect(modelBytes(data)).toBeLessThanOrEqual(CAP);
+      expect(data).toMatchObject({ over_cap: true, repo: 'harbor', path: 'src/big.ts' });
+      expect(data.note).toContain('not staged (this tool does not stage)');
+      expect(h.budget.state().bytes).toBe(modelBytes(data));
+    });
+
+    test('with a harness and a tool call id the full result is staged', async () => {
+      const h = setup({ env: REAL });
+      const { harness, written } = fakeHarness(h);
+      const env = await runCodeTool({
+        tool: 'repo_read',
+        ctx: h.ctx,
+        harness,
+        toolCallId: 'toolu_code_1',
+        work: async () => ({ ok: true, data: bigFile, summary: 'repo_read harbor' }),
+      });
+      expect(env.output.data).toMatchObject({ over_cap: true, staged_file: '/data/toolu_code_1.json' });
+      expect(written[0]?.path).toBe('/data/toolu_code_1.json');
+    });
+
+    test('a small repo result is unchanged', async () => {
+      const h = setup({ env: REAL });
+      const small = { repo: 'harbor', path: 'a.ts', text: 'ok' };
+      const env = await runCodeTool({ tool: 'repo_read', ctx: h.ctx, work: async () => ({ ok: true, data: small, summary: 'repo_read harbor' }) });
+      expect(env.output.data).toEqual(small);
+    });
   });
 });

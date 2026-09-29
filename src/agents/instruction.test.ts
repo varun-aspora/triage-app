@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import * as v from 'valibot';
 import { TriageInitSchema, type TriageInit } from '../types/classification.ts';
 import { matchPattern, parsePatterns } from '../classify/patterns.ts';
-import { BRIEF_FIELDS, methodText, ORCHESTRATOR_DOCS } from './instruction.ts';
+import { BRIEF_FIELDS, MAX_LISTED_LEADS, methodText, ORCHESTRATOR_DOCS } from './instruction.ts';
 import { type Knowledge, loadKnowledge } from './skills.ts';
 
 const FIXTURE = fileURLToPath(new URL('./__fixtures__/knowledge', import.meta.url));
@@ -20,6 +20,7 @@ function init(
     ids?: Record<string, string>;
     matched?: string;
     hops?: Record<string, unknown>[];
+    leads?: Record<string, unknown>[];
   } = {},
 ): TriageInit {
   return v.parse(TriageInitSchema, {
@@ -53,6 +54,7 @@ function init(
       ids: overrides.ids ?? { customer_id: 'cust-test-1', account_form_id: 'form-test-1' },
       hops: overrides.hops ?? [],
       basic_state: [],
+      ...(overrides.leads !== undefined ? { leads: overrides.leads } : {}),
     },
   });
 }
@@ -173,6 +175,41 @@ describe('methodText', () => {
 
   test('with no hops, the id chain line says so', () => {
     expect(methodText(init(), { knowledge })).toContain('- Id chain: no hops');
+  });
+
+  test('lists the leads after the known ids, each with its label or kind and its key (D96)', () => {
+    const U1 = '11111111-1111-4111-8111-111111111111';
+    const leads = [
+      { value: U1, kind: 'uuid', source: 'thread', label: 'Alphadesk user ID', status: 'seed' },
+      { value: 'cust-test-1', kind: 'digits', source: 'hint', key: 'customer_id', status: 'seed' },
+      { value: '+971501234567', kind: 'phone', source: 'answer', label: 'call\u0007 me `now`', status: 'seed' },
+    ];
+    const run = methodText(init({ leads }), { knowledge }).split('## This run')[1] as string;
+    // The customer_id lead is on the Known ids line already, so it is left out.
+    expect(run).toContain(
+      `- Known ids: customer_id = cust-test-1, account_form_id = form-test-1\n- Leads: Alphadesk user ID: ${U1}; call me now: +971501234567\n`,
+    );
+  });
+
+  test('lists at most MAX_LISTED_LEADS leads and counts the rest; a keyed lead with another value stays', () => {
+    const leads = Array.from({ length: MAX_LISTED_LEADS + 3 }, (_, i) => ({
+      value: String(100000000 + i),
+      kind: 'digits',
+      source: 'thread',
+      status: 'seed',
+      ...(i === 0 ? { key: 'customer_id' } : {}),
+    }));
+    const line = methodText(init({ leads }), { knowledge })
+      .split('\n')
+      .find((l) => l.startsWith('- Leads: ')) as string;
+    expect(line.split('; ')).toHaveLength(MAX_LISTED_LEADS);
+    expect(line).toContain('digits: 100000000 (customer_id)');
+    expect(line).not.toContain(String(100000000 + MAX_LISTED_LEADS));
+    expect(line.endsWith(' (+3 more)')).toBe(true);
+  });
+
+  test('without leads there is no leads line', () => {
+    expect(methodText(init(), { knowledge })).not.toContain('- Leads:');
   });
 
   test('a masked id stays masked', () => {

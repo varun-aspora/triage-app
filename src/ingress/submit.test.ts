@@ -26,7 +26,7 @@ import type { Tier } from '../types/core.ts';
 import type { IdChain } from '../types/id-chain.ts';
 import { INPUT_ANSWER_CHAIN_ATTR, INPUT_ANSWER_SIGNAL } from '../types/input-request.ts';
 import { BLOCK_RESUME_SIGNAL, MAX_RESUME_NOTE_CHARS } from '../types/block.ts';
-import { flushRunEventLog, installRunEventLog, uninstallRunEventLog } from '../runlog/event-log.ts';
+import { flushRunEventLog, installRunEventLog, setRunRedactionNames, uninstallRunEventLog } from '../runlog/event-log.ts';
 import { readRunEvents } from '../runlog/read.ts';
 import { sampleBlock, sampleInputRequest } from '../runstore/contract.ts';
 import type { Attachment } from '../types/request.ts';
@@ -44,7 +44,8 @@ import {
   snapshotSubmission,
   type UsageEvent,
 } from '../usage/meter.ts';
-import type { IngressIdentity } from './identity.ts';
+import { threadLeads } from './extract-ids.ts';
+import { type IngressIdentity, leadsGap, NO_IDS_GAP } from './identity.ts';
 import { loadStalled } from './stalled.ts';
 import { buildTriageRequest, IngressInputError, type TriageInput } from './normalise.ts';
 import { prepareDeps, prepareRequest, type PreparedSubmission } from './prepare.ts';
@@ -1104,7 +1105,14 @@ describe('needs_input and answerRun', () => {
   });
 
   test('answerRun closes the question, records an answer submission and resumes the run with a signal', async () => {
-    const h = harness();
+    const seen: unknown[] = [];
+    // A text-only answer takes its leads without the identity step, and this one holds no id-shaped value.
+    const h = harness({
+      identity: async (...args: unknown[]) => {
+        seen.push(args[0]);
+        return { id_chain: { ids: {}, hops: [], basic_state: [] }, basic_state: [], gaps: [NO_IDS_GAP] };
+      },
+    });
     await parked(h);
     const result = await answerRun(RUN_ID, { answer: 'the one on 3 Sep for 12,000', by: 'ops-reviewer' }, h.deps);
     expect(result.status).toBe('completed');
@@ -1120,7 +1128,10 @@ describe('needs_input and answerRun', () => {
     const msg = d.message as { kind: string; type: string; body: string; attributes: Record<string, string> };
     expect(msg.kind).toBe('signal');
     expect(msg.type).toBe(INPUT_ANSWER_SIGNAL);
+    // Nothing found adds no chain and no gap.
     expect(msg.attributes).toEqual({ question_id: 'q1' });
+    expect(seen).toEqual([]);
+    expect(msg.body).not.toContain(NO_IDS_GAP);
     expect(msg.body).toContain('Answer from ops-reviewer to your question q1');
     expect(msg.body).toContain('the one on 3 Sep for 12,000');
     expect(h.events.filter((e) => e === 'embedRun')).toHaveLength(1);
@@ -1178,7 +1189,15 @@ describe('needs_input and answerRun', () => {
       h.deps,
     );
     expect(result.status).toBe('completed');
-    expect(seen).toEqual([{ request_id: RUN_ID, interface: 'cli', messages: [], hints: { ids: { customer_id: 'cust-answer-1' } } }]);
+    // The answer text goes to the identity step as a message, next to the ids.
+    expect(seen).toEqual([
+      {
+        request_id: RUN_ID,
+        interface: 'cli',
+        messages: [{ ts: expect.any(String), author: 'ops', text: `it is the account ${ACCOUNT}`, is_parent: false }],
+        hints: { ids: { customer_id: 'cust-answer-1' } },
+      },
+    ]);
     const msg = h.flue.dispatches[0]!.message as { body: string; attributes: Record<string, string> };
     expect(JSON.parse(msg.attributes[INPUT_ANSWER_CHAIN_ATTR]!)).toEqual(chain);
     expect(msg.attributes.question_id).toBe('q1');
@@ -1189,24 +1208,124 @@ describe('needs_input and answerRun', () => {
     expect(msg.body).toContain(ACCOUNT);
     expect(JSON.stringify(await h.store.getRun(RUN_ID))).not.toContain(ACCOUNT);
 
-    // An identity step that cannot run leaves an empty chain and a gap; a loud one is passed on.
+    // An identity step that cannot run leaves the given ids as hint leads and a gap.
     const g = harness({
       identity: async () => {
         throw new Error('boom');
       },
     });
     await parked(g);
-    await answerRun(RUN_ID, { answer: 'x', ids: { customer_id: 'c-2' }, by: 'ops' }, g.deps);
+    await answerRun(RUN_ID, { answer: 'x', ids: { customer_id: '123456789' }, by: 'ops' }, g.deps);
     const gm = g.flue.dispatches[0]!.message as { body: string; attributes: Record<string, string> };
-    expect(JSON.parse(gm.attributes[INPUT_ANSWER_CHAIN_ATTR]!)).toEqual({ ids: {}, hops: [], basic_state: [] });
-    expect(gm.body).toContain('identity step did not run (Error)');
+    expect(JSON.parse(gm.attributes[INPUT_ANSWER_CHAIN_ATTR]!)).toEqual({
+      ids: {},
+      hops: [],
+      basic_state: [],
+      leads: [{ value: '123456789', kind: 'digits', source: 'hint', key: 'customer_id', status: 'seed' }],
+    });
+    expect(gm.body).toContain("identity step did not run on the answer's ids (Error)");
+    expect(gm.body).not.toContain('classifier');
 
-    // Without an identity step in the deps, ids cannot be verified.
+    // A loud failure is passed on when the person sent ids, and the question stays open.
+    class FixtureMissError extends Error {
+      override name = 'FixtureMissError';
+    }
+    const l = harness({
+      identity: async () => {
+        throw new FixtureMissError('no fixture');
+      },
+    });
+    await parked(l);
+    await expect(answerRun(RUN_ID, { answer: 'x', ids: { customer_id: 'c-3' }, by: 'ops' }, l.deps)).rejects.toBeInstanceOf(FixtureMissError);
+    expect((await l.store.getRun(RUN_ID))?.input_request?.question_id).toBe('q1');
+    expect(l.flue.dispatches).toHaveLength(0);
+
+    // Without an identity step in the deps, ids cannot be verified; a bare answer still goes through.
+    const a = harness();
+    await parked(a);
+    const { identity: _none, ...answerOnly } = a.deps;
+    await answerRun(RUN_ID, { answer: 'x', by: 'ops' }, answerOnly);
+    expect((a.flue.dispatches[0]!.message as { attributes: Record<string, string> }).attributes).toEqual({ question_id: 'q1' });
+
     const n = harness();
     await parked(n);
     const { identity: _identity, ...noIdentity } = n.deps;
     await expect(answerRun(RUN_ID, { answer: 'x', ids: { customer_id: 'c' }, by: 'ops' }, noIdentity)).rejects.toBeInstanceOf(SubmissionInputError);
     expect(n.flue.dispatches).toHaveLength(0);
+  });
+});
+
+// ------------------------------------------------------------------ answer leads
+
+describe('answer leads (D96)', () => {
+  const lead = 'b4e7d2a9-1c3f-4a6b-8e5d-9f2a0c1b3d47';
+
+  async function parkedAnswer(h: Harness): Promise<void> {
+    await h.store.createRun(RUN_ID, redactPersisted(prepared().request, { names: [NAME] }));
+    await h.store.addSubmission(RUN_ID, redactPersisted({ kind: 'initial' as const }));
+    await h.store.putInputRequest(RUN_ID, redactPersisted(sampleInputRequest('q1')));
+  }
+
+  function answerChainOf(h: Harness): { chain: IdChain; body: string } {
+    const msg = h.flue.dispatches[0]!.message as { body: string; attributes: Record<string, string> };
+    return { chain: JSON.parse(msg.attributes[INPUT_ANSWER_CHAIN_ATTR]!) as IdChain, body: msg.body };
+  }
+
+  test('ids in a text-only answer come back as answer leads without the identity step, even one that would throw', async () => {
+    class FixtureMissError extends Error {
+      override name = 'FixtureMissError';
+    }
+    let calls = 0;
+    const h = harness({
+      identity: async () => {
+        calls++;
+        throw new FixtureMissError('no fixture');
+      },
+    });
+    await parkedAnswer(h);
+    await answerRun(RUN_ID, { answer: `the user id is ${lead}`, by: 'ops' }, h.deps);
+    expect(calls).toBe(0);
+    const { chain, body } = answerChainOf(h);
+    expect(chain).toEqual({
+      ids: {},
+      hops: [],
+      basic_state: [],
+      leads: [{ value: lead, kind: 'uuid', source: 'answer', label: 'the user id is', at: { message: 0, offset: 15 }, status: 'seed' }],
+    });
+    expect(body).not.toContain('no known id');
+    expect(body).not.toContain('identity step');
+  });
+
+  test("an answer lead's label is masked with the run's redaction names", async () => {
+    uninstallRunEventLog();
+    try {
+      setRunRedactionNames(RUN_ID, [NAME]);
+      const h = harness();
+      await parkedAnswer(h);
+      await answerRun(RUN_ID, { answer: `${NAME} account: ${lead}`, by: 'ops' }, h.deps);
+      const label = answerChainOf(h).chain.leads?.[0]?.label;
+      expect(label).toBeDefined();
+      expect(label).not.toContain('Asha');
+      expect(label).toContain('account');
+    } finally {
+      uninstallRunEventLog();
+    }
+  });
+
+  test('with ids, the answer text rides to the identity step and its thread leads come back tagged answer', async () => {
+    const h = harness({
+      // What the identity step returns for a text with one unlabelled id.
+      identity: async (...args: unknown[]) => {
+        const request = args[0] as { messages: Parameters<typeof threadLeads>[0] };
+        const { leads } = threadLeads(request.messages, 'thread');
+        return { id_chain: { ids: { customer_id: 'c-4' }, hops: [], basic_state: [], leads: [...leads] }, basic_state: [], gaps: [leadsGap(leads.length)] };
+      },
+    });
+    await parkedAnswer(h);
+    await answerRun(RUN_ID, { answer: `the user id is ${lead}`, ids: { customer_id: 'c-4' }, by: 'ops' }, h.deps);
+    const { chain, body } = answerChainOf(h);
+    expect(chain.leads?.map((l) => [l.value, l.source])).toEqual([[lead, 'answer']]);
+    expect(body).not.toContain('no known id');
   });
 });
 
@@ -2422,7 +2541,14 @@ describe('usage', () => {
         id_chain: { ids: {}, hops: [], basic_state: [] },
         basic_state: [],
         gaps: [],
-        extraction: { extractor: 'decision', candidates: { customer_id: 1 }, dropped: {}, fields: { customer_id: { outcome: 'none', probability: 0.8 } } },
+        extraction: {
+          extractor: 'decision',
+          candidates: { customer_id: 1 },
+          dropped: {},
+          fields: { customer_id: { outcome: 'none', probability: 0.8 } },
+          leads: 0,
+          leads_dropped: 0,
+        },
       };
     };
     const h = harness();

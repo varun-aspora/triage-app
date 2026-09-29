@@ -522,11 +522,11 @@ describe('paging, order and the 5,000-hit early return', () => {
     expect((data.hits as unknown[]).length).toBe(250);
   });
 
-  test('raw returns whole documents without the _source copy; qw sends no --fields', async () => {
+  test('raw returns whole documents without the _source copy, at most 20 per page; qw sends no --fields', async () => {
     const doc = { ...HIT_A, _source: { ...HIT_A } };
     const runner = scriptedRunner((call) => ({ stdout: call.argv[0] === 'count' ? '{"num_hits":1}' : JSON.stringify({ num_hits: 1, hits: [doc] }) }));
     const viaQw = await connector(QW_HOME(), { exec: runner }).search(ctxWith(), 'ssfb', { ...INPUT, raw: true }, REQUEST_WINDOW);
-    expect(runner.calls[1]?.argv).toEqual(searchArgv(0, 250, null));
+    expect(runner.calls[1]?.argv).toEqual(searchArgv(0, 20, null));
     const f = fetchSpy(() => new Response(JSON.stringify({ num_hits: 1, hits: [doc] }), { status: 200 }));
     const viaHttp = await connector(HTTP_HOME(), { fetchImpl: f }).search(ctxWith(), 'ssfb', { ...INPUT, raw: true }, REQUEST_WINDOW);
     for (const out of [viaQw, viaHttp]) expect((dataOf(out).hits as unknown[])[0]).toEqual(HIT_A);

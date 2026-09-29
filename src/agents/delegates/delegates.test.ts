@@ -35,7 +35,7 @@ const FAKE_ENC_KEY = 'QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU
 const CODE_TOOLS = ['code_explore', 'code_impact', 'code_node', 'repo_find', 'repo_grep', 'repo_read', 'repo_tree'];
 const REPO_TOOLS = ['repo_find', 'repo_grep', 'repo_read', 'repo_tree'];
 const CODEGRAPH_TOOLS = ['code_explore', 'code_impact', 'code_node'];
-const BASE_TOOLS = ['http_call', 'logs_search', 'note_evidence', 'run_log', 'sql_select', ...REPO_TOOLS];
+const BASE_TOOLS = ['http_call', 'logs_search', 'note_evidence', 'read_staged', 'run_log', 'sql_select', ...REPO_TOOLS];
 const SSFB_ALWAYS = ['detect_silent_reversals', 'get_account_statement'];
 const SSFB_FLAGGED = ['cbs_call', 'decrypt_fields', 'encrypt_lookup_value'];
 const ENTITY_IO = ['sql_select', 'http_call', 'logs_search'];
@@ -223,7 +223,7 @@ describe('tool sets (mock mode, credentials blank)', () => {
       expect(normal).not.toContain(name);
       expect(deep).not.toContain(name);
     }
-    expect(sorted(normal)).toEqual(sorted(ENTITY_IO.concat('note_evidence', 'run_log')));
+    expect(sorted(normal)).toEqual(sorted(ENTITY_IO.concat('note_evidence', 'read_staged', 'run_log')));
     expect(deep).toContain('code_explore');
   });
 
