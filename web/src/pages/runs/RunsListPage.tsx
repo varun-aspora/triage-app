@@ -92,19 +92,24 @@ export default function RunsListPage() {
       <div className="runs-filters">
         <form onSubmit={openRun} style={{ width: 320, maxWidth: '100%' }} role="search">
           <Label htmlFor="runs-q">Run id</Label>
-          <div style={{ position: 'relative' }}>
-            <span style={{ position: 'absolute', left: 12, top: 12, color: 'var(--muted)', display: 'flex' }}>
-              <Icon name="search" />
-            </span>
-            <Input
-              id="runs-q"
-              type="search"
-              className="mono"
-              placeholder="Paste a run id"
-              value={runIdInput}
-              onChange={(e) => setRunIdInput(e.target.value)}
-              style={{ paddingLeft: 36 }}
-            />
+          <div style={{ display: 'flex', gap: 8 }}>
+            <div style={{ position: 'relative', flex: 1 }}>
+              <span style={{ position: 'absolute', left: 12, top: 12, color: 'var(--muted)', display: 'flex' }}>
+                <Icon name="search" />
+              </span>
+              <Input
+                id="runs-q"
+                type="search"
+                className="mono"
+                placeholder="Paste a run id"
+                value={runIdInput}
+                onChange={(e) => setRunIdInput(e.target.value)}
+                style={{ paddingLeft: 36 }}
+              />
+            </div>
+            <Button type="submit" disabled={runIdInput.trim() === ''}>
+              Open
+            </Button>
           </div>
         </form>
         <div style={{ width: 150 }}>
