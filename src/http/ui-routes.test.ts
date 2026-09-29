@@ -103,6 +103,14 @@ describe('GET /ui/session', () => {
   });
 });
 
+describe('GET /ui/session env_label', () => {
+  test('carries TRIAGE_ENV_LABEL, which the public config.json does not', async () => {
+    const app = createUiRoutes({ config: () => config({ TRIAGE_ENV_LABEL: 'stage' }), entities: () => [], distDir: makeDist().dist });
+    expect(((await (await app.request('/ui/session')).json()) as { env_label?: string }).env_label).toBe('stage');
+    expect(await (await app.request('/ui/config.json')).json()).toEqual({ env: 'production' });
+  });
+});
+
 describe('static shell', () => {
   const { dist } = makeDist();
   const app = uiApp(dist);

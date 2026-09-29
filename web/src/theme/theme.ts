@@ -3,7 +3,7 @@
 // these colours (see lib/status.ts).
 
 import { createContext, useContext } from 'react';
-import type { UiEnv } from '../api/types.ts';
+import type { Session, UiEnv } from '../api/types.ts';
 
 export type Theme = {
   readonly name: string;
@@ -24,6 +24,15 @@ export const THEMES: Readonly<Record<UiEnv, Theme>> = {
   },
   'non-production': { name: 'NON-PRODUCTION', accent: '#1e7a4c', soft: '#e6f3ec', sidebar: '#e2eee7' },
 };
+
+/** Production always shows its fixed note. Otherwise the note is about the session's mode, so it needs a session. */
+export function bannerNote(theme: Theme, session: Pick<Session, 'mock_mode'> | undefined): string | undefined {
+  if (theme.note !== undefined) return theme.note;
+  if (session === undefined) return undefined;
+  return session.mock_mode
+    ? 'Mock mode: tools answer from reviewed fixtures.'
+    : 'Live mode: tools read real systems, read-only.';
+}
 
 export function applyTheme(env: UiEnv): void {
   const theme = THEMES[env];

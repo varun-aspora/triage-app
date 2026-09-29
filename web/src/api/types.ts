@@ -27,6 +27,8 @@ export type Session = {
   mock_mode: boolean;
   entities: Entity[];
   allow_slack_post: boolean;
+  /** TRIAGE_ENV_LABEL; absent when unset. */
+  env_label?: string;
 };
 
 /** Every error body the API returns. Only error is always present; fields name inputs, never their values. */
