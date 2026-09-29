@@ -143,7 +143,7 @@ export function PhaseStepper({ steps }: { steps: Record<StepperPhase, StepState>
             <li key={p} className={`step ${state}`} aria-current={state === 'current' || state === 'waiting' ? 'step' : undefined}>
               <span className="dot">
                 {state === 'done' && <Icon name="check" size={12} />}
-                {state === 'failed' && <Icon name="x" size={12} />}
+                {state === 'failed' && <Icon name="alert" size={12} />}
                 {state === 'waiting' && <Icon name="clock" size={12} />}
               </span>
               <span>{p}</span>

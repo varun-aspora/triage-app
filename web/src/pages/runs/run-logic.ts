@@ -279,17 +279,35 @@ export type FailureGuess = {
   steps: Record<StepperPhase, StepState>;
 };
 
+const FAILED_AT_HINTS: Record<Exclude<StepperPhase, 'completed'>, string> = {
+  preflight: 'Preflight checks the tools and credentials the run needs. Doctor shows which one is off.',
+  identity: 'The run could not work out who or what the request is about. Doctor shows whether a tool or credential is off.',
+  classifying: 'The classifier did not finish. Doctor shows whether a tool or credential is off.',
+  dispatched: 'The run was classified but the investigators did not start. Doctor shows whether a tool or credential is off.',
+  investigating: 'An investigator was running when the run stopped. Doctor shows whether a tool or credential is off.',
+};
+
 /**
- * Where a failed run most likely stopped. The store records only a reason on
- * failure, not the phase, so this reads what the run left behind: no
- * classification means it never got past preflight or identity, and no
- * evidence means no investigator stored findings.
+ * Where a failed run stopped. The server reads the last phase from the event
+ * log (failed_phase). Without it the store records only a reason, so this
+ * falls back to what the run left behind: no classification means it never
+ * got past preflight or identity, and no evidence means no investigator
+ * stored findings.
  */
-export function inferFailure(run: Pick<RunDetail, 'classification' | 'evidence'>): FailureGuess {
+export function inferFailure(run: Pick<RunDetail, 'classification' | 'evidence' | 'failed_phase'>): FailureGuess {
+  const at = STEPPER_PHASES.findIndex((p) => p === run.failed_phase);
+  const phase = STEPPER_PHASES[at];
+  if (phase !== undefined && phase !== 'completed') {
+    return {
+      title: `Failed at ${phase}`,
+      hint: FAILED_AT_HINTS[phase],
+      steps: stepsFrom((i) => (i < at ? 'done' : i === at ? 'failed' : 'todo')),
+    };
+  }
   if (run.classification === null) {
     return {
       title: 'Failed before classification (preflight or identity)',
-      hint: 'Preflight checks the tools and credentials the run needs. Doctor shows which one is off.',
+      hint: FAILED_AT_HINTS.preflight,
       steps: stepsFrom((i) => (i <= 1 ? 'failed' : 'todo')),
     };
   }

@@ -110,7 +110,7 @@ import {
   type SubmissionResult,
 } from '../submit.ts';
 import { findingRefs } from '../../report/finding-refs.ts';
-import { readRunEvents } from '../../runlog/read.ts';
+import { lastPipelinePhase, readRunEvents } from '../../runlog/read.ts';
 import { filterRuns, parseListQuery, statusOfPhase, storeQuery, withStalled } from './run-list.ts';
 import {
   AskBodySchema,
@@ -252,7 +252,7 @@ export function createTriageRoutes(source: TriageRouteDepsSource): Hono {
     if (run === null) return notFound(c);
     // The usage view and the stalled check ask about the same worker pid; it is checked once.
     const isAlive = deps.isAlive !== undefined ? oncePerPid(deps.isAlive) : undefined;
-    return c.json(runView(run, isAlive, await stalledFor(deps, run, isAlive), deps.codeBase));
+    return c.json(runView(run, isAlive, await stalledFor(deps, run, isAlive), deps.codeBase, await failedPhaseFor(deps, run)));
   });
 
   app.get('/triage/:run_id/events', async (c) => {
@@ -482,6 +482,16 @@ function stalledFor(deps: TriageRouteDeps, run: RunRecord, isAlive: ((pid: numbe
   return loadStalled(run, stalledDeps(deps, isAlive));
 }
 
+/** Where a failed or stopped run got to, from its event log. Undefined when unknown; the page then guesses. */
+async function failedPhaseFor(deps: TriageRouteDeps, run: RunRecord): Promise<string | undefined> {
+  if ((run.phase !== 'failed' && run.phase !== 'stopped') || deps.runsDir === undefined) return undefined;
+  try {
+    return (await lastPipelinePhase(deps.runsDir, run.run_id)) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** loadStalled's deps from the route deps: the configured wait, the runs dir and the pid check. */
 function stalledDeps(deps: TriageRouteDeps, isAlive: ((pid: number) => boolean) | undefined): StalledDeps {
   return {
@@ -496,12 +506,14 @@ function stalledDeps(deps: TriageRouteDeps, isAlive: ((pid: number) => boolean) 
  * the persisted profile again. isAlive checks the run's worker pid, so a
  * running run whose worker died shows its open usage as incomplete, not live.
  * stalled (D71) is the caller's, from loadStalled; the view reads nothing.
+ * failed_phase is the last pipeline phase in the event log, added after redaction like stalled.
  */
 export function runView(
   run: RunRecord,
   isAlive?: (pid: number) => boolean,
   stalled?: Stalled | null,
   codeBase?: (repo: string) => string | undefined,
+  failedPhase?: string,
 ): Record<string, unknown> {
   // Optional access throughout: older or partial records (and test fixtures)
   // may lack parts of the request or classification.
@@ -571,6 +583,7 @@ export function runView(
     usage,
     ...(Object.keys(links).length > 0 ? { code_links: links } : {}),
     ...(stalled !== undefined && stalled !== null ? { stalled } : {}),
+    ...(failedPhase !== undefined ? { failed_phase: failedPhase } : {}),
   };
 }
 

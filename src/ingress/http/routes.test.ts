@@ -1366,6 +1366,24 @@ describe('GET /triage/:run_id stalled (D71)', () => {
   });
 });
 
+describe('GET /triage/:run_id failed_phase', () => {
+  test('a failed run shows the last pipeline phase in its log; other runs and unknown logs show none', async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), 'triage-routes-failed-phase-'));
+    try {
+      mkdirSync(join(runsDir, RUN_B), { recursive: true });
+      const line = (phase: string) => `${JSON.stringify({ ts: '2026-09-24T00:00:00.000Z', source: 'pipeline', type: 'phase', data: { phase } })}\n`;
+      writeFileSync(join(runsDir, RUN_B, 'events.jsonl'), line('preflight') + line('failed'));
+      const get = async (h: ReturnType<typeof harness>, id: string) => (await (await h.app.request(`/triage/${id}`)).json()) as Record<string, unknown>;
+      expect((await get(harness({ runs: { [RUN_B]: record(RUN_B, 'failed') }, runsDir }), RUN_B)).failed_phase).toBe('preflight');
+      expect('failed_phase' in (await get(harness({ runs: { [RUN_B]: record(RUN_B, 'completed') }, runsDir }), RUN_B))).toBe(false);
+      expect('failed_phase' in (await get(harness({ runs: { [RUN_A]: record(RUN_A, 'failed') }, runsDir }), RUN_A))).toBe(false);
+      expect('failed_phase' in (await get(harness({ runs: { [RUN_B]: record(RUN_B, 'failed') } }), RUN_B))).toBe(false);
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('POST /triage/:run_id/resume', () => {
   const body = { requested_by: 'ops@example.com', note: 'harbor is back' };
 

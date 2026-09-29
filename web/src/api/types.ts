@@ -182,6 +182,8 @@ export type RunDetail = {
   usage?: RunUsageView;
   /** D71: set while the run is running but nobody is working on it. Absent otherwise, and from older servers. */
   stalled?: StalledView;
+  /** Failed or stopped runs: the last pipeline phase the event log shows. Absent when unknown or from an older server. */
+  failed_phase?: RunPhase;
 };
 
 export type ThreadMessageInput = { ts: string; author: string; text: string; is_parent?: boolean };

@@ -200,6 +200,21 @@ describe('inferFailure', () => {
     expect(g.steps.classifying).toBe('done');
     expect(g.steps.dispatched).toBe('failed');
   });
+  test('failed_phase marks only that step', () => {
+    const g = inferFailure({ classification: null, evidence: [], failed_phase: 'preflight' });
+    expect(g.title).toBe('Failed at preflight');
+    expect(g.steps.preflight).toBe('failed');
+    expect(g.steps.identity).toBe('todo');
+    const later = inferFailure({ classification: decision(['ssfb']), evidence: [], failed_phase: 'dispatched' });
+    expect(later.title).toBe('Failed at dispatched');
+    expect(later.steps.classifying).toBe('done');
+    expect(later.steps.dispatched).toBe('failed');
+    expect(later.steps.investigating).toBe('todo');
+  });
+  test('a failed_phase that is not a step falls back to the guess', () => {
+    const g = inferFailure({ classification: null, evidence: [], failed_phase: 'blocked' });
+    expect(g.title).toBe('Failed before classification (preflight or identity)');
+  });
   test('with evidence', () => {
     const g = inferFailure({ classification: decision(['ssfb']), evidence: [{ key: 'ssfb', version: 1 }] });
     expect(g.title).toBe('Failed while investigating');
