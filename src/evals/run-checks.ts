@@ -9,7 +9,6 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { BUDGET_EXEMPT_TOOLS, CODE_TOOLS } from '../gate/budget.ts';
-import { JOURNEY_FIELDS } from '../gate/scope.ts';
 import { canonicalJson } from '../mock/key.ts';
 import { REUSED_MARK } from '../runlog/actions.ts';
 import type { RunEventLine } from '../runlog/event-log.ts';
@@ -140,7 +139,8 @@ export function untracedLogValues(events: readonly RunEventLine[], knowledge: re
   for (const e of events) {
     const d = dataOf(e);
     if (e.type === 'tool') seen += `\n${norm(stringsIn(d.result).join('\n'))}`;
-    if (e.type !== 'tool_start' || d.toolName !== 'logs_search' || typeof d.toolCallId !== 'string') continue;
+    if (e.type !== 'tool_start' || typeof d.toolCallId !== 'string') continue;
+    if (d.toolName !== 'logs_search') continue;
     for (const [field, value] of logValues(d.args)) {
       const n = norm(value);
       if (!known.includes(n) && !seen.includes(n)) out.push({ tool_call: d.toolCallId, field });
@@ -178,8 +178,8 @@ export function reportText(report: Report): string {
   ].join('\n');
 }
 
-// A WHERE equality or a fields filter on a device or verification id.
-const JOURNEY_KEYED = new RegExp(`\\b(?:${JOURNEY_FIELDS.join('|')})\\b["']?\\s*(?:=|:|\\bin\\b)`, 'i');
+// A WHERE equality or a fields filter on a device or verification id (the D77 journey-key names).
+const JOURNEY_KEYED = /\b(?:device_id|x-device-id|verification_id)\b["']?\s*(?:=|:|\bin\b)/i;
 
 /** The rows of the report citing this service whose source call was keyed by a device or verification id. */
 export function journeyKeyedCitations(report: Report, events: readonly RunEventLine[], ref: { entity: string; service: string }): number {

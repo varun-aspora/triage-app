@@ -33,24 +33,38 @@
 // same database was unreachable is added as an unreachable item with an
 // empty value. Strict fixture misses and aborts are loud and are passed on.
 //
-// No ids means no core call: the result is an empty chain with the gap
-// 'no ids in request'. Gaps never carry id values.
+// Leads (D96). Every id-shaped value in the thread becomes a seed lead
+// (threadLeads in ./extract-ids.ts), whatever the decision or the labels made
+// of it, and the id-shaped values of hints.ids the thread does not hold are
+// added as hint leads. A lead whose value a known id key holds is tagged with
+// that key. Values compare as in the scope set (chainValues), so a phone
+// matches with or without its country code. Leads ride on id_chain.leads in
+// both return paths, and the scope set takes every seed (src/gate/scope.ts),
+// so an id the decision answered none for, or one with no label, is still
+// usable. Labels go through the persisted redaction with the ingress names.
+// The extraction record counts the leads and the ones past the cap.
+// requesterLeads is the pure part, which the answer path also uses.
+//
+// No ids means no core call: the result is an empty chain (with its leads)
+// and the gap 'no ids in request' when there are no leads either, else
+// 'no known id; <n> leads from the thread'. Gaps never carry id values.
 import * as v from 'valibot';
 import type { KnownIdField } from '../config/known-ids.ts';
 import { decide, DecisionError } from '../decisions/decide.ts';
 import { decisionRoute } from '../decisions/registry.ts';
 import type { DecisionProvider, DecisionUsage } from '../decisions/types.ts';
 import { redactModelFacing, redactPersisted } from '../gate/redact.ts';
+import { chainValues } from '../gate/scope.ts';
 import {
   resolveIdChain as coreResolveIdChain,
   type IdChainResult,
   type IdentityCoreDeps,
 } from '../tools/_lib/identity-core.ts';
 import { IDENTITY_STATEMENTS, type IdentityStatement } from '../tools/_lib/identity-statements.ts';
-import type { KnownIdKey, KnownIds } from '../types/core.ts';
-import { type BasicStateItem, type IdChain, IdChainSchema } from '../types/id-chain.ts';
+import { KNOWN_ID_KEYS, type KnownIdKey, type KnownIds } from '../types/core.ts';
+import { type BasicStateItem, type IdChain, IdChainSchema, LEAD_LABEL_MAX, type Lead, type LeadSource } from '../types/id-chain.ts';
 import type { TriageRequest } from '../types/request.ts';
-import { hintedIds, labelledIds, orderedTexts, withHints } from './extract-ids.ts';
+import { hintedIds, hintLeads, labelledIds, leadLabel, orderedTexts, threadLeads, withHints } from './extract-ids.ts';
 import {
   buildIdDecision,
   collectCandidates,
@@ -60,6 +74,16 @@ import {
 } from './id-decision.ts';
 
 export const NO_IDS_GAP = 'no ids in request';
+
+/** The gap when the thread has leads but no known id. Counts only. */
+export function leadsGap(n: number): string {
+  return `no known id; ${n} lead${n === 1 ? '' : 's'} from the thread`;
+}
+
+/** True for NO_IDS_GAP and the leads gap. */
+export function isNoIdsGap(gap: string): boolean {
+  return gap === NO_IDS_GAP || gap.startsWith('no known id; ');
+}
 
 /** decision_error text is capped at this many characters. */
 export const MAX_DECISION_ERROR_CHARS = 300;
@@ -110,6 +134,10 @@ export type IdExtraction = {
   readonly dropped: Readonly<Partial<Record<KnownIdKey, number>>>;
   /** Decision path: per asked field, what happened and the chosen option's probability. */
   readonly fields: Readonly<Partial<Record<KnownIdKey, FieldAnswer>>>;
+  /** Leads on the chain (D96). */
+  readonly leads: number;
+  /** Thread leads past MAX_LEADS. */
+  readonly leads_dropped: number;
 };
 
 export type IngressIdentity = {
@@ -143,12 +171,18 @@ export async function resolveIngressIdentity(
   deps.signal.throwIfAborted();
   const read = await readIds(request, deps);
   const ids = withHints(read.ids, request.hints);
-  const extraction = read.extraction;
+  const leadsFor = (chainIds: Partial<KnownIds>) => {
+    const { leads, dropped } = requesterLeads(request, chainIds, deps.redactionNames ?? [], 'thread');
+    const extraction: IdExtraction = Object.freeze({ ...read.extraction, leads: leads.length, leads_dropped: dropped });
+    return { leads: leads.length > 0 ? { leads } : {}, extraction };
+  };
   const gaps: string[] = [...read.gaps];
 
   if (Object.keys(ids).length === 0) {
-    const id_chain = v.parse(IdChainSchema, { ids: {}, hops: [], basic_state: [] });
-    return Object.freeze({ id_chain, basic_state: id_chain.basic_state, gaps: Object.freeze([NO_IDS_GAP, ...gaps]), extraction });
+    const { leads, extraction } = leadsFor({});
+    const id_chain = v.parse(IdChainSchema, { ids: {}, hops: [], basic_state: [], ...leads });
+    const first = extraction.leads === 0 ? NO_IDS_GAP : leadsGap(extraction.leads);
+    return Object.freeze({ id_chain, basic_state: id_chain.basic_state, gaps: Object.freeze([first, ...gaps]), extraction });
   }
 
   const { resolveIdChain = coreResolveIdChain, redactionNames, knownIdFields: _fields, decision: _decision, ...rest } = deps;
@@ -170,15 +204,75 @@ export async function resolveIngressIdentity(
 
   const chain = parsed.output;
   const basic_state = [...chain.basic_state, ...missingUnreachableState(chain, deps.now)];
-  const id_chain: IdChain = { ...chain, basic_state };
+  const { leads, extraction } = leadsFor(chain.ids);
+  const id_chain: IdChain = { ...chain, basic_state, ...leads };
   gaps.push(...unreachableGaps(id_chain));
 
   return Object.freeze({ id_chain, basic_state: id_chain.basic_state, gaps: Object.freeze(gaps), extraction });
 }
 
+// ---------------------------------------------------------------- leads
+
+/**
+ * The requester's leads (D96): the messages' id-shaped values tagged with
+ * source, then the hint leads the messages do not hold. Each is tagged with
+ * the known id key (of ids, hints on top) that holds its value, and its label
+ * is redacted with names. Pure; dropped counts the message leads past the cap.
+ */
+export function requesterLeads(
+  request: Pick<TriageRequest, 'messages' | 'hints'>,
+  ids: Partial<KnownIds>,
+  names: readonly string[],
+  source: LeadSource,
+): { readonly leads: Lead[]; readonly dropped: number } {
+  const thread = threadLeads(request.messages, source);
+  const held = withHints(ids, request.hints);
+  const seen = new Set(thread.leads.flatMap((lead) => [...formsOf(lead)]));
+  const hinted = hintLeads(request.hints).filter((lead) => !overlaps(formsOf(lead), seen));
+  const leads = [...thread.leads, ...hinted].map((lead) => {
+    const key = lead.key ?? keyHolding(held, lead);
+    const label = lead.label === undefined ? undefined : redactedLabel(lead.label, names);
+    const { label: _label, key: _key, ...rest } = lead;
+    return { ...rest, ...(label !== undefined ? { label } : {}), ...(key !== undefined ? { key } : {}) };
+  });
+  return { leads, dropped: thread.dropped };
+}
+
+// The forms a value compares by, as the scope set holds them: a phone (or a
+// digit run under phone_number) with and without its country code.
+function formsOf(lead: Pick<Lead, 'key' | 'value'>): Set<string> {
+  return new Set(chainValues(lead.key, lead.value).map((entry) => `${entry.group}:${entry.value}`));
+}
+
+function overlaps(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  for (const form of a) if (b.has(form)) return true;
+  return false;
+}
+
+// The first key whose value shares a compared form with the lead's.
+function keyHolding(ids: Partial<KnownIds>, lead: Lead): KnownIdKey | undefined {
+  const forms = formsOf(lead);
+  return KNOWN_ID_KEYS.find((key) => {
+    const value = ids[key];
+    return value !== undefined && overlaps(formsOf({ key, value }), forms);
+  });
+}
+
+// A label is thread text: masked with the ingress names, then cleaned again,
+// because a mask can make it longer.
+function redactedLabel(label: string, names: readonly string[]): string | undefined {
+  const masked = redactPersisted(label, { names }).value;
+  return masked.length <= LEAD_LABEL_MAX && !/[\r\n]/.test(masked) ? masked : leadLabel(masked);
+}
+
 // ---------------------------------------------------------------- reading ids
 
-type Read = { readonly ids: Partial<KnownIds>; readonly extraction: IdExtraction; readonly gaps: readonly string[] };
+type Read = {
+  readonly ids: Partial<KnownIds>;
+  /** The lead counts are added by the caller. */
+  readonly extraction: Omit<IdExtraction, 'leads' | 'leads_dropped'>;
+  readonly gaps: readonly string[];
+};
 
 /** The ids from the thread, before hints: the decision when it can run, else the labels. */
 async function readIds(request: Pick<TriageRequest, 'messages' | 'hints'>, deps: IngressIdentityDeps): Promise<Read> {

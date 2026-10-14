@@ -174,6 +174,8 @@ function fakeHarness(): { harness: StagingHarness; written: Written[] } {
 }
 
 const REAL = { TRIAGE_MOCK_MODE: 'false' };
+// TRIAGE_MODEL_REDACTION (D107): off is the default and gives the model raw rows.
+const MASKED = { TRIAGE_MODEL_REDACTION: 'on' };
 
 // Synthetic rows shaped like the trace 6d4d SELECT * (11 rows x 17 columns,
 // about 77 KB, three wide JSON columns). No real data.
@@ -266,7 +268,7 @@ describe('sql_select: schema', () => {
   });
 
   test('mounted for investigators (and deep), not for triage or code_walker', () => {
-    expect(toolModule.mounts).toEqual(['investigator']);
+    expect(toolModule.mounts).toEqual(['investigator', 'agent']);
     expect(toolModule.enabled(makeToolContext({ entity: null }), 'triage')).toEqual({
       on: false,
       reason: 'sql_select needs an entity',
@@ -410,25 +412,40 @@ describe('sql_select: scope', () => {
   });
 });
 
-describe('sql_select: device and verification ids (D77, Q13)', () => {
+describe('sql_select: derived leads (D97)', () => {
   const DEVICE_ID = 'c0ffee00-1111-4222-8333-00000000d001';
   const BY_DEVICE = 'SELECT id, status FROM delivery_requests WHERE device_id = $1';
 
-  test('a device_id from rows fetched by a chain id is allowed in a later call; an unseen one is refused', async () => {
-    const h = setup({ env: REAL, sql: fakeSql([{ id: 'row-1', device_id: DEVICE_ID }]) });
+  test('an id in any column of rows tied by a chain id is usable in a later call; an unseen one is refused', async () => {
+    const h = setup({ env: REAL, sql: fakeSql([{ id: 'row-1', notes: { device: DEVICE_ID } }]) });
     const before = await call(h, { service: 'package', sql: BY_DEVICE, params: [DEVICE_ID] });
     expect(before.output.status).toBe('refused');
-    expect(before.output.message).toContain('as an sql_select $n param compared to a device_id or verification_id column');
+    expect(before.output.message).toContain("usable once it is in the requester's text or shows up in a result fetched by an id already in scope (at most 3 steps)");
     expect((await call(h, { service: 'package', sql: SELECT_ONE, params: [CUSTOMER] })).output.status).toBe('ok');
+    const lead = h.ctx.deps.idChain().leads?.find((l) => l.value === DEVICE_ID);
+    expect(lead).toEqual({
+      value: DEVICE_ID,
+      kind: 'uuid',
+      source: 'derived',
+      status: 'derived',
+      depth: 1,
+      parent: 'uuid:***6666',
+      via: { tool: 'sql_select', tool_call_id: 'toolu_sql_1', field: 'notes.device' },
+    });
+    // Full scope now: as a param against any column, or as a literal.
     expect((await call(h, { service: 'package', sql: BY_DEVICE, params: [DEVICE_ID] })).output.status).toBe('ok');
+    expect((await call(h, { service: 'package', sql: SELECT_ONE, params: [DEVICE_ID] })).output.status).toBe('ok');
+    expect((await call(h, { service: 'package', sql: `SELECT id FROM delivery_requests WHERE device_id = '${DEVICE_ID}'` })).output.status).toBe('ok');
     expect((await call(h, { service: 'package', sql: BY_DEVICE, params: [STRANGER] })).output.status).toBe('refused');
-    // Compared to a column that is not a device or verification id, it is refused.
-    expect((await call(h, { service: 'package', sql: SELECT_ONE, params: [DEVICE_ID] })).output.status).toBe('refused');
   });
 
-  test('rows fetched without a chain id do not count', async () => {
-    const h = setup({ env: REAL, sql: fakeSql([{ id: 'row-1', device_id: DEVICE_ID }]) });
+  test('rows fetched without an id in scope, or by a systemic count, add nothing', async () => {
+    const h = setup({ env: REAL, sql: fakeSql([{ id: 'row-1', device_id: DEVICE_ID, n: 1 }]) });
     expect((await call(h, { service: 'package', sql: 'SELECT id, device_id FROM delivery_requests LIMIT 5' })).output.status).toBe('ok');
+    const count = 'SELECT count(*) AS n FROM delivery_requests WHERE external_ref_id = $1';
+    // The fake answers with the same row, device_id included.
+    expect((await call(h, { service: 'package', sql: count, params: [CUSTOMER], scope: 'systemic' })).output.status).toBe('ok');
+    expect(h.ctx.deps.idChain().leads).toBeUndefined();
     expect((await call(h, { service: 'package', sql: BY_DEVICE, params: [DEVICE_ID] })).output.status).toBe('refused');
   });
 });
@@ -570,7 +587,7 @@ describe('sql_select: real mode', () => {
 
   test('full rows are staged to /data; the model gets the capped rows and the path', async () => {
     const rows = [row(1), row(2), row(3), row(4)];
-    const h = setup({ env: REAL, sql: fakeSql(rows) });
+    const h = setup({ env: { ...REAL, ...MASKED }, sql: fakeSql(rows) });
     const { harness, written } = fakeHarness();
     const env = await call(h, { service: 'package', sql: SELECT_ONE, params: [CUSTOMER] }, harness);
     expect(written).toHaveLength(1);
@@ -723,14 +740,26 @@ describe('sql_select: real mode', () => {
 // ------------------------------------------------------------------ redaction and audit
 
 describe('sql_select: redaction and audit', () => {
-  test('row values pass the model-facing profile: a PAN is masked, an account number is kept', async () => {
+  test('with redaction on, row values pass the model-facing profile: a PAN is masked, an account number is kept', async () => {
     for (const env of [REAL, {}]) {
-      const h = setup({ env, sql: fakeSql([row(1)]), fixtureResult: { rows: [row(1)] } });
+      const h = setup({ env: { ...env, ...MASKED }, sql: fakeSql([row(1)]), fixtureResult: { rows: [row(1)] } });
       const out = await call(h, { service: 'package', sql: SELECT_ONE, params: [CUSTOMER] });
       const text = JSON.stringify(out);
       expect(text).not.toContain(PAN);
       expect(dataOf(out).rows[0]!['account_number']).toBe(ACCOUNT_NO);
       expect(dataOf(out).rows[0]!['id']).toBe('row-1');
+    }
+  });
+
+  test('with redaction off, the default, the PAN reaches the model and the staged file raw (D107)', async () => {
+    for (const env of [REAL, {}]) {
+      const h = setup({ env, sql: fakeSql([row(1)]), fixtureResult: { rows: [row(1)] } });
+      const { harness, written } = fakeHarness();
+      const out = await call(h, { service: 'package', sql: SELECT_ONE, params: [CUSTOMER] }, harness);
+      expect(JSON.stringify(dataOf(out).rows)).toContain(PAN);
+      expect(written[0]!.text).toContain(PAN);
+      // The audit line stays masked.
+      expect(JSON.stringify(h.audit.lines)).not.toContain(PAN);
     }
   });
 

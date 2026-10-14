@@ -89,7 +89,7 @@ describe('detect_silent_reversals module', () => {
   test('SSFB investigators only, and the conformance checks pass', () => {
     expect(toolModule.name).toBe('detect_silent_reversals');
     expect(toolModule.entities).toEqual(['ssfb']);
-    expect(toolModule.mounts).toEqual(['investigator']);
+    expect(toolModule.mounts).toEqual(['investigator', 'agent']);
     const w = world({ mock: true });
     expect(conformanceProblems(toolModule, toolModule.create(w.ctx, 'investigator'))).toEqual([]);
   });
@@ -225,9 +225,10 @@ describe('flags', () => {
     expect((out['counts'] as Data)['db_transfers']).toBe(3);
   });
 
-  test('mock mode answers from the fixture and the output passes the model-facing profile', async () => {
+  test('mock mode answers from the fixture and, with redaction on, the output passes the model-facing profile', async () => {
     const w = world({
       mock: true,
+      env: { TRIAGE_MODEL_REDACTION: 'on' },
       fixtures: [
         {
           kind: 'detect_silent_reversals',

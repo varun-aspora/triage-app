@@ -26,7 +26,7 @@ import type { Tier } from '../types/core.ts';
 import type { IdChain } from '../types/id-chain.ts';
 import { INPUT_ANSWER_CHAIN_ATTR, INPUT_ANSWER_SIGNAL } from '../types/input-request.ts';
 import { BLOCK_RESUME_SIGNAL, MAX_RESUME_NOTE_CHARS } from '../types/block.ts';
-import { flushRunEventLog, installRunEventLog, uninstallRunEventLog } from '../runlog/event-log.ts';
+import { flushRunEventLog, installRunEventLog, setRunRedactionNames, uninstallRunEventLog } from '../runlog/event-log.ts';
 import { readRunEvents } from '../runlog/read.ts';
 import { sampleBlock, sampleInputRequest } from '../runstore/contract.ts';
 import type { Attachment } from '../types/request.ts';
@@ -36,6 +36,7 @@ import type { Stalled } from '../types/stalled.ts';
 import type { RunPhase, RunRecord } from '../runstore/types.ts';
 import { priceUsage } from '../usage/price.ts';
 import { NO_USAGE_GAP } from '../tools/finish-report.tool.ts';
+import type { ScoutInput, ScoutResult } from '../tools/_lib/scout.ts';
 import {
   installUsageMeter,
   recordUsage,
@@ -44,7 +45,8 @@ import {
   snapshotSubmission,
   type UsageEvent,
 } from '../usage/meter.ts';
-import type { IngressIdentity } from './identity.ts';
+import { threadLeads } from './extract-ids.ts';
+import { type IngressIdentity, leadsGap, NO_IDS_GAP } from './identity.ts';
 import { loadStalled } from './stalled.ts';
 import { buildTriageRequest, IngressInputError, type TriageInput } from './normalise.ts';
 import { prepareDeps, prepareRequest, type PreparedSubmission } from './prepare.ts';
@@ -230,7 +232,8 @@ type Harness = {
 };
 
 type HarnessOptions = {
-  config?: Partial<{ mock: boolean; priorCases: boolean; usageFlushMs: number }>;
+  /** modelRedaction left out: the config key is left out too, which reads as off (D107). */
+  config?: Partial<{ mock: boolean; priorCases: boolean; usageFlushMs: number; modelRedaction: 'off' | 'on' }>;
   classify?: SubmissionDeps['classify'];
   identity?: () => Promise<IngressIdentity>;
   read?: ReadBehaviour;
@@ -261,6 +264,7 @@ function harness(o: HarnessOptions = {}): Harness {
       ...(o.config?.usageFlushMs !== undefined ? { usageFlushMs: o.config.usageFlushMs } : {}),
     },
     budgets: { runTimeoutMs: 1_000, runMaxAttempts: 1 },
+    ...(o.config?.modelRedaction !== undefined ? { redaction: { model: o.config.modelRedaction } } : {}),
   };
   const deps: SubmissionDeps = {
     config,
@@ -399,8 +403,8 @@ describe('redaction', () => {
     expect(storeText(h.calls)).not.toContain(NAME);
   });
 
-  test('the message is model-facing and initialData.request is the persisted-profile copy', async () => {
-    const h = harness();
+  test('with redaction on, the message is model-facing and initialData.request is the persisted-profile copy', async () => {
+    const h = harness({ config: { modelRedaction: 'on' } });
     const p = prepared();
     await runSubmission(p, h.deps);
     const body = bodyOf(h);
@@ -413,6 +417,19 @@ describe('redaction', () => {
     const expected = { ...redactPersisted(p.request, { names: [NAME] }).value, request_id: RUN_ID };
     expect(initialDataOf(h).request).toEqual(expected);
     expect(JSON.stringify(initialDataOf(h).request)).not.toContain(PAN);
+  });
+
+  test('with redaction off, the default, the message is raw and initialData.request is still the persisted-profile copy (D107)', async () => {
+    for (const h of [harness(), harness({ config: { modelRedaction: 'off' } })]) {
+      const p = prepared();
+      await runSubmission(p, h.deps);
+      const body = bodyOf(h);
+      expect(body).toContain(PAN);
+      expect(body).toContain(ACCOUNT);
+      const expected = { ...redactPersisted(p.request, { names: [NAME] }).value, request_id: RUN_ID };
+      expect(initialDataOf(h).request).toEqual(expected);
+      expect(JSON.stringify(initialDataOf(h))).not.toContain(PAN);
+    }
   });
 
   test('the classifier gets the model-facing thread', async () => {
@@ -889,6 +906,7 @@ describe('text files and PDFs', () => {
   test('their text follows the thread in the message; unread files become warnings', async () => {
     const classified: unknown[] = [];
     const h = harness({
+      config: { modelRedaction: 'on' },
       classify: async (input) => {
         classified.push(input);
         return goodClassification();
@@ -981,8 +999,8 @@ describe('askRun', () => {
     await expect(askRun(RUN_ID, '   ', 'ops', h.deps)).rejects.toBeInstanceOf(IngressInputError);
   });
 
-  test('a known run gets a new submission without initialData and with the redacted question', async () => {
-    const h = harness();
+  test('a known run gets a new submission without initialData and with the redacted question (redaction on)', async () => {
+    const h = harness({ config: { modelRedaction: 'on' } });
     await runSubmission(prepared(), h.deps);
     const question = `Did the retry to ${PHONE} go out for card ${PAN}?`;
     const result = await askRun(RUN_ID, question, 'ops.reviewer@example.com', h.deps);
@@ -1104,7 +1122,14 @@ describe('needs_input and answerRun', () => {
   });
 
   test('answerRun closes the question, records an answer submission and resumes the run with a signal', async () => {
-    const h = harness();
+    const seen: unknown[] = [];
+    // A text-only answer takes its leads without the identity step, and this one holds no id-shaped value.
+    const h = harness({
+      identity: async (...args: unknown[]) => {
+        seen.push(args[0]);
+        return { id_chain: { ids: {}, hops: [], basic_state: [] }, basic_state: [], gaps: [NO_IDS_GAP] };
+      },
+    });
     await parked(h);
     const result = await answerRun(RUN_ID, { answer: 'the one on 3 Sep for 12,000', by: 'ops-reviewer' }, h.deps);
     expect(result.status).toBe('completed');
@@ -1120,7 +1145,10 @@ describe('needs_input and answerRun', () => {
     const msg = d.message as { kind: string; type: string; body: string; attributes: Record<string, string> };
     expect(msg.kind).toBe('signal');
     expect(msg.type).toBe(INPUT_ANSWER_SIGNAL);
+    // Nothing found adds no chain and no gap.
     expect(msg.attributes).toEqual({ question_id: 'q1' });
+    expect(seen).toEqual([]);
+    expect(msg.body).not.toContain(NO_IDS_GAP);
     expect(msg.body).toContain('Answer from ops-reviewer to your question q1');
     expect(msg.body).toContain('the one on 3 Sep for 12,000');
     expect(h.events.filter((e) => e === 'embedRun')).toHaveLength(1);
@@ -1178,7 +1206,15 @@ describe('needs_input and answerRun', () => {
       h.deps,
     );
     expect(result.status).toBe('completed');
-    expect(seen).toEqual([{ request_id: RUN_ID, interface: 'cli', messages: [], hints: { ids: { customer_id: 'cust-answer-1' } } }]);
+    // The answer text goes to the identity step as a message, next to the ids.
+    expect(seen).toEqual([
+      {
+        request_id: RUN_ID,
+        interface: 'cli',
+        messages: [{ ts: expect.any(String), author: 'ops', text: `it is the account ${ACCOUNT}`, is_parent: false }],
+        hints: { ids: { customer_id: 'cust-answer-1' } },
+      },
+    ]);
     const msg = h.flue.dispatches[0]!.message as { body: string; attributes: Record<string, string> };
     expect(JSON.parse(msg.attributes[INPUT_ANSWER_CHAIN_ATTR]!)).toEqual(chain);
     expect(msg.attributes.question_id).toBe('q1');
@@ -1189,24 +1225,124 @@ describe('needs_input and answerRun', () => {
     expect(msg.body).toContain(ACCOUNT);
     expect(JSON.stringify(await h.store.getRun(RUN_ID))).not.toContain(ACCOUNT);
 
-    // An identity step that cannot run leaves an empty chain and a gap; a loud one is passed on.
+    // An identity step that cannot run leaves the given ids as hint leads and a gap.
     const g = harness({
       identity: async () => {
         throw new Error('boom');
       },
     });
     await parked(g);
-    await answerRun(RUN_ID, { answer: 'x', ids: { customer_id: 'c-2' }, by: 'ops' }, g.deps);
+    await answerRun(RUN_ID, { answer: 'x', ids: { customer_id: '123456789' }, by: 'ops' }, g.deps);
     const gm = g.flue.dispatches[0]!.message as { body: string; attributes: Record<string, string> };
-    expect(JSON.parse(gm.attributes[INPUT_ANSWER_CHAIN_ATTR]!)).toEqual({ ids: {}, hops: [], basic_state: [] });
-    expect(gm.body).toContain('identity step did not run (Error)');
+    expect(JSON.parse(gm.attributes[INPUT_ANSWER_CHAIN_ATTR]!)).toEqual({
+      ids: {},
+      hops: [],
+      basic_state: [],
+      leads: [{ value: '123456789', kind: 'digits', source: 'hint', key: 'customer_id', status: 'seed' }],
+    });
+    expect(gm.body).toContain("identity step did not run on the answer's ids (Error)");
+    expect(gm.body).not.toContain('classifier');
 
-    // Without an identity step in the deps, ids cannot be verified.
+    // A loud failure is passed on when the person sent ids, and the question stays open.
+    class FixtureMissError extends Error {
+      override name = 'FixtureMissError';
+    }
+    const l = harness({
+      identity: async () => {
+        throw new FixtureMissError('no fixture');
+      },
+    });
+    await parked(l);
+    await expect(answerRun(RUN_ID, { answer: 'x', ids: { customer_id: 'c-3' }, by: 'ops' }, l.deps)).rejects.toBeInstanceOf(FixtureMissError);
+    expect((await l.store.getRun(RUN_ID))?.input_request?.question_id).toBe('q1');
+    expect(l.flue.dispatches).toHaveLength(0);
+
+    // Without an identity step in the deps, ids cannot be verified; a bare answer still goes through.
+    const a = harness();
+    await parked(a);
+    const { identity: _none, ...answerOnly } = a.deps;
+    await answerRun(RUN_ID, { answer: 'x', by: 'ops' }, answerOnly);
+    expect((a.flue.dispatches[0]!.message as { attributes: Record<string, string> }).attributes).toEqual({ question_id: 'q1' });
+
     const n = harness();
     await parked(n);
     const { identity: _identity, ...noIdentity } = n.deps;
     await expect(answerRun(RUN_ID, { answer: 'x', ids: { customer_id: 'c' }, by: 'ops' }, noIdentity)).rejects.toBeInstanceOf(SubmissionInputError);
     expect(n.flue.dispatches).toHaveLength(0);
+  });
+});
+
+// ------------------------------------------------------------------ answer leads
+
+describe('answer leads (D96)', () => {
+  const lead = 'b4e7d2a9-1c3f-4a6b-8e5d-9f2a0c1b3d47';
+
+  async function parkedAnswer(h: Harness): Promise<void> {
+    await h.store.createRun(RUN_ID, redactPersisted(prepared().request, { names: [NAME] }));
+    await h.store.addSubmission(RUN_ID, redactPersisted({ kind: 'initial' as const }));
+    await h.store.putInputRequest(RUN_ID, redactPersisted(sampleInputRequest('q1')));
+  }
+
+  function answerChainOf(h: Harness): { chain: IdChain; body: string } {
+    const msg = h.flue.dispatches[0]!.message as { body: string; attributes: Record<string, string> };
+    return { chain: JSON.parse(msg.attributes[INPUT_ANSWER_CHAIN_ATTR]!) as IdChain, body: msg.body };
+  }
+
+  test('ids in a text-only answer come back as answer leads without the identity step, even one that would throw', async () => {
+    class FixtureMissError extends Error {
+      override name = 'FixtureMissError';
+    }
+    let calls = 0;
+    const h = harness({
+      identity: async () => {
+        calls++;
+        throw new FixtureMissError('no fixture');
+      },
+    });
+    await parkedAnswer(h);
+    await answerRun(RUN_ID, { answer: `the user id is ${lead}`, by: 'ops' }, h.deps);
+    expect(calls).toBe(0);
+    const { chain, body } = answerChainOf(h);
+    expect(chain).toEqual({
+      ids: {},
+      hops: [],
+      basic_state: [],
+      leads: [{ value: lead, kind: 'uuid', source: 'answer', label: 'the user id is', at: { message: 0, offset: 15 }, status: 'seed' }],
+    });
+    expect(body).not.toContain('no known id');
+    expect(body).not.toContain('identity step');
+  });
+
+  test("an answer lead's label is masked with the run's redaction names", async () => {
+    uninstallRunEventLog();
+    try {
+      setRunRedactionNames(RUN_ID, [NAME]);
+      const h = harness();
+      await parkedAnswer(h);
+      await answerRun(RUN_ID, { answer: `${NAME} account: ${lead}`, by: 'ops' }, h.deps);
+      const label = answerChainOf(h).chain.leads?.[0]?.label;
+      expect(label).toBeDefined();
+      expect(label).not.toContain('Asha');
+      expect(label).toContain('account');
+    } finally {
+      uninstallRunEventLog();
+    }
+  });
+
+  test('with ids, the answer text rides to the identity step and its thread leads come back tagged answer', async () => {
+    const h = harness({
+      // What the identity step returns for a text with one unlabelled id.
+      identity: async (...args: unknown[]) => {
+        const request = args[0] as { messages: Parameters<typeof threadLeads>[0] };
+        const { leads } = threadLeads(request.messages, 'thread');
+        return { id_chain: { ids: { customer_id: 'c-4' }, hops: [], basic_state: [], leads: [...leads] }, basic_state: [], gaps: [leadsGap(leads.length)] };
+      },
+    });
+    await parkedAnswer(h);
+    await answerRun(RUN_ID, { answer: `the user id is ${lead}`, ids: { customer_id: 'c-4' }, by: 'ops' }, h.deps);
+    const { chain, body } = answerChainOf(h);
+    expect(chain.leads?.map((l) => [l.value, l.source])).toEqual([[lead, 'answer']]);
+    expect(body).not.toContain('no known id');
   });
 });
 
@@ -1446,7 +1582,7 @@ describe('blocked and resumeRun', () => {
   });
 
   test('the note is model-facing in the signal and persisted-profile in the store; a blank note is left out', async () => {
-    const h = harness();
+    const h = harness({ config: { modelRedaction: 'on' } });
     await blocked(h);
     await resumeRun(RUN_ID, { by: 'ops', note: `  harbor is back for ${PHONE}; card ${PAN} was the test card  ` }, h.deps);
     const body = signalOf(h).body;
@@ -1457,6 +1593,16 @@ describe('blocked and resumeRun', () => {
     expect(stored).toContain('harbor is back for');
     expect(stored).not.toContain(PHONE);
     expect(stored).not.toContain(PAN);
+
+    // Redaction off (D107): the signal carries the note raw, the store stays masked.
+    const r = harness();
+    await blocked(r);
+    await resumeRun(RUN_ID, { by: 'ops', note: `card ${PAN} was the test card` }, r.deps);
+    expect(signalOf(r).body).toContain(`card ${PAN} was the test card`);
+    const rawRun = await r.store.getRun(RUN_ID);
+    const rawStored = JSON.stringify([rawRun?.submissions[1]?.note, rawRun?.block_history[0]?.note]);
+    expect(rawStored).toContain('was the test card');
+    expect(rawStored).not.toContain(PAN);
 
     const g = harness();
     await blocked(g);
@@ -1714,7 +1860,7 @@ describe('resumeRun on a working run (D72)', () => {
   });
 
   test('a dispatched run is steered too; the note is persisted-profile in the store and model-facing in the signal', async () => {
-    const h = harness();
+    const h = harness({ config: { modelRedaction: 'on' } });
     await working(h, 'dispatched');
     const { deps } = withModes(h.deps, { stalled: notStalled });
     await resumeRun(RUN_ID, { by: 'ops', note: `call ${PHONE}; card ${PAN} is the test card` }, deps);
@@ -2422,7 +2568,14 @@ describe('usage', () => {
         id_chain: { ids: {}, hops: [], basic_state: [] },
         basic_state: [],
         gaps: [],
-        extraction: { extractor: 'decision', candidates: { customer_id: 1 }, dropped: {}, fields: { customer_id: { outcome: 'none', probability: 0.8 } } },
+        extraction: {
+          extractor: 'decision',
+          candidates: { customer_id: 1 },
+          dropped: {},
+          fields: { customer_id: { outcome: 'none', probability: 0.8 } },
+          leads: 0,
+          leads_dropped: 0,
+        },
       };
     };
     const h = harness();
@@ -2844,5 +2997,137 @@ describe('trace names (D100)', () => {
 
     expect((await runSubmission(prepared(), h.deps)).status).toBe('completed');
     expect(traceLabel(RUN_ID)).toEqual({ topic: 'card:charge not reflected', kind: 'initial' });
+  });
+});
+
+// ------------------------------------------------------------------ scout (plan 15 P4)
+
+describe('scout', () => {
+  const SCOUTED: ScoutResult = {
+    lines: ['****5678 -> ssfb db harbor public.accounts.account_number 1; atspl: nothing (logs 0, 1 column, 1 indexed)'],
+    gaps: [],
+    values: [{ value: '****5678', kind: 'digits', status: 'ok', hits: 1 }],
+    probes: 3,
+  };
+
+  /** The harness with the scout switched on or off and a fake scout that records its calls. */
+  function scouting(on: boolean | undefined, fake: (input: ScoutInput) => Promise<ScoutResult> = async () => SCOUTED, o: HarnessOptions = {}) {
+    const h = harness(o);
+    const calls: ScoutInput[] = [];
+    const deps: SubmissionDeps = {
+      ...h.deps,
+      config: { ...h.deps.config, ...(on !== undefined ? { discovery: { scout: on } } : {}) },
+      scout: async (input) => {
+        h.events.push('scout');
+        calls.push(input);
+        return fake(input);
+      },
+    };
+    return { h, deps, calls };
+  }
+
+  async function withEventLog<T>(fn: (runsDir: string) => Promise<T>): Promise<T> {
+    const runsDir = mkdtempSync(join(tmpdir(), 'triage-submit-scout-'));
+    dirs.push(runsDir);
+    installRunEventLog({ runsDir, observe: () => () => undefined });
+    try {
+      return await fn(runsDir);
+    } finally {
+      await flushRunEventLog();
+      uninstallRunEventLog();
+    }
+  }
+
+  test('runs once after identity and before the classification is stored, and its lines ride in initialData', async () => {
+    const { h, deps, calls } = scouting(true);
+    await runSubmission(prepared(), deps);
+    const order = h.events.filter((e) => ['identity', 'scout', 'putClassification', 'dispatch'].includes(e));
+    expect(order).toEqual(['identity', 'scout', 'putClassification', 'dispatch']);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ runId: RUN_ID, idChain: CHAIN, interface: 'cli', redactionNames: [NAME] });
+    expect(calls[0]?.window).toEqual(prepared().request.window);
+    // Flue re-parses initialData with the schema, which drops unknown keys: the lines must survive it.
+    expect(v.parse(TriageInitSchema, initialDataOf(h)).scout).toEqual([...SCOUTED.lines]);
+  });
+
+  test('the step log gets a scout line with the counts and masked values only', async () => {
+    await withEventLog(async (runsDir) => {
+      const { deps } = scouting(true);
+      await runSubmission(prepared(), deps);
+      await flushRunEventLog();
+      const { events } = await readRunEvents(runsDir, RUN_ID);
+      const scout = events.filter((e) => e.type === 'scout');
+      expect(scout).toHaveLength(1);
+      expect(scout[0]?.data).toMatchObject({ probes: 3, values: SCOUTED.values, gaps: 0 });
+      expect(JSON.stringify(scout[0]?.data)).not.toContain(ACCOUNT);
+    });
+  });
+
+  test('its gaps become scout warnings, stored and in initialData', async () => {
+    const { h, deps } = scouting(true, async () => ({ ...SCOUTED, gaps: ['scout: locate failed for ****5678 (FixtureMissError)'] }));
+    await runSubmission(prepared(), deps);
+    const warning = { step: 'scout', message: 'scout: locate failed for ****5678 (FixtureMissError)' };
+    expect(initialDataOf(h).preflight_warnings).toContainEqual(warning);
+    const stored = h.calls.find((c) => c.method === 'putClassification')?.args[1];
+    expect(isPersisted(stored) ? (stored.value as { preflight_warnings: unknown[] }).preflight_warnings : []).toContainEqual(warning);
+  });
+
+  test('a scout that throws is a gap: the run is still dispatched, without scout lines', async () => {
+    await withEventLog(async (runsDir) => {
+      const { h, deps } = scouting(true, async () => {
+        throw new TypeError(`cannot read ${ACCOUNT}`);
+      });
+      const result = await runSubmission(prepared(), deps);
+      expect(result.status).toBe('completed');
+      const init = initialDataOf(h);
+      expect(init.scout).toBeUndefined();
+      const gap = init.preflight_warnings?.find((w) => w.step === 'scout');
+      expect(gap?.message).toStartWith('scout failed, so where the ids live was not checked before the run: TypeError');
+      expect(gap?.message).not.toContain(ACCOUNT);
+      await flushRunEventLog();
+      const { events } = await readRunEvents(runsDir, RUN_ID);
+      expect(events.find((e) => e.type === 'scout')?.data).toMatchObject({ error: 'TypeError' });
+    });
+  });
+
+  test('a stop during the scout stops the run, as in any other step', async () => {
+    const ac = new AbortController();
+    const { h, deps } = scouting(
+      true,
+      async (input) => {
+        ac.abort();
+        input.signal.throwIfAborted();
+        return SCOUTED;
+      },
+      { signal: ac.signal },
+    );
+    await expect(runSubmission(prepared(), deps)).rejects.toThrow();
+    expect(h.flue.dispatches).toHaveLength(0);
+  });
+
+  test('off, or left out of the config: not called and no scout lines', async () => {
+    for (const on of [false, undefined]) {
+      const { h, deps, calls } = scouting(on);
+      await runSubmission(prepared(), deps);
+      expect(calls).toHaveLength(0);
+      expect(initialDataOf(h).scout).toBeUndefined();
+      expect(initialDataOf(h).preflight_warnings?.some((w) => w.step === 'scout')).toBe(false);
+    }
+  });
+
+  test('only the initial submission scouts: a follow-up, an answer and a resume do not', async () => {
+    const { h, deps, calls } = scouting(true, async () => SCOUTED, {
+      read: async () => {
+        if (h.flue.reads.length === 2) await h.store.putInputRequest(RUN_ID, redactPersisted(sampleInputRequest('q1')));
+        if (h.flue.reads.length === 3) await h.store.putBlock(RUN_ID, redactPersisted(sampleBlock('b1')));
+        return { text: 'done', submissionId: `sub-${h.flue.reads.length}`, data: {} };
+      },
+    });
+    await runSubmission(prepared(), deps);
+    await askRun(RUN_ID, 'and the second transfer?', 'ops', deps);
+    await answerRun(RUN_ID, { answer: 'no more ids', by: 'ops' }, deps);
+    await resumeRun(RUN_ID, { by: 'ops', note: 'harbor is back' }, deps);
+    expect(h.flue.dispatches).toHaveLength(4);
+    expect(calls).toHaveLength(1);
   });
 });

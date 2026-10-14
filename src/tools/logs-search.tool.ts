@@ -9,7 +9,8 @@
 //   budget -> scope (id-shaped terms; systemic only with count or group_by,
 //   ids still checked; correlation ids seen in an earlier result, D76, D77)
 //   -> gate (buildLogsQuery and resolveWindow from src/gate) -> not configured
-//   -> fixture (transport-neutral key) or the Quickwit connector -> envelope
+//   -> fixture (transport-neutral key) or the Quickwit connector -> derived
+//   leads from the hits (D97) -> envelope
 //
 // This tool holds no limiter. The connector takes the entity's slot from
 // quickwitSlot() for each request it sends, so the per-entity cap
@@ -17,6 +18,10 @@
 //
 // The window defaults to the request window, both ends are always sent, and
 // it is returned with the query that was built (D76).
+//
+// Results are shaped at the source (plan 16 S1.2, D104): the model gets the
+// top GROUP_TOP_N groups with keys cut to GROUP_KEY_CHARS, raw pages hold at
+// most RAW_MAX_HITS documents, and the staged file keeps the full result.
 
 import { defineTool, type ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
@@ -40,17 +45,20 @@ import {
   normalizeMessage,
   PAGE_SIZE,
   quickwitGateConfig,
+  RAW_MAX_HITS,
   type LogsQuery,
   type QuickwitGateConfig,
 } from '../gate/quickwit.ts';
+import type { Config } from '../config/env.ts';
 import { resolveWindow } from '../gate/quickwit-window.ts';
-import { observeCorrelationIds, observeJourneyKeys, type LogsMode } from '../gate/scope.ts';
+import { redactForModel } from '../gate/redact.ts';
+import { observeCorrelationIds, type LogsMode } from '../gate/scope.ts';
 import { semanticKey } from '../mock/key.ts';
 import type { Entity, TimeWindow } from '../types/core.ts';
 import type { ToolEnvelope } from '../types/tool-result.ts';
-import { type GateDecision, runIoTool, type BackingRef, type StagingHarness } from './_lib/pipeline.ts';
-import type { ToolContext, ToolModule } from './types.ts';
-import { observedScopeOf, scopeSetOf } from './_lib/context.ts';
+import { cutText, type GateDecision, runIoTool, type BackingRef, type StagingHarness } from './_lib/pipeline.ts';
+import type { Mount, ToolContext, ToolModule } from './types.ts';
+import { observedScopeOf } from './_lib/context.ts';
 
 declare module './_lib/context.ts' {
   interface ToolConnectors {
@@ -65,6 +73,14 @@ export const LOGS_SEARCH = 'logs_search';
 export const LOGS_SERVICE = 'logs';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Groups the model sees; the staged file keeps all of them (plan 16 S1.2). */
+export const GROUP_TOP_N = 25;
+/** Characters of a group key the model sees. */
+export const GROUP_KEY_CHARS = 200;
+
+// Fields whose values are whole log lines: grouping by them turns normalize on.
+const WHOLE_LINE_FIELDS: ReadonlySet<string> = new Set(['message', 'error', 'raw_message']);
 
 const Text = v.pipe(v.string(), v.minLength(1), v.maxLength(512));
 const FieldName = v.pipe(v.string(), v.minLength(1), v.maxLength(64));
@@ -130,14 +146,19 @@ export const LogsSearchInputSchema = v.strictObject({
     v.pipe(v.number(), v.integer(), v.minValue(1), v.description('Most hits to return. Clamped to the page size.')),
   ),
   columns: v.optional(v.pipe(v.array(FieldName), v.maxLength(10), v.description('Extra fields to show in each hit, such as status or User-Agent.'))),
-  raw: v.optional(v.pipe(v.boolean(), v.description('Return whole log documents instead of the listed fields.'))),
+  raw: v.optional(
+    v.pipe(v.boolean(), v.description(`Return whole log documents instead of the listed fields, at most ${RAW_MAX_HITS} per page.`)),
+  ),
   count: v.optional(v.pipe(v.boolean(), v.description('Return the number of matching lines only.'))),
   group_by: v.optional(
     v.pipe(
       v.array(FieldName),
       v.minLength(1),
       v.maxLength(4),
-      v.description('1 to 4 fields to group by, such as ["service"] or ["message", "error"]. Returns counts per value.'),
+      v.description(
+        '1 to 4 fields to group by, such as ["service"] or ["message", "error"]. Returns counts per value. ' +
+          'message, error and raw_message turn normalize on.',
+      ),
     ),
   ),
   count_distinct: v.optional(v.pipe(FieldName, v.description('Field whose distinct values are counted, such as customer_id.'))),
@@ -156,47 +177,74 @@ export type LogsSearchOutput = LogsSearchData & {
   readonly query: string;
   /** With normalize on a hits search: the hits folded by normalised error or message. */
   readonly message_groups?: readonly LogGroup[];
+  /** Model-facing only: how many groups (or message_groups) there are in all. */
+  readonly group_count?: number;
+  /** Model-facing only: the groups past the top GROUP_TOP_N and the hits they hold. */
+  readonly groups_omitted?: { readonly groups: number; readonly hits: number };
 };
 
-function description(ctx: ToolContext, entity: Entity): string {
-  let cfg: QuickwitGateConfig | undefined;
+function gateConfig(ctx: ToolContext, entity: Entity): QuickwitGateConfig | undefined {
   try {
-    cfg = quickwitGateConfig(ctx.registry, entity);
+    return quickwitGateConfig(ctx.registry, entity);
   } catch {
     // A registry that cannot answer leaves the lists out; run() reports not configured.
+    return undefined;
   }
+}
+
+/** The page size, services and fields of one entity's logs. Undefined where logs are not configured. */
+function entityLists(ctx: ToolContext, entity: Entity): { readonly page: number; readonly services: string[]; readonly fields: readonly string[] } | undefined {
+  const cfg = gateConfig(ctx, entity);
+  if (cfg === undefined) return undefined;
+  const services = Object.entries(cfg.services)
+    .filter(([, logName]) => logName !== undefined)
+    .map(([name]) => name);
+  return { page: Math.min(PAGE_SIZE, cfg.maxHits), services, fields: cfg.fields };
+}
+
+// entity is null on the agent mount (D110): one description for every
+// entity, with the page size and lists per entity in entityLine.
+function description(ctx: ToolContext, entity: Entity | null): string {
+  const lists = entity === null ? undefined : entityLists(ctx, entity);
   const { defaultLookbackDays, maxLogCallsPerRun } = ctx.config.budgets;
-  const pageSize = Math.min(PAGE_SIZE, cfg?.maxHits ?? PAGE_SIZE);
   const limit = HIT_LIMIT.toLocaleString('en-US');
+  const entityNote =
+    entity === null
+      ? ' On ssfb, denoise drops kong, kafka and access-log noise; on the other entities a UUID goes in terms, never in fields.'
+      : entity === 'ssfb'
+        ? ' denoise drops kong, kafka and access-log noise.'
+        : ' On this entity a UUID goes in terms, never in fields.';
+  const page = entity === null ? 'one page of hits (page size per entity below)' : `one page of ${lists?.page ?? PAGE_SIZE} hits`;
   const lines = [
-    `Search the ${entity} service logs (Quickwit).`,
+    entity === null ? "Search one entity's service logs (Quickwit)." : `Search the ${entity} service logs (Quickwit).`,
     'Give at least one of terms, fields, message, error, contains or an any_of group of messages or terms; ' +
       'service, level and exclude narrow a query but are not enough on their own. Leave service out to search every service.',
     'terms, exclude and any_of values with a space or a dash are sent whole in single quotes; a single quote inside a value is refused. ' +
       'message is the exact label from the code. error ANDs its words on the error field. contains is one word matched inside raw_message. ' +
-      'fields are exact filters by name.' +
-      (entity === 'ssfb' ? ' denoise drops kong, kafka and access-log noise.' : ' On this entity a UUID goes in terms, never in fields.'),
-    `Each call returns one page of ${pageSize} hits, newest first (order: "oldest" to reverse), with num_hits and next_offset when more remain; ` +
+      `fields are exact filters by name.${entityNote}`,
+    `Each call returns ${page}, newest first (order: "oldest" to reverse), with num_hits and next_offset when more remain; ` +
       'pass offset for the next page. The tool never fetches the next page itself.',
     'Every query sends both ends of its window: without from/to it is the request window ' +
       `(${defaultLookbackDays} days before the thread's first message up to when the request came in), and the window used is returned. Times are UTC.`,
+    'Start with count, or group_by on service/level, to size the result, then read hits with named columns.',
     `Over ${limit} hits the call returns early with the count and no hits: narrow the window or add a filter, or use count or group_by first. ` +
       `group_by (up to 4 fields) and count_distinct tally at most ${limit} hits. At most ${maxLogCallsPerRun} logs_search calls per run.`,
     'Id-shaped values must come from the brief or the ID chain. ' +
       'For counts across customers set scope: "systemic" together with count, group_by or count_distinct; ids are still checked.',
     'Returns hits (the listed fields plus columns, or whole documents with raw) with offset and next_offset, a count, or groups ' +
       '(key is the group_by values joined with " | ") and distinct with tally_base, plus num_hits, window, the query sent, truncated and notes. ' +
+      `raw returns at most ${RAW_MAX_HITS} hits per page. ` +
+      'group_by on message or error returns whole lines as keys: use normalize to fold ids and numbers out of them (it is on by default there). ' +
+      `groups return the top ${GROUP_TOP_N} with keys cut to ${GROUP_KEY_CHARS} characters, with group_count and groups_omitted; ` +
+      'the full list is in the staged file. ' +
       'The full result is also written to /data/<call id>.json in the sandbox. A 0-hit result says what to try next.',
     '"Refused" means the query was not run or Quickwit rejected it: fix what the message says and retry. ' +
       '"did not answer" carries the reason: retry once or narrow the window. "not configured" means logs are not set up ' +
-      `for ${entity}: record the gap and use another source.`,
+      `for ${entity ?? 'that entity'}: record the gap and use another source.`,
   ];
-  if (cfg !== undefined) {
-    const services = Object.entries(cfg.services)
-      .filter(([, logName]) => logName !== undefined)
-      .map(([name]) => name);
-    if (services.length > 0) lines.push(`Services: ${services.join(', ')}.`);
-    lines.push(`Fields: ${cfg.fields.join(', ')}.`);
+  if (lists !== undefined) {
+    if (lists.services.length > 0) lines.push(`Services: ${lists.services.join(', ')}.`);
+    lines.push(`Fields: ${lists.fields.join(', ')}.`);
   }
   return lines.join(' ');
 }
@@ -295,6 +343,53 @@ export function foldGroups(groups: readonly LogGroup[]): LogGroup[] {
     .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key));
 }
 
+/**
+ * The model-facing groups: the top GROUP_TOP_N (the list is already largest
+ * first) with each key cut to GROUP_KEY_CHARS. Each key is redacted before
+ * the cut, because a cut can split an email or a card number so the later
+ * model-facing redaction no longer matches it. Cut keys that end up equal
+ * stay separate groups. The staged file and the audit line keep the full list.
+ * Keys are redacted as the run's model sees them (TRIAGE_MODEL_REDACTION, D107).
+ */
+export function forModel(out: LogsSearchOutput, config: Pick<Config, 'redaction'>): LogsSearchOutput {
+  if ('groups' in out && out.groups !== undefined) {
+    const { top, fields } = topGroups(out.groups, out.notes, config);
+    return { ...out, ...fields, groups: top };
+  }
+  if (out.message_groups !== undefined) {
+    const { top, fields } = topGroups(out.message_groups, out.notes, config);
+    return { ...out, ...fields, message_groups: top };
+  }
+  return out;
+}
+
+// The shown groups with their keys cut, and the counts and note that go with
+// them. The staged file is named only "when present" because staging can
+// fail or be off.
+function topGroups(
+  all: readonly LogGroup[],
+  notes: readonly string[] | undefined,
+  config: Pick<Config, 'redaction'>,
+): { top: LogGroup[]; fields: Pick<LogsSearchOutput, 'group_count' | 'groups_omitted' | 'notes'> } {
+  const shown = all.slice(0, GROUP_TOP_N).map((g) => ({ key: redactForModel(g.key, config), count: g.count }));
+  const omitted = all.slice(GROUP_TOP_N);
+  const cut = shown.some((g) => g.key.length > GROUP_KEY_CHARS);
+  const note =
+    omitted.length > 0 || cut
+      ? `${shown.length} of ${all.length} groups shown; keys cut to ${GROUP_KEY_CHARS} chars; ` +
+        'staged_file (when present) has all groups; group by service or level, or use normalize'
+      : undefined;
+  const merged = [...(notes ?? []), ...(note !== undefined ? [note] : [])];
+  return {
+    top: shown.map((g) => ({ key: cutText(g.key, GROUP_KEY_CHARS), count: g.count })),
+    fields: {
+      group_count: all.length,
+      groups_omitted: { groups: omitted.length, hits: omitted.reduce((sum, g) => sum + g.count, 0) },
+      ...(merged.length > 0 ? { notes: merged } : {}),
+    },
+  };
+}
+
 function messageGroups(hits: readonly LogHit[]): LogGroup[] {
   const groups: LogGroup[] = [];
   for (const hit of hits) {
@@ -310,6 +405,8 @@ type Shape = {
   readonly normalize: boolean;
   /** Added to notes when the result has 0 hits. */
   readonly zeroNote: string;
+  /** Tool notes added to every result, such as normalize turned on. */
+  readonly notes: readonly string[];
 };
 
 // The same shaping for a fixture and a real result: this call's window,
@@ -327,7 +424,7 @@ function shape(value: unknown, s: Shape): LogsSearchOutput {
         ]
       : [];
   const common = (total: number) => {
-    const notes = [...s.query.notes, ...(total === 0 ? [s.zeroNote, ...absent] : [])];
+    const notes = [...s.query.notes, ...s.notes, ...(total === 0 ? [s.zeroNote, ...absent] : [])];
     return { query: s.query.query, window: s.window, ...(notes.length > 0 ? { notes } : {}) };
   };
   const numHits = typeof rest.num_hits === 'number' ? rest.num_hits : 0;
@@ -368,6 +465,12 @@ function shape(value: unknown, s: Shape): LogsSearchOutput {
   };
 }
 
+// No hits, groups or count: the same test that adds the zero-hit note.
+function foundNothing(out: LogsSearchOutput): boolean {
+  if ('count' in out) return out.count === 0;
+  return out.num_hits === 0 && ('hits' in out ? out.hits.length === 0 : (out.groups?.length ?? 0) === 0);
+}
+
 function summaryOf(entity: Entity, service: string | undefined, out: LogsSearchOutput, transport: QuickwitTransportKind | undefined): string {
   const via = transport === undefined ? '' : ` via ${transport}`;
   const target = `${entity}:${service ?? 'all services'}`;
@@ -392,7 +495,12 @@ async function runLogsSearch(ctx: ToolContext, entity: Entity, args: RunArgs): P
   const requestWindow = requestWindowOf(ctx, now);
   const target = targetOf(ctx, entity);
   const queryInput = queryInputOf(data);
-  const normalize = data.normalize === true;
+  // Keys of whole lines are almost all distinct until ids and numbers are folded out.
+  const autoNormalize = data.normalize === undefined && data.group_by?.some((f) => WHOLE_LINE_FIELDS.has(f)) === true;
+  const normalize = data.normalize === true || autoNormalize;
+  const toolNotes = autoNormalize
+    ? ['normalize turned on because group_by has message, error or raw_message; pass normalize: false to keep ids']
+    : [];
 
   let query: LogsQuery | undefined;
   let window: TimeWindow | undefined;
@@ -420,7 +528,7 @@ async function runLogsSearch(ctx: ToolContext, entity: Entity, args: RunArgs): P
 
   const shapeOf = (value: unknown): LogsSearchOutput => {
     const r = ready();
-    return shape(value, { query: r.query, window: r.window, normalize, zeroNote: zeroHitsNote(data) });
+    return shape(value, { query: r.query, window: r.window, normalize, zeroNote: zeroHitsNote(data), notes: toolNotes });
   };
 
   return runIoTool<'logs_search', unknown>(
@@ -466,14 +574,18 @@ async function runLogsSearch(ctx: ToolContext, entity: Entity, args: RunArgs): P
       },
       render: (value) => {
         const out = shapeOf(value);
-        // Correlation ids and journey keys in these hits may be searched later in the run (D77).
-        if ('hits' in out) {
-          observeCorrelationIds(ctx.runId, out.hits);
-          observeJourneyKeys(ctx.runId, LOGS_SEARCH, data, scopeSetOf(deps), out.hits);
-        }
-        return out;
+        // Correlation ids in these hits may be searched later in the run (D77).
+        if ('hits' in out) observeCorrelationIds(ctx.runId, out.hits);
+        return forModel(out, ctx.config);
       },
+      // Ids in hits tied to an id in scope become derived leads (D97).
+      leads: (value) => {
+        const out = shapeOf(value);
+        return { records: 'hits' in out ? out.hits : [] };
+      },
+      // The staged file and the audit summary keep every group.
       stage: shapeOf,
+      empty: (value) => foundNothing(shapeOf(value)),
       summary: (value) => summaryOf(entity, data.service, shapeOf(value), transportUsed),
     },
     {
@@ -486,13 +598,13 @@ async function runLogsSearch(ctx: ToolContext, entity: Entity, args: RunArgs): P
   );
 }
 
-/** Builds the logs_search tool for an investigator's entity. */
-export function logsSearchTool(ctx: ToolContext): ToolDefinition {
+/** Builds the logs_search tool for an investigator's entity, or one agent-mount copy. */
+export function logsSearchTool(ctx: ToolContext, mount?: Mount): ToolDefinition {
   const entity = ctx.entity;
   if (entity === null) throw new Error('logs_search needs an entity in the tool context');
   return defineTool({
     name: LOGS_SEARCH,
-    description: description(ctx, entity),
+    description: description(ctx, mount === 'agent' ? null : entity),
     input: LogsSearchInputSchema,
     harness: true,
     run: async ({ data, signal, toolCallId, log, harness }): Promise<ToolEnvelope> =>
@@ -508,10 +620,17 @@ export function logsSearchTool(ctx: ToolContext): ToolDefinition {
 
 export const toolModule: ToolModule = {
   name: LOGS_SEARCH,
-  mounts: ['investigator'],
+  mounts: ['investigator', 'agent'],
   entities: 'all',
+  perEntity: true,
   // Always mounted: a blank Quickwit config answers "not configured" so the
   // investigator records the gap instead of guessing (HLD 02 §1.2).
   enabled: () => ({ on: true }),
-  create: (ctx) => logsSearchTool(ctx),
+  create: (ctx, mount) => logsSearchTool(ctx, mount),
+  entityLine(ctx) {
+    const lists = ctx.entity === null ? undefined : entityLists(ctx, ctx.entity);
+    if (lists === undefined) return '';
+    const services = lists.services.length > 0 ? [`services ${lists.services.join(', ')}`] : [];
+    return [`page ${lists.page} hits`, ...services, `fields ${lists.fields.join(', ')}`].join('; ');
+  },
 };

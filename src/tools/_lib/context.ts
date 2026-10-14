@@ -6,7 +6,12 @@
 // The IdChain is held here, not copied into each tool: deps.idChain() is a
 // getter, so when resolve_identity (T05.5) widens the chain mid-run, later
 // calls see the wider scope. widenIdChain() is the only way to change it, and
-// it only ever adds ids to the scope set.
+// it only ever adds ids to the scope set. It also keeps the chain's leads
+// (D96) when the new chain leaves them out, so the report and the saved chain
+// still list them. addLeads() adds the derived leads the pipeline finds in a
+// tied result (D97) to the same chain, so they are saved with it
+// (triage.agent.ts syncs deps.idChain() at every finish) and survive a settle
+// and a resume.
 
 import * as v from 'valibot';
 import type { EscalationStore } from '../../agents/escalation.ts';
@@ -20,7 +25,7 @@ import { createScopeSet, extendScopeSet, observedIds, type ScopeSet } from '../.
 import { createMockLayer, type MockLayer } from '../../mock/index.ts';
 import type { RunStore } from '../../runstore/types.ts';
 import type { Entity, Interface, RunId, TimeWindow } from '../../types/core.ts';
-import { type IdChain, IdChainSchema } from '../../types/id-chain.ts';
+import { type IdChain, IdChainSchema, type Lead } from '../../types/id-chain.ts';
 import type { ToolDeps } from '../types.ts';
 
 /**
@@ -178,25 +183,52 @@ export function createToolDeps(opts: CreateToolDepsOptions): ToolDeps {
 export function widenIdChain(deps: ToolDeps, next: IdChain): IdChain {
   const holder = holders.get(deps);
   if (holder === undefined) throw new IdChainError('these deps were not built by createToolDeps');
-  const chain = parseChain(next);
+  const parsed = parseChain(next);
+  const leads = mergeLeads(holder.chain.leads, parsed.leads);
+  const chain: IdChain = leads.length > 0 ? { ...parsed, leads } : parsed;
   holder.chain = chain;
   holder.scope = extendScopeSet(holder.scope, chain);
   return chain;
 }
 
 /**
- * base with extra's ids added (extra wins) and extra's hops and state items
- * appended when base does not already hold them. Pure; nothing is widened.
+ * Adds derived leads (D97) to the run's chain and scope set. A lead whose
+ * kind and value the chain already holds is skipped. Returns the leads that
+ * were added.
+ */
+export function addLeads(deps: ToolDeps, leads: readonly Lead[]): Lead[] {
+  const holder = holders.get(deps);
+  if (holder === undefined) throw new IdChainError('these deps were not built by createToolDeps');
+  const merged = mergeLeads(holder.chain.leads, leads);
+  const added = merged.slice(holder.chain.leads?.length ?? 0);
+  if (added.length === 0) return [];
+  holder.chain = { ...holder.chain, leads: merged };
+  holder.scope = extendScopeSet(holder.scope, { ids: {}, hops: [], basic_state: [], leads: added });
+  return added;
+}
+
+/**
+ * base with extra's ids added (extra wins), extra's hops and state items
+ * appended when base does not already hold them, and the leads of both, one
+ * per kind and value. Pure; nothing is widened.
  */
 export function mergeIdChains(base: IdChain, extra: IdChain): IdChain {
   const keys = (list: readonly unknown[]): Set<string> => new Set(list.map((x) => JSON.stringify(x)));
   const hops = keys(base.hops);
   const state = keys(base.basic_state);
+  const leads = mergeLeads(base.leads, extra.leads);
   return {
     ids: { ...base.ids, ...extra.ids },
     hops: [...base.hops, ...extra.hops.filter((h) => !hops.has(JSON.stringify(h)))],
     basic_state: [...base.basic_state, ...extra.basic_state.filter((s) => !state.has(JSON.stringify(s)))],
+    ...(leads.length > 0 ? { leads } : {}),
   };
+}
+
+/** base's leads, then extra's leads base does not hold (same kind and value); the first one seen wins. */
+export function mergeLeads(base: readonly Lead[] = [], extra: readonly Lead[] = []): Lead[] {
+  const seen = new Set(base.map((lead) => `${lead.kind}:${lead.value}`));
+  return [...base, ...extra.filter((lead) => !seen.has(`${lead.kind}:${lead.value}`))];
 }
 
 /**
@@ -211,7 +243,7 @@ export function scopeSetOf(deps: ToolDeps): ScopeSet {
   return createScopeSet(chain);
 }
 
-/** The ids seen in the run's earlier results (D77), as the pipeline's scope option. */
+/** The correlation ids seen in the run's earlier results (D77), as the pipeline's scope option. */
 export function observedScopeOf(runId: RunId): { observed?: ReadonlySet<string> } {
   const observed = observedIds(runId);
   return observed !== undefined ? { observed } : {};

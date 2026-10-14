@@ -67,6 +67,7 @@ describe('models and metadata', () => {
       MODEL_TIER_MID: 'faux/mid',
       MODEL_TIER_STRONG: 'faux/strong',
       MODEL_CODE_WALKER: 'faux/strong',
+      MODEL_WORKER: '',
     });
     expect(Object.isFrozen(fake.modelEnv)).toBe(true);
   });
@@ -80,6 +81,7 @@ describe('models and metadata', () => {
     expect(models.modelForTier('mid', config)).toBe('faux/mid');
     expect(models.modelForTier('strong', config)).toBe('faux/strong');
     expect(models.codeWalkerModel(config)).toBe('faux/strong');
+    expect(models.workerModel(config)).toBeUndefined();
   });
 });
 

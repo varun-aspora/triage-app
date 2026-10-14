@@ -10,8 +10,7 @@
 // (ids in path segments, query and body must be in the IdChain), then the
 // gate below, then the not-configured check, then the fixture or the
 // connector. The gate:
-//   1. refuses a service that is not an API service of the entity, and
-//      finacle (or any cbs transport service), which is cbs_call's job;
+//   1. refuses a service that is not an API service of the entity;
 //   2. refuses a body on GET or HEAD;
 //   3. joins the base path prefix and the model's path and runs buildUrl,
 //      which refuses '..', '//', encoded separators, control bytes, schemes
@@ -28,6 +27,17 @@
 // a bad path or method is still refused, and the call then answers
 // 'not configured for <entity>:<service>'.
 //
+// finacle on SSFB (D111) goes to the CBS connector instead of the HTTP one:
+// GET only (the owner allows the gateway for reads only), the cbs path check
+// (letters, digits and / _ . -, no query, no '..'), then decideHttp with
+// service finacle against a placeholder origin, since the rules match on the
+// path alone and the connector resolves it against SSFB_CBS_GATEWAY_URL
+// itself. No customer header is sent. When SSFB_CBS_VIA_KUBECTL_ENABLED is
+// not true the call answers not configured with that reason. Mock mode
+// answers from the 'cbs_call' fixture kind, a name kept so fixtures recorded
+// before the route moved still resolve. Any other service with transport
+// 'cbs' has no route.
+//
 // In real mode the service picklist leaves out services whose base URL or
 // auth token is blank, and an entity with none gets no http_call (D75). The
 // not-configured answer stays as the second check.
@@ -41,6 +51,7 @@ import type { FlueLogger } from '@flue/runtime';
 import { defineTool, type ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
 import type { ApiCapability, AuthCapability, ServiceSpec } from '../config/registry.ts';
+import { CBS_ENTITY, CBS_KEYS, CBS_OFF_REASON, type CbsConnector, createCbsConnector } from '../connectors/cbs/client.ts';
 import type { HttpCallData, HttpConnector } from '../connectors/http/client.ts';
 import type { MockPort } from '../connectors/mock.ts';
 import { ConnectorError, type ConnectorContext } from '../connectors/types.ts';
@@ -50,6 +61,7 @@ import {
   CALLABLE_METHODS,
   CBS_SERVICE,
   type CallableMethod,
+  decideHttp,
   type HttpAllowed,
   MAX_PATH_LENGTH,
   MAX_QUERY_PARAMS,
@@ -60,13 +72,16 @@ import { type ApiRule, evaluateRule } from '../gate/rules.ts';
 import { type HttpCallFacts, semanticKey } from '../mock/key.ts';
 import type { Entity } from '../types/core.ts';
 import type { ToolEnvelope } from '../types/tool-result.ts';
+import { outcomeData, realConnectorContext } from './_lib/connector-context.ts';
 import { type BackingRef, type GateDecision, runIoTool, type StagingHarness } from './_lib/pipeline.ts';
-import type { ToolContext, ToolDeps, ToolModule } from './types.ts';
+import type { Mount, ToolContext, ToolDeps, ToolModule } from './types.ts';
 
 declare module './_lib/context.ts' {
   interface ToolConnectors {
     /** Admin HTTP for http_call. Missing means http_call answers not configured in real mode. */
     readonly http?: HttpConnector;
+    /** The CBS connector for http_call's finacle route. When missing, one is built per run from the registry and config. */
+    readonly cbs?: CbsConnector;
   }
 }
 
@@ -75,14 +90,14 @@ export const HTTP_CALL_TOOL = 'http_call';
 /** Most characters of response body the model sees per call. The full body is staged. */
 export const HTTP_BODY_MAX_CHARS = 16_000;
 
-/** Used only to vet the path and method when the service base URL is blank. Never called. */
+/** Vets the path and method when the service base URL is blank, and for finacle, whose rules match the path alone. Never called. */
 const PLACEHOLDER_BASE = 'http://base-not-configured.invalid';
 
 const NO_BODY_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD']);
 
 // ------------------------------------------------------------ services
 
-/** The entity's services that list an API env name, finacle included (it is refused in run). */
+/** The entity's services that list an API env name, finacle included. */
 export function apiServices(ctx: Pick<ToolContext, 'registry' | 'entity'>): readonly string[] {
   const entity = ctx.entity;
   if (entity === null || !ctx.registry.isEnabled(entity)) return [];
@@ -97,14 +112,18 @@ type ServiceFacts = {
   readonly spec: ServiceSpec;
   readonly api: ApiCapability | undefined;
   readonly auth: AuthCapability | undefined;
+  /** The registry's CBS flag for the entity. Only read for a cbs transport service. */
+  readonly cbsOn: boolean;
 };
 
 function serviceFacts(ctx: Pick<ToolContext, 'registry'>, entity: Entity, service: string): ServiceFacts | undefined {
   try {
+    const api = ctx.registry.serviceApi(entity, service);
     return {
       spec: ctx.registry.service(entity, service),
-      api: ctx.registry.serviceApi(entity, service),
+      api,
       auth: ctx.registry.serviceAuth(entity, service),
+      cbsOn: api?.transport === 'cbs' && ctx.registry.cbsEnabled(entity),
     };
   } catch {
     return undefined;
@@ -117,6 +136,11 @@ function backingFor(mockMode: boolean, entity: Entity, service: string, facts: S
   if (api === undefined) {
     const name = /^[a-z][a-z0-9_]*$/.test(service) ? `${entity}_${service}_API_URL` : `${entity}_API_URL`;
     return { envName: name.toUpperCase(), status: 'missing' };
+  }
+  if (api.transport === 'cbs') {
+    if (facts?.cbsOn !== true) return { envName: CBS_KEYS.flag, status: 'disabled', reason: CBS_OFF_REASON };
+    // Mock mode reads no gateway env, so a blank gateway URL does not matter there.
+    return { envName: api.envName, status: mockMode ? 'ok' : api.status };
   }
   if (api.status !== 'ok') return { envName: api.envName, status: api.status };
   const auth = facts?.auth;
@@ -178,6 +202,8 @@ export type HttpCallInput = {
 
 /** What the gate hands to fixture() and real() once every check passed. */
 type CallPlan = {
+  /** 'cbs' for finacle on SSFB: the CBS connector and the 'cbs_call' fixture kind. */
+  readonly route: 'http' | 'cbs';
   readonly method: CallableMethod;
   /** The built pathname relative to the service base, for rules, fixtures and audit. */
   readonly relPath: string;
@@ -213,19 +239,20 @@ function decideCall(
   const { service } = input;
   const where = `${entity}:${service}`;
 
-  if (service === CBS_SERVICE || facts?.api?.transport === 'cbs') {
-    return {
-      gate: deny(
-        `Refused: ${CBS_SERVICE} and other CBS services have no HTTP route. Use cbs_call for Finacle paths.`,
-        'finacle_via_http: use cbs_call',
-      ),
-    };
-  }
   if (!services.known.includes(service) || facts === undefined || facts.api === undefined) {
     return {
       gate: deny(
-        `Refused: ${entity} has no HTTP API named that. Use one of: ${services.offered.filter((s) => s !== CBS_SERVICE).join(', ')}.`,
+        `Refused: ${entity} has no HTTP API named that. Use one of: ${services.offered.join(', ')}.`,
         'bad_service: not an API service of the entity',
+      ),
+    };
+  }
+  const cbs = facts.api.transport === 'cbs';
+  if (cbs && (entity !== CBS_ENTITY || service !== CBS_SERVICE)) {
+    return {
+      gate: deny(
+        `Refused: ${where} is a CBS service, and only ${CBS_SERVICE} on ${CBS_ENTITY} reaches the CBS gateway. Record the gap.`,
+        'bad_service: cbs transport without a route',
       ),
     };
   }
@@ -237,6 +264,7 @@ function decideCall(
   if (input.body !== undefined && NO_BODY_METHODS.has(method)) {
     return { gate: deny(`Refused: ${method} takes no body. Drop body, or pass values in query.`, 'bad_body: body on GET or HEAD') };
   }
+  if (cbs) return decideCbs(ctx, entity, input, method);
 
   const path = input.path;
   if (typeof path !== 'string' || !path.startsWith('/')) {
@@ -312,6 +340,7 @@ function decideCall(
   return {
     gate: { ok: true, rule_index: rule.rule_index, action: 'allow' },
     plan: {
+      route: 'http',
       method: method as CallableMethod,
       relPath,
       decision,
@@ -320,7 +349,51 @@ function decideCall(
   };
 }
 
+/** The finacle route: GET only, then decideHttp with service finacle (D111). */
+function decideCbs(ctx: ToolContext, entity: Entity, input: HttpCallInput, method: string): GateResult {
+  if (method !== 'GET') {
+    return {
+      gate: deny(
+        `Refused: ${CBS_SERVICE} takes GET only; the CBS gateway is read-only for triage. If a write is needed, recommend it in the report instead.`,
+        'cbs_get_only',
+      ),
+    };
+  }
+  const rules = rulesFor(ctx, entity);
+  if (rules === null) {
+    return {
+      gate: deny(
+        `Refused: resources/${rulesFileName(entity)} could not be loaded, so no ${CBS_SERVICE} call is allowed. Record the gap.`,
+        'rules_file: failed to load',
+      ),
+    };
+  }
+  const path = typeof input.path === 'string' ? input.path : '';
+  const decided = decideHttp({
+    service: CBS_SERVICE,
+    method,
+    path,
+    ...(input.query !== undefined ? { query: input.query } : {}),
+    base: PLACEHOLDER_BASE,
+    rules,
+  });
+  if (!decided.ok) {
+    const rule = decided.rule_index !== undefined ? { rule_index: decided.rule_index, action: 'block' as const } : undefined;
+    return { gate: deny(`Refused: ${decided.message}.`, decided.code, rule) };
+  }
+  // The connector requires the decided pathname to equal the path it sends.
+  if (decided.pathname !== path) {
+    return { gate: deny("Refused: a finacle path must be in plain form (no '.' segments).", 'bad_cbs_path') };
+  }
+  return {
+    gate: { ok: true, rule_index: decided.rule_index, action: 'allow' },
+    plan: { route: 'cbs', method: decided.method, relPath: path, decision: decided },
+  };
+}
+
 // ------------------------------------------------------------ result
+
+const NOT_STUCK_STATUSES: ReadonlySet<number> = new Set([401, 403, 429]);
 
 const HttpCallDataSchema = v.object({
   status: v.pipe(v.number(), v.integer()),
@@ -351,6 +424,20 @@ const REAL_ONLY_PORT: MockPort = Object.freeze({
   lookup: () => Promise.reject(new Error('http_call: fixture lookups happen in the tool pipeline')),
 });
 
+// One CBS connector per run when the deps do not carry one.
+const builtCbs = new WeakMap<ToolDeps, CbsConnector>();
+
+function cbsConnectorFor(ctx: ToolContext): CbsConnector {
+  const given = ctx.deps.connectors.cbs;
+  if (given !== undefined) return given;
+  let built = builtCbs.get(ctx.deps);
+  if (built === undefined) {
+    built = createCbsConnector({ registry: ctx.registry, config: ctx.config });
+    builtCbs.set(ctx.deps, built);
+  }
+  return built;
+}
+
 // ------------------------------------------------------------ the call
 
 /** Fixture key facts: entity, service, method, the path relative to the base, and the query. */
@@ -380,7 +467,7 @@ async function runHttpCall(ctx: ToolContext, services: ServiceLists, flue: HttpR
   // Only a listed service name goes into audit lines and messages. A known
   // service that is not offered still gets its not-configured answer.
   const serviceName = services.known.includes(service) ? service : 'unknown';
-  if (entity === null) throw new Error('http_call needs an investigator entity');
+  if (entity === null) throw new Error('http_call needs an entity in the tool context');
   const facts = serviceName === 'unknown' ? undefined : serviceFacts(ctx, entity, serviceName);
 
   let plan: CallPlan | undefined;
@@ -389,7 +476,7 @@ async function runHttpCall(ctx: ToolContext, services: ServiceLists, flue: HttpR
     return plan;
   };
 
-  return runIoTool<'http_call', HttpCallData>(
+  return runIoTool<'http_call' | 'cbs_call', HttpCallData>(
     {
       tool: HTTP_CALL_TOOL,
       service: serviceName,
@@ -403,12 +490,25 @@ async function runHttpCall(ctx: ToolContext, services: ServiceLists, flue: HttpR
       },
       fixture: () => {
         const p = planned();
+        if (p.route === 'cbs') {
+          return { kind: 'cbs_call', key: semanticKey('cbs_call', { entity, method: p.method, path: p.relPath }) };
+        }
         return { kind: 'http_call', key: semanticKey('http_call', keyFacts(entity, serviceName, p, input)) };
       },
       // GET and HEAD only; any other method runs every time (D79).
       repeat: () => NO_BODY_METHODS.has(input.method ?? 'GET') && input,
       real: async (signal) => {
         const p = planned();
+        if (p.route === 'cbs') {
+          const out = await cbsConnectorFor(ctx).call(realConnectorContext(ctx, signal), {
+            path: p.relPath,
+            method: p.method,
+            decision: p.decision,
+            keyInput: { entity, service: CBS_SERVICE, method: p.method, path: p.relPath },
+          });
+          const res = outcomeData(out);
+          return { status: res.status, body: res.body, truncated: false, rule_index: p.decision.rule_index };
+        }
         const connector = deps.connectors.http;
         if (connector === undefined) throw new ConnectorError('not_configured', 'no HTTP connector for this run');
         const connectorCtx: ConnectorContext = {
@@ -448,6 +548,9 @@ async function runHttpCall(ctx: ToolContext, services: ServiceLists, flue: HttpR
         };
       },
       stage: (value) => value,
+      // A client error is a variation that did not work: found nothing, for the stuck count (P6).
+      // Auth and throttling are not the model's query, so they do not count.
+      empty: (value) => v.is(HttpCallDataSchema, value) && value.status >= 400 && value.status < 500 && !NOT_STUCK_STATUSES.has(value.status),
       summary: (value) => {
         const p = planned();
         const status = v.is(HttpCallDataSchema, value) ? String(value.status) : 'unknown';
@@ -468,7 +571,16 @@ async function runHttpCall(ctx: ToolContext, services: ServiceLists, flue: HttpR
 
 const ScalarSchema = v.union([v.string(), v.number(), v.boolean()]);
 
-function inputSchema(services: readonly string[]) {
+const SERVICE_TEXT = 'The entity service whose admin API to call.';
+const FINACLE_NOTE =
+  "finacle is the bank's Finacle CBS gateway, for balances, holds and account state the admin APIs do not show: " +
+  'GET only, no query, and a path of letters, digits and / _ . - such as /misc/api/crm/savingaccount/<account_number>';
+
+// Described only when the gateway is on; in mock mode finacle is still offered and answers not configured.
+const finacleDescribed = (ctx: ToolContext, offered: readonly string[]): boolean =>
+  offered.includes(CBS_SERVICE) && ctx.entity === CBS_ENTITY && ctx.registry.cbsEnabled(CBS_ENTITY);
+
+function inputSchema(services: readonly string[], finacle: boolean) {
   const serviceSchema =
     services.length > 0
       ? v.picklist(services as [string, ...string[]])
@@ -476,7 +588,7 @@ function inputSchema(services: readonly string[]) {
   return v.strictObject({
     service: v.pipe(
       serviceSchema,
-      v.description('The entity service whose admin API to call. finacle is not reachable here; use cbs_call.'),
+      v.description(finacle ? `${SERVICE_TEXT} ${FINACLE_NOTE}.` : SERVICE_TEXT),
     ),
     path: v.pipe(
       v.string(),
@@ -508,28 +620,31 @@ function inputSchema(services: readonly string[]) {
 }
 
 const DESCRIPTION =
-  "Calls the investigator entity's admin API for one service and returns status, the body cut to a size cap, " +
+  "Calls the entity's admin API for one service and returns status, the body cut to a size cap, " +
   "rule_index and taken_at. Give a path relative to the service, never a URL. GET and HEAD work; other methods " +
   'are refused unless the rules file allows them. Ids in the path, query or body must be in the ID chain. ' +
   'Auth and the customer header are added for you. The full body is also written to /data/<call id>.json.';
 
 export const toolModule: ToolModule = Object.freeze({
   name: HTTP_CALL_TOOL,
-  mounts: Object.freeze(['investigator'] as const),
+  mounts: Object.freeze(['investigator', 'agent'] as const),
   entities: 'all' as const,
+  perEntity: true as const,
   enabled(ctx: ToolContext) {
-    if (ctx.entity === null) return { on: false, reason: 'http_call needs an investigator entity' } as const;
-    if (offeredServices(ctx).filter((s) => s !== CBS_SERVICE).length === 0) {
+    if (ctx.entity === null) return { on: false, reason: 'http_call needs an entity' } as const;
+    if (offeredServices(ctx).length === 0) {
       return { on: false, reason: `${ctx.entity} has no HTTP API service configured` } as const;
     }
     return { on: true } as const;
   },
-  create(ctx: ToolContext): ToolDefinition {
+  create(ctx: ToolContext, mount: Mount): ToolDefinition {
     const services: ServiceLists = { known: apiServices(ctx), offered: offeredServices(ctx) };
+    // The agent mount merges every entity's service input into one (D110), so there the finacle note goes in entityLine.
+    const finacle = mount !== 'agent' && finacleDescribed(ctx, services.offered);
     return defineTool({
       name: HTTP_CALL_TOOL,
       description: DESCRIPTION,
-      input: inputSchema(services.offered),
+      input: inputSchema(services.offered, finacle),
       harness: true,
       run: async ({ data, signal, toolCallId, log, harness }): Promise<ToolEnvelope> =>
         runHttpCall(ctx, services, {
@@ -540,5 +655,10 @@ export const toolModule: ToolModule = Object.freeze({
           ...(signal !== undefined ? { signal } : {}),
         }),
     });
+  },
+  entityLine(ctx: ToolContext): string {
+    const offered = offeredServices(ctx);
+    const line = `services ${offered.join(', ')}`;
+    return finacleDescribed(ctx, offered) ? `${line}; ${FINACLE_NOTE}` : line;
   },
 });

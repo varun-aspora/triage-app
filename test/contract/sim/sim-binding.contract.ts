@@ -148,7 +148,8 @@ let events: RunEventLine[] = [];
 
 beforeAll(async () => {
   // The eval home serves <repo>/fixtures, and runCase reads cases/<case id>/ first.
-  await bootEvalRuntime({ faux: fake });
+  // The case has no catalogue fixtures for the scout's locate, so it is off here.
+  await bootEvalRuntime({ faux: fake, overrides: { TRIAGE_SCOUT: 'off' } });
   r = await runCase(c, {
     runId: RUN_ID,
     turns: {

@@ -53,7 +53,7 @@ export function runLogPage(ctx: ToolContext, input: RunLogInput): { total: numbe
   return {
     total: matching.length,
     offset,
-    lines: page.map(actionLine),
+    lines: page.map((a) => actionLine(a, true)),
     ...(next < matching.length ? { next_offset: next } : {}),
   };
 }
@@ -72,7 +72,7 @@ function create(ctx: ToolContext): ToolDefinition {
 
 export const toolModule: ToolModule = {
   name: RUN_LOG,
-  mounts: ['triage', 'investigator', 'investigator_deep', 'code_walker'],
+  mounts: ['triage', 'investigator', 'investigator_deep', 'code_walker', 'agent'],
   entities: 'all',
   enabled: () => ({ on: true }),
   create,

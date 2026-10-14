@@ -13,12 +13,14 @@ export type KeyGroup =
   | 'mock'
   | 'budgets'
   | 'sql'
+  | 'discovery'
   | 'models'
   | 'providers'
   | 'evals'
   | 'http'
   | 'slack'
   | 'sandbox'
+  | 'redaction'
   | 'code'
   | 'repos'
   | 'tracing';
@@ -52,6 +54,12 @@ export const DEPLOY_MODE_KEY = 'TRIAGE_DEPLOY_MODE';
 
 export const TRACING_MODES = ['off', 'otlp', 'braintrust'] as const;
 export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+/** D109: split is the Triage root with investigator and code_walker subagents; single is one agent plus an on-demand worker. */
+export const AGENT_SHAPES = ['split', 'single'] as const;
+/** D107: off gives the model and the sandbox raw values; on masks them again. */
+export const MODEL_REDACTION_MODES = ['off', 'on'] as const;
+/** Plan 15 P4: on runs locate on each seed lead before the first brief. */
+export const SCOUT_MODES = ['on', 'off'] as const;
 
 /** Provider credentials copied into process.env for pi-ai by applyProviderEnv. */
 export const PROVIDER_KEYS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY'] as const;
@@ -68,6 +76,10 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'TRIAGE_RUNS_DIR', type: 'path', group: 'runtime', default: './.data/runs' },
   { name: 'TRIAGE_REPOS_DIR', type: 'path', group: 'runtime', example: './data/repos' },
   { name: 'TRIAGE_KNOWLEDGE_DIR', type: 'path', group: 'runtime', default: './knowledge' },
+  // D99: where propose_note writes. Under the data dir, so a run never writes into the repo.
+  { name: 'TRIAGE_PROPOSALS_DIR', type: 'path', group: 'runtime', default: './.data/proposals' },
+  // D109: which agent shape a new run uses. A run keeps the shape it started with.
+  { name: 'TRIAGE_AGENT_SHAPE', type: 'enum', group: 'runtime', default: 'split', values: AGENT_SHAPES },
 
   // Flue persistence (D38). TRIAGE_DB_URL is a path for sqlite and a DSN for postgres.
   { name: 'TRIAGE_DB_PROVIDER', type: 'enum', group: 'persistence', default: 'sqlite', values: ['sqlite', 'postgres'] },
@@ -102,6 +114,14 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'TRIAGE_MAX_CODE_CALLS_PER_RUN', type: 'int', group: 'budgets', default: '400', min: 1 },
   { name: 'TRIAGE_MAX_TASKS_PER_RUN', type: 'int', group: 'budgets', default: '12', min: 0 },
   { name: 'TRIAGE_MAX_ASKS_PER_RUN', type: 'int', group: 'budgets', default: '10', min: 0 },
+  // D109: tool calls one worker may make in the single shape; the run's limits still apply.
+  { name: 'TRIAGE_MAX_TOOL_CALLS_PER_WORKER', type: 'int', group: 'budgets', default: '40', min: 1 },
+  // D97: derived leads. One field of one result adds at most this many new ids, and a
+  // derived lead adds further leads up to this depth.
+  { name: 'TRIAGE_MAX_DERIVED_PER_FIELD', type: 'int', group: 'budgets', default: '10', min: 1 },
+  { name: 'TRIAGE_MAX_LEAD_DEPTH', type: 'int', group: 'budgets', default: '3', min: 1 },
+  // S1.4: the prompt size the root agent's context is compacted back under (reserve = window - this).
+  { name: 'TRIAGE_MAX_PROMPT_TOKENS', type: 'int', group: 'budgets', default: '60000', min: 10_000 },
   { name: 'TRIAGE_MAX_RESPONSE_BYTES_PER_CALL', type: 'int', group: 'budgets', default: '1048576', min: 1 },
   { name: 'TRIAGE_MAX_BYTES_PER_RUN', type: 'int', group: 'budgets', default: '20971520', min: 1 },
   // D90: what the model sees from one sql_select result, apart from the transport caps above.
@@ -126,7 +146,17 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'TRIAGE_SQL_RETRY_DELAY_MS', type: 'int', group: 'sql', default: '1000', min: 0, max: 60_000 },
   { name: 'TRIAGE_SQL_RETRY_MAX_DELAY_MS', type: 'int', group: 'sql', default: '5000', min: 0, max: 600_000 },
 
-  // Models. Specs are parsed by src/models.ts; blank MODEL_CODE_WALKER falls back to the strong tier there.
+  // Discovery (plan 15). D98: locate runs count(*) probes, so it has its own budget, a cap on
+  // the columns it tries per database, and a statement timeout shorter than sql_select's.
+  { name: 'TRIAGE_LOCATE_MAX_PROBES_PER_RUN', type: 'int', group: 'discovery', default: '200', min: 1 },
+  { name: 'TRIAGE_LOCATE_MAX_COLUMNS_PER_DB', type: 'int', group: 'discovery', default: '40', min: 1 },
+  { name: 'TRIAGE_LOCATE_TIMEOUT_MS', type: 'int', group: 'discovery', default: '3000', min: 100 },
+  { name: 'TRIAGE_SCOUT', type: 'enum', group: 'discovery', default: 'on', values: SCOUT_MODES },
+  // P6: refused or zero-hit calls in a row before the agent is told to stop and say what is missing.
+  { name: 'TRIAGE_STUCK_AFTER', type: 'int', group: 'discovery', default: '4', min: 2 },
+
+  // Models. Specs are parsed by src/models.ts; blank MODEL_CODE_WALKER falls back to the strong tier there,
+  // and blank MODEL_WORKER means the worker uses the run's tier model (D108).
   // The decision model used for classification and id extraction (D69). The id extraction needs a
   // decision model spec (typesafe/... or openrouter/typesafe/...); any other model makes it read the
   // template labels. It was called MODEL_CLASSIFIER; RENAMED_KEYS makes an old .env fail to load.
@@ -135,6 +165,7 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'MODEL_TIER_MID', type: 'string', group: 'models', example: 'openai/gpt-6-sol' },
   { name: 'MODEL_TIER_STRONG', type: 'string', group: 'models', example: 'openai/gpt-6-sol' },
   { name: 'MODEL_CODE_WALKER', type: 'string', group: 'models', example: 'openai/gpt-6-sol' },
+  { name: 'MODEL_WORKER', type: 'string', group: 'models' },
   { name: 'MODEL_THINKING_CHEAP', type: 'enum', group: 'models', example: 'low', default: 'off', values: THINKING_LEVELS },
   { name: 'MODEL_THINKING_MID', type: 'enum', group: 'models', example: 'medium', default: 'low', values: THINKING_LEVELS },
   { name: 'MODEL_THINKING_STRONG', type: 'enum', group: 'models', default: 'high', values: THINKING_LEVELS },
@@ -181,9 +212,15 @@ export const KEYS: readonly KeySpec[] = [
   { name: 'TRIAGE_SANDBOX_PROVIDER', type: 'enum', group: 'sandbox', default: 'virtual', values: ['virtual', 'e2b', 'daytona', 'local'] },
   { name: 'TRIAGE_SANDBOX_PYTHON', type: 'bool', group: 'sandbox', default: 'true' },
   { name: 'TRIAGE_SANDBOX_TIMEOUT_MS', type: 'int', group: 'sandbox', default: '30000', min: 1 },
+  // D105: the most the run's sandbox directory may hold.
+  { name: 'TRIAGE_SANDBOX_QUOTA_MB', type: 'int', group: 'sandbox', default: '500', min: 1 },
   { name: 'E2B_API_KEY', type: 'string', group: 'sandbox', secret: true },
   { name: 'DAYTONA_API_KEY', type: 'string', group: 'sandbox', secret: true },
   { name: 'DAYTONA_API_URL', type: 'string', group: 'sandbox' },
+
+  // Model-facing redaction (D107). off: staged files and tool results hold raw values.
+  // The PII check on what leaves the run applies either way.
+  { name: 'TRIAGE_MODEL_REDACTION', type: 'enum', group: 'redaction', default: 'off', values: MODEL_REDACTION_MODES },
 
   // Code navigation. Binary names are looked up on PATH, so they are strings, not paths.
   { name: 'CODEGRAPH_BIN', type: 'string', group: 'code', default: 'codegraph' },

@@ -1,5 +1,5 @@
 // For tools whose real() calls a T04 connector that goes through withMock
-// itself (the field-crypto tools, cbs_call).
+// itself (the field-crypto tools, http_call's finacle route).
 //
 // runIoTool already does the mock lookup and fixture recording through
 // deps.fixtures.resolveIo. The connector gets a ConnectorContext whose mock

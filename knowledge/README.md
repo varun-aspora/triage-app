@@ -60,17 +60,34 @@ knowledge/
   them, and exits 1. Without the variable it skips; CI runs it that way. After
   updating the skills, run it with `--update` to rewrite the hashes.
 
+## Proposals from runs (D99)
+
+- A run proposes what it learned with `propose_note`. Proposals land in
+  `TRIAGE_PROPOSALS_DIR` (default `./.data/proposals`), one `<run_id>.md` per
+  run, never in this tree, and no run ever reads them.
+- The owner reviews them (`triage proposals`, `triage proposals show <run_id>`)
+  and turns the good ones into a PR against `knowledge/`. Nothing is
+  auto-merged.
+
 ## Which agent gets what
+
+`TRIAGE_AGENT_SHAPE` picks the shape of a run: `split` (the default) or
+`single` (D109). A run keeps the shape it started with.
 
 | Agent | Instruction (`method/`, always on) | Skills (on demand) |
 |---|---|---|
-| `Triage` | `orchestrator.md`, `brief-template.md`, `report-format.md` | `<entity>-overview` for each enabled entity, `patterns`, `frontend-routing` |
-| `investigate_<entity>` and `investigate_<entity>_deep` | `investigator.md`, `logs.md`, `logs-<entity>.md` | `<entity>-<service>` for the registry's services, the entity's journey notes, `repo-map`; `codegraph-limits` on the deep variant only |
-| `code_walker` | `code-walker.md` | `repo-map`, `codegraph-limits`, `frontend-routing` |
+| `Triage`, split | `orchestrator.md`, `brief-template.md`, `report-format.md` | `<entity>-overview` for each enabled entity, `patterns`, `frontend-routing` |
+| `investigate_<entity>` and `investigate_<entity>_deep` (split) | `investigator.md`, `logs.md`, `logs-<entity>.md` | `<entity>-<service>` for the registry's services, the entity's journey notes, `repo-map`; `codegraph-limits` on the deep variant only |
+| `code_walker` (split) | `code-walker.md` | `repo-map`, `codegraph-limits`, `frontend-routing` |
+| `Triage`, single | `agent.md`, `report-format.md`, `logs.md`, `logs-<entity>.md` for each enabled entity | every note of each enabled entity (`<entity>-*`), `repo-map`, `patterns`, `frontend-routing`, `codegraph-limits` |
+| `worker` (single) | `logs.md`, `logs-<entity>.md` for each enabled entity, then a short footer written in code | the same notes as the single `Triage` |
 
 Instruction text is for what an agent always needs. Skills are for knowledge
 it needs only on some runs. A method file names only tools and delegates the
-agent that reads it has; `test/knowledge/_util.ts` lists them per agent.
+agent that reads it has; `test/knowledge/_util.ts` lists them per agent. A
+skill the root mounts in both shapes never tells the reader to brief or task
+a delegate. Where only an investigator has a note in the split shape, it says
+so: "the SSFB investigator has it when the run has one".
 
 ## SKILL.md front-matter
 

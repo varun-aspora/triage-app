@@ -205,8 +205,18 @@ export async function runTriage(
 
 // ------------------------------------------------------------------ routing
 
-/** Who a model call belongs to: the root, a delegate, or the strong synthesis pass. */
-export type AgentKey = 'triage' | 'synthesis' | 'code_walker' | `investigate_${Entity}` | `investigate_${Entity}_deep`;
+/**
+ * Who a model call belongs to: the root, a delegate, or the strong synthesis
+ * pass. The root is 'triage' in both shapes; 'worker' is the single shape's
+ * only delegate.
+ */
+export type AgentKey =
+  | 'triage'
+  | 'synthesis'
+  | 'worker'
+  | 'code_walker'
+  | `investigate_${Entity}`
+  | `investigate_${Entity}_deep`;
 
 export type SeenCall = {
   readonly agent: AgentKey;
@@ -236,13 +246,18 @@ function userTexts(messages: readonly Message[]): string[] {
 export function agentOf(context: Context): AgentKey {
   const system = context.systemPrompt ?? '';
   if (userTexts(context.messages).some((t) => t.includes(SYNTHESIS_MARK))) return 'synthesis';
+  // The single shape's worker footer (src/agents/delegates/worker.ts), checked before the root markers.
+  if (system.includes('## This worker')) return 'worker';
   if (system.includes('## This delegate')) {
     if (system.includes('You have no database, API or log tools')) return 'code_walker';
     const entity = /- Entity: (ssfb|atspl|rtl)\. /.exec(system)?.[1] as Entity | undefined;
     if (entity === undefined) throw new FakeModelError('a delegate prompt names no entity');
     return system.includes('You are the deep variant') ? `investigate_${entity}_deep` : `investigate_${entity}`;
   }
-  if (system.includes('## Fixed rules') && system.includes('## Brief skeleton for this run')) return 'triage';
+  // Split root: the rules and the brief skeleton. Single root: the rules and '## One agent', never a brief skeleton.
+  if (system.includes('## Fixed rules') && (system.includes('## Brief skeleton for this run') || system.includes('## One agent'))) {
+    return 'triage';
+  }
   throw new FakeModelError('a model call came from an agent the contract router does not know');
 }
 

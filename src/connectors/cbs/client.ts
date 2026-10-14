@@ -1,4 +1,5 @@
-// The CBS connector behind cbs_call (HLD §2 cbs_call row; D14, D30, A13).
+// The CBS connector behind http_call's finacle route (HLD §2; D14, D30, A13,
+// D111).
 //
 // call(ctx, {path, method, decision, body?, keyInput}) runs in this order:
 // 1. SSFB_CBS_VIA_KUBECTL_ENABLED must be true, else not_configured.
@@ -43,6 +44,9 @@ export const CBS_KEYS = Object.freeze({
   source: 'SSFB_CBS_SOURCE',
   sourceIdentifier: 'SSFB_CBS_SOURCE_IDENTIFIER',
 });
+
+/** Why the gateway is off. http_call also answers with it before any fixture lookup. */
+export const CBS_OFF_REASON = `${CBS_KEYS.flag} is not true`;
 
 export type CbsResponse = {
   readonly status: number;
@@ -90,7 +94,7 @@ function refused(message: string): ConnectorError {
 }
 
 function blank(name: string): ConnectorError {
-  return new ConnectorError('not_configured', `cbs_call is not configured for ${CBS_ENTITY}: ${name} is blank`);
+  return new ConnectorError('not_configured', `the CBS gateway is not configured for ${CBS_ENTITY}: ${name} is blank`);
 }
 
 /** The path checks on top of the gate: charset, no '..', no '?', no '//'. */
@@ -106,23 +110,23 @@ export function checkPath(path: unknown): string {
 /** Refuses unless decision is an allow for exactly this method and path. */
 export function checkDecision(decision: HttpDecision | undefined, method: string, path: string): void {
   if (typeof decision !== 'object' || decision === null) {
-    throw refused('cbs_call needs an allow decision from the rules gate');
+    throw refused('a CBS call needs an allow decision from the rules gate');
   }
   if (decision.ok !== true || decision.action !== 'allow') {
-    throw refused('the rules gate did not allow this cbs_call');
+    throw refused('the rules gate did not allow this CBS call');
   }
   if (decision.method !== method) throw refused('method differs from the one the rules gate decided on');
   if (decision.pathname !== path) throw refused('path differs from the one the rules gate decided on');
 }
 
 function checkKeyInput(keyInput: CbsCallInput['keyInput'], method: string, path: string): void {
-  if (typeof keyInput !== 'object' || keyInput === null) throw refused('cbs_call needs keyInput');
-  if (keyInput.entity !== CBS_ENTITY) throw refused(`cbs_call keyInput entity must be ${CBS_ENTITY}`);
+  if (typeof keyInput !== 'object' || keyInput === null) throw refused('a CBS call needs keyInput');
+  if (keyInput.entity !== CBS_ENTITY) throw refused(`CBS keyInput entity must be ${CBS_ENTITY}`);
   if (keyInput.service !== undefined && keyInput.service !== CBS_SERVICE) {
-    throw refused(`cbs_call keyInput service must be ${CBS_SERVICE}`);
+    throw refused(`CBS keyInput service must be ${CBS_SERVICE}`);
   }
   if ((keyInput.method ?? 'GET').toUpperCase() !== method || keyInput.path !== path) {
-    throw refused('cbs_call keyInput must name the same method and path as the call');
+    throw refused('CBS keyInput must name the same method and path as the call');
   }
 }
 
@@ -207,7 +211,7 @@ export function createCbsConnector(options: CbsConnectorOptions): CbsConnector {
 
   async function call(ctx: ConnectorContext, input: CbsCallInput): Promise<ConnectorOutcome<CbsResponse>> {
     if (!enabled()) {
-      throw new ConnectorError('not_configured', `cbs_call is off for ${CBS_ENTITY}: ${CBS_KEYS.flag} is not true`);
+      throw new ConnectorError('not_configured', `the CBS gateway is off for ${CBS_ENTITY}: ${CBS_OFF_REASON}`);
     }
     const method = input.method ?? 'GET';
     if (!(CALLABLE_METHODS as readonly string[]).includes(method)) {

@@ -63,7 +63,7 @@
     "eventbus": {
       "quickwit_service": "eventbus",
       "repo": "eventbus",
-      "note": "no known database; its pod is the in-cluster hop for cbs_call"
+      "note": "no known database; its pod is the in-cluster hop for the CBS gateway"
     },
     "audit": {
       "quickwit_service": "audit-svc",
@@ -73,7 +73,7 @@
     "finacle": {
       "api": "SSFB_CBS_GATEWAY_URL",
       "transport": "cbs",
-      "note": "reachable only through cbs_call; same rules file applies"
+      "note": "reached through http_call with service finacle, GET only, when the CBS gateway is on; same rules file applies"
     }
   },
   "quickwit_fields": ["service", "level", "message", "error", "raw_message", "timestamp", "x_req_id", "x_txn_id", "form_id", "x-customer-id"],

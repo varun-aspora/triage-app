@@ -8,6 +8,7 @@ import * as runtime from '@flue/runtime';
 import { hasProvider, resolveModel } from '@flue/runtime/internal';
 import { configFromRecord, loadConfig, type Config } from './config/env.ts';
 import { ConfigError } from './config/errors.ts';
+import type { ModelLookup } from './models.ts';
 
 // models.ts loads config at import. Clear TRIAGE_HOME first so a home exported
 // in the shell is never read, then import it dynamically.
@@ -138,12 +139,69 @@ describe('tier mapping', () => {
   });
 });
 
+describe('worker model (D108)', () => {
+  test('blank MODEL_WORKER is undefined, so the worker inherits the run tier model', () => {
+    expect(models.workerModel(cfg(BASE))).toBeUndefined();
+    expect(models.workerModel(cfg({ ...BASE, MODEL_WORKER: '' }))).toBeUndefined();
+  });
+
+  test('a set MODEL_WORKER is returned as is', () => {
+    expect(models.workerModel(cfg({ ...BASE, MODEL_WORKER: 'anthropic/claude-sonnet-4-6' }))).toBe('anthropic/claude-sonnet-4-6');
+  });
+
+  test('an unparseable MODEL_WORKER names the key only', () => {
+    const err = configError(() => models.workerModel(cfg({ ...BASE, MODEL_WORKER: SEED })));
+    expect(err.keys).toEqual(['MODEL_WORKER']);
+    expect(err.message).not.toContain(SEED);
+  });
+
+  test('an ollama MODEL_WORKER is in the registered ollama model list', () => {
+    spySetProvider();
+    const c = cfg({ ...BASE, MODEL_WORKER: 'ollama/worker-t108', OLLAMA_BASE_URL: 'http://localhost:11434/v1' });
+    expect(models.registerProviders(c)).toBe(true);
+    expect(resolveModel('ollama/worker-t108').id).toBe('worker-t108');
+  });
+});
+
+describe('compaction settings (S1.4)', () => {
+  const lookupWith = (contextWindow?: number): ModelLookup => () =>
+    contextWindow === undefined ? undefined : { input: ['text'], contextWindow };
+
+  test('a known window reserves the window minus TRIAGE_MAX_PROMPT_TOKENS', () => {
+    expect(models.compactionFor('x/y', cfg(BASE), lookupWith(1_000_000))).toEqual({ reserveTokens: 940_000 });
+    const c = cfg({ ...BASE, TRIAGE_MAX_PROMPT_TOKENS: '100000' });
+    expect(models.compactionFor('x/y', c, lookupWith(200_000))).toEqual({ reserveTokens: 100_000 });
+  });
+
+  test('keepRecentTokens is left to Flue', () => {
+    expect(models.compactionFor('x/y', cfg(BASE), lookupWith(400_000))).not.toHaveProperty('keepRecentTokens');
+  });
+
+  test("a window close to or within the budget keeps Flue's default", () => {
+    expect(models.compactionFor('x/y', cfg(BASE), lookupWith(64_000))).toBeUndefined();
+    expect(models.compactionFor('x/y', cfg(BASE), lookupWith(32_000))).toBeUndefined();
+    expect(models.compactionFor('x/y', cfg(BASE), lookupWith(80_000))).toEqual({ reserveTokens: 20_000 });
+  });
+
+  test('an unknown model or window gets the fixed fallback reserve', () => {
+    expect(models.compactionFor('x/y', cfg(BASE), lookupWith(undefined))).toEqual({ reserveTokens: 32_000 });
+    expect(models.compactionFor('x/y', cfg(BASE), lookupWith(0))).toEqual({ reserveTokens: 32_000 });
+  });
+
+  test('the default lookup reads the pi-ai catalog window', () => {
+    const window = models.lookupModel('openai/gpt-5.5')?.contextWindow;
+    expect(window).toBeGreaterThan(60_000 + 20_000);
+    expect(models.compactionFor('openai/gpt-5.5', cfg(BASE))).toEqual({ reserveTokens: (window ?? 0) - 60_000 });
+  });
+});
+
 describe('refused specs', () => {
   const slots: Array<[string, (c: Config) => string]> = [
     ['MODEL_TIER_CHEAP', (c) => models.modelForTier('cheap', c)],
     ['MODEL_TIER_MID', (c) => models.modelForTier('mid', c)],
     ['MODEL_TIER_STRONG', (c) => models.modelForTier('strong', c)],
     ['MODEL_CODE_WALKER', (c) => models.codeWalkerModel(c)],
+    ['MODEL_WORKER', (c) => models.workerModel(c) ?? ''],
   ];
 
   for (const [key, call] of slots) {

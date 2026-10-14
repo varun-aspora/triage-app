@@ -120,16 +120,17 @@ async function delegate(t: Tripwire, runId: string, taskId: string): Promise<{ r
 // ------------------------------------------------------------------ allowlist
 
 describe('allowlist', () => {
+  // The agent mount (D109) adds no names of its own: its entity tools keep their bare names (D110).
   test('snapshot for TRIAGE_ENTITIES=ssfb,atspl,rtl with SSFB flags on', () => {
     const { config, registry } = fullHome();
     expect(allowedToolNames({ config, registry })).toEqual([
       'activate_skill',
       'ask_requester',
       'bash',
-      'cbs_call',
       'code_explore',
       'code_impact',
       'code_node',
+      'codebase_note_evidence',
       'decrypt_fields',
       'detect_silent_reversals',
       'edit',
@@ -140,10 +141,13 @@ describe('allowlist', () => {
       'glob',
       'grep',
       'http_call',
+      'locate',
       'logs_search',
       'note_evidence',
+      'propose_note',
       'read',
       'read_skill_resource',
+      'read_staged',
       'repo_find',
       'repo_grep',
       'repo_read',
@@ -165,15 +169,23 @@ describe('allowlist', () => {
 
   test('SSFB-only tools drop out when ssfb is not enabled', () => {
     const names = allowedToolNames(home(['atspl', 'rtl'], SSFB_FLAGS));
-    for (const n of ['get_account_statement', 'detect_silent_reversals', 'cbs_call', 'decrypt_fields', 'encrypt_lookup_value']) {
+    for (const n of ['get_account_statement', 'detect_silent_reversals', 'decrypt_fields', 'encrypt_lookup_value']) {
       expect(names).not.toContain(n);
+      expect(names).not.toContain(`ssfb_${n}`);
     }
+    expect(names.filter((n) => n.startsWith('ssfb_'))).toEqual([]);
+  });
+
+  test('no entity-prefixed name is allowed (D110)', () => {
+    const names = allowedToolNames(fullHome());
+    for (const n of ['sql_select', 'logs_search', 'http_call', 'note_evidence']) expect(names).toContain(n);
+    expect(names.filter((n) => /^(ssfb|atspl|rtl)_/.test(n))).toEqual([]);
   });
 
   test('flag-gated SSFB tools drop out when their flags are off', () => {
     const names = allowedToolNames(home(['ssfb']));
     expect(names).toContain('get_account_statement');
-    for (const n of ['cbs_call', 'decrypt_fields', 'encrypt_lookup_value']) expect(names).not.toContain(n);
+    for (const n of ['decrypt_fields', 'encrypt_lookup_value']) expect(names).not.toContain(n);
   });
 });
 
@@ -194,6 +206,15 @@ describe('tool names', () => {
     'exec',
     'http_get',
     'deep_investigator',
+    'shivalik_sql_select',
+    // The agent mount's per-entity names before D110.
+    'rtl_sql_select',
+    'ssfb_logs_search',
+    'atspl_note_evidence',
+    // Removed in D111: finacle is http_call's job now.
+    'cbs_call',
+    'ssfb_cbs_call',
+    'rtl_cbs_call',
     'bash_host',
     'give_up',
     'SQL_SELECT',
@@ -226,13 +247,13 @@ describe('tool names', () => {
 
   test("an SSFB-only tool is refused when ssfb is not in TRIAGE_ENTITIES", async () => {
     const { tripwire, audit } = harness(home(['atspl', 'rtl'], SSFB_FLAGS));
-    for (const name of ['get_account_statement', 'detect_silent_reversals', 'cbs_call', 'decrypt_fields']) {
+    for (const name of ['get_account_statement', 'detect_silent_reversals', 'encrypt_lookup_value', 'decrypt_fields', 'ssfb_sql_select', 'ssfb_http_call']) {
       const { ran, error } = await callTool(tripwire, name, freshRunId());
       expect(ran).toBe(false);
       expect(error).toBeInstanceOf(TripwireDeniedError);
       expect(audit.lines.at(-1)?.tool).toBe(name);
     }
-    expect(audit.lines).toHaveLength(4);
+    expect(audit.lines).toHaveLength(6);
   });
 
   test('every allowlisted name passes and writes nothing', async () => {

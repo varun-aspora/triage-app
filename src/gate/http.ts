@@ -1,5 +1,6 @@
-// URL builder, header builder and method decision for http_call and cbs_call
-// (HLD §2 and §3 http.ts; D8, D30, D31, D40).
+// URL builder, header builder and method decision for http_call, including
+// its finacle route to the CBS gateway (HLD §2 and §3 http.ts; D8, D30, D31,
+// D40, D111).
 //
 // The model gives a path, never a URL. The base URL comes from the registry
 // and is passed in by the tool, so this module reads no env and does no I/O.
@@ -19,7 +20,6 @@ export const HTTP_REFUSAL_CODES = [
   'outside_base',
   'bad_query',
   'bad_method',
-  'finacle_via_http',
   'bad_service',
   'bad_cbs_path',
   'bad_auth',
@@ -261,7 +261,7 @@ export function buildHeaders(input: HeaderInput): BuiltHeaders | HttpRefusal {
 
 export type CheckedCbsPath = { readonly ok: true; readonly path: string };
 
-/** cbs_call paths: ^/[A-Za-z0-9/_.-]+$, no '?' and no '..'. */
+/** finacle paths: ^/[A-Za-z0-9/_.-]+$, no '?' and no '..'. */
 export function checkCbsPath(path: unknown): CheckedCbsPath | HttpRefusal {
   if (typeof path !== 'string' || path.length > MAX_PATH_LENGTH || !CBS_PATH.test(path) || path.includes('..')) {
     return refuse(
@@ -274,10 +274,7 @@ export function checkCbsPath(path: unknown): CheckedCbsPath | HttpRefusal {
 
 // -------------------------------------------------------------- decision
 
-export type HttpTool = 'http_call' | 'cbs_call';
-
 export type HttpDecisionInput = {
-  readonly tool: HttpTool;
   readonly service: string;
   /** Defaults to GET. Must be one of CALLABLE_METHODS exactly (upper case, no spaces). */
   readonly method?: string;
@@ -303,42 +300,33 @@ export type HttpDecision = HttpAllowed | HttpRefusal;
 export const CBS_SERVICE = 'finacle';
 
 /**
- * Decides one http_call or cbs_call. Order: finacle refused on http_call,
- * method check, cbs path check, URL build, then evaluateRule on the built
- * pathname. cbs_call is always evaluated as service 'finacle' and takes no
- * query.
+ * Decides one http_call. Order: method check, the cbs path check for finacle,
+ * URL build, then evaluateRule on the built pathname. finacle takes no query.
  *
  * Rules are matched on the full built pathname here. HLD §4.4 templates are
  * relative to the service base, so this is only right for a base with no
  * path prefix; http_call strips the prefix and does its own matching.
  */
 export function decideHttp(input: HttpDecisionInput): HttpDecision {
-  const { tool, service } = input;
-
-  if (tool === 'http_call' && service === CBS_SERVICE) {
-    return refuse('finacle_via_http', 'finacle has no HTTP route; use cbs_call for Finacle paths');
-  }
-  if (tool === 'cbs_call' && service !== CBS_SERVICE) {
-    return refuse('bad_service', `cbs_call only reaches ${CBS_SERVICE}`);
-  }
+  const cbs = input.service === CBS_SERVICE;
 
   const method = input.method ?? 'GET';
   if (!(CALLABLE_METHODS as readonly string[]).includes(method)) {
     return refuse('bad_method', `method must be one of ${CALLABLE_METHODS.join(', ')}`);
   }
 
-  if (tool === 'cbs_call') {
-    const cbs = checkCbsPath(input.path);
-    if (!cbs.ok) return cbs;
+  if (cbs) {
+    const checked = checkCbsPath(input.path);
+    if (!checked.ok) return checked;
     if (input.query !== undefined && Object.keys(input.query).length > 0) {
-      return refuse('bad_query', 'cbs_call takes no query parameters');
+      return refuse('bad_query', `${CBS_SERVICE} takes no query parameters`);
     }
   }
 
-  const built = buildUrl(input.base, input.path, tool === 'cbs_call' ? undefined : input.query);
+  const built = buildUrl(input.base, input.path, cbs ? undefined : input.query);
   if (!built.ok) return built;
 
-  const decision = evaluateRule(input.rules, { service, method, pathname: built.pathname });
+  const decision = evaluateRule(input.rules, { service: input.service, method, pathname: built.pathname });
   if (decision.action !== 'allow') {
     const where = decision.rule_index === 'default' ? 'by default' : `by rule ${decision.rule_index}`;
     const why = decision.reason === undefined ? '' : `: ${decision.reason}`;

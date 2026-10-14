@@ -35,7 +35,10 @@ import type { Tier } from './types/core.ts';
 export type ModelSpec = { readonly provider: string; readonly modelId: string };
 
 /** The part of pi-ai model metadata this module reads. */
-export type ModelMetadata = { readonly input: readonly string[] };
+export type ModelMetadata = { readonly input: readonly string[]; readonly contextWindow?: number };
+
+/** Compaction settings for useModel (S1.4). A missing field keeps Flue's default. */
+export type CompactionSettings = { readonly reserveTokens?: number; readonly keepRecentTokens?: number };
 
 /** Returns pi-ai metadata for a spec, or undefined when no catalog knows the model. */
 export type ModelLookup = (spec: string) => ModelMetadata | undefined;
@@ -84,6 +87,41 @@ export function codeWalkerModel(config: Config = activeConfig()): string {
   return checkSpec('MODEL_CODE_WALKER', config.models.codeWalker, config, false);
 }
 
+/**
+ * The worker's model spec in the single shape (D108), or undefined when
+ * MODEL_WORKER is blank: the worker then inherits the run's tier model.
+ */
+export function workerModel(config: Config = activeConfig()): string | undefined {
+  if (config.models.worker === undefined) return undefined;
+  return checkSpec('MODEL_WORKER', config.models.worker, config, false);
+}
+
+// Used when the model's context window is unknown. Flue does not compact at all
+// when it does not know the window either, so this only matters when Flue's
+// registry knows a model the lookup does not.
+const FALLBACK_RESERVE_TOKENS = 32_000;
+// Flue's own default reserve. A smaller reserve would leave little room for the
+// reply and the compaction summary, so below it Flue's default is kept.
+const MIN_RESERVE_TOKENS = 20_000;
+
+/**
+ * Compaction settings for the root agent's model (S1.4). With a known context
+ * window, the reserve is the window minus TRIAGE_MAX_PROMPT_TOKENS, so Flue
+ * compacts once the context passes that budget. Undefined when that reserve
+ * would be under Flue's default (a window close to or within the budget):
+ * Flue's default then fits the model better. keepRecentTokens is left to Flue.
+ */
+export function compactionFor(
+  spec: string,
+  config: Config = activeConfig(),
+  lookup: ModelLookup = lookupModel,
+): CompactionSettings | undefined {
+  const window = lookup(spec)?.contextWindow;
+  if (window === undefined || window <= 0) return { reserveTokens: FALLBACK_RESERVE_TOKENS };
+  const reserveTokens = window - config.budgets.maxPromptTokens;
+  return reserveTokens >= MIN_RESERVE_TOKENS ? { reserveTokens } : undefined;
+}
+
 /** Whether the model takes image input, read from pi-ai model metadata (D36). Unknown models count as text-only. */
 export function acceptsImages(spec: string, lookup: ModelLookup = lookupModel): boolean {
   return lookup(spec)?.input.includes('image') ?? false;
@@ -129,7 +167,7 @@ export function registerProviders(config: Config): boolean {
 function ollamaModelIds(config: Config): string[] {
   const m = config.models;
   const ids = new Set<string>();
-  for (const spec of [m.decision, m.tierCheap, m.tierMid, m.tierStrong, m.codeWalker]) {
+  for (const spec of [m.decision, m.tierCheap, m.tierMid, m.tierStrong, m.codeWalker, m.worker]) {
     const parsed = spec === undefined ? undefined : parseSpec(spec);
     if (parsed?.provider === OLLAMA) ids.add(parsed.modelId);
   }

@@ -2,13 +2,14 @@
 //
 // Action log: one compact line per tool call in the run, from the root and
 // every delegate: time, agent, tool, the arguments and a one-line outcome
-// (rows, hits, groups, status, refusal reason, evidence id). Both text parts
-// pass the persisted redaction profile before they are stored, so the log
-// holds what events.jsonl may hold and nothing more. logActions() wraps the
-// tools each agent mounts, so no tool records itself. events.jsonl stays the
-// durable copy; this in-memory copy exists because a delegate's brief is
-// rendered synchronously at delegation time, while that file is written
-// through a setImmediate queue.
+// (rows, hits, groups, status, refusal reason, evidence id). A call a sandbox
+// script made (D112) is logged under the agent whose bash ran it, marked
+// '(script)'. Both text parts pass the persisted redaction profile before
+// they are stored, so the log holds what events.jsonl may hold and nothing
+// more. logActions() wraps the tools each agent mounts, so no tool records
+// itself. events.jsonl stays the durable copy; this in-memory copy exists
+// because a delegate's brief is rendered synchronously at delegation time,
+// while that file is written through a setImmediate queue.
 //
 // Repeat cache: runIoTool stores the ok envelope of a call that opted in
 // (IoToolSpec.repeat) under its repeat key, and an exact repeat within
@@ -23,6 +24,7 @@ import type { ToolDefinition } from '@flue/runtime/tool';
 import { excerpt } from '../connectors/error-text.ts';
 import { redactPersisted } from '../gate/redact.ts';
 import { canonicalJson } from '../mock/key.ts';
+import { agentEntitiesOf, ENTITY_INPUT, entityOfCall } from '../tools/agent-entity.ts';
 import type { ToolContext } from '../tools/types.ts';
 import type { Entity } from '../types/core.ts';
 import type { ToolEnvelope } from '../types/tool-result.ts';
@@ -31,6 +33,12 @@ import type {} from '../tools/_lib/context.ts';
 
 /** The agent name of the root's own calls. */
 export const ROOT_AGENT = 'triage';
+/**
+ * Set in a tool's run context when a sandbox script made the call (D112,
+ * src/agents/script-commands.ts). A symbol, so wrappers that spread the
+ * context keep it.
+ */
+export const SCRIPT_CALL = Symbol('scriptCall');
 /** Lines a delegate's brief carries; run_log reads the rest. */
 export const BRIEF_LINES = 60;
 /** How long an ok result may be reused. */
@@ -39,7 +47,14 @@ export const REPEAT_TTL_MS = 10 * 60_000;
 const ARGS_CHARS = 240;
 const OUTCOME_CHARS = 200;
 // Their arguments are findings, reports or questions, not queries.
-const NO_ARGS: ReadonlySet<string> = new Set(['note_evidence', 'finish_report', 'ask_requester', 'stop_blocked']);
+const NO_ARGS: ReadonlySet<string> = new Set([
+  'note_evidence',
+  'codebase_note_evidence',
+  'finish_report',
+  'ask_requester',
+  'stop_blocked',
+  'propose_note',
+]);
 // Reading the log is not an action worth listing.
 const NOT_LOGGED: ReadonlySet<string> = new Set(['run_log']);
 
@@ -47,10 +62,21 @@ export type Action = {
   readonly at: string;
   readonly agent: string;
   readonly tool: string;
-  /** The calling agent's entity; null for the root and code_walker. */
+  /**
+   * The entity the call was for: the calling investigator's, or on the agent
+   * mount the one an entity tool ran for (its entity input, or its fixed
+   * entity; D110). Null for the entity-free calls (root tools, code tools,
+   * code_walker) and for an entity input the tool does not serve.
+   */
   readonly entity: Entity | null;
+  /** Set when the call went to an agent-mount entity tool (D110), so the entity is the one the call chose. */
+  readonly entityTool?: true;
   readonly args: string;
   readonly outcome: string;
+  /** Flue's id for the call, so propose_note can check the evidence it cites (D99). */
+  readonly toolCallId?: string;
+  /** Set when a sandbox script made the call (D112); the agent is still the one whose bash ran it. */
+  readonly script?: true;
 };
 
 type Repeat = { readonly envelope: ToolEnvelope; readonly by: string; readonly at: string };
@@ -79,8 +105,10 @@ export function clockOf(iso: string): string {
   return `${iso.slice(11, 19)}Z`;
 }
 
-export function actionLine(a: Action): string {
-  return `${clockOf(a.at)} ${a.agent} ${a.tool}${a.args !== '' ? ` ${a.args}` : ''} -> ${a.outcome}`;
+export function actionLine(a: Action, withCall = false): string {
+  // withCall: run_log shows the call id, which propose_note cites as evidence; briefs leave it out to save tokens.
+  const call = withCall && a.toolCallId !== undefined ? ` [call ${a.toolCallId}]` : '';
+  return `${clockOf(a.at)} ${a.agent}${a.script === true ? ' (script)' : ''} ${a.tool}${a.args !== '' ? ` ${a.args}` : ''} -> ${a.outcome}${call}`;
 }
 
 /** What one agent may see: its own entity's calls and the entity-free ones (root, code_walker); all for null. */
@@ -105,16 +133,22 @@ export function actionBrief(runId: string, entity: Entity | null): string[] {
   ];
 }
 
-/** Wraps each tool so every call adds one line to the run's log. The agent name comes from ctx.agent. */
+/**
+ * Wraps each tool so every call adds one line to the run's log. The agent name
+ * comes from ctx.agent. Where ctx has no entity, an agent-mount entity tool
+ * gives it from the call (D110).
+ */
 export function logActions(tools: readonly ToolDefinition[], ctx: ToolContext): ToolDefinition[] {
   const agent = ctx.agent ?? ROOT_AGENT;
   return tools.map((tool) => {
     if (NOT_LOGGED.has(tool.name)) return tool;
+    const mark = ctx.entity === null ? agentEntitiesOf(tool) : undefined;
     const run = tool.run.bind(tool) as (context: never) => Promise<unknown>;
     return {
       ...tool,
       async run(context: never) {
-        const { data } = context as { data?: unknown };
+        const { data, toolCallId, [SCRIPT_CALL]: script } = context as { data?: unknown; toolCallId?: unknown; [SCRIPT_CALL]?: unknown };
+        const entity = ctx.entity ?? entityOfCall(mark, data) ?? null;
         const add = (outcome: string): void => {
           const names = ctx.deps.run.redactionNames;
           const safe = (text: string): string => redactPersisted(text, { names }).value;
@@ -122,9 +156,14 @@ export function logActions(tools: readonly ToolDefinition[], ctx: ToolContext): 
             at: ctx.deps.now().toISOString(),
             agent,
             tool: tool.name,
-            entity: ctx.entity,
-            args: NO_ARGS.has(tool.name) ? '' : excerpt(safe(argsText(data)), ARGS_CHARS),
+            entity,
+            ...(mark !== undefined ? { entityTool: true as const } : {}),
+            args: NO_ARGS.has(tool.name)
+              ? noArgsText(mark !== undefined ? entity : null)
+              : excerpt(safe(argsText(data, mark?.picked === true ? entity : null)), ARGS_CHARS),
             outcome: excerpt(safe(outcome), OUTCOME_CHARS),
+            ...(typeof toolCallId === 'string' ? { toolCallId } : {}),
+            ...(script === true ? { script: true as const } : {}),
           });
         };
         try {
@@ -141,12 +180,30 @@ export function logActions(tools: readonly ToolDefinition[], ctx: ToolContext): 
   });
 }
 
-function argsText(data: unknown): string {
+// The entity stays in the line of an agent-mount call whose arguments are left out, as the tool name no longer carries it.
+function noArgsText(entity: Entity | null): string {
+  return entity === null ? '' : argsText({}, entity);
+}
+
+// With `lead`, the entity input goes first, so a line cut at ARGS_CHARS still
+// says which entity the call was for (canonical order would put any_of,
+// body or columns before it).
+function argsText(data: unknown, lead: Entity | null = null): string {
+  let text: string;
   try {
-    return canonicalJson(data ?? {});
+    const rest = lead === null || typeof data !== 'object' || data === null ? data : withoutEntity(data);
+    text = canonicalJson(rest ?? {});
   } catch {
-    return '{}';
+    text = '{}';
   }
+  if (lead === null || !text.startsWith('{')) return text;
+  const head = `{${JSON.stringify(ENTITY_INPUT)}:${JSON.stringify(lead)}`;
+  return text === '{}' ? `${head}}` : `${head},${text.slice(1)}`;
+}
+
+function withoutEntity(data: object): Record<string, unknown> {
+  const { [ENTITY_INPUT]: _entity, ...rest } = data as Record<string, unknown>;
+  return rest;
 }
 
 // Fields of an ok result that say what came back, in the order shown.

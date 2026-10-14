@@ -46,7 +46,8 @@ the CX team replies with.
   method describes, and one line on why.
 - `evidence_ladder`: the sources actually used, in the order they were used,
   from `api`, `db`, `logs`, `cbs` and `code`.
-- `entities_consulted`: the entities an investigator was briefed on.
+- `entities_consulted`: the entities whose data the run read; for an
+  orchestrator, the entities an investigator was briefed on.
 - `gaps`: what could not be checked and why, one line each.
 - `escalated` and `escalation_reasons`: write false and an empty list.
   `finish_report` sets them when escalation fires, on a strong run too.

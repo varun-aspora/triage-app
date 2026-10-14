@@ -12,6 +12,7 @@
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { basename, extname, isAbsolute, join, relative, sep } from 'node:path';
 import { defineSkill, type SkillDefinition } from '@flue/runtime';
+import type { AgentShape } from '../config/env.ts';
 import type { Entity } from '../types/core.ts';
 
 export const METHOD_DIR = 'method';
@@ -396,8 +397,28 @@ export function frontendRoutingSkill(knowledge: Knowledge = currentKnowledge()):
   return knowledge.skills.get('frontend-routing');
 }
 
-/** The notes the root mounts itself; missing ones are left out. */
-export function rootSkills(entities: readonly Entity[], knowledge: Knowledge = currentKnowledge()): SkillDefinition[] {
+/**
+ * The notes the root mounts itself; missing ones are left out. Split: each
+ * entity's overview, patterns and frontend-routing. Single (D109): every
+ * '<entity>-*' note of the given entities (overview, service and journey
+ * notes), then repo-map, patterns, frontend-routing and codegraph-limits. The
+ * single shape's worker gets the same set.
+ */
+export function rootSkills(
+  entities: readonly Entity[],
+  knowledge: Knowledge = currentKnowledge(),
+  shape: AgentShape = 'split',
+): SkillDefinition[] {
+  if (shape === 'single') {
+    const all = [...knowledge.skills.values()];
+    return [
+      ...entities.flatMap((e) => all.filter((s) => s.name.startsWith(`${e}-`))),
+      repoMapSkill(knowledge),
+      patternsSkill(knowledge),
+      frontendRoutingSkill(knowledge),
+      codegraphLimitsSkill(knowledge),
+    ].filter((s) => s !== undefined);
+  }
   return [...entities.map((e) => overviewSkill(e, knowledge)), patternsSkill(knowledge), frontendRoutingSkill(knowledge)].filter(
     (s) => s !== undefined,
   );

@@ -40,6 +40,7 @@ import { toolsFor } from '../../tools/index.ts';
 import type { Mount, ToolContext, ToolDeps } from '../../tools/types.ts';
 import { EntitySchema, RunIdSchema, type Entity, type RunId } from '../../types/core.ts';
 import { deployManifestLines } from '../deploy-manifests.ts';
+import { bindTaskTools } from '../script-commands.ts';
 import { codegraphLimitsSkill, currentKnowledge, journeySkills, methodDoc, repoMapSkill, serviceSkills, type Knowledge } from '../skills.ts';
 
 /** Thinking level of the deep variant (HLD §1.3). */
@@ -194,8 +195,13 @@ export function delegateContext(runId: RunId, entity: Entity | null, env: Delega
   return Object.freeze({ runId, entity, agent, config: env.config, registry: env.registry, deps });
 }
 
-/** Calls the hooks for every tool and skill and returns the instruction text. */
+/**
+ * Calls the hooks for every tool and skill and returns the instruction text.
+ * The tools also become the ones the sandbox's script commands run for this
+ * task (D112).
+ */
 export function mountAll(mounts: DelegateMounts, hooks: DelegateHooks): string {
+  bindTaskTools(mounts.tools);
   for (const tool of mounts.tools) hooks.useTool(tool);
   for (const skill of mounts.skills) hooks.useSkill(skill);
   return mounts.instructions;

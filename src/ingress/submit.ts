@@ -19,7 +19,10 @@
 //      match, then the tier policy. A classifier failure ends as category
 //      unknown and tier strong, and the run is still dispatched.
 //   5. store.putClassification with the decision, the id chain and the
-//      warnings, and prior cases when TRIAGE_PRIOR_CASES=true.
+//      warnings, and prior cases when TRIAGE_PRIOR_CASES=true. Just before
+//      it, when TRIAGE_SCOUT is on, the scout (plan 15 P4) locates the chain
+//      ids and seed leads, counts only: its masked lines go in
+//      initialData.scout for the run section, and a failure is a warning.
 //   6. A new submission, then init(Triage, { id: run_id, uid: null })
 //      .dispatch({ message, initialData }). Flue 2.0.8 puts the uid send
 //      condition on init(), not on the handle's dispatch(), so uid: null goes
@@ -92,9 +95,14 @@
 // answerRun(run_id, input, deps) is the way back: it closes the open
 // question with who answered (or skipped) and when, and dispatches the
 // answer as a triage.input_answer signal on the same instance. Ids the
-// person gave go through the ingress identity step first, and the resulting
-// chain rides in the signal's attributes, where the root merges it into the
-// run's scope (D26). Free text never widens scope.
+// person gave, and the answer text as a message, go through the ingress
+// identity step first, and the resulting chain rides in the signal's
+// attributes, where the root merges it into the run's scope (D26). The
+// answer is requester text, so its id-shaped values come back as leads with
+// source 'answer' and join scope as seeds (D96). A text-only answer skips the
+// identity step and takes its leads from requesterLeads, which cannot fail.
+// The decision call here is not counted in the run's usage: there is no
+// intake bucket after dispatch.
 //
 // A response can also end on stop_blocked (D55): the tool stores the block
 // and moves the run to blocked, and read() returns as for a completed
@@ -213,6 +221,7 @@ import { registryNames } from '../report/gaps.ts';
 import { partialReportDraft } from '../report/partial.ts';
 import { writeReport } from '../report/write.ts';
 import { collectFindings, reportTail } from '../tools/finish-report.tool.ts';
+import { runScout, type ScoutInput, type ScoutResult } from '../tools/_lib/scout.ts';
 import {
   type PhaseDetail,
   RunNotFoundError,
@@ -248,7 +257,7 @@ import {
   type UsageBucket,
   usageVersion,
 } from '../usage/meter.ts';
-import { type IdentityUsage, type IngressIdentity, NO_IDS_GAP, resolveIngressIdentity } from './identity.ts';
+import { type IdentityUsage, type IngressIdentity, isNoIdsGap, requesterLeads, resolveIngressIdentity } from './identity.ts';
 import { IngressInputError } from './normalise.ts';
 import type { PreparedSubmission } from './prepare.ts';
 import {
@@ -268,6 +277,7 @@ import {
   renderThread,
   unreadList,
   type FileText,
+  type RenderConfig,
   type RenderFiles,
   type RenderImages,
   type ResumeFrom,
@@ -284,7 +294,16 @@ export type SubmissionConfig = {
   readonly budgets: Pick<Config['budgets'], 'runTimeoutMs' | 'runMaxAttempts'> & Partial<Pick<Config['budgets'], 'wrapUpMs'>>;
   /** For a partial report's env_label (D88). Left out: blank. */
   readonly display?: Config['display'];
+  /** The model-facing redaction of the messages the run gets (D107). Left out: off, the TRIAGE_MODEL_REDACTION default. */
+  readonly redaction?: Config['redaction'];
+  /** TRIAGE_SCOUT (plan 15 P4). Left out: no scout. */
+  readonly discovery?: Pick<Config['discovery'], 'scout'>;
 };
+
+/** What render-thread's model-facing redaction reads (D107). */
+function renderConfig(config: SubmissionConfig): RenderConfig {
+  return { redaction: config.redaction ?? { model: 'off' } };
+}
 
 /** The parts of Flue's instance handle the pipeline uses. */
 export type AgentHandle = Pick<AgentInstanceHandle, 'dispatch' | 'read' | 'abort'>;
@@ -382,6 +401,8 @@ export type SubmissionDeps = SettleDeps & {
   readonly priorCases: (runId: RunId, signal: AbortSignal, onUsage?: (u: EmbedUsage) => void) => Promise<PriorCasesResult>;
   /** Reads an attachment's bytes from its bytes_ref. */
   readonly readAttachment: (bytesRef: string, signal: AbortSignal) => Promise<Uint8Array>;
+  /** Locates the intake's ids before the first dispatch (plan 15 P4). Called only when config.discovery.scout is on. */
+  readonly scout?: (input: ScoutInput) => Promise<ScoutResult>;
 };
 
 export type SubmissionStatus = 'completed' | 'failed' | 'needs_input' | 'blocked' | 'stopped';
@@ -677,6 +698,10 @@ async function submitInScope(prepared: PreparedSubmission, deps: SubmissionDeps)
       warnings.push(...pc.gaps.map((message) => warning('prior_cases', message)));
     }
 
+    // Before putClassification, so a scout gap is stored with the other warnings.
+    const scout = await scoutStep(runId, request, identity.id_chain, names, deps, signal);
+    warnings.push(...(scout?.gaps ?? []).map((message) => warning('scout', message)));
+
     await store.putClassification(
       runId,
       redactPersisted({ decision, id_chain: identity.id_chain, preflight_warnings: warnings }, { names }),
@@ -692,6 +717,8 @@ async function submitInScope(prepared: PreparedSubmission, deps: SubmissionDeps)
       preflight_warnings: warnings,
       redaction_names: names,
       ...(priorCases !== undefined ? { prior_cases: priorCases } : {}),
+      // Masked lines for the root's run section (instruction.ts).
+      ...(scout !== undefined && scout.lines.length > 0 ? { scout: scout.lines } : {}),
     });
   } catch (err) {
     watch.dispose();
@@ -708,7 +735,7 @@ async function submitInScope(prepared: PreparedSubmission, deps: SubmissionDeps)
 
   const message: DeliveredMessage = {
     kind: 'user',
-    body: renderThread(request, render, files),
+    body: renderThread(request, render, files, renderConfig(deps.config)),
     ...(images.length > 0 ? { attachments: images } : {}),
   };
   return dispatchAndSettle(
@@ -729,7 +756,7 @@ export async function askRun(runId: string, question: string, by: string, deps: 
   if (typeof by !== 'string' || by.trim() === '') throw new IngressInputError('by', 'is required');
   const run = await deps.store.getRun(runId);
   if (run === null) throw new RunNotFoundError(runId);
-  const message: DeliveredMessage = { kind: 'user', body: renderAsk(question.trim(), by.trim()) };
+  const message: DeliveredMessage = { kind: 'user', body: renderAsk(question.trim(), by.trim(), renderConfig(deps.config)) };
   // No initialData and no uid: the instance exists and is continued.
   return dispatchAndSettle(runId, { kind: 'ask', question: question.trim() }, { message }, { id: runId }, deps);
 }
@@ -774,22 +801,17 @@ async function answerInScope(runId: string, input: AnswerInput, deps: AnswerDeps
   if (questionId !== open.question_id) throw new RunNotWaitingError(runId, questionId);
 
   const signal = deps.signal ?? new AbortController().signal;
-  const ids = input.ids ?? {};
-  let chain: IdChain | undefined;
-  const gaps: string[] = [];
-  if (Object.keys(ids).length > 0) {
-    if (deps.identity === undefined) throw new SubmissionInputError('ids need the identity step in the deps');
-    const identity = await identityStep(
-      { request_id: runId, interface: run.request.interface, messages: [], hints: { ids } },
-      [],
-      deps as Pick<SubmissionDeps, 'identity'>,
-      signal,
-    );
-    chain = identity.id_chain;
-    gaps.push(...identity.gaps.filter((g) => g !== NO_IDS_GAP));
-  }
-
   const now = deps.now ?? (() => new Date());
+  const ids = input.ids ?? {};
+  if (Object.keys(ids).length > 0 && deps.identity === undefined) throw new SubmissionInputError('ids need the identity step in the deps');
+  const messages = answer === '' ? [] : [{ ts: now().toISOString(), author: by, text: answer, is_parent: false }];
+  const { chain, gaps } = await answerChain(
+    { request_id: runId, interface: run.request.interface, messages, hints: { ids } },
+    runRedactionNames(runId),
+    deps,
+    signal,
+  );
+
   await deps.store.resolveInputRequest(
     runId,
     questionId,
@@ -799,7 +821,7 @@ async function answerInScope(runId: string, input: AnswerInput, deps: AnswerDeps
   const message: DeliveredMessage = {
     kind: 'signal',
     type: INPUT_ANSWER_SIGNAL,
-    body: renderAnswer(open, { skip, answer, by, ids: chain?.ids ?? {}, gaps }),
+    body: renderAnswer(open, { skip, answer, by, ids: chain?.ids ?? {}, gaps }, renderConfig(deps.config)),
     attributes: {
       question_id: questionId,
       ...(chain !== undefined ? { [INPUT_ANSWER_CHAIN_ATTR]: JSON.stringify(chain) } : {}),
@@ -812,6 +834,39 @@ async function answerInScope(runId: string, input: AnswerInput, deps: AnswerDeps
     { id: runId },
     deps,
   );
+}
+
+type AnswerChain = { readonly chain: IdChain | undefined; readonly gaps: readonly string[] };
+
+/**
+ * The chain an answer adds. Ids the person gave go through the identity step,
+ * with the answer text as a message. A text-only answer does not call it: its
+ * leads come from requesterLeads, which is pure and cannot fail. When the
+ * step fails without being loud, the answer's leads still ride along with a
+ * gap. An answer with no id and no lead adds nothing, so no chain rides along.
+ */
+async function answerChain(
+  request: Pick<TriageRequest, 'request_id' | 'interface' | 'messages' | 'hints'>,
+  names: readonly string[],
+  deps: AnswerDeps,
+  signal: AbortSignal,
+): Promise<AnswerChain> {
+  const fallback = (gaps: readonly string[]): AnswerChain => {
+    const { leads } = requesterLeads(request, {}, names, 'answer');
+    return { chain: leads.length > 0 ? { ids: {}, hops: [], basic_state: [], leads } : undefined, gaps };
+  };
+  if (deps.identity === undefined || Object.keys(request.hints.ids ?? {}).length === 0) return fallback([]);
+  try {
+    const identity = await deps.identity(request, { redactionNames: names, signal });
+    const leads = identity.id_chain.leads?.map((lead) => (lead.source === 'thread' ? { ...lead, source: 'answer' as const } : lead));
+    return {
+      chain: { ...identity.id_chain, ...(leads !== undefined ? { leads } : {}) },
+      gaps: identity.gaps.filter((g) => !isNoIdsGap(g)),
+    };
+  } catch (err) {
+    if (signal.aborted || LOUD_IDENTITY_ERRORS.has(className(err))) throw err;
+    return fallback([`identity step did not run on the answer's ids (${className(err)}); they are in scope but were not resolved`]);
+  }
 }
 
 // ------------------------------------------------------------------ resume
@@ -905,7 +960,7 @@ async function resumeStored(run: RunRecord, by: string, note: string, deps: Sett
   const message: DeliveredMessage = {
     kind: 'signal',
     type: BLOCK_RESUME_SIGNAL,
-    body: renderResume(resumeFrom(from, stalled), { by, at, note }),
+    body: renderResume(resumeFrom(from, stalled), { by, at, note }, renderConfig(deps.config)),
   };
   const result = await dispatchAndSettle(
     runId,
@@ -960,7 +1015,7 @@ async function steerRun(run: RunRecord, by: string, note: string, deps: SettleDe
   // A user message, like a follow-up (askRun): the model reads it as the
   // person speaking, not as a framework event. renderSteer adds no
   // instructions of its own, and the fixed rules still bind.
-  const message: DeliveredMessage = { kind: 'user', body: renderSteer({ by, at: now().toISOString(), note }) };
+  const message: DeliveredMessage = { kind: 'user', body: renderSteer({ by, at: now().toISOString(), note }, renderConfig(deps.config)) };
   const result = await dispatchAndSettle(runId, { kind: 'steer', note }, { message }, { id: runId }, deps);
   return Object.freeze({ ...result, mode: 'steer' as const });
 }
@@ -1574,6 +1629,32 @@ async function identityStep(
   }
 }
 
+/**
+ * The scout (plan 15 P4), on the initial submission only: locate on the
+ * intake's ids, counts only. A failure is a gap and never stops the run; a
+ * stop still does. Undefined when the scout is off.
+ */
+async function scoutStep(
+  runId: RunId,
+  request: TriageRequest,
+  chain: IdChain,
+  names: readonly string[],
+  deps: SubmissionDeps,
+  signal: AbortSignal,
+): Promise<ScoutResult | undefined> {
+  if (deps.scout === undefined || deps.config.discovery?.scout !== true) return undefined;
+  const started = Date.now();
+  try {
+    const result = await deps.scout({ runId, idChain: chain, interface: request.interface, window: request.window, redactionNames: names, signal });
+    logRunEvent(runId, 'scout', { durationMs: Date.now() - started, probes: result.probes, values: result.values, gaps: result.gaps.length });
+    return result;
+  } catch (err) {
+    if (signal.aborted) throw err;
+    logRunEvent(runId, 'scout', { durationMs: Date.now() - started, error: className(err) });
+    return { lines: [], gaps: [`scout failed, so where the ids live was not checked before the run: ${failureReason(err)}`], values: [], probes: 0 };
+  }
+}
+
 async function classifyStep(
   runId: RunId,
   request: TriageRequest,
@@ -1889,6 +1970,20 @@ export function submissionDeps(options: SubmissionDepsOptions = {}): SubmissionD
     priorCases: (runId, signal, onUsage) =>
       priorCasesFor(config, store, embedder, runId, { signal, ...(onUsage !== undefined ? { onUsage } : {}) }),
     readAttachment: (bytesRef, signal) => readFile(bytesRef, { signal }),
+    scout: (input) =>
+      runScout(
+        {
+          config,
+          registry,
+          connectors: rt.connectors,
+          runStore: store,
+          audit,
+          fixtures: mock,
+          ...(rt.caseId !== undefined ? { caseId: rt.caseId } : {}),
+          now,
+        },
+        input,
+      ),
   };
 }
 

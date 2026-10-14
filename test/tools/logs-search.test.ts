@@ -19,8 +19,18 @@ import type { FixtureStore } from '../../src/mock/store.ts';
 import { releaseActions } from '../../src/runlog/actions.ts';
 import type { RunStore } from '../../src/runstore/types.ts';
 import { createToolDeps } from '../../src/tools/_lib/context.ts';
+import type { ToolDeps } from '../../src/tools/types.ts';
 import { conformanceProblems, FORBIDDEN_INPUT_KEYS } from '../../src/tools/index.ts';
-import { foldGroups, LogsSearchInputSchema, logsModeOf, toolModule } from '../../src/tools/logs-search.tool.ts';
+import {
+  foldGroups,
+  forModel,
+  GROUP_KEY_CHARS,
+  GROUP_TOP_N,
+  LogsSearchInputSchema,
+  logsModeOf,
+  type LogsSearchOutput,
+  toolModule,
+} from '../../src/tools/logs-search.tool.ts';
 import type { Entity, TimeWindow } from '../../src/types/core.ts';
 import type { IdChain } from '../../src/types/id-chain.ts';
 import { type ToolEnvelope, ToolEnvelopeSchema } from '../../src/types/tool-result.ts';
@@ -65,6 +75,7 @@ type StoreCall = { kind: string; entity: string; key_string: string };
 
 type Setup = {
   h: TestHome;
+  deps: ToolDeps;
   audit: MemoryAuditSink;
   storeCalls: StoreCall[];
   call(input: Record<string, unknown>, opts?: { signal?: AbortSignal }): Promise<ToolEnvelope>;
@@ -83,6 +94,8 @@ type SetupOptions = {
   budgetFromConfig?: boolean;
   /** The run clock; NOW by default. */
   clock?: () => Date;
+  /** Records what the call stages to /data. */
+  writes?: { path: string; text: string }[];
 };
 
 function setup(opts: SetupOptions = {}): Setup {
@@ -145,13 +158,22 @@ function setup(opts: SetupOptions = {}): Setup {
   const ctx = makeToolContext({ config: h.config, registry: h.registry, entity, runId, deps });
   const tool = toolModule.create(ctx, 'investigator');
   const log = { info() {}, warn() {}, error() {} };
+  const writes = opts.writes;
+  const harness = writes !== undefined ? { sandbox: { writeFile: async (path: string, text: string) => void writes.push({ path, text }) } } : undefined;
   return {
     h,
+    deps,
     audit,
     storeCalls,
     async call(input, callOpts = {}) {
       const data = v.parse(LogsSearchInputSchema, input);
-      const out = await tool.run({ data, toolCallId: `toolu_logs_${seq}`, log, ...(callOpts.signal ? { signal: callOpts.signal } : {}) } as never);
+      const out = await tool.run({
+        data,
+        toolCallId: `toolu_logs_${seq}`,
+        log,
+        ...(harness !== undefined ? { harness } : {}),
+        ...(callOpts.signal ? { signal: callOpts.signal } : {}),
+      } as never);
       return v.parse(ToolEnvelopeSchema, out);
     },
   };
@@ -199,6 +221,9 @@ const noFetch: FetchLike = () => Promise.reject(new Error('fetch must not run'))
 
 // ------------------------------------------------------------------ schema
 
+// forModel with model-facing redaction on (D107), as these tests expect masked keys.
+const ON = { redaction: { model: 'on' as const } };
+
 describe('input schema', () => {
   test('schema has no transport, entity, index or run_id field', () => {
     const entries = Object.keys(LogsSearchInputSchema.entries);
@@ -221,7 +246,7 @@ describe('input schema', () => {
     const ctx = makeToolContext({ entity: 'rtl' });
     expect(toolModule.enabled(ctx, 'investigator')).toEqual({ on: true });
     expect(() => toolModule.create(ctx, 'investigator')).not.toThrow();
-    expect(toolModule.mounts).toEqual(['investigator']);
+    expect(toolModule.mounts).toEqual(['investigator', 'agent']);
     expect(toolModule.entities).toBe('all');
   });
 
@@ -264,6 +289,11 @@ describe('input schema', () => {
       '50 logs_search calls',
       'single quotes',
       'denoise',
+      'Start with count, or group_by on service/level, to size the result, then read hits with named columns',
+      'group_by on message or error returns whole lines as keys: use normalize',
+      'groups return the top 25 with keys cut to 200 characters',
+      'the full list is in the staged file',
+      'raw returns at most 20 hits per page',
     ]) {
       expect(tool.description).toContain(text);
     }
@@ -361,21 +391,25 @@ describe('gate denies', () => {
     expect((await setup({ fixture: HITS_FIXTURE }).call({ fields: { x_req_id: REQ_ID } })).output.status).toBe('refused');
   });
 
-  test('an x-device-id or verification_id is allowed once a hit fetched by a chain id showed it (D77, Q13)', async () => {
+  test('an id in any field of a hit tied by a chain id is usable in a later call (D97)', async () => {
     const DEVICE_ID = 'a1b2c3d4-e5f6-4a7b-8c9d-00000000d001';
     const VERIFICATION_ID = 'a1b2c3d4-e5f6-4a7b-8c9d-00000000e002';
-    const hit = { ...HIT_A, 'x-device-id': DEVICE_ID, verification_id: VERIFICATION_ID };
+    const hit = { ...HIT_A, message: `SIM bound for ${DEVICE_ID}`, verification_id: VERIFICATION_ID };
     const s = setup({ fixture: { hits: [hit], num_hits: 1, window: REQUEST_WINDOW, truncated: false } });
     const before = await s.call({ fields: { verification_id: VERIFICATION_ID } });
     expect(before.output.status).toBe('refused');
-    expect(before.output.message).toContain('a device or verification id');
+    expect(before.output.message).toContain("usable once it is in the requester's text or shows up in a result fetched by an id already in scope");
     // A search by message alone returns the hit but does not tie it to the customer.
-    dataOf(await s.call({ message: 'SIM binding poll', columns: ['x-device-id', 'verification_id'] }));
+    dataOf(await s.call({ message: 'SIM binding poll' }));
     expect((await s.call({ terms: [DEVICE_ID] })).output.status).toBe('refused');
-    dataOf(await s.call({ service: 'harbor', terms: [CUSTOMER], columns: ['x-device-id', 'verification_id'] }));
-    // On SSFB these are not filterable fields, so they are searched as terms.
+    expect(s.deps.idChain().leads).toBeUndefined();
+    dataOf(await s.call({ service: 'harbor', terms: [CUSTOMER] }));
+    expect(s.deps.idChain().leads?.map((l) => [l.value, l.depth, l.parent, l.via?.tool, l.via?.field])).toEqual([
+      [DEVICE_ID, 1, 'uuid:***6666', 'logs_search', 'message'],
+      [VERIFICATION_ID, 1, 'uuid:***6666', 'logs_search', 'verification_id'],
+    ]);
     dataOf(await s.call({ terms: [DEVICE_ID] }));
-    dataOf(await s.call({ service: 'guardian', terms: [VERIFICATION_ID] }));
+    dataOf(await s.call({ message: `failed for ${VERIFICATION_ID}` }));
     expect((await s.call({ terms: [STRANGER] })).output.status).toBe('refused');
   });
 
@@ -784,6 +818,148 @@ describe('paging and the 5,000-hit early return', () => {
     const out = dataOf(await s.call({ service: 'harbor', message: 'failed', group_by: ['level', 'error'], count_distinct: 'form_id' }));
     expect(out).toMatchObject({ groups: [{ key: 'error | timeout', count: 3 }], distinct: { field: 'form_id', count: 2 }, tally_base: 3 });
     expect(lastAudit(s).summary_redacted).toContain('1 groups, 2 distinct form_id over 3 hits');
+  });
+});
+
+// ------------------------------------------------------------------ shaping for the model
+
+/** n groups, largest first, with keys of the given length. */
+function manyGroups(n: number, keyChars = 20): { key: string; count: number }[] {
+  return Array.from({ length: n }, (_, i) => ({ key: `group ${String.fromCharCode(97 + (i % 26))}${i} `.padEnd(keyChars, 'x'), count: n - i }));
+}
+
+const sumOf = (groups: readonly { count: number }[]): number => groups.reduce((sum, g) => sum + g.count, 0);
+const groupsOf = (out: LogsSearchOutput) => ('groups' in out ? out.groups : undefined);
+
+describe('shaping for the model (plan 16 S1.2)', () => {
+  test('forModel keeps the top 25 groups and cuts long keys to 200 chars', () => {
+    const groups = manyGroups(30, 250);
+    const out = forModel({ groups, tally_base: sumOf(groups), num_hits: sumOf(groups), window: REQUEST_WINDOW, query: 'q', truncated: false }, ON);
+    expect(groupsOf(out)).toHaveLength(GROUP_TOP_N);
+    expect(groupsOf(out)?.[0]?.key).toBe(`${groups[0]?.key.slice(0, GROUP_KEY_CHARS)}… [250 chars]`);
+    expect(groupsOf(out)?.map((g) => g.count)).toEqual(groups.slice(0, 25).map((g) => g.count));
+    expect(out.group_count).toBe(30);
+    expect(out.groups_omitted).toEqual({ groups: 5, hits: sumOf(groups.slice(25)) });
+    expect(out.notes).toEqual([
+      '25 of 30 groups shown; keys cut to 200 chars; staged_file (when present) has all groups; group by service or level, or use normalize',
+    ]);
+  });
+
+  test('forModel leaves short lists alone apart from the counts, and never merges equal cut keys', () => {
+    const small = forModel({ groups: [{ key: 'error', count: 2 }], tally_base: 2, num_hits: 2, window: REQUEST_WINDOW, query: 'q', truncated: false }, ON);
+    expect(small).toMatchObject({ groups: [{ key: 'error', count: 2 }], group_count: 1, groups_omitted: { groups: 0, hits: 0 } });
+    expect(small.notes).toBeUndefined();
+    const prefix = 'p'.repeat(GROUP_KEY_CHARS);
+    const twins = forModel({
+      groups: [
+        { key: `${prefix} one`, count: 2 },
+        { key: `${prefix} two`, count: 1 },
+      ],
+      tally_base: 3,
+      num_hits: 3,
+      window: REQUEST_WINDOW,
+      query: 'q',
+      truncated: false,
+    }, ON);
+    expect(groupsOf(twins)).toEqual([
+      { key: `${prefix}… [204 chars]`, count: 2 },
+      { key: `${prefix}… [204 chars]`, count: 1 },
+    ]);
+    const noGroups: LogsSearchOutput = { count: 3, num_hits: 3, window: REQUEST_WINDOW, query: 'q', truncated: false };
+    expect(forModel(noGroups, ON)).toBe(noGroups);
+  });
+
+  test('a group_by result shows 25 groups whose counts plus groups_omitted add up to tally_base', async () => {
+    const groups = manyGroups(40);
+    const base = sumOf(groups);
+    const s = setup({ fixture: { groups, tally_base: base, num_hits: base, window: REQUEST_WINDOW, truncated: false } });
+    const out = dataOf(await s.call({ service: 'harbor', message: 'failed', group_by: ['service'] }));
+    const shown = out.groups as { key: string; count: number }[];
+    const omitted = out.groups_omitted as { groups: number; hits: number };
+    expect(shown).toHaveLength(25);
+    expect(out.group_count).toBe(40);
+    expect(omitted.groups + shown.length).toBe(40);
+    expect(sumOf(shown) + omitted.hits).toBe(out.tally_base as number);
+    // No harness here, so nothing is staged and the note does not promise a file.
+    expect(out.staged_file).toBeUndefined();
+    expect(out.notes).toEqual([expect.stringContaining('staged_file (when present) has all groups')]);
+    // The audit line counts every group.
+    expect(lastAudit(s).summary_redacted).toContain(`40 groups over ${base} hits`);
+  });
+
+  test('the staged file holds every group while the envelope holds 25', async () => {
+    const groups = manyGroups(60, 300);
+    const writes: { path: string; text: string }[] = [];
+    const s = setup({ writes, fixture: { groups, tally_base: sumOf(groups), num_hits: sumOf(groups), window: REQUEST_WINDOW, truncated: false } });
+    const out = dataOf(await s.call({ service: 'harbor', message: 'failed', group_by: ['service'] }));
+    expect(out.groups).toHaveLength(25);
+    expect(out.staged_file).toBe(writes[0]?.path);
+    const staged = JSON.parse(writes[0]?.text ?? '{}') as { groups: { key: string }[]; group_count?: number };
+    expect(staged.groups.map((g) => g.key)).toEqual(groups.map((g) => g.key));
+    expect(staged.group_count).toBeUndefined();
+  });
+
+  test('group_by on message, error or raw_message turns normalize on, with a note', async () => {
+    const fixture = {
+      groups: [
+        { key: 'doc fetch failed for form 12345678', count: 2 },
+        { key: 'doc fetch failed for form 87654321', count: 1 },
+      ],
+      num_hits: 3,
+      window: REQUEST_WINDOW,
+      truncated: false,
+    };
+    for (const field of ['message', 'error', 'raw_message']) {
+      const out = dataOf(await setup({ fixture }).call({ service: 'harbor', message: 'failed', group_by: ['service', field] }));
+      expect(out.groups).toEqual([{ key: 'doc fetch failed for form <num>', count: 3 }]);
+      expect(out.notes).toContain('normalize turned on because group_by has message, error or raw_message; pass normalize: false to keep ids');
+    }
+    const kept = dataOf(await setup({ fixture }).call({ service: 'harbor', message: 'failed', group_by: ['message'], normalize: false }));
+    expect(kept.groups).toEqual(fixture.groups);
+    expect(kept.notes).toBeUndefined();
+    const byLevel = dataOf(await setup({ fixture }).call({ service: 'harbor', message: 'failed', group_by: ['level'] }));
+    expect(byLevel.groups).toEqual(fixture.groups);
+  });
+
+  test('message_groups on a hits search get the same top 25 and key cut', async () => {
+    const hits = Array.from({ length: 30 }, (_, i) => ({ ...HIT_C, message: `${String.fromCharCode(97 + (i % 26))}${'m'.repeat(240)} ${i}` }));
+    const s = setup({ fixture: { hits, num_hits: 30, window: REQUEST_WINDOW, truncated: false } });
+    const out = dataOf(await s.call({ service: 'harbor', message: 'failed', normalize: true }));
+    expect(out.hits).toHaveLength(30);
+    const groups = out.message_groups as { key: string; count: number }[];
+    expect(groups).toHaveLength(25);
+    expect(groups.every((g) => g.key.endsWith('chars]') && g.key.length < 220)).toBe(true);
+    expect(out).toMatchObject({ group_count: 30, groups_omitted: { groups: 5, hits: 5 } });
+  });
+
+  test('raw: true is clamped to 20 hits with a note', async () => {
+    const hits = Array.from({ length: 30 }, (_, i) => ({ ...HIT_A, timestamp: `2026-09-22T09:${String(i).padStart(2, '0')}:00Z` }));
+    const s = setup({ fixture: { hits, num_hits: 30, window: REQUEST_WINDOW, truncated: false } });
+    const out = dataOf(await s.call({ service: 'harbor', message: 'failed', raw: true }));
+    expect(out.hits).toHaveLength(20);
+    expect(out).toMatchObject({ next_offset: 20, truncated: true });
+    expect(out.notes).toEqual(['raw pages hold at most 20 hits; name columns to read more per page']);
+    const asked = dataOf(await s.call({ service: 'harbor', message: 'failed', raw: true, max_hits: 100 }));
+    expect(asked.notes).toEqual([expect.stringContaining('max_hits clamped to 20 because raw returns whole documents')]);
+  });
+
+  test('keys are redacted before the cut, so an email or card number across char 200 stays masked', () => {
+    const email = `${'a'.repeat(185)} jane.doe@example.com failed`;
+    const card = `${'a'.repeat(187)} 4111111111111111 declined`;
+    for (const shape of ['groups', 'message_groups'] as const) {
+      const groups = [
+        { key: email, count: 2 },
+        { key: card, count: 1 },
+      ];
+      const base = { tally_base: 3, num_hits: 3, window: REQUEST_WINDOW, query: 'q', truncated: false };
+      const out = forModel(shape === 'groups' ? { groups, ...base } : { hits: [], message_groups: groups, ...base }, ON);
+      const keys = (shape === 'groups' ? groupsOf(out) : out.message_groups)?.map((g) => g.key) ?? [];
+      expect(keys).toHaveLength(2);
+      expect(keys.join('\n')).not.toContain('jane.doe');
+      expect(keys.join('\n')).not.toContain('411111111111');
+      expect(keys[0]).toContain(' ****@example');
+      expect(keys[1]).toContain('****1111');
+    }
   });
 });
 

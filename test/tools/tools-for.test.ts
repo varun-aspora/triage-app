@@ -3,6 +3,7 @@
 // and ctx.deps is a spy, so nothing here can reach a connector.
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { ToolDefinition } from '@flue/runtime/tool';
+import { agentEntitiesOf } from '../../src/tools/agent-entity.ts';
 import {
   allToolModules,
   mountPlan,
@@ -26,15 +27,21 @@ const CBS_FLAG = 'SSFB_CBS_VIA_KUBECTL_ENABLED';
 
 // The repo_* tools are on both investigator variants, scoped to the entity's repos.
 const REPO_TOOLS = ['repo_find', 'repo_grep', 'repo_read', 'repo_tree'];
-const BASE_INVESTIGATOR = ['http_call', 'logs_search', 'note_evidence', 'run_log', 'sql_select', ...REPO_TOOLS];
+const BASE_INVESTIGATOR = ['http_call', 'locate', 'logs_search', 'note_evidence', 'propose_note', 'read_staged', 'run_log', 'sql_select', ...REPO_TOOLS];
 const SSFB_ALWAYS = ['detect_silent_reversals', 'get_account_statement'];
 const SSFB_CRYPTO = ['decrypt_fields', 'encrypt_lookup_value'];
 // Scoped to ssfb in their module. The crypto tools serve any entity with a field-encryption service (D48).
-const SSFB_SCOPED = [...SSFB_ALWAYS, 'cbs_call'];
+const SSFB_SCOPED = SSFB_ALWAYS;
 const SSFB_ONLY = [...SSFB_SCOPED, ...SSFB_CRYPTO];
 const CODEGRAPH_TOOLS = ['code_explore', 'code_impact', 'code_node'];
 const CODE_TOOLS = [...CODEGRAPH_TOOLS, ...REPO_TOOLS];
-const MOUNTS: readonly Mount[] = ['triage', 'investigator', 'investigator_deep', 'code_walker'];
+const MOUNTS: readonly Mount[] = ['triage', 'investigator', 'investigator_deep', 'code_walker', 'agent'];
+// The entity data tools, mounted once on the agent mount with an entity input, or their one entity fixed (D109, D110).
+const PER_ENTITY = ['http_call', 'logs_search', 'sql_select', ...SSFB_ONLY];
+// Shared tools on the agent mount.
+const SHARED_AGENT = ['ask_requester', 'finish_report', 'locate', 'propose_note', 'read_staged', 'resolve_identity', 'run_log', 'stop_blocked', ...CODE_TOOLS];
+// note_evidence joins the agent mount through its own module (S2.8); its name is left out of the exact lists here.
+const withoutEvidence = (list: readonly string[]): string[] => list.filter((n) => !n.endsWith('note_evidence'));
 
 const names = (tools: readonly ToolDefinition[]): string[] => tools.map((t) => t.name).sort();
 const sorted = (list: readonly string[]): string[] => [...list].sort();
@@ -130,10 +137,10 @@ describe('per-mount and per-entity membership', () => {
     }
   });
 
-  test('the triage mount holds ask_requester, stop_blocked, resolve_identity, note_evidence, run_log and finish_report only', () => {
+  test('the triage mount holds ask_requester, stop_blocked, resolve_identity, note_evidence, propose_note, run_log and finish_report only', () => {
     for (const h of [plain, allOn]) {
       const set = names(toolsFor('triage', ctxFrom(h, null)));
-      expect(set).toEqual(sorted(['ask_requester', 'finish_report', 'note_evidence', 'resolve_identity', 'run_log', 'stop_blocked']));
+      expect(set).toEqual(sorted(['ask_requester', 'finish_report', 'note_evidence', 'propose_note', 'resolve_identity', 'run_log', 'stop_blocked']));
     }
   });
 
@@ -141,6 +148,92 @@ describe('per-mount and per-entity membership', () => {
     for (const h of [plain, allOn]) {
       expect(names(toolsFor('code_walker', ctxFrom(h, null)))).toEqual(sorted([...CODE_TOOLS, 'note_evidence', 'run_log']));
     }
+  });
+
+  test('the perEntity modules are the entity data tools', () => {
+    expect(sorted(withoutEvidence(allToolModules.filter((m) => m.perEntity === true).map((m) => m.name)))).toEqual(sorted(PER_ENTITY));
+  });
+
+  test("the agent mount holds each data tool once, picking among the enabled entities that have it, and the shared tools once", () => {
+    for (const h of [plain, allOn]) {
+      const served = new Map<string, Entity[]>();
+      for (const entity of h.registry.enabledEntities()) {
+        for (const name of names(toolsFor('investigator', ctxFrom(h, entity)))) {
+          if (PER_ENTITY.includes(name)) served.set(name, [...(served.get(name) ?? []), entity]);
+        }
+      }
+      const agent = toolsFor('agent', ctxFrom(h, null));
+      expect(withoutEvidence(names(agent))).toEqual(sorted([...SHARED_AGENT, ...served.keys()]));
+      for (const [name, entities] of served) {
+        const tool = agent.find((t) => t.name === name)!;
+        const want = SSFB_SCOPED.includes(name) ? { entities, picked: false } : { entities, picked: true };
+        expect({ name, mark: agentEntitiesOf(tool) }).toEqual({ name, mark: want });
+      }
+    }
+  });
+
+  test('on the agent mount the SSFB-only tools have no entity input; the crypto tools pick ssfb only', () => {
+    const set = toolsFor('agent', ctxFrom(allOn, null));
+    for (const name of SSFB_SCOPED) {
+      const tool = set.find((t) => t.name === name)!;
+      expect(entryKeys(tool)).not.toContain('entity');
+      expect(tool.description).toStartWith('SSFB (also called shivalik) only. ');
+    }
+    // The crypto tools serve any entity with a field-encrypted service; only ssfb has one.
+    for (const name of SSFB_CRYPTO) {
+      const tool = set.find((t) => t.name === name)!;
+      expect(entityOptions(tool)).toEqual(['ssfb']);
+      expect(planRow('agent', ctxFrom(allOn, null), name)).toEqual({ name, on: true });
+      const off = planRow('agent', ctxFrom(plain, null), name);
+      expect(off?.on).toBe(false);
+      expect(off && !off.on ? off.reason : '').toContain(`rtl: no service of this entity has field encryption`);
+    }
+  });
+
+  test('an entity not in TRIAGE_ENTITIES gets no tools on the agent mount', () => {
+    const h = home({ [ENC_KEY]: FAKE_FIELD_KEY, [CBS_FLAG]: 'true' }, ['atspl', 'rtl']);
+    const set = toolsFor('agent', ctxFrom(h, null));
+    for (const name of SSFB_ONLY) expect(names(set)).not.toContain(name);
+    expect(entityOptions(set.find((t) => t.name === 'sql_select')!)).toEqual(['atspl', 'rtl']);
+    expect(entityOptions(set.find((t) => t.name === 'logs_search')!)).toEqual(['atspl', 'rtl']);
+  });
+
+  test("each entity's copy is built for that entity: same service picklist as its investigator's tool", async () => {
+    const now = () => new Date('2026-09-29T00:00:00.000Z');
+    const agent = new Map(toolsFor('agent', ctxFrom(allOn, null, { now } as unknown as ToolDeps)).map((t) => [t.name, t]));
+    for (const tool of ['sql_select', 'http_call']) {
+      // A service no entity has: the refusal lists every entity's own services.
+      const out = (await (agent.get(tool)!.run as (c: unknown) => Promise<{ output: { status: string; message: string } }>)({
+        data: { entity: 'rtl', service: 'no_such_service', path: '/x', sql: 'SELECT 1' },
+        toolCallId: 'call_1',
+      })).output;
+      expect(out.status).toBe('refused');
+      const pairs = out.message.slice(out.message.indexOf('pairs: ') + 7, -1).split(', ');
+      for (const entity of ['ssfb', 'rtl'] as const) {
+        const own = picklistsOf(allOn, entity).get(tool);
+        expect({ tool, entity, services: pairs.filter((p) => p.startsWith(`${entity}:`)).map((p) => p.slice(entity.length + 1)) }).toEqual({
+          tool,
+          entity,
+          services: [...(own ?? [])],
+        });
+      }
+    }
+    const rtlSql = picklistsOf(allOn, 'rtl').get('sql_select')!;
+    expect(agent.get('sql_select')!.description).toContain(`rtl: services ${rtlSql.join(', ')}.`);
+  });
+
+  test("http_call's finacle note reaches the agent mount on the ssfb line, only when the gateway is on (D110, D111)", () => {
+    const httpOf = (h: TestHome) => toolsFor('agent', ctxFrom(h, null)).find((t) => t.name === 'http_call')!;
+    const on = httpOf(allOn);
+    expect(on.description).toMatch(/ssfb \(also called shivalik\): services [^.]*\bfinacle\b[^.]*; finacle is the bank's Finacle CBS gateway/);
+    expect(on.description).toMatch(/rtl: services [^.;]*\.$/);
+    // The merged service input carries no per-entity note.
+    expect(JSON.stringify(on.input)).not.toContain('Finacle');
+    expect(httpOf(plain).description).not.toContain('Finacle');
+  });
+
+  test('the agent mount refuses a context with an entity', () => {
+    expect(() => toolsFor('agent', ctxFrom(plain, 'rtl'))).toThrow(/without an entity/);
   });
 
   test('an investigator mount without an entity is refused', () => {
@@ -173,8 +266,6 @@ describe('flag and key gating', () => {
         expect(set).toContain(name);
         expect(planRow(mount, ctx, name)).toEqual({ name, on: true });
       }
-      // The key does not turn cbs_call on.
-      expect(set).not.toContain('cbs_call');
     }
   });
 
@@ -182,31 +273,12 @@ describe('flag and key gating', () => {
     expect(() => home({ [CBS_FLAG]: value })).toThrow(/SSFB_CBS_VIA_KUBECTL_ENABLED must be true or false/);
   });
 
-  test.each(['false', ''])('cbs_call is off and listed with a reason when the flag is %p', (value) => {
-    const h = home({ [CBS_FLAG]: value });
-    const ctx = ctxFrom(h, 'ssfb');
-    expect(names(toolsFor('investigator', ctx))).not.toContain('cbs_call');
-    expect(planRow('investigator', ctx, 'cbs_call')).toEqual({ name: 'cbs_call', on: false, reason: `${CBS_FLAG} is not true` });
-  });
-
-  test('cbs_call is on only when the flag is true, and the flag does not turn the crypto tools on', () => {
-    const h = home({ [CBS_FLAG]: 'true' });
-    const ctx = ctxFrom(h, 'ssfb');
-    const set = names(toolsFor('investigator', ctx));
-    expect(set).toContain('cbs_call');
-    expect(planRow('investigator', ctx, 'cbs_call')).toEqual({ name: 'cbs_call', on: true });
-    for (const name of SSFB_CRYPTO) expect(set).not.toContain(name);
-  });
-
-  test('cbs_call stays off when ssfb is not an enabled entity, even with the flag on', () => {
-    const h = home({ [CBS_FLAG]: 'true' }, ['atspl', 'rtl']);
-    const ctx = ctxFrom(h, 'ssfb');
-    expect(names(toolsFor('investigator', ctx))).not.toContain('cbs_call');
-    expect(planRow('investigator', ctx, 'cbs_call')).toEqual({
-      name: 'cbs_call',
-      on: false,
-      reason: 'ssfb is not in TRIAGE_ENTITIES',
-    });
+  test('the CBS flag mounts no tool of its own: finacle is an http_call service (D111)', () => {
+    const on = names(toolsFor('investigator', ctxFrom(home({ [CBS_FLAG]: 'true' }), 'ssfb')));
+    const off = names(toolsFor('investigator', ctxFrom(home({ [CBS_FLAG]: 'false' }), 'ssfb')));
+    expect(on).toEqual(off);
+    expect(allToolModules.map((m) => m.name)).not.toContain('cbs_call');
+    for (const name of SSFB_CRYPTO) expect(on).not.toContain(name);
   });
 
   test('every disabled tool shows in mountPlan with a non-empty reason', () => {
@@ -221,7 +293,7 @@ describe('flag and key gating', () => {
 
   test('repo_read and repo_grep are off with a reason when TRIAGE_REPOS_DIR is blank', () => {
     const h = home({ TRIAGE_REPOS_DIR: '' });
-    for (const [mount, entity] of [['code_walker', null], ['investigator_deep', 'rtl']] as const) {
+    for (const [mount, entity] of [['code_walker', null], ['investigator_deep', 'rtl'], ['agent', null]] as const) {
       const ctx = ctxFrom(h, entity);
       const set = names(toolsFor(mount, ctx));
       for (const name of REPO_TOOLS) {
@@ -259,6 +331,14 @@ describe('names per set', () => {
 // ------------------------------------------------------------ service picklists
 
 /** The picklist options of a tool's `service` input, or undefined when it has none. */
+function entryKeys(tool: ToolDefinition): string[] {
+  return Object.keys((tool.input as { entries?: object } | undefined)?.entries ?? {});
+}
+
+function entityOptions(tool: ToolDefinition): unknown {
+  return (tool.input as { entries?: Record<string, { options?: unknown }> }).entries?.entity?.options;
+}
+
 function servicePicklist(tool: ToolDefinition): readonly string[] | undefined {
   const input = tool.input as { entries?: Record<string, { type?: string; options?: unknown }> } | undefined;
   const service = input?.entries?.service;

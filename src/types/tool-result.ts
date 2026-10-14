@@ -36,9 +36,11 @@ export function refused(message: string, now: Clock = systemClock): ToolEnvelope
   return envelope({ status: 'refused', message }, now);
 }
 
-// The backing env var for this entity and service is blank.
-export function notConfigured(entity: Entity, service: string, now: Clock = systemClock): ToolEnvelope {
-  return envelope({ status: 'not_configured', message: `not configured for ${entity}:${service}` }, now);
+// The backing env var for this entity and service is blank. reason, when
+// given, says what is missing (an env name, never a value).
+export function notConfigured(entity: Entity, service: string, now: Clock = systemClock, reason?: string): ToolEnvelope {
+  const why = reason === undefined ? '' : `: ${reason}`;
+  return envelope({ status: 'not_configured', message: `not configured for ${entity}:${service}${why}` }, now);
 }
 
 // The backing system could not be reached (tunnel down, timeout).

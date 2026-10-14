@@ -13,7 +13,7 @@ const NAME = 'repo_grep';
 
 export const toolModule: ToolModule = {
   name: NAME,
-  mounts: ['code_walker', 'investigator'],
+  mounts: ['code_walker', 'investigator', 'agent'],
   entities: 'all',
   enabled: (ctx) => codeToolEnabled(ctx),
   create: (ctx) => {

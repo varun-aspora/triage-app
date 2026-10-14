@@ -171,7 +171,7 @@ function harborFixture(path: string, method = 'GET', result: unknown = { status:
 describe('http_call module', () => {
   test('is picked up by the generated tool list and mounted on investigators', () => {
     expect(allToolNames()).toContain('http_call');
-    expect(toolModule.mounts).toEqual(['investigator']);
+    expect(toolModule.mounts).toEqual(['investigator', 'agent']);
     expect(toolModule.entities).toBe('all');
   });
 
@@ -341,21 +341,24 @@ describe('http_call path checks', () => {
 // ------------------------------------------------------------------ services
 
 describe('http_call services', () => {
-  test('deny: finacle is refused and the message names cbs_call', async () => {
+  test('finacle never goes through fetch: with the CBS flag off it answers not configured with the reason', async () => {
     const s = setup({ real: true });
     const env = await call(s, { service: 'finacle', path: '/custom/api/x' });
-    expect(env.output.status).toBe('refused');
-    expect(env.output.message).toContain('cbs_call');
+    expect(env.output.status).toBe('not_configured');
+    expect(env.output.message).toBe('not configured for ssfb:finacle: SSFB_CBS_VIA_KUBECTL_ENABLED is not true');
     expect(s.fetchCalls.length).toBe(0);
-    expect(lastAudit(s).decision).toBe('deny');
   });
 
-  test('deny: finacle on an entity without it still points to cbs_call', async () => {
-    const s = setup({ entity: 'atspl' });
-    const env = await call(s, { service: 'finacle', path: '/custom/api/x' });
-    expect(env.output.status).toBe('refused');
-    expect(env.output.message).toContain('cbs_call');
-  });
+  for (const entity of ['atspl', 'rtl'] as const) {
+    test(`deny: finacle on ${entity} is an unknown service`, async () => {
+      const s = setup({ entity });
+      const env = await call(s, { service: 'finacle', path: '/custom/api/x' });
+      expect(env.output.status).toBe('refused');
+      expect(env.output.message).toContain(`${entity} has no HTTP API named that`);
+      expect(lastAudit(s).reason).toBe('bad_service: not an API service of the entity');
+      expect(s.storeCalls()).toBe(0);
+    });
+  }
 
   test('deny: a service without an API is refused', async () => {
     const s = setup();
@@ -632,12 +635,24 @@ describe('http_call body cap', () => {
     expect((env.output.data as { truncated: boolean }).truncated).toBe(true);
   });
 
-  test('the body passes the model-facing redaction profile', async () => {
+  test('with redaction on, the body passes the model-facing redaction profile', async () => {
     const card = '4111111111111111';
-    const s = setup({ fixtures: harborFixture('/admin/v1/card', 'GET', { status: 200, body: { card } }) });
+    const s = setup({
+      env: { TRIAGE_MODEL_REDACTION: 'on' },
+      fixtures: harborFixture('/admin/v1/card', 'GET', { status: 200, body: { card } }),
+    });
     const env = await call(s, { service: 'harbor', path: '/admin/v1/card' });
     expect(env.output.status).toBe('ok');
     expect(JSON.stringify(env)).not.toContain(card);
+  });
+
+  test('with redaction off, the default, the body is raw except for credentials (D107)', async () => {
+    const card = '4111111111111111';
+    const body = { card, email: 'priya.sharma@example.com', token: 'Authorization: Bearer synthetictoken.abc123' };
+    const s = setup({ fixtures: harborFixture('/admin/v1/card', 'GET', { status: 200, body }) });
+    const env = await call(s, { service: 'harbor', path: '/admin/v1/card' });
+    expect(env.output.status).toBe('ok');
+    expect((env.output.data as { body: unknown }).body).toEqual({ ...body, token: 'Authorization: Bearer ****' });
   });
 
   test('deny: a fixture with the wrong shape is a loud error', async () => {

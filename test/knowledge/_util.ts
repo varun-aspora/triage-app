@@ -433,7 +433,6 @@ export const SSFB_EXTRA_TOOLS = [
   'detect_silent_reversals',
   'encrypt_lookup_value',
   'decrypt_fields',
-  'cbs_call',
 ] as const;
 export const CODE_TOOLS = [
   'code_explore',
@@ -448,6 +447,10 @@ export const CODE_TOOLS = [
 export const REPO_TOOLS = ['repo_read', 'repo_grep', 'repo_find', 'repo_tree'] as const;
 /** On every agent: the run action log (D79). */
 export const SHARED_TOOLS = ['run_log'] as const;
+/** Counts where a value lives (plan 15 P3): on both investigators (their own entity) and the single agent, not the split root. */
+export const LOCATE_TOOLS = ['locate'] as const;
+/** Proposes a knowledge note for the owner (D99): on the split root, both investigators and the single agent. */
+export const PROPOSE_TOOLS = ['propose_note'] as const;
 /** Flue sandbox tools, on every agent through the one inherited sandbox (D45). */
 export const SANDBOX_TOOLS = ['read', 'write', 'edit', 'bash', 'grep', 'glob'] as const;
 /** Flue framework tools. */
@@ -459,12 +462,18 @@ export const KNOWN_TOOLS: ReadonlySet<string> = new Set([
   ...SSFB_EXTRA_TOOLS,
   ...CODE_TOOLS,
   ...SHARED_TOOLS,
+  ...LOCATE_TOOLS,
+  ...PROPOSE_TOOLS,
   ...SANDBOX_TOOLS,
   ...FRAMEWORK_TOOLS,
 ]);
 
-/** Agent kinds, matching the tool mounts in src/tools/types.ts. */
-export const AGENTS = ['triage', 'investigator', 'investigator_deep', 'code_walker'] as const;
+/**
+ * Agent kinds, matching the tool mounts in src/tools/types.ts. 'agent' is the
+ * single-shape Triage (D109): the split tools under their plain names, which
+ * is how it mounts them, with an entity input (D110).
+ */
+export const AGENTS = ['triage', 'investigator', 'investigator_deep', 'code_walker', 'agent'] as const;
 export type AgentKind = (typeof AGENTS)[number];
 
 const SKILL_TOOLS = ['activate_skill', 'read_skill_resource'] as const;
@@ -478,16 +487,27 @@ export function allowedTools(agent: AgentKind, entity?: Entity): ReadonlySet<str
   const base: string[] = [...SANDBOX_TOOLS, ...SKILL_TOOLS, ...SHARED_TOOLS];
   switch (agent) {
     case 'triage':
-      return new Set([...base, ...TRIAGE_TOOLS, 'task']);
+      return new Set([...base, ...TRIAGE_TOOLS, ...PROPOSE_TOOLS, 'task']);
     case 'investigator':
     case 'investigator_deep': {
-      const tools: string[] = [...base, ...INVESTIGATOR_TOOLS, ...REPO_TOOLS, 'finish'];
+      const tools: string[] = [...base, ...INVESTIGATOR_TOOLS, ...REPO_TOOLS, ...LOCATE_TOOLS, ...PROPOSE_TOOLS, 'finish'];
       if (entity === 'ssfb') tools.push(...SSFB_EXTRA_TOOLS);
       if (agent === 'investigator_deep') tools.push(...CODE_TOOLS);
       return new Set(tools);
     }
     case 'code_walker':
       return new Set([...base, ...CODE_TOOLS, 'note_evidence', 'finish']);
+    case 'agent':
+      return new Set([
+        ...base,
+        ...TRIAGE_TOOLS,
+        ...INVESTIGATOR_TOOLS,
+        ...SSFB_EXTRA_TOOLS,
+        ...CODE_TOOLS,
+        ...LOCATE_TOOLS,
+        ...PROPOSE_TOOLS,
+        'task',
+      ]);
   }
 }
 
@@ -530,5 +550,7 @@ export function methodFilesFor(agent: AgentKind, entity?: Entity): string[] {
       return entity ? ['investigator.md', 'logs.md', `logs-${entity}.md`] : ['investigator.md', 'logs.md'];
     case 'code_walker':
       return ['code-walker.md'];
+    case 'agent':
+      return ['agent.md', 'report-format.md', 'logs.md', ...(entity ? [entity] : ENTITIES).map((e) => `logs-${e}.md`)];
   }
 }

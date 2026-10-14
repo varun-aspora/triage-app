@@ -91,5 +91,8 @@ export const TriageInitSchema = v.object({
   redaction_names: v.optional(v.array(NonEmptyStringSchema)),
   // Pre-flight warnings, copied into the report's gaps.
   preflight_warnings: v.optional(v.array(PreflightWarningSchema)),
+  // The scout's masked lines for the run section (plan 15 P4). Listed here
+  // because Flue re-parses initialData with this schema and drops unknown keys.
+  scout: v.optional(v.array(NonEmptyStringSchema)),
 });
 export type TriageInit = v.InferOutput<typeof TriageInitSchema>;

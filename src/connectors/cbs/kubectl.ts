@@ -1,4 +1,4 @@
-// kubectl and in-pod curl for cbs_call (D14, D30, A13).
+// kubectl and in-pod curl for the CBS gateway (D14, D30, A13).
 //
 // kubectl runs on the laptop against the entity's kube context (the Q26
 // default; there is no bastion hop in v1). Three command shapes exist and

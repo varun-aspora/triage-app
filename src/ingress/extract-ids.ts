@@ -24,8 +24,16 @@
 //
 // Nothing is invented: every value returned is text from the request, an
 // option key from the file, or a hint.
+//
+// Leads (D96). threadLeads returns every id-shaped value in the messages
+// (the scope rule's shapes: UUID, email, +cc phone, 9 or more digits), with
+// or without a label, so an id no key takes still reaches the run's scope.
+// Each lead keeps the text before it on its line as a label and where it was
+// found. hintLeads does the same for hints.ids.
 import type { KnownIdChoiceField, KnownIdField } from '../config/known-ids.ts';
+import { extractIdShaped, type IdShaped } from '../gate/id-patterns.ts';
 import { KNOWN_ID_KEYS, type KnownIdKey, type KnownIds } from '../types/core.ts';
+import { LEAD_LABEL_MAX, type Lead, type LeadSource } from '../types/id-chain.ts';
 import type { TriageRequest } from '../types/request.ts';
 import { patternValues } from './id-decision.ts';
 
@@ -76,9 +84,103 @@ export function hintedIds(hints: Request['hints']): Partial<KnownIds> {
 
 /** Message texts with the parent first, then the rest in the order given. */
 export function orderedTexts(messages: Request['messages']): string[] {
-  const parents = messages.filter((m) => m.is_parent);
-  const rest = messages.filter((m) => !m.is_parent);
-  return [...parents, ...rest].map((m) => m.text);
+  return parentFirst(messages).map(([, m]) => m.text);
+}
+
+// Messages with their indexes, the parent first, then the rest in the order given.
+function parentFirst(messages: Request['messages']): [number, Request['messages'][number]][] {
+  const all = [...messages.entries()];
+  return [...all.filter(([, m]) => m.is_parent), ...all.filter(([, m]) => !m.is_parent)];
+}
+
+// ---------------------------------------------------------------- leads
+
+/** Most leads threadLeads returns; the rest are counted as dropped. */
+export const MAX_LEADS = 50;
+
+export type ThreadLeads = { readonly leads: readonly Lead[]; readonly dropped: number };
+
+/**
+ * Every id-shaped value in the messages as a seed lead, parent first and in
+ * text order, one per kind and value. Past MAX_LEADS the rest are counted.
+ */
+export function threadLeads(messages: Request['messages'], source: LeadSource): ThreadLeads {
+  const seen = new Set<string>();
+  const leads: Lead[] = [];
+  let dropped = 0;
+  for (const [message, { text }] of parentFirst(messages)) {
+    let prevEnd = 0;
+    for (const found of positioned(text)) {
+      // The label starts after the previous value on the same line.
+      const from = Math.max(text.lastIndexOf('\n', found.offset - 1) + 1, prevEnd);
+      prevEnd = found.offset + found.raw.length;
+      const id = `${found.kind}:${found.normalised}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      if (leads.length >= MAX_LEADS) {
+        dropped++;
+        continue;
+      }
+      const label = leadLabel(text.slice(from, found.offset));
+      leads.push({
+        value: leadValue(found),
+        kind: found.kind,
+        source,
+        ...(label !== undefined ? { label } : {}),
+        at: { message, offset: found.offset },
+        status: 'seed',
+      });
+    }
+  }
+  return { leads, dropped };
+}
+
+/** The id-shaped values in hints.ids as seed leads, each tagged with its key. */
+export function hintLeads(hints: Request['hints']): Lead[] {
+  return (Object.entries(hintedIds(hints)) as [KnownIdKey, string][]).flatMap(([key, value]) =>
+    extractIdShaped(value).map((found) => ({ value: leadValue(found), kind: found.kind, source: 'hint' as const, key, status: 'seed' as const })),
+  );
+}
+
+/**
+ * A label cleaned to one line of at most LEAD_LABEL_MAX characters: Slack
+ * markers, a trailing ':' or '=' and a mailto: or tel: link opener are
+ * dropped, and a long label keeps the words nearest the value. Empty means none.
+ */
+export function leadLabel(raw: string): string | undefined {
+  const flat = raw
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/[*~`]/g, '')
+    .replace(/(?:mailto|tel):\s*$/i, '')
+    .replace(/^[\s>•·_|,;-]+/, '')
+    .replace(/[\s:=<|([_,;-]+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (flat === '') return undefined;
+  if (flat.length <= LEAD_LABEL_MAX) return flat;
+  const tail = flat.slice(-(LEAD_LABEL_MAX - 1));
+  const space = tail.indexOf(' ');
+  return `…${space > 0 ? tail.slice(space + 1) : tail}`;
+}
+
+// A lead's value: the compared form, except that a phone keeps its country
+// code ('+' and every digit), so the scope set gets both forms.
+function leadValue(found: IdShaped): string {
+  return found.kind === 'phone' ? `+${found.raw.replace(/\D/g, '')}` : found.normalised;
+}
+
+// The id-shaped values of one text with their offsets, in text order.
+// extractIdShaped blanks each match before the next pattern runs; blanking
+// the same way here finds each match where the pattern found it.
+function positioned(text: string): (IdShaped & { offset: number })[] {
+  let rest = text;
+  const out: (IdShaped & { offset: number })[] = [];
+  for (const found of extractIdShaped(text)) {
+    const offset = Math.max(0, rest.indexOf(found.raw));
+    rest = `${rest.slice(0, offset)}${' '.repeat(found.raw.length)}${rest.slice(offset + found.raw.length)}`;
+    out.push({ ...found, offset });
+  }
+  return out.sort((a, b) => a.offset - b.offset);
 }
 
 function rulesFor(fields: readonly KnownIdField[]): Rules {

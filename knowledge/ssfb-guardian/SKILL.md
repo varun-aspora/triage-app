@@ -125,7 +125,7 @@ sql_select {
    `ssfb-harbor`) give the timeline per poll.
 
 A device id is in scope only once a result in this run, fetched by an id from
-the chain, has shown it (the investigator note has the rule). Rows fetched by the device id do not bring their verification ids into scope,
+the chain, has shown it (the method note has the rule). Rows fetched by the device id do not bring their verification ids into scope,
 so search the logs by the device id, not by those verification ids.
 
 ## Queries

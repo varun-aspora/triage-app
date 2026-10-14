@@ -63,4 +63,27 @@ describe.skipIf(!present)('knowledge/ tree', () => {
     expect(mounted.length).toBeGreaterThan(2);
     expect(problems).toEqual([]);
   });
+
+  // The single shape (D109) mounts every entity note and the four shared
+  // notes, on the root and the worker alike, so a note may point at any
+  // other entity note, but only at one that exists.
+  test('single shape: every note is mounted, and a pointer to an entity note names one that exists', () => {
+    const k = loadKnowledge(KNOWLEDGE);
+    const mounted = rootSkills(ENTITIES, k, 'single');
+    const mountedNames = new Set(mounted.map((s) => s.name));
+    expect(mounted.length).toBe(mountedNames.size);
+    for (const shared of ['repo-map', 'patterns', 'frontend-routing', 'codegraph-limits']) expect(mountedNames.has(shared)).toBe(true);
+    expect([...k.skills.keys()].filter((name) => !mountedNames.has(name))).toEqual([]);
+    const entityNote = new RegExp(`\\b(?:${ENTITIES.join('|')})-[a-z0-9]+(?:-[a-z0-9]+)*\\b`, 'g');
+    const problems: string[] = [];
+    for (const skill of mounted) {
+      for (const sentence of skill.instructions.replace(/\s+/g, ' ').split(/(?<=[.!?;])\s|\|/)) {
+        if (!/\bnotes?\b/i.test(sentence)) continue;
+        for (const [name] of sentence.matchAll(entityNote)) {
+          if (!mountedNames.has(name)) problems.push(`${skill.name}: ${name} in "${sentence.trim()}"`);
+        }
+      }
+    }
+    expect(problems).toEqual([]);
+  });
 });

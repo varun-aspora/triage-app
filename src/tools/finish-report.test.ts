@@ -11,6 +11,7 @@ import { createRunBudget, releaseRunBudget, type RunBudget } from '../gate/budge
 import type { Persisted } from '../gate/redact.ts';
 import type { MockLayer } from '../mock/index.ts';
 import { createFakeModel } from '../mock/fake-model.ts';
+import { logActions, releaseActions } from '../runlog/actions.ts';
 import { ReportSchema as FullReportSchema } from '../report/schema.ts';
 import type { WriteReportArgs, WriteReportResult } from '../report/write.ts';
 import {
@@ -22,7 +23,8 @@ import {
   type RunStore,
 } from '../runstore/types.ts';
 import type { PreflightWarning, TriageInit } from '../types/classification.ts';
-import type { Tier } from '../types/core.ts';
+import { ENTITIES, type Entity, type Tier } from '../types/core.ts';
+import type { IdChain } from '../types/id-chain.ts';
 import type { CodeFindings, EntityFindings } from '../types/findings.ts';
 import type { Report, ReportDraft } from '../types/report.ts';
 import { ToolEnvelopeSchema, type ToolEnvelope } from '../types/tool-result.ts';
@@ -30,8 +32,10 @@ import type { UsageRow } from '../types/usage.ts';
 import { makeTestConfig, makeToolContext } from '../../test/support/fake-tool-context.ts';
 import {
   computeCost,
+  consultedEntities,
   createFinishReportTool,
   FINISH_REPORT,
+  FinishReportInputSchema,
   MAX_SYNTHESIS_PASSES,
   NO_USAGE_GAP,
   SYNTHESIS_SKIPPED_GAP,
@@ -43,6 +47,7 @@ import {
   unpricedGap,
   type UsageReader,
 } from './finish-report.tool.ts';
+import { markAgentEntities } from './agent-entity.ts';
 import { conformanceProblems, toolsFor } from './index.ts';
 import type { ToolDeps } from './types.ts';
 
@@ -259,6 +264,7 @@ type SetupOptions = {
   options?: FinishReportOptions;
   respond?: () => Promise<unknown>;
   maxToolCalls?: number;
+  idChain?: IdChain;
 };
 
 /** One usage row as the meter gives it: a faux model priced at $0 unless overridden. */
@@ -316,6 +322,7 @@ function setup(opts: SetupOptions = {}): Setup {
     releaseRunBudget(runId);
     releaseEscalation(runId);
     releaseFinishReport(runId);
+    releaseActions(runId);
   });
   const tier = opts.tier ?? 'mid';
   const initialData =
@@ -329,7 +336,7 @@ function setup(opts: SetupOptions = {}): Setup {
     escalation,
     run: { interface: 'cli', redactionNames: opts.runNames ?? [] },
     now: () => NOW,
-    idChain: () => ({ ids: {}, hops: [], basic_state: [] }),
+    idChain: () => opts.idChain ?? { ids: {}, hops: [], basic_state: [] },
     ...(initialData !== undefined ? { initialData } : {}),
     usage: opts.usage ?? (() => [usageRow()]),
     ...(opts.repoCommit !== undefined ? { repoCommit: opts.repoCommit } : {}),
@@ -348,19 +355,22 @@ async function call(s: Setup, data: unknown, signal: AbortSignal = new AbortCont
 // ------------------------------------------------------------------ module
 
 describe('finish_report module', () => {
-  test('is mounted on triage only, as a harness tool with a conforming input', () => {
+  test('is mounted on triage and agent, as a harness tool with a conforming input', () => {
     expect(toolModule.name).toBe(FINISH_REPORT);
-    expect(toolModule.mounts).toEqual(['triage']);
+    expect(toolModule.mounts).toEqual(['triage', 'agent']);
     const ctx = makeToolContext({ config });
-    const tool = toolModule.create(ctx, 'triage');
-    expect(tool.name).toBe(FINISH_REPORT);
-    expect((tool as { harness?: boolean }).harness).toBe(true);
-    expect(conformanceProblems(toolModule, tool)).toEqual([]);
+    for (const mount of ['triage', 'agent'] as const) {
+      const tool = toolModule.create(ctx, mount);
+      expect(tool.name).toBe(FINISH_REPORT);
+      expect((tool as { harness?: boolean }).harness).toBe(true);
+      expect(conformanceProblems(toolModule, tool)).toEqual([]);
+    }
   });
 
-  test('the generated tool list puts it on triage and not on the delegates', () => {
+  test('the generated tool list puts it on triage and agent and not on the delegates', () => {
     const triage = toolsFor('triage', makeToolContext({ config })).map((t) => t.name);
     expect(triage).toContain(FINISH_REPORT);
+    expect(toolsFor('agent', makeToolContext({ config })).map((t) => t.name)).toContain(FINISH_REPORT);
     const investigator = toolsFor('investigator_deep', makeToolContext({ config, entity: 'ssfb' })).map((t) => t.name);
     expect(investigator).not.toContain(FINISH_REPORT);
     const walker = toolsFor('code_walker', makeToolContext({ config })).map((t) => t.name);
@@ -389,6 +399,119 @@ describe('finish_report: writeReport refusals', () => {
     expect(deny.decision).toBe('deny');
     expect(deny.tool).toBe(FINISH_REPORT);
     expect(JSON.stringify(s.audit.lines)).not.toContain('98765');
+  });
+
+  test('the report lead list is filled from the run chain with masked values; the model cannot write it (D96)', async () => {
+    const uuid = 'b4e7d2a9-1c3f-4a6b-8e5d-9f2a0c1b3d47';
+    const chain: IdChain = {
+      ids: {},
+      hops: [],
+      basic_state: [],
+      leads: [
+        { value: uuid, kind: 'uuid', source: 'thread', label: 'Alphadesk user ID', at: { message: 0, offset: 20 }, status: 'seed' },
+        { value: '+919876543210', kind: 'phone', source: 'answer', label: 'Synth Person phone', status: 'seed' },
+        { value: 'ops.user@example.com', kind: 'email', source: 'hint', key: 'customer_id', status: 'seed' },
+        { value: '000011112222', kind: 'digits', source: 'thread', status: 'seed' },
+      ],
+    };
+    const s = setup({ idChain: chain, runNames: ['Synth Person'] });
+    const draft = baseDraft();
+    // A lead list the model wrote itself is replaced.
+    draft.id_chain = { ...draft.id_chain, leads: [{ value: 'c0ffee00-1c3f-4a6b-8e5d-9f2a0c1b3d47', kind: 'uuid', source: 'thread', status: 'seed' }] };
+
+    const out = await call(s, draft);
+
+    expect(out.output.status).toBe('ok');
+    const leads = s.store.reports[0]!.report.id_chain.leads ?? [];
+    expect(leads.map((l) => [l.value, l.kind, l.source])).toEqual([
+      ['uuid:***3d47', 'uuid', 'thread'],
+      ['phone:***3210', 'phone', 'answer'],
+      ['email:***.com', 'email', 'hint'],
+      ['digits:***2222', 'digits', 'thread'],
+    ]);
+    expect(leads[0]).toMatchObject({ label: 'Alphadesk user ID', at: { message: 0, offset: 20 } });
+    expect(leads[1]?.label).not.toContain('Synth Person');
+    const stored = JSON.stringify(s.store.reports[0]);
+    for (const raw of [uuid, '9876543210', 'ops.user@example.com', '000011112222', 'c0ffee00']) expect(stored).not.toContain(raw);
+  });
+
+  test('the report lists derived leads masked, with their depth, parent and source call (D97)', async () => {
+    const referee = 'b4e7d2a9-1c3f-4a6b-8e5d-9f2a0c1b3d47';
+    const chain: IdChain = {
+      ids: { customer_id: 'c0ffee00-1111-4222-8333-444455556666' },
+      hops: [],
+      basic_state: [],
+      leads: [
+        {
+          value: referee,
+          kind: 'uuid',
+          source: 'derived',
+          status: 'derived',
+          depth: 1,
+          parent: 'uuid:***6666',
+          via: { tool: 'sql_select', tool_call_id: 'toolu_01ABC', field: 'referee_id' },
+        },
+        {
+          value: '+919876543210',
+          kind: 'phone',
+          source: 'derived',
+          status: 'derived',
+          depth: 2,
+          parent: 'uuid:***3d47',
+          via: { tool: 'logs_search', tool_call_id: 'toolu_02DEF', field: 'message' },
+        },
+        {
+          // A tool call id with a long run of digits, as the fake model mints them.
+          value: 'b4e7d2a9-1c3f-4a6b-8e5d-9f2a0c1b0001',
+          kind: 'uuid',
+          source: 'derived',
+          status: 'derived',
+          depth: 1,
+          parent: 'uuid:***6666',
+          via: { tool: 'logs_search', tool_call_id: 'tool_1790654474586_kyk5zrfznje', field: 'x-device-id' },
+        },
+      ],
+    };
+    const s = setup({ idChain: chain });
+
+    const out = await call(s, baseDraft());
+
+    expect(out.output.status).toBe('ok');
+    expect(s.store.reports[0]!.report.id_chain.leads).toEqual([
+      {
+        value: 'uuid:***3d47',
+        kind: 'uuid',
+        source: 'derived',
+        status: 'derived',
+        depth: 1,
+        parent: 'uuid:***6666',
+        via: { tool: 'sql_select', tool_call_id: 'toolu_01ABC', field: 'referee_id' },
+      },
+      {
+        value: 'phone:***3210',
+        kind: 'phone',
+        source: 'derived',
+        status: 'derived',
+        depth: 2,
+        parent: 'uuid:***3d47',
+        via: { tool: 'logs_search', tool_call_id: 'toolu_02DEF', field: 'message' },
+      },
+      expect.objectContaining({ value: 'uuid:***0001', via: expect.objectContaining({ tool: 'logs_search', field: 'x-device-id' }) }),
+    ]);
+    const stored = JSON.stringify(s.store.reports[0]!.report.id_chain.leads);
+    for (const raw of [referee, '9876543210', '1790654474586']) expect(stored).not.toContain(raw);
+  });
+
+  test('a lead list the model writes in a shape LeadSchema refuses does not get the draft refused (D96)', async () => {
+    expect(Object.keys(FinishReportInputSchema.entries.id_chain.entries)).not.toContain('leads');
+    const s = setup();
+    const draft = { ...baseDraft() } as Record<string, unknown> & { id_chain: object };
+    draft.id_chain = { ...draft.id_chain, leads: [{ value: 'x', kind: 'name', label: 'l'.repeat(200) }] };
+
+    const out = await call(s, draft);
+
+    expect(out.output.status).toBe('ok');
+    expect(s.store.reports[0]!.report.id_chain.leads).toBeUndefined();
   });
 
   test('a schema refusal lists the schema path and stores nothing', async () => {
@@ -897,5 +1020,119 @@ describe('finish_report: initialData', () => {
 
     expect(s.harness.calls).toHaveLength(1);
     expect(writer.spy.calls[0]!.draft.gaps).toContain('preflight ssfb tunnel: tunnel is down (fix: triage tunnel up ssfb)');
+  });
+});
+
+// ------------------------------------------------------------------ entities_consulted
+
+/**
+ * Adds one line to the run's action log, the way logActions records a mounted
+ * tool's call. With an entity, the tool is an agent-mount entity tool called
+ * with that entity (D110).
+ */
+async function logged(s: Setup, tool: string, status: 'ok' | 'refused', entity?: Entity): Promise<void> {
+  const plain = {
+    name: tool,
+    description: 'test tool',
+    input: v.object({}),
+    run: async () => ({ output: status === 'ok' ? { status, data: { row_count: 1 } } : { status, message: 'not allowed' } }),
+  } as unknown as ToolDefinition;
+  const fakeTool = entity === undefined ? plain : markAgentEntities(plain, { entities: ENTITIES, picked: true });
+  const [wrapped] = logActions([fakeTool], makeToolContext({ runId: s.runId, config, deps: s.deps }));
+  await (wrapped!.run as (c: unknown) => Promise<unknown>)({ data: entity === undefined ? {} : { entity }, toolCallId: 'call_0', log: console });
+}
+
+describe('finish_report: entities_consulted (D109, D110)', () => {
+  test('on the agent mount it is the union of the draft, the evidence keys and the ok data calls', async () => {
+    const writer = fakeWriter();
+    const s = setup({ tier: 'strong', options: { writeReport: writer.writeReport, consultedFromRun: true } });
+    // The sample draft lists ssfb only.
+    expect(baseDraft('strong').entities_consulted).toEqual(['ssfb']);
+    putEvidence(s.store, 'rtl', entityFindings('high'));
+    putEvidence(s.store, 'code', codeFindings([]));
+    await logged(s, 'logs_search', 'ok', 'atspl');
+
+    const out = await call(s, baseDraft('strong'));
+
+    expect(out.output.status).toBe('ok');
+    expect(writer.spy.calls[0]!.draft.entities_consulted).toEqual(['ssfb', 'atspl', 'rtl']);
+  });
+
+  test('a refused data call and a shared tool add nothing', async () => {
+    const writer = fakeWriter();
+    const s = setup({ tier: 'strong', options: { writeReport: writer.writeReport, consultedFromRun: true } });
+    await logged(s, 'sql_select', 'refused', 'rtl');
+    await logged(s, 'repo_grep', 'ok');
+
+    await call(s, baseDraft('strong'));
+
+    expect(writer.spy.calls[0]!.draft.entities_consulted).toEqual(['ssfb']);
+  });
+
+  test('after the action log is released the stored evidence keys still count', async () => {
+    const writer = fakeWriter();
+    const s = setup({ tier: 'strong', options: { writeReport: writer.writeReport, consultedFromRun: true } });
+    await logged(s, 'sql_select', 'ok', 'atspl');
+    putEvidence(s.store, 'atspl', entityFindings('high'));
+    releaseActions(s.runId);
+
+    await call(s, { ...baseDraft('strong'), entities_consulted: [] });
+
+    expect(writer.spy.calls[0]!.draft.entities_consulted).toEqual(['atspl']);
+  });
+
+  test('a report rebuilt by strong synthesis gets the union too', async () => {
+    const writer = fakeWriter();
+    const s = setup({
+      tier: 'cheap',
+      options: { writeReport: writer.writeReport, consultedFromRun: true },
+      respond: async () => ({ data: { ...strongDraft(), entities_consulted: [] } }),
+    });
+    putEvidence(s.store, 'rtl', entityFindings('low'));
+
+    await call(s, baseDraft('cheap'));
+
+    expect(s.harness.calls).toHaveLength(1);
+    expect(writer.spy.calls[0]!.draft.entities_consulted).toEqual(['rtl']);
+  });
+
+  test('the split shape keeps the draft list', async () => {
+    const writer = fakeWriter();
+    const s = setup({ tier: 'strong', options: { writeReport: writer.writeReport } });
+    putEvidence(s.store, 'rtl', entityFindings('high'));
+    await logged(s, 'logs_search', 'ok', 'atspl');
+
+    await call(s, baseDraft('strong'));
+
+    expect(writer.spy.calls[0]!.draft.entities_consulted).toEqual(['ssfb']);
+  });
+
+  test('the module adds the run entities on the agent mount only', async () => {
+    for (const [mount, want] of [
+      ['agent', ['ssfb', 'rtl']],
+      ['triage', ['ssfb']],
+    ] as const) {
+      const s = setup({ tier: 'strong' });
+      putEvidence(s.store, 'rtl', entityFindings('high'));
+      const tool = toolModule.create(makeToolContext({ runId: s.runId, config, deps: s.deps }), mount);
+
+      const out = await call({ ...s, tool }, baseDraft('strong'));
+
+      expect(out.output.status).toBe('ok');
+      expect(s.store.reports[0]!.report.entities_consulted).toEqual([...want]);
+    }
+  });
+
+  test('consultedEntities lists each entity once, in ENTITIES order, and leaves out code', () => {
+    const at = '2026-09-24T09:10:00.000Z';
+    const got = consultedEntities(
+      ['rtl', 'rtl'],
+      [
+        { entity: 'code', findings: codeFindings(['harbor']) },
+        { entity: 'rtl', findings: entityFindings('high') },
+      ],
+      [{ at, agent: 'worker', tool: 'http_call', entity: 'ssfb', entityTool: true, args: '', outcome: 'ok status=200' }],
+    );
+    expect(got).toEqual(['ssfb', 'rtl']);
   });
 });

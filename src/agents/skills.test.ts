@@ -13,6 +13,7 @@ import {
   parseSkillFile,
   patternsSkill,
   repoMapSkill,
+  rootSkills,
   serviceSkills,
 } from './skills.ts';
 
@@ -269,6 +270,39 @@ describe('cached accessors', () => {
     expect(overviewSkill('ssfb', fixture)?.name).toBe('ssfb-overview');
     expect(methodDoc('investigator.md', fixture)).toContain('per-entity investigator');
     expect(methodDoc('nosuch.md', fixture)).toBeUndefined();
+  });
+});
+
+describe('rootSkills', () => {
+  test('split (the default): each overview, then patterns and frontend-routing when present', () => {
+    const k = loadKnowledge(FIXTURE);
+    expect(rootSkills(['ssfb', 'atspl'], k).map((s) => s.name)).toEqual(['ssfb-overview', 'atspl-overview', 'patterns']);
+    expect(rootSkills(['ssfb'], k, 'split').map((s) => s.name)).toEqual(['ssfb-overview', 'patterns']);
+  });
+
+  test("single: every '<entity>-*' note of the given entities, then repo-map, patterns, frontend-routing and codegraph-limits", () => {
+    const k = loadKnowledge(FIXTURE);
+    expect(rootSkills(['ssfb', 'atspl'], k, 'single').map((s) => s.name)).toEqual([
+      'ssfb-harbor',
+      'ssfb-overview',
+      'atspl-overview',
+      'repo-map',
+      'patterns',
+      'codegraph-limits',
+    ]);
+    expect(rootSkills(['atspl'], k, 'single').map((s) => s.name)).toEqual(['atspl-overview', 'repo-map', 'patterns', 'codegraph-limits']);
+  });
+
+  test('single: a note only counts for an entity when its name starts with the entity and a hyphen', () => {
+    const k = loadKnowledge(
+      tree({
+        'rtl/rtl-workflow/SKILL.md': skillMd('rtl-workflow'),
+        'rtlx/rtlx-notes/SKILL.md': skillMd('rtlx-notes'),
+        'global/frontend-routing/SKILL.md': skillMd('frontend-routing'),
+      }),
+    );
+    expect(rootSkills(['rtl'], k, 'single').map((s) => s.name)).toEqual(['rtl-workflow', 'frontend-routing']);
+    expect(rootSkills([], k, 'single').map((s) => s.name)).toEqual(['frontend-routing']);
   });
 });
 

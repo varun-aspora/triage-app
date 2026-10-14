@@ -48,7 +48,7 @@ declare module '../_lib/context.ts' {
   }
 }
 
-export const CODE_TOOL_MOUNTS: readonly Mount[] = Object.freeze(['code_walker', 'investigator_deep']);
+export const CODE_TOOL_MOUNTS: readonly Mount[] = Object.freeze(['code_walker', 'investigator_deep', 'agent']);
 
 /** Most characters of codegraph output the model sees per call. */
 export const CODE_OUTPUT_MAX_CHARS = 16_000;

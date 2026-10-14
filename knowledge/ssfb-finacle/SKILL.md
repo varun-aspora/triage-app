@@ -17,16 +17,14 @@ and accounts in it; rhythm runs transfers, term deposits and cards through it.
 
 ## Access
 
-Finacle is reached through `cbs_call` when enabled; GET only unless a rules
-entry allows more.
+Finacle is reached through `http_call` with `service: "finacle"`, on SSFB
+only, and only when the deployment turns the CBS gateway on. GET only.
 
-- `cbs_call` is on the SSFB investigators only, and only when the deployment
-  turns it on. If it is not available, record the gap and continue with the
-  admin APIs and databases.
-- The ordinary HTTP tool refuses `service: "finacle"`. Use `cbs_call`.
+- If the call answers not configured, the gateway is off: record the gap and
+  continue with the admin APIs and databases.
 - `path` is a plain path: letters, digits, `/`, `_`, `.` and `-`. No query
   string and no `..`.
-- The rules file ships empty, so today only GET works.
+- Any method but GET is refused, whatever the rules file says.
 
 Use it when the admin APIs and databases cannot answer, for example when a
 record was hard-deleted on the Aspora side but still exists in CBS.
@@ -39,8 +37,8 @@ record was hard-deleted on the Aspora side but still exists in CBS.
 | `/customer/api/retail/<cif>` | Customer details for a CIF. |
 
 ```
-cbs_call { path: "/misc/api/crm/savingaccount/<account_number>" }
-cbs_call { path: "/customer/api/retail/<cif>" }
+http_call { service: "finacle", path: "/misc/api/crm/savingaccount/<account_number>" }
+http_call { service: "finacle", path: "/customer/api/retail/<cif>" }
 ```
 
 `<account_number>` is the CBS account number from rhythm
@@ -49,8 +47,7 @@ you need the CIF, the savingaccount response gives it as `CustId`.
 
 A third path, `/custom/api/lvl2/finacle/script`, runs the bank's
 customer-account inquiry script (`CUST_ACCT_DET`). It is a POST, so it is
-refused until a rules entry allows it. Report the need for it instead of
-trying it.
+refused. Report the need for it instead of trying it.
 
 ## shivalik-cbs-go
 

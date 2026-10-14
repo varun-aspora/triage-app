@@ -164,20 +164,32 @@ describe('tool sets from HLD §2', () => {
 
   test('triage has no entity I/O and investigators have no report tool', () => {
     const triage = allowedTools('triage');
-    for (const t of ['sql_select', 'http_call', 'logs_search', 'cbs_call']) expect(triage.has(t)).toBe(false);
+    for (const t of ['sql_select', 'http_call', 'logs_search']) expect(triage.has(t)).toBe(false);
     expect(triage.has('finish_report')).toBe(true);
     expect(allowedTools('investigator', 'rtl').has('finish_report')).toBe(false);
   });
 
   test('SSFB extras only on SSFB investigators, CodeGraph only on deep and code_walker, repo tools on all three', () => {
-    expect(allowedTools('investigator', 'ssfb').has('cbs_call')).toBe(true);
-    expect(allowedTools('investigator', 'atspl').has('cbs_call')).toBe(false);
+    expect(allowedTools('investigator', 'ssfb').has('get_account_statement')).toBe(true);
+    expect(allowedTools('investigator', 'atspl').has('get_account_statement')).toBe(false);
+    expect(allowedTools('investigator', 'ssfb').has('cbs_call')).toBe(false);
     expect(allowedTools('investigator', 'ssfb').has('code_explore')).toBe(false);
     expect(allowedTools('investigator', 'rtl').has('repo_grep')).toBe(true);
     expect(allowedTools('investigator', 'rtl').has('repo_read')).toBe(true);
     expect(allowedTools('investigator_deep', 'rtl').has('code_explore')).toBe(true);
     expect(allowedTools('code_walker').has('sql_select')).toBe(false);
     expect(allowedTools('code_walker').has('repo_grep')).toBe(true);
+  });
+
+  test('locate is on the investigators and the single agent, propose_note also on the root', () => {
+    expect(allowedTools('triage').has('locate')).toBe(false);
+    expect(allowedTools('triage').has('propose_note')).toBe(true);
+    for (const agent of ['investigator', 'investigator_deep', 'agent'] as const) {
+      expect(allowedTools(agent, 'rtl').has('locate')).toBe(true);
+      expect(allowedTools(agent, 'rtl').has('propose_note')).toBe(true);
+    }
+    expect(allowedTools('code_walker').has('locate')).toBe(false);
+    expect(toolsOutside('Call `locate` on the id.', 'triage')).toEqual(['locate']);
   });
 
   test('mentionedTools and toolsOutside', () => {

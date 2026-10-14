@@ -37,7 +37,7 @@ import { ConnectorError } from '../connectors/types.ts';
 import { makeAuditLine } from '../gate/audit.ts';
 import { isExhausted } from '../gate/budget.ts';
 import { extractIdShaped } from '../gate/id-patterns.ts';
-import { redactModelFacing } from '../gate/redact.ts';
+import { redactForModel } from '../gate/redact.ts';
 import { extendScopeSet, inScope, type ScopeSet } from '../gate/scope.ts';
 import type { AuditDecision } from '../types/audit.ts';
 import { ENTITIES, KNOWN_ID_KEYS, type KnownIdKey, type KnownIds } from '../types/core.ts';
@@ -111,7 +111,9 @@ export type ResolveIdentityInput = v.InferOutput<ReturnType<typeof inputSchema>>
 const description =
   'Resolve ids that surfaced mid-run (for example a form id in a log line) through the fixed ID-chain lookups ' +
   'and add them to the run ID chain, so later investigator calls may use them. You pass ids only; the lookups ' +
-  'are fixed. Each id comes back with a status: in_chain (already known, re-resolved), linked (a lookup tied ' +
+  'are fixed. An id that appears in the requester\'s text (the thread, hints or an ask_requester answer) is in ' +
+  'the chain already as a lead, so other tools accept it; resolve it only to find the ids it leads to. ' +
+  'Each id comes back with a status: in_chain (already known, re-resolved), linked (a lookup tied ' +
   'it to the run customer, so it and the ids it led to were added), unverified (it resolved but nothing ties ' +
   'it to the run customer; it was NOT added and other tools will refuse it), not_found, or unreachable (a ' +
   'database did not answer; errors says why). Returns the updated id_chain with per-hop status and taken_at, ' +
@@ -368,7 +370,7 @@ async function runResolveIdentity(ctx: ToolContext, flue: RunInput): Promise<Too
     ...(errors.length > 0 ? { errors, errors_hint: HOP_ERRORS_HINT } : {}),
     ...(flue.data.entity_hint !== undefined ? { entity_hint: flue.data.entity_hint } : {}),
   };
-  return ok(JSON.parse(JSON.stringify(redactModelFacing(data))) as unknown, now);
+  return ok(JSON.parse(JSON.stringify(redactForModel(data, ctx.config))) as unknown, now);
 }
 
 // ------------------------------------------------------------ hop errors
@@ -410,7 +412,7 @@ const HOP_ENTITIES = [...new Set(Object.values(IDENTITY_STATEMENTS).map((s) => s
 
 export const toolModule: ToolModule = {
   name: RESOLVE_IDENTITY,
-  mounts: ['triage'],
+  mounts: ['triage', 'agent'],
   entities: 'all',
   enabled(ctx) {
     if (HOP_ENTITIES.some((e) => ctx.registry.isEnabled(e))) return { on: true };

@@ -166,7 +166,7 @@ export function createAskRequesterTool(ctx: ToolContext): ToolDefinition {
 
 export const toolModule: ToolModule = {
   name: ASK_REQUESTER,
-  mounts: ['triage'],
+  mounts: ['triage', 'agent'],
   entities: 'all',
   enabled: (ctx) => (ctx.config.budgets.maxAsksPerRun > 0 ? { on: true } : { on: false, reason: 'TRIAGE_MAX_ASKS_PER_RUN is 0' }),
   create: (ctx) => createAskRequesterTool(ctx),

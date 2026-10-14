@@ -302,7 +302,7 @@ describe('resolve_identity: schema', () => {
   });
 
   test('mounted on triage only, picked up by the generated tool list, create() and enabled() never touch deps', () => {
-    expect(toolModule.mounts).toEqual(['triage']);
+    expect(toolModule.mounts).toEqual(['triage', 'agent']);
     expect(allToolNames()).toContain(RESOLVE_IDENTITY);
     for (const { mount, entity } of conformanceCases(toolModule)) {
       const ctx = makeToolContext({ entity });
@@ -441,6 +441,19 @@ describe('resolve_identity: scope', () => {
       expect(denied.output.status).toBe('refused');
       expect(denied.output.message).toContain('scope');
     }
+  });
+
+  test('an id from the requester text is a seed lead: in scope already, and resolving it is in_chain and joins its hops (D96)', async () => {
+    const chain: IdChain = { ...BASE_CHAIN, leads: [{ value: STRANGER, kind: 'uuid', source: 'thread', label: 'Alphadesk user ID', status: 'seed' }] };
+    const h = setup({ chain, fixtures: STRANGER_FIXTURES });
+    expect((await selectForm(h, STRANGER)).output.status).toBe('ok');
+
+    const env = await call(h.tool, { ids: { aspora_user_id: STRANGER } });
+    expect(resultFor(env, 'aspora_user_id')?.status).toBe('in_chain');
+    expect(h.deps.idChain().ids.aspora_user_id).toBe(STRANGER);
+    // The leads survive the widen, and the ids the lead led to are usable.
+    expect(h.deps.idChain().leads).toEqual(chain.leads);
+    expect((await selectForm(h, STRANGER_FORM)).output.status).toBe('ok');
   });
 
   test('deny: a chain id sent next to a foreign id does not carry the foreign id in', async () => {

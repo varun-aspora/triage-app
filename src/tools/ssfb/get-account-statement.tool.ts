@@ -50,7 +50,7 @@ declare module '../_lib/context.ts' {
 
 export const SSFB = 'ssfb' as const;
 export const RHYTHM = 'rhythm';
-export const SSFB_MOUNTS: readonly Mount[] = Object.freeze(['investigator']);
+export const SSFB_MOUNTS: readonly Mount[] = Object.freeze(['investigator', 'agent']);
 
 /** Legs per page when the model does not choose (the script's detect default). */
 export const STATEMENT_PAGE_SIZE = 100;
@@ -190,7 +190,6 @@ export function decideStatement(base: string, rules: readonly ApiRule[], q: Stat
     return { ok: false, code: 'bad_base', message: 'the rhythm base URL could not be parsed' };
   }
   return decideHttp({
-    tool: 'http_call',
     service: RHYTHM,
     method: 'GET',
     path,
@@ -530,6 +529,7 @@ export const toolModule: ToolModule = Object.freeze({
   name: GET_ACCOUNT_STATEMENT,
   mounts: SSFB_MOUNTS,
   entities: [SSFB],
+  perEntity: true,
   enabled: () => ({ on: true }) as const,
   create(ctx: ToolContext): ToolDefinition {
     return defineTool({

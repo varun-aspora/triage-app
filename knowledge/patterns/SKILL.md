@@ -1,6 +1,6 @@
 ---
 name: patterns
-description: The known-issue index. patterns.json lists known failure signatures, each with a query recipe to try first, a tier hint and whether its root cause is confirmed. Use it when the classification carries a matched_pattern_id, or when the thread's error text looks like a known issue, to pick the first checks for an investigator brief.
+description: The known-issue index. patterns.json lists known failure signatures, each with a query recipe to try first, a tier hint and whether its root cause is confirmed. Use it when the classification carries a matched_pattern_id, or when the thread's error text looks like a known issue, to pick the first checks.
 metadata:
   kind: patterns
   entity: shared
@@ -13,8 +13,8 @@ metadata:
 `patterns.json`, next to this note, is the index of known issues. Read it with
 `read_skill_resource`. Ingress already ran a cheap match against it; when an
 entry matched, your instructions carry a "Known pattern lead" section with its
-first queries. You can also look an entry up yourself when a delegate's answer
-quotes an error text that looks familiar.
+first queries. You can also look an entry up yourself when a result quotes an
+error text that looks familiar.
 
 ## What a match means
 
@@ -41,27 +41,27 @@ quotes an error text that looks familiar.
 | `category` | The classifier category the entry belongs to. A match only counts in that category. |
 | `signature.regex` | Error texts that point at the entry. Matched case-insensitively. |
 | `signature.services` | Registry services (`entity:service`) the error comes from. Empty means any service. |
-| `entities` | The entities to brief. Send the recipe's part for each entity to that entity's investigator. |
-| `query_recipe` | The first checks, written as investigator tool calls. Copy them into the brief with the ids and window from the id chain. |
-| `first_queries` | Optional. The evidence to collect before any hypothesis, one `{entity, query}` per item. Put each entity's queries in that entity's brief on a `Lead:` line, marked as a lead to test, not an answer. |
-| `tier_hint` | The tier that usually settles it. `strong` means brief `investigate_<entity>_deep`, or escalate. |
+| `entities` | The entities in play. Each part of the recipe is for that entity. |
+| `query_recipe` | The first checks, written as calls to the entity's data tools. They run with the ids and window from the id chain. |
+| `first_queries` | Optional. The evidence to collect before any hypothesis, one `{entity, query}` per item. The Known pattern lead section lists them per entity. They are a lead to test, not an answer. |
+| `tier_hint` | The tier that usually settles it. `strong` means it usually needs the service code read as well as the data, and may need escalation. |
 | `stable` | True only when the source records a confirmed root cause. |
-| `source_ref` | The note and heading the entry came from. The investigator for that entity has the note; name it in the brief. |
+| `source_ref` | The note and heading the entry came from. Whoever reads that entity's data has the note (the investigator for that entity, when the run has one). |
 | `lesson` | Optional. What a reviewed case taught, from its actual root cause. It says where the answer was last time; this run still needs its own evidence. |
 
 The recipes use `<placeholder>` ids. Replace them with ids from the id chain,
-never with ids you guessed. A brief still needs everything the brief template
-asks for: ids, window, services, the question and what to return.
+never with ids you guessed. Every check still needs the ids, the window, the
+services and the question it answers.
 
 ## Out of reach: remittance orders
 
 The remittance order backend (`/appserver/v3/order`) is not mapped to any
-entity. None of the investigators can read it, and past cases about it ended in
+entity. No entity tool can read it, and past cases about it ended in
 escalation. When a thread points at it (entry `remittance-order-out-of-reach`):
 
 - Do not loop looking for another way in.
-- At most, ask `investigate_ssfb` to show from the account statement whether a
-  credit arrived in the window.
+- At most, show from the SSFB account statement whether a credit arrived in
+  the window.
 - List the order backend in `gaps`, and fill `action_owner` and
   `escalate_to` so the report says who takes it from here.
 

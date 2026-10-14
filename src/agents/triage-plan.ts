@@ -2,12 +2,14 @@
 // LLD 04 §2.4, §3; D3, D10, D22, D23, D42, D45).
 //
 // The first half is pure, so it can be unit tested under bun:
-// - triagePlan(init, config, registry): the tier model and its thinking
-//   level, the enabled entities (every one in TRIAGE_ENTITIES that the
-//   registry enables), the focus (the enabled entities request.hints.entities
-//   names) and the delegate and skill names the root mounts. Hints set where
-//   the root starts, not what it can reach: a case that starts in one entity
-//   often continues in another.
+// - triagePlan(init, config, registry, options): the shape (split or single,
+//   D109; a run keeps the shape its saved plan holds), the tier model, its
+//   thinking level and, in single shape, its compaction settings, the enabled
+//   entities (every one in TRIAGE_ENTITIES that the registry enables), the
+//   focus (the enabled entities request.hints.entities names) and the
+//   delegate and skill names the root mounts. Hints set where the root
+//   starts, not what it can reach: a case that starts in one entity often
+//   continues in another.
 // - finishDecision(retries, calledFinish, calledAsk, calledBlocked): what
 //   useAgentFinish does when a response would stop. A written report, an
 //   opened question or an opened block ends it; otherwise signal once, then
@@ -17,7 +19,8 @@
 // The second half wires one run:
 // - triageRuntime() loads config, registry and knowledge once per process,
 //   builds the connectors (real mode only), the sandbox factory and a run
-//   store handle, and installs the tripwire (the safety gate). Token usage
+//   store handle, and installs the tripwire (the safety gate) and, on the
+//   virtual sandbox, the script command scopes (D112). Token usage
 //   is counted by the usage meter that bootRuntime installs (D59);
 //   finish_report reads it through runUsageInMemory.
 //   configureTriageRuntime() replaces any of these (tests, eval driver).
@@ -34,7 +37,7 @@
 import type { AgentResponseToolCall, SandboxFactory, ThinkingLevel } from '@flue/runtime';
 import type { ToolDefinition } from '@flue/runtime/tool';
 import * as v from 'valibot';
-import { type Config, loadConfig } from '../config/env.ts';
+import { type AgentShape, type Config, loadConfig } from '../config/env.ts';
 import { KEY_BY_NAME } from '../config/keys.ts';
 import { loadRegistry, type Registry } from '../config/registry.ts';
 import { createCodegraphConnector } from '../connectors/codegraph.ts';
@@ -44,13 +47,14 @@ import { createQuickwitConnector } from '../connectors/quickwit/client.ts';
 import { createSqlConnector } from '../connectors/sql/pg-client.ts';
 import { type AuditSink, createJsonlAuditSink } from '../gate/audit-sink.ts';
 import { releaseObservedIds } from '../gate/scope.ts';
-import { modelForTier, thinkingForTier } from '../models.ts';
+import { type CompactionSettings, compactionFor, modelForTier, thinkingForTier } from '../models.ts';
 import { netTcpConnect } from '../ops/doctor/probes.ts';
 import { runTunnelPreflight } from '../ops/preflight.ts';
 import { releaseActions, ROOT_AGENT } from '../runlog/actions.ts';
 import { getRunStore } from '../runstore/index.ts';
 import type { RunStore } from '../runstore/types.ts';
 import { releaseConnectorFailures } from '../tools/_lib/connector-failures.ts';
+import { releaseLocateState } from '../tools/locate.tool.ts';
 import { createToolDeps, type ToolConnectors } from '../tools/_lib/context.ts';
 import { ASK_REQUESTER } from '../tools/ask-requester.tool.ts';
 import {
@@ -60,6 +64,7 @@ import {
   releaseFinishReport,
   type UsageReader,
 } from '../tools/finish-report.tool.ts';
+import { agentEntitiesOf } from '../tools/agent-entity.ts';
 import { STOP_BLOCKED } from '../tools/stop-blocked.tool.ts';
 import type { ToolContext, ToolDeps } from '../tools/types.ts';
 import type { TriageInit } from '../types/classification.ts';
@@ -68,9 +73,11 @@ import { type IdChain, IdChainSchema } from '../types/id-chain.ts';
 import { INPUT_ANSWER_CHAIN_ATTR, INPUT_ANSWER_SIGNAL } from '../types/input-request.ts';
 import { CODE_WALKER_NAME } from './delegates/code-walker.ts';
 import { investigatorName } from './delegates/investigator.ts';
+import { WORKER_NAME } from './delegates/worker.ts';
 import { type Escalation, type EscalationSnapshot, escalationFor, releaseEscalation } from './escalation.ts';
 import { sandboxFactory } from './sandbox.ts';
-import { currentKnowledge, type Knowledge, loadKnowledge } from './skills.ts';
+import { installScriptScope, releaseRootTools } from './script-commands.ts';
+import { currentKnowledge, type Knowledge, loadKnowledge, rootSkills } from './skills.ts';
 import { logRunEvent, setRunRedactionNames } from '../runlog/event-log.ts';
 import { runUsageInMemory } from '../usage/meter.ts';
 import { installedTripwire, installTripwire, tripwireOptionsFor } from './tripwire.ts';
@@ -97,18 +104,29 @@ export function overviewSkillName(entity: Entity): string {
 // ------------------------------------------------------------------ plan
 
 export type TriagePlan = {
+  /** split: the root and its investigators; single: one agent with every entity's tools and a worker (D109). */
+  readonly shape: AgentShape;
   readonly tier: Tier;
   /** modelForTier(tier_final), a 'provider/model' spec. */
   readonly model: string;
   readonly thinkingLevel: ThinkingLevel;
-  /** Every enabled entity, in ENTITIES order. Each gets its investigators. */
+  /** Single shape only: compactionFor(model). Missing means Flue's default. */
+  readonly compaction?: CompactionSettings;
+  /** Every enabled entity, in ENTITIES order. Split: each gets its investigators; single: the entity tools reach it. */
   readonly entities: readonly Entity[];
   /** The enabled entities request.hints.entities names, in ENTITIES order; empty with no hints. */
   readonly focus: readonly Entity[];
-  /** investigate_<e> and investigate_<e>_deep per entity, then code_walker. */
+  /** Split: investigate_<e> and investigate_<e>_deep per entity, then code_walker. Single: worker. */
   readonly delegates: readonly string[];
-  /** <e>-overview per entity, then patterns and frontend-routing. */
+  /** Split: <e>-overview per entity, then patterns and frontend-routing. Single: rootSkills(..., 'single'). */
   readonly skills: readonly string[];
+};
+
+export type TriagePlanOptions = {
+  /** The plan persisted by an earlier submission of the run. Its shape wins over TRIAGE_AGENT_SHAPE. */
+  readonly saved?: PlanState | null;
+  /** For the single shape's skill names. Defaults to the knowledge loaded at boot. */
+  readonly knowledge?: Knowledge;
 };
 
 /** Every entity in TRIAGE_ENTITIES that the registry enables. The root mounts investigators for all of them. */
@@ -135,19 +153,36 @@ export function focusEntitiesFor(
   return Object.freeze(enabled.filter((e) => named.has(e)));
 }
 
-export function triagePlan(init: TriageInit, config: Config, registry: Registry): TriagePlan {
+/**
+ * The run's shape: the saved plan's, so a run never changes shape between
+ * submissions, else TRIAGE_AGENT_SHAPE. A saved plan with no shape was
+ * written before the single shape existed, so it is split.
+ */
+export function shapeFor(config: Pick<Config, 'agentShape'>, saved?: PlanState | null): AgentShape {
+  if (saved === undefined || saved === null) return config.agentShape;
+  return saved.shape ?? 'split';
+}
+
+export function triagePlan(init: TriageInit, config: Config, registry: Registry, options: TriagePlanOptions = {}): TriagePlan {
+  const shape = shapeFor(config, options.saved);
   const tier = init.classification.tier_final;
+  const model = modelForTier(tier, config);
   const entities = enabledEntitiesFor(config, registry);
   const focus = focusEntitiesFor(init, entities, registry);
-  const delegates = [
-    ...entities.flatMap((e) => [investigatorName(e), investigatorName(e, true)]),
-    CODE_WALKER_NAME,
-  ];
-  const skills = [...entities.map(overviewSkillName), PATTERNS_SKILL, FRONTEND_ROUTING_SKILL];
+  const split = shape === 'split';
+  const delegates = split
+    ? [...entities.flatMap((e) => [investigatorName(e), investigatorName(e, true)]), CODE_WALKER_NAME]
+    : [WORKER_NAME];
+  const skills = split
+    ? [...entities.map(overviewSkillName), PATTERNS_SKILL, FRONTEND_ROUTING_SKILL]
+    : rootSkills(entities, options.knowledge ?? currentKnowledge(), 'single').map((s) => s.name);
+  const compaction = split ? undefined : compactionFor(model, config);
   return Object.freeze({
+    shape,
     tier,
-    model: modelForTier(tier, config),
+    model,
     thinkingLevel: thinkingForTier(tier, config),
+    ...(compaction !== undefined ? { compaction } : {}),
     entities,
     focus,
     delegates: Object.freeze(delegates),
@@ -155,8 +190,24 @@ export function triagePlan(init: TriageInit, config: Config, registry: Registry)
   });
 }
 
+/**
+ * The names of the mounted agent-mount entity tools (D110), grouped by the
+ * entities each serves, in mount order. Each of the given entities gets a
+ * list, empty when none of its tools is mounted, so the instruction never
+ * falls back to names that are not mounted.
+ */
+export function entityToolNames(tools: readonly ToolDefinition[], entities: readonly Entity[] = []): Partial<Record<Entity, string[]>> {
+  const byEntity: Partial<Record<Entity, string[]>> = Object.fromEntries(entities.map((e) => [e, []]));
+  for (const tool of tools) {
+    for (const entity of agentEntitiesOf(tool)?.entities ?? []) (byEntity[entity] ??= []).push(tool.name);
+  }
+  return byEntity;
+}
+
 /** The plan as it goes into persistent state (JSON only). */
 export type PlanState = {
+  /** Missing in plans saved before the single shape existed; those runs are split. */
+  readonly shape?: AgentShape;
   readonly tier: Tier;
   readonly model: string;
   readonly thinking_level: ThinkingLevel;
@@ -168,6 +219,7 @@ export type PlanState = {
 
 export function planState(plan: TriagePlan): PlanState {
   return {
+    shape: plan.shape,
     tier: plan.tier,
     model: plan.model,
     thinking_level: plan.thinkingLevel,
@@ -419,6 +471,8 @@ function buildRuntime(o: TriageRuntimeOptions): TriageRuntime {
       tripwireOptionsFor(config, registry, audit, { interfaceOf: (runId) => runInterfaces.get(runId) ?? 'cli' }),
     );
   }
+  // Only the virtual sandbox has script commands (D112).
+  if (config.sandbox.provider === 'virtual') installScriptScope();
   const repoCommit = o.repoCommit ?? (real ? commitReaderFor({ config, runner: createExecRunner() }) : undefined);
   return Object.freeze({
     config,
@@ -446,7 +500,7 @@ function knowledgeFor(config: Config): Knowledge {
 
 /**
  * The real connectors. Built only when mock mode is off; none of them
- * connects or spawns until a tool calls it. cbs_call builds its own per run.
+ * connects or spawns until a tool calls it. http_call builds the CBS connector per run.
  */
 export function realConnectors(config: Config, registry: Registry): ToolConnectors {
   return Object.freeze({
@@ -550,7 +604,11 @@ export function runDepsFor(runId: RunId, init: TriageInit, rt: TriageRuntime = t
   return deps;
 }
 
-/** The ToolContext of the triage mount: no entity, the run id by closure. */
+/**
+ * The ToolContext of the root's own tools: the run id by closure and no
+ * entity. The agent mount builds its per-entity tools from it with the
+ * entity set.
+ */
 export function triageToolContext(runId: RunId, deps: ToolDeps, rt: TriageRuntime = triageRuntime()): ToolContext {
   return Object.freeze({ runId, entity: null, agent: ROOT_AGENT, config: rt.config, registry: rt.registry, deps });
 }
@@ -559,8 +617,9 @@ export function triageToolContext(runId: RunId, deps: ToolDeps, rt: TriageRuntim
  * Drops the run's in-process state once a response settles: its deps, the
  * escalation store, the connector failure record, the synthesis count, the
  * written-report, opened-question and opened-block marks, the correlation ids
- * seen in logs results, the run action log and repeat cache (D79) and the
- * tripwire's pending task decisions. The metered usage is dropped by the
+ * seen in logs results, the run action log and repeat cache (D79), locate's
+ * probe count and schema catalogues (D98) and the tripwire's pending task
+ * decisions. The metered usage is dropped by the
  * settle code after it is stored (D59). Persistent state and the run store
  * keep what matters.
  */
@@ -574,6 +633,8 @@ export function settleRun(runId: RunId): void {
   releaseConnectorFailures(runId);
   releaseFinishReport(runId);
   releaseObservedIds(runId);
+  releaseLocateState(runId);
   releaseActions(runId);
+  releaseRootTools(runId);
   installedTripwire()?.forgetRun(runId);
 }

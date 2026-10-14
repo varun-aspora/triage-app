@@ -84,7 +84,7 @@ export type LogsQuery = {
   readonly offset: number;
   /** The extra columns asked for (already in fields). */
   readonly columns: readonly string[];
-  /** search only: return whole documents. */
+  /** search only: return whole documents, at most RAW_MAX_HITS per page. */
   readonly raw: boolean;
   /** The service value used in the query; absent when the query has no service clause. */
   readonly service?: string;
@@ -106,6 +106,8 @@ export const MAX_COLUMNS = 10;
 export const PAGE_SIZE = 250;
 /** A query over this many hits returns early (D76); no page starts at or past it. */
 export const HIT_LIMIT = 5_000;
+/** Most hits one raw page returns: whole documents are large (plan 16 S1.2). */
+export const RAW_MAX_HITS = 20;
 
 /**
  * The owner's SSFB noise filter: drops kong, kafka and access lines unless
@@ -277,11 +279,22 @@ function build(cfg: QuickwitGateConfig, input: LogsQueryInput): LogsQuery {
 
   const shape = modeOf(cfg, allowed, input);
 
-  let maxHits = Math.min(PAGE_SIZE, cfg.maxHits);
-  if (input.max_hits !== undefined) {
-    if (!Number.isInteger(input.max_hits) || input.max_hits < 1) refuse('max_hits must be a whole number of at least 1');
-    if (input.max_hits > maxHits) notes.push(`max_hits clamped to ${maxHits}, the page size for ${cfg.entity}`);
-    maxHits = Math.min(input.max_hits, maxHits);
+  if (input.max_hits !== undefined && (!Number.isInteger(input.max_hits) || input.max_hits < 1)) {
+    refuse('max_hits must be a whole number of at least 1');
+  }
+  const pageSize = Math.min(PAGE_SIZE, cfg.maxHits);
+  // Whole documents carry every field, so a raw page is kept small.
+  const limit = shape.raw ? Math.min(RAW_MAX_HITS, pageSize) : pageSize;
+  const maxHits = Math.min(input.max_hits ?? limit, limit);
+  if (input.max_hits === undefined) {
+    // Nothing was asked, so nothing is clamped; a raw page is just smaller.
+    if (limit < pageSize) notes.push(`raw pages hold at most ${limit} hits; name columns to read more per page`);
+  } else if (input.max_hits > limit) {
+    notes.push(
+      limit < pageSize
+        ? `max_hits clamped to ${limit} because raw returns whole documents; name columns instead to read more hits per page`
+        : `max_hits clamped to ${limit}, the page size for ${cfg.entity}`,
+    );
   }
 
   const query = parts.join(' AND ');

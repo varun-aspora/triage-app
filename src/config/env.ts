@@ -16,8 +16,11 @@ import {
   DEPLOY_MODE_KEY,
   HOME_KEY,
   KEY_BY_NAME,
+  AGENT_SHAPES,
+  MODEL_REDACTION_MODES,
   PROVIDER_KEYS,
   RENAMED_KEYS,
+  SCOUT_MODES,
   THINKING_LEVELS,
   TRACING_MODES,
   isEntityKey,
@@ -33,11 +36,16 @@ export type GitProtocol = 'ssh' | 'https';
 export type UiEnv = 'production' | 'non-production';
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 export type TracingMode = (typeof TRACING_MODES)[number];
+export type AgentShape = (typeof AGENT_SHAPES)[number];
+export type ModelRedaction = (typeof MODEL_REDACTION_MODES)[number];
+type ScoutMode = (typeof SCOUT_MODES)[number];
 
 export type Config = {
   readonly home: string;
   readonly display: { readonly envLabel?: string };
   readonly entities: readonly string[];
+  /** D109: the shape a new run starts with; a run keeps the shape it started with. */
+  readonly agentShape: AgentShape;
   readonly paths: {
     readonly resourcesDir: string;
     readonly dataDir: string;
@@ -45,6 +53,8 @@ export type Config = {
     readonly runsDir: string;
     readonly reposDir?: string;
     readonly knowledgeDir: string;
+    /** D99: propose_note output; later runs never read it. */
+    readonly proposalsDir: string;
     readonly fixturesDir: string;
   };
   readonly db: {
@@ -70,6 +80,14 @@ export type Config = {
     readonly maxTasksPerRun: number;
     /** Questions to the requester per run (ask_requester); 0 leaves the tool unmounted. */
     readonly maxAsksPerRun: number;
+    /** D109: tool calls per worker in the single shape. */
+    readonly maxToolCallsPerWorker: number;
+    /** D97: new ids one field of one result may add as derived leads. */
+    readonly maxDerivedPerField: number;
+    /** D97: how deep derived leads may chain from a seed lead. */
+    readonly maxLeadDepth: number;
+    /** S1.4: the root agent's context is compacted back under this many tokens. */
+    readonly maxPromptTokens: number;
     readonly maxResponseBytesPerCall: number;
     readonly maxBytesPerRun: number;
     /** D90: bytes of one sql_select result the model sees; the full rows are staged. */
@@ -91,12 +109,23 @@ export type Config = {
     /** D57: attempts per entity DB call on a lost connection; the wait doubles from delayMs up to maxDelayMs, with jitter. */
     readonly retry: { readonly attempts: number; readonly delayMs: number; readonly maxDelayMs: number };
   };
+  /** Plan 15 P3, P4, P6. */
+  readonly discovery: {
+    /** D98: count probes per run, across every locate call; timeoutMs is the statement timeout of one probe. */
+    readonly locate: { readonly maxProbesPerRun: number; readonly maxColumnsPerDb: number; readonly timeoutMs: number };
+    /** P4: locate each seed lead before the first brief. */
+    readonly scout: boolean;
+    /** P6: refused or zero-hit calls in a row before the stuck note. */
+    readonly stuckAfter: number;
+  };
   readonly models: {
     readonly decision?: string;
     readonly tierCheap?: string;
     readonly tierMid?: string;
     readonly tierStrong?: string;
     readonly codeWalker?: string;
+    /** D108: the single shape's worker; blank means the run's tier model. */
+    readonly worker?: string;
     readonly thinkingCheap: ThinkingLevel;
     readonly thinkingMid: ThinkingLevel;
     readonly thinkingStrong: ThinkingLevel;
@@ -133,10 +162,14 @@ export type Config = {
     readonly provider: SandboxProvider;
     readonly python: boolean;
     readonly timeoutMs: number;
+    /** D105: the most the run's sandbox directory may hold, in MB. */
+    readonly quotaMb: number;
     readonly e2bApiKey?: string;
     readonly daytonaApiKey?: string;
     readonly daytonaApiUrl?: string;
   };
+  /** D107: off gives the model and the sandbox raw values; the check on what leaves the run stays. */
+  readonly redaction: { readonly model: ModelRedaction };
   readonly code: { readonly codegraphBin: string; readonly qwBin: string; readonly syncBeforeQuery: boolean };
   readonly git: { readonly protocol: GitProtocol; readonly host: string; readonly org: string; readonly httpsToken?: string };
   readonly repos: { readonly syncIntervalMs: number; readonly syncInterfaces: readonly Interface[] };
@@ -195,6 +228,7 @@ export function configFromRecord(
     home: root,
     display: { envLabel: r.str('TRIAGE_ENV_LABEL') },
     entities: r.csv('TRIAGE_ENTITIES').map((e) => e.toLowerCase()),
+    agentShape: r.enumOf<AgentShape>('TRIAGE_AGENT_SHAPE'),
     paths: {
       resourcesDir: join(root, 'resources'),
       dataDir: r.requiredPath('TRIAGE_DATA_DIR'),
@@ -202,6 +236,7 @@ export function configFromRecord(
       runsDir: r.requiredPath('TRIAGE_RUNS_DIR'),
       reposDir: r.path('TRIAGE_REPOS_DIR'),
       knowledgeDir: r.requiredPath('TRIAGE_KNOWLEDGE_DIR'),
+      proposalsDir: r.requiredPath('TRIAGE_PROPOSALS_DIR'),
       fixturesDir: r.requiredPath('TRIAGE_FIXTURES_DIR'),
     },
     db: {
@@ -230,6 +265,10 @@ export function configFromRecord(
       maxCodeCallsPerRun: r.requiredInt('TRIAGE_MAX_CODE_CALLS_PER_RUN'),
       maxTasksPerRun: r.requiredInt('TRIAGE_MAX_TASKS_PER_RUN'),
       maxAsksPerRun: r.requiredInt('TRIAGE_MAX_ASKS_PER_RUN'),
+      maxToolCallsPerWorker: r.requiredInt('TRIAGE_MAX_TOOL_CALLS_PER_WORKER'),
+      maxDerivedPerField: r.requiredInt('TRIAGE_MAX_DERIVED_PER_FIELD'),
+      maxLeadDepth: r.requiredInt('TRIAGE_MAX_LEAD_DEPTH'),
+      maxPromptTokens: r.requiredInt('TRIAGE_MAX_PROMPT_TOKENS'),
       maxResponseBytesPerCall: r.requiredInt('TRIAGE_MAX_RESPONSE_BYTES_PER_CALL'),
       maxBytesPerRun: r.requiredInt('TRIAGE_MAX_BYTES_PER_RUN'),
       maxModelBytesPerCall: r.requiredInt('TRIAGE_MAX_MODEL_BYTES_PER_CALL'),
@@ -251,12 +290,22 @@ export function configFromRecord(
         maxDelayMs: r.requiredInt('TRIAGE_SQL_RETRY_MAX_DELAY_MS'),
       },
     },
+    discovery: {
+      locate: {
+        maxProbesPerRun: r.requiredInt('TRIAGE_LOCATE_MAX_PROBES_PER_RUN'),
+        maxColumnsPerDb: r.requiredInt('TRIAGE_LOCATE_MAX_COLUMNS_PER_DB'),
+        timeoutMs: r.requiredInt('TRIAGE_LOCATE_TIMEOUT_MS'),
+      },
+      scout: r.enumOf<ScoutMode>('TRIAGE_SCOUT') === 'on',
+      stuckAfter: r.requiredInt('TRIAGE_STUCK_AFTER'),
+    },
     models: {
       decision: r.str('MODEL_DECISION'),
       tierCheap: r.str('MODEL_TIER_CHEAP'),
       tierMid: r.str('MODEL_TIER_MID'),
       tierStrong: r.str('MODEL_TIER_STRONG'),
       codeWalker: r.str('MODEL_CODE_WALKER'),
+      worker: r.str('MODEL_WORKER'),
       thinkingCheap: r.enumOf<ThinkingLevel>('MODEL_THINKING_CHEAP'),
       thinkingMid: r.enumOf<ThinkingLevel>('MODEL_THINKING_MID'),
       thinkingStrong: r.enumOf<ThinkingLevel>('MODEL_THINKING_STRONG'),
@@ -294,10 +343,12 @@ export function configFromRecord(
       provider: r.enumOf<SandboxProvider>('TRIAGE_SANDBOX_PROVIDER'),
       python: r.bool('TRIAGE_SANDBOX_PYTHON'),
       timeoutMs: r.requiredInt('TRIAGE_SANDBOX_TIMEOUT_MS'),
+      quotaMb: r.requiredInt('TRIAGE_SANDBOX_QUOTA_MB'),
       e2bApiKey: r.str('E2B_API_KEY'),
       daytonaApiKey: r.str('DAYTONA_API_KEY'),
       daytonaApiUrl: r.str('DAYTONA_API_URL'),
     },
+    redaction: { model: r.enumOf<ModelRedaction>('TRIAGE_MODEL_REDACTION') },
     code: {
       codegraphBin: r.requiredStr('CODEGRAPH_BIN'),
       qwBin: r.requiredStr('QW_BIN'),

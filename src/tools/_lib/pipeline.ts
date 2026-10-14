@@ -2,8 +2,18 @@
 // in one place (HLD 02 §2 and §3, D2, D19, D20, D26, D27, D42, D45):
 //
 //   signal -> repeat -> budget -> scope -> gate -> not configured
-//   -> mock or real -> audit -> stage to /data -> model-facing redaction
-//   -> envelope
+//   -> mock or real -> audit -> derived leads -> stage to /data
+//   -> model-facing redaction -> result cap -> envelope
+//
+// Derived leads (D97): a tool that sets spec.leads hands over the records of
+// its full result. When the call was tied to an id in scope, every new
+// id-shaped value in them joins the run's chain (deriveLeads in
+// src/gate/scope.ts, addLeads in context.ts). Each added lead and each field
+// that added none is written to the run event log, values masked.
+//
+// Model-facing redaction follows TRIAGE_MODEL_REDACTION (D107, redactForModel):
+// off, the default, masks credentials only, so the model reads raw data; on
+// is the model-facing profile.
 //
 // Repeat (D79): a tool that sets spec.repeat opts into the run's repeat
 // cache (src/runlog/actions.ts). An exact repeat of an earlier ok call in the
@@ -25,27 +35,46 @@
 //
 // Staging is owned here and nowhere else: stageRows() writes the full result
 // to /data/<toolCallId>.json in the sandbox. On the virtual sandbox it writes
-// model-facing text; e2b and daytona leave the machine, so they get
-// persisted-profile text only (D45).
+// what the model sees: raw with TRIAGE_MODEL_REDACTION=off (credentials still
+// masked), model-facing text with on. e2b and daytona leave the machine, so
+// they get persisted-profile text only (D45).
+//
+// The result cap (D104) is owned here too: after redaction, a result whose
+// JSON is over TRIAGE_MAX_MODEL_BYTES_PER_CALL is replaced by a summary
+// (capModelResult) that keeps the counts, the first few rows or hits and the
+// staged_file path, and says how to read the rest with read_staged or how
+// to narrow the call. runCodeTool calls the same helper, so repo_* results
+// are capped the same way.
+//
+// Stuck note (P6): each agent of the run (the root, each investigator, the
+// worker) has a count of calls in a row that were refused by scope or the
+// tool's gate or found nothing (spec.empty, or no mock fixture). A call that
+// found something resets it; budget refusals, connector errors and not
+// configured leave it as it is. When it reaches TRIAGE_STUCK_AFTER, and at
+// every multiple after that, the result gets a note telling the model to stop
+// trying variations and say what is missing, and a 'stuck' run event records
+// the counts. There is no hard stop: the model decides.
 
 import type { FlueLogger, Sandbox } from '@flue/runtime';
 import type { Config } from '../../config/env.ts';
 import { errorText, excerpt, safeErrorText, scrubSecrets, stripAddresses } from '../../connectors/error-text.ts';
 import { makeAuditLine } from '../../gate/audit.ts';
 import { isExhausted } from '../../gate/budget.ts';
-import { checkScope, type LogsMode } from '../../gate/scope.ts';
+import { checkScope, deriveLeads, type LogsMode, maskId, type LeadCall } from '../../gate/scope.ts';
+import type { RowKeys } from '../../gate/sql.ts';
 import { classifySqlState, isSqlState, maskSqlValues, sqlErrorMessage, type SqlStateInfo } from '../../gate/sql-errors.ts';
-import { redactModelFacing, redactPersisted } from '../../gate/redact.ts';
+import { redactForModel, redactPersisted } from '../../gate/redact.ts';
 import { FixtureMissError } from '../../mock/errors.ts';
 import { keyString } from '../../mock/key.ts';
 import type { FixtureEntity, FixtureKind, SemanticKey } from '../../mock/types.ts';
-import { findRepeat, rememberRepeat } from '../../runlog/actions.ts';
+import { findRepeat, rememberRepeat, ROOT_AGENT } from '../../runlog/actions.ts';
+import { logRunEvent } from '../../runlog/event-log.ts';
 import type { AuditDecision, AuditTransport } from '../../types/audit.ts';
 import type { Entity } from '../../types/core.ts';
 import { notConfigured, ok, refused, type ToolEnvelope, unreachable } from '../../types/tool-result.ts';
-import type { ToolContext } from '../types.ts';
+import type { ToolContext, ToolDeps } from '../types.ts';
 import { recordConnectorFailure } from './connector-failures.ts';
-import { scopeSetOf } from './context.ts';
+import { addLeads, scopeSetOf } from './context.ts';
 
 // ------------------------------------------------------------------ types
 
@@ -65,7 +94,7 @@ export const PIPELINE_STEPS = [
 ] as const;
 export type PipelineStep = (typeof PIPELINE_STEPS)[number];
 
-/** A tool-specific gate result. rule_index and action go on the audit line (http_call, cbs_call). */
+/** A tool-specific gate result. rule_index and action go on the audit line (http_call). */
 export type GateDecision =
   | { readonly ok: true; readonly rule_index?: number | 'default'; readonly action?: 'allow' | 'block' }
   | {
@@ -83,7 +112,12 @@ export type GateDecision =
  * the value is set. Only envName ever reaches an audit line; the value never
  * reaches this module.
  */
-export type BackingRef = { readonly envName: string; readonly status: string };
+export type BackingRef = {
+  readonly envName: string;
+  readonly status: string;
+  /** Why it is off when that is more than a blank env var. Goes to the model and the audit line. */
+  readonly reason?: string;
+};
 
 export type ScopeOptions = {
   /** What to check. Defaults to spec.input. */
@@ -92,10 +126,8 @@ export type ScopeOptions = {
   /** From the SQL parser: true when the select list is aggregate-only. */
   readonly sqlAggregateOnly?: boolean;
   readonly logsMode?: LogsMode;
-  /** Correlation ids and journey keys seen in earlier results of the run (D77). */
+  /** Correlation ids seen in earlier results of the run (D77). */
   readonly observed?: ReadonlySet<string>;
-  /** From the SQL parser: the $n params compared only to a device_id or verification_id column (Q13). */
-  readonly sqlJourneyParams?: readonly number[];
   /** The query reads only its service's scope_exempt_tables (D89). */
   readonly sqlConfigTablesOnly?: boolean;
 };
@@ -128,6 +160,12 @@ export type IoToolSpec<K extends FixtureKind, T> = {
   readonly render: (value: T) => unknown;
   /** The full result to stage as /data/<toolCallId>.json. Row-returning tools only. */
   readonly stage?: (value: T) => unknown;
+  /**
+   * The records of the full result to read for derived leads (D97), with the
+   * SQL parser's row keys for sql_select. Leave it out for tools whose
+   * results never add ids.
+   */
+  readonly leads?: (value: T) => { readonly records: readonly unknown[]; readonly rowKeys?: RowKeys };
   /** Audit summary for an allowed call. Passes the persisted profile. */
   readonly summary?: (value: T) => string;
   /** Count-only tools (decrypt_fields, encrypt_lookup_value): values handled. */
@@ -141,6 +179,14 @@ export type IoToolSpec<K extends FixtureKind, T> = {
    * read of "now", a write). Leave it out for tools with side effects.
    */
   readonly repeat?: () => unknown;
+  /**
+   * The tool's own summary when the result is over the cap (D104). Leave it
+   * out for the generic one. It passes the model-facing redaction, and gets
+   * the over_cap fields and the note added.
+   */
+  readonly overCap?: (value: T, cap: number) => unknown;
+  /** True when the call found nothing (0 rows, 0 hits, a 404), for the stuck count (P6). Left out, an ok result counts as found. */
+  readonly empty?: (value: T) => boolean;
 };
 
 /** The sandbox surface staging needs: a harness tool's harness. */
@@ -160,7 +206,8 @@ export type IoRunContext = {
 
 // ------------------------------------------------------------------ staging
 
-export type StageProfile = 'model_facing' | 'persisted';
+/** raw: TRIAGE_MODEL_REDACTION=off on the virtual sandbox, credentials still masked (D107). */
+export type StageProfile = 'raw' | 'model_facing' | 'persisted';
 
 export type StageResult =
   | { readonly staged: true; readonly path: string; readonly profile: StageProfile }
@@ -176,9 +223,9 @@ export type StageOptions = {
 const REMOTE_SANDBOXES: ReadonlySet<string> = new Set(['e2b', 'daytona']);
 
 /** The profile staged text passes for the configured sandbox provider (D45). */
-export function stageProfileFor(config: Pick<Config, 'sandbox'>): StageProfile | null {
+export function stageProfileFor(config: Pick<Config, 'sandbox' | 'redaction'>): StageProfile | null {
   const provider = config.sandbox.provider;
-  if (provider === 'virtual') return 'model_facing';
+  if (provider === 'virtual') return config.redaction.model === 'off' ? 'raw' : 'model_facing';
   if (REMOTE_SANDBOXES.has(provider)) return 'persisted';
   // local is refused by config and the doctor; never stage into it.
   return null;
@@ -199,7 +246,7 @@ export async function stageRows(
   harness: StagingHarness | undefined,
   toolCallId: string,
   rows: unknown,
-  config: Pick<Config, 'sandbox'>,
+  config: Pick<Config, 'sandbox' | 'redaction'>,
   opts: StageOptions = {},
 ): Promise<StageResult> {
   if (harness === undefined) return { staged: false, reason: 'no harness' };
@@ -211,7 +258,7 @@ export async function stageRows(
     const safe =
       profile === 'persisted'
         ? redactPersisted(rows, opts.names !== undefined ? { names: opts.names } : {}).value
-        : redactModelFacing(rows);
+        : redactForModel(rows, config);
     const text = JSON.stringify(safe ?? null);
     // harness.sandbox throws when the agent has no sandbox, so read it here.
     await harness.sandbox.writeFile(path, text);
@@ -307,6 +354,18 @@ export async function runIoTool<K extends FixtureKind, T>(
   spec: IoToolSpec<K, T>,
   ctx: IoRunContext,
 ): Promise<ToolEnvelope> {
+  const seen: { outcome: StuckOutcome } = { outcome: 'other' };
+  const envelope = await runPipeline(spec, ctx, (outcome) => {
+    seen.outcome = outcome;
+  });
+  return countStuck(ctx.toolContext, spec.tool, envelope, seen.outcome);
+}
+
+async function runPipeline<K extends FixtureKind, T>(
+  spec: IoToolSpec<K, T>,
+  ctx: IoRunContext,
+  mark: (outcome: StuckOutcome) => void,
+): Promise<ToolEnvelope> {
   const step = (name: PipelineStep): void => ctx.onStep?.(name);
   const { toolContext } = ctx;
 
@@ -355,15 +414,15 @@ export async function runIoTool<K extends FixtureKind, T>(
 
   const finish = <V>(build: (safe: V) => ToolEnvelope, value: V): ToolEnvelope => {
     step('redact');
-    const safe = redactModelFacing(value);
+    const safe = redactForModel(value, toolContext.config);
     step('envelope');
     return build(safe);
   };
   const refuse = (text: string): ToolEnvelope => finish((t) => refused(t, now), text);
-  const notConfiguredEnvelope = (): ToolEnvelope =>
+  const notConfiguredEnvelope = (reason?: string): ToolEnvelope =>
     entity === null
       ? refuse(`not configured for ${spec.service}`)
-      : finish(() => notConfigured(entity, spec.service, now), '');
+      : finish(() => notConfigured(entity, spec.service, now, reason), '');
 
   // 1. Repeat: an exact repeat of an earlier ok call in this run. A spent run
   // budget skips it, so the model reads the budget message instead.
@@ -373,6 +432,7 @@ export async function runIoTool<K extends FixtureKind, T>(
     const earlier = deps.budget.state().exhausted ? undefined : findRepeat(toolContext.runId, repeatKey, now());
     if (earlier !== undefined) {
       audit({ decision: 'allow', exit: 'reused', transport: noIoTransport, summary: `${spec.tool} ${where}: result reused` });
+      mark(stuckStateOf(deps).emptyRepeats.has(repeatKey) ? 'empty' : 'found');
       return earlier;
     }
   }
@@ -399,15 +459,13 @@ export async function runIoTool<K extends FixtureKind, T>(
       ...(options.sqlAggregateOnly !== undefined ? { sqlAggregateOnly: options.sqlAggregateOnly } : {}),
       ...(options.logsMode !== undefined ? { logsMode: options.logsMode } : {}),
       ...(options.observed !== undefined ? { observed: options.observed } : {}),
-      ...(options.sqlJourneyParams !== undefined ? { sqlJourneyParams: options.sqlJourneyParams } : {}),
       ...(options.sqlConfigTablesOnly !== undefined ? { sqlConfigTablesOnly: options.sqlConfigTablesOnly } : {}),
+      maxLeadDepth: toolContext.config.budgets.maxLeadDepth,
     });
     if (!result.ok) {
       audit({ decision: 'deny', exit: 'refused', transport: noIoTransport, reason: result.reason });
-      return refuse(
-        `Refused: ${result.reason}. Use only ids from the brief or the ID chain; ` +
-          "for counts across customers use scope: 'systemic'.",
-      );
+      mark('refused');
+      return refuse(`Refused: ${result.reason}. ${result.next}`);
     }
   }
 
@@ -418,6 +476,7 @@ export async function runIoTool<K extends FixtureKind, T>(
     gate = spec.gate();
     if (!gate.ok) {
       audit({ decision: 'deny', exit: 'refused', transport: noIoTransport, reason: gate.reason, gate });
+      mark('refused');
       return refuse(gate.message);
     }
   }
@@ -429,10 +488,10 @@ export async function runIoTool<K extends FixtureKind, T>(
       decision: 'deny',
       exit: 'not_configured',
       transport: noIoTransport,
-      reason: `not configured: ${spec.backing.envName} is blank`,
+      reason: `not configured: ${spec.backing.reason ?? `${spec.backing.envName} is blank`}`,
       gate,
     });
-    return notConfiguredEnvelope();
+    return notConfiguredEnvelope(spec.backing.reason);
   }
 
   // 6. Mock or real. resolveIo never calls real() in mock mode (D19).
@@ -544,6 +603,8 @@ export async function runIoTool<K extends FixtureKind, T>(
 
   if (outcome.fixture_miss) {
     audit({ decision: 'allow', exit: 'fixture_miss', transport: 'mock', summary: `${spec.tool} ${where}: no fixture`, gate });
+    // The text tells the model to treat it as no data, so it counts as found nothing.
+    mark('empty');
     return refuse(`No ${fixture.kind} fixture for this call (mock mode). Treat it as no data and record the gap.`);
   }
 
@@ -557,25 +618,295 @@ export async function runIoTool<K extends FixtureKind, T>(
     gate,
   });
 
-  // 8. Stage the full result. A failure is logged and does not fail the call.
-  let stagedPath: string | undefined;
-  if (spec.stage !== undefined) {
-    step('stage');
-    const staged = await stageRows(ctx.harness, ctx.toolCallId, spec.stage(value), toolContext.config, {
-      names,
-      log: ctx.log,
-    });
-    if (staged.staged) stagedPath = staged.path;
+  const empty = spec.empty?.(value) === true;
+  mark(empty ? 'empty' : 'found');
+  if (repeatKey !== undefined) {
+    const emptyRepeats = stuckStateOf(deps).emptyRepeats;
+    if (empty) emptyRepeats.add(repeatKey);
+    else emptyRepeats.delete(repeatKey);
   }
 
-  // 9. Model-facing redaction, then 10. the envelope.
+  // 8. Derived leads from the full result (D97).
+  if (spec.leads !== undefined && spec.scope !== 'skip') {
+    const { records, rowKeys } = spec.leads(value);
+    const scope = spec.scope;
+    const call: LeadCall = {
+      tool: spec.tool,
+      toolCallId: ctx.toolCallId,
+      params: scope.params !== undefined ? scope.params : spec.input,
+      ...(rowKeys !== undefined ? { rowKeys } : {}),
+      ...(scope.systemic !== undefined ? { systemic: scope.systemic } : {}),
+    };
+    recordLeads(toolContext, call, records);
+  }
+
+  // 9. Stage the full result. A failure is logged and does not fail the call.
+  let staged: StageResult | undefined;
+  if (spec.stage !== undefined) {
+    step('stage');
+    staged = await stageRows(ctx.harness, ctx.toolCallId, spec.stage(value), toolContext.config, { names, log: ctx.log });
+  }
+  const stagedPath = staged?.staged === true ? staged.path : undefined;
+
+  // 10. Model-facing redaction, the result cap (D104), then 11. the envelope.
+  // An over-cap result of a tool that stages nothing gets its rendered value
+  // staged now, so the summary can still point at a file.
   const rendered = spec.render(value);
   const data = stagedPath !== undefined && isPlainObject(rendered) ? { ...rendered, staged_file: stagedPath } : rendered;
-  const envelope = finish((safe) => ok(asJson(safe), now), data);
+  step('redact');
+  const safe = asJson(redactForModel(data, toolContext.config));
+  const cap = toolContext.config.budgets.maxModelBytesPerCall;
+  const overCap = spec.overCap;
+  const capped = await fitModelResult(safe, {
+    cap,
+    ...(stagedPath !== undefined ? { stagedFile: stagedPath } : {}),
+    ...(staged === undefined
+      ? { stage: () => stageRows(ctx.harness, ctx.toolCallId, rendered, toolContext.config, { names, log: ctx.log }) }
+      : !staged.staged
+        ? { notStaged: staged.reason }
+        : {}),
+    ...(overCap !== undefined ? { custom: () => asJson(redactForModel(overCap(value, cap), toolContext.config)) } : {}),
+  });
+  step('envelope');
+  const envelope = ok(capped, now);
   if (repeatKey !== undefined) {
     rememberRepeat(toolContext.runId, repeatKey, envelope, toolContext.agent ?? 'an earlier call', now().toISOString());
   }
   return envelope;
+}
+
+// ------------------------------------------------------------------ derived leads (D97)
+
+// Adds the call's derived leads to the run's chain and writes one run event
+// per added lead and per skipped field. Values are masked; a skip carries
+// counts only.
+function recordLeads(toolContext: ToolContext, call: LeadCall, records: readonly unknown[]): void {
+  const deps = toolContext.deps;
+  const { budgets } = toolContext.config;
+  const found = deriveLeads(deps.idChain(), scopeSetOf(deps), call, records, {
+    maxDepth: budgets.maxLeadDepth,
+    maxPerField: budgets.maxDerivedPerField,
+  });
+  for (const lead of found.leads.length > 0 ? addLeads(deps, found.leads) : []) {
+    logRunEvent(toolContext.runId, 'lead', {
+      value: maskId({ kind: lead.kind, normalised: lead.value }),
+      kind: lead.kind,
+      depth: lead.depth,
+      parent: lead.parent,
+      tool: call.tool,
+      tool_call_id: call.toolCallId,
+      field: lead.via?.field,
+    });
+  }
+  for (const skip of found.skipped) {
+    logRunEvent(toolContext.runId, 'lead_skipped', { ...skip, tool: call.tool, tool_call_id: call.toolCallId });
+  }
+}
+
+// ------------------------------------------------------------------ stuck note (P6)
+
+/** What a call counts as: refused and empty add to the streak, found resets it, other leaves it. */
+export type StuckOutcome = 'refused' | 'empty' | 'found' | 'other';
+
+type StuckState = {
+  /** Calls in a row that were refused or found nothing, per agent name. */
+  readonly streaks: Map<string, number>;
+  /** Repeat keys whose result was empty, so a reused result counts the same. */
+  readonly emptyRepeats: Set<string>;
+};
+
+// Keyed by the run's deps, so the counts go when the run's deps do and a
+// resumed run (new deps) starts from zero. Keyed within that by agent name:
+// Flue gives a tool no id for the agent instance calling it.
+const stuckByDeps = new WeakMap<ToolDeps, StuckState>();
+
+function stuckStateOf(deps: ToolDeps): StuckState {
+  let state = stuckByDeps.get(deps);
+  if (state === undefined) stuckByDeps.set(deps, (state = { streaks: new Map(), emptyRepeats: new Set() }));
+  return state;
+}
+
+/** The note added to a result when an agent has had `calls` refused or empty calls in a row. */
+export function stuckNote(calls: number, root: boolean): string {
+  const next = root
+    ? 'say what is missing and use ask_requester for it, or stop_blocked if nobody can give it.'
+    : 'return what is missing to the root.';
+  return `${calls} calls in a row were refused or found nothing. Stop trying variations: ${next}`;
+}
+
+// Counts the call for its agent and adds the note at TRIAGE_STUCK_AFTER and
+// every multiple of it, so a long streak is reminded without every result
+// carrying it. The repeat cache already holds the envelope without the note.
+// Exported for tools that run their own pipeline (locate), so they share the count.
+export function countStuck(toolContext: ToolContext, tool: string, envelope: ToolEnvelope, outcome: StuckOutcome): ToolEnvelope {
+  if (outcome === 'other') return envelope;
+  const agent = toolContext.agent ?? ROOT_AGENT;
+  const streaks = stuckStateOf(toolContext.deps).streaks;
+  if (outcome === 'found') {
+    streaks.delete(agent);
+    return envelope;
+  }
+  const calls = (streaks.get(agent) ?? 0) + 1;
+  streaks.set(agent, calls);
+  const after = toolContext.config.discovery.stuckAfter;
+  if (calls % after !== 0) return envelope;
+  logRunEvent(toolContext.runId, 'stuck', { agent, tool, calls, after });
+  const note = stuckNote(calls, agent === ROOT_AGENT);
+  const message = envelope.output.message;
+  return { output: { ...envelope.output, message: message !== undefined && message !== '' ? `${message} ${note}` : note } };
+}
+
+// ------------------------------------------------------------------ result cap (D104)
+
+// Fields an over-cap summary keeps as they are: counts, the query, paging and
+// notes, plus the other keys the run action log reads (outcomeOf in
+// src/runlog/actions.ts).
+const OVER_CAP_KEEP: ReadonlySet<string> = new Set([
+  'service',
+  'row_count',
+  'num_hits',
+  'count',
+  'tally_base',
+  'truncated',
+  'status',
+  'query',
+  'window',
+  'offset',
+  'next_offset',
+  'notes',
+  'distinct',
+  'matches',
+  'evidence_id',
+]);
+// Arrays already ordered by count: their summary is the top items.
+const OVER_CAP_TOP: ReadonlySet<string> = new Set(['groups', 'message_groups']);
+// The summary's own fields, which a tool's result or custom summary cannot override.
+const OVER_CAP_HEAD = ['over_cap', 'bytes', 'cap', 'staged_file', 'note'];
+/** Long strings in a summary are cut to this many characters. */
+export const OVER_CAP_STRING_CHARS = 200;
+/** A body (http_call) is cut to this many characters. */
+export const OVER_CAP_BODY_CHARS = 2048;
+// Items kept from each array, tried in order until the summary fits.
+const OVER_CAP_ITEMS = [20, 10, 5, 3, 1, 0];
+// Nesting below this depth is shown as cut JSON text.
+const OVER_CAP_DEPTH = 3;
+const NARROW = 'count or group_by first, fewer columns, a shorter window';
+
+/** The UTF-8 byte length of a value's JSON, as the model gets it. */
+export function modelBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value ?? null));
+}
+
+export type OverCapOptions = {
+  /** TRIAGE_MAX_MODEL_BYTES_PER_CALL. */
+  readonly cap: number;
+  /** The file with the full result. Defaults to the result's own staged_file. */
+  readonly stagedFile?: string;
+  /** Why nothing was staged, when there is no file. */
+  readonly notStaged?: string;
+  /** A tool's own summary, already redacted (IoToolSpec.overCap). */
+  readonly custom?: unknown;
+};
+
+/**
+ * The redacted result as it is when its JSON fits the cap, otherwise a
+ * summary that does: over_cap, bytes, cap and staged_file, the fields in
+ * OVER_CAP_KEEP as they are, every array as { total, first } (or top), long
+ * strings cut, a body cut to about 2 KB, and a note on what to do next.
+ * Fewer items are kept until it fits. Pure.
+ */
+export function capModelResult(safe: unknown, opts: OverCapOptions): unknown {
+  const bytes = modelBytes(safe);
+  if (bytes <= opts.cap) return safe;
+  const own = isPlainObject(safe) && typeof safe.staged_file === 'string' ? safe.staged_file : undefined;
+  const file = opts.stagedFile ?? own;
+  const head = { over_cap: true, bytes, cap: opts.cap, ...(file !== undefined ? { staged_file: file } : {}) };
+  const note =
+    file !== undefined
+      ? `Over ${opts.cap} bytes; the full result is in staged_file. Read a slice with read_staged (jq or lines), or narrow the call: ${NARROW}.`
+      : `Over ${opts.cap} bytes and not staged (${opts.notStaged ?? 'nothing to stage'}); narrow the call: ${NARROW}.`;
+  const fits = (value: unknown): boolean => modelBytes(value) <= opts.cap;
+
+  if (isPlainObject(opts.custom)) {
+    const summary = { ...head, ...withoutHead(opts.custom), note };
+    if (fits(summary)) return summary;
+  }
+  const base = opts.custom !== undefined ? opts.custom : safe;
+  for (const items of OVER_CAP_ITEMS) {
+    const summary = { ...head, ...summarise(base, items), note };
+    if (fits(summary)) return summary;
+  }
+  // Still too big (a huge query or notes): the numbers only.
+  const numbers = isPlainObject(base)
+    ? Object.fromEntries(Object.entries(base).filter(([k, v]) => OVER_CAP_KEEP.has(k) && (typeof v === 'number' || typeof v === 'boolean')))
+    : {};
+  const last = { ...head, ...numbers, note };
+  return fits(last) ? last : { ...head, note };
+}
+
+export type FitOptions = Omit<OverCapOptions, 'custom'> & {
+  /** Stages the full result, called only when it is over the cap and nothing is staged. */
+  readonly stage?: () => Promise<StageResult>;
+  /** The tool's own summary, redacted. Called only when over the cap. */
+  readonly custom?: () => unknown;
+};
+
+/** capModelResult, staging the full result first when it is over the cap and has no file yet. */
+export async function fitModelResult(safe: unknown, opts: FitOptions): Promise<unknown> {
+  if (modelBytes(safe) <= opts.cap) return safe;
+  let stagedFile = opts.stagedFile;
+  let notStaged = opts.notStaged;
+  if (stagedFile === undefined && opts.stage !== undefined) {
+    const staged = await opts.stage();
+    if (staged.staged) stagedFile = staged.path;
+    else notStaged = staged.reason;
+  }
+  return capModelResult(safe, {
+    cap: opts.cap,
+    ...(stagedFile !== undefined ? { stagedFile } : {}),
+    ...(notStaged !== undefined ? { notStaged } : {}),
+    ...(opts.custom !== undefined ? { custom: opts.custom() } : {}),
+  });
+}
+
+function withoutHead(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([k]) => !OVER_CAP_HEAD.includes(k)));
+}
+
+/** text cut to chars characters, with its full length shown after the cut. */
+export function cutText(text: string, chars: number): string {
+  return text.length <= chars ? text : `${text.slice(0, chars)}… [${text.length} chars]`;
+}
+
+// The top-level fields of a summary, keeping `items` of each array.
+function summarise(value: unknown, items: number): Record<string, unknown> {
+  if (Array.isArray(value)) return { items: listSummary(value, items, 'first') };
+  if (typeof value === 'string') return { text: cutText(value, OVER_CAP_BODY_CHARS) };
+  if (!isPlainObject(value)) return { value };
+  const out: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(withoutHead(value))) {
+    if (OVER_CAP_KEEP.has(key)) out[key] = field;
+    else if (Array.isArray(field)) out[key] = listSummary(field, items, OVER_CAP_TOP.has(key) ? 'top' : 'first');
+    else if (key === 'body') out[key] = cutText(typeof field === 'string' ? field : JSON.stringify(field) ?? '', OVER_CAP_BODY_CHARS);
+    else out[key] = shrink(field, items, 1);
+  }
+  return out;
+}
+
+function listSummary(list: readonly unknown[], items: number, label: 'first' | 'top'): Record<string, unknown> {
+  return { total: list.length, [label]: list.slice(0, items).map((item) => shrink(item, items, 1)) };
+}
+
+// Strings cut, arrays kept to `items`, deep nesting shown as cut JSON text.
+function shrink(value: unknown, items: number, depth: number): unknown {
+  if (typeof value === 'string') return cutText(value, OVER_CAP_STRING_CHARS);
+  if (value === null || typeof value !== 'object') return value;
+  if (depth >= OVER_CAP_DEPTH) return cutText(JSON.stringify(value) ?? '', OVER_CAP_STRING_CHARS);
+  if (Array.isArray(value)) {
+    const kept = value.slice(0, items).map((item) => shrink(item, items, depth + 1));
+    return value.length <= items ? kept : { total: value.length, first: kept };
+  }
+  return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, shrink(v, items, depth + 1)]));
 }
 
 // The repeat cache key: tool, target and the facts spec.repeat returns, as

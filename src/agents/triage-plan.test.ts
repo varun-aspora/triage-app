@@ -8,15 +8,17 @@ import * as v from 'valibot';
 import { ConfigError } from '../config/errors.ts';
 import type { RunStore } from '../runstore/types.ts';
 import { connectorFailuresFor, recordConnectorFailure } from '../tools/_lib/connector-failures.ts';
-import { mergeIdChains, widenIdChain } from '../tools/_lib/context.ts';
+import { mergeIdChains, scopeSetOf, widenIdChain } from '../tools/_lib/context.ts';
+import { markAgentEntities } from '../tools/agent-entity.ts';
 import { ASK_REQUESTER } from '../tools/ask-requester.tool.ts';
 import { FINISH_REPORT, synthesisPassesFor } from '../tools/finish-report.tool.ts';
 import { toolsFor } from '../tools/index.ts';
 import { STOP_BLOCKED } from '../tools/stop-blocked.tool.ts';
 import { type TriageInit, TriageInitSchema } from '../types/classification.ts';
 import { ENTITIES, type Entity, type Tier } from '../types/core.ts';
-import type { IdChain } from '../types/id-chain.ts';
+import type { IdChain, Lead } from '../types/id-chain.ts';
 import { INPUT_ANSWER_CHAIN_ATTR, INPUT_ANSWER_SIGNAL } from '../types/input-request.ts';
+import { compactionFor } from '../models.ts';
 import { makeTestHome, REPO_ROOT, type TestHome } from '../../test/support/home.ts';
 import { escalationFor } from './escalation.ts';
 import { rootAgents } from './index.ts';
@@ -33,6 +35,7 @@ import {
   durabilityAtImport,
   durabilityFor,
   enabledEntitiesFor,
+  entityToolNames,
   focusEntitiesFor,
   FINISH_REQUIRED_SIGNAL,
   finishDecision,
@@ -40,11 +43,13 @@ import {
   lazyRunStore,
   MAX_FINISH_SIGNALS,
   mirrorOf,
+  type PlanState,
   planState,
   reportWrittenFor,
   runDepsFor,
   sameMirror,
   settleRun,
+  shapeFor,
   TRIAGE_AGENT_NAME,
   triagePlan,
   triageRuntime,
@@ -300,16 +305,105 @@ describe('triagePlan: entities, delegates and skills', () => {
   });
 });
 
+describe('triagePlan: shape (D109)', () => {
+  const SPLIT_DELEGATES = [
+    'investigate_ssfb',
+    'investigate_ssfb_deep',
+    'investigate_atspl',
+    'investigate_atspl_deep',
+    'investigate_rtl',
+    'investigate_rtl_deep',
+    'code_walker',
+  ];
+
+  test('TRIAGE_AGENT_SHAPE defaults to split: investigators, code_walker and no compaction', () => {
+    const h = home();
+    const plan = triagePlan(init(), h.config, h.registry, { knowledge });
+    expect(plan.shape).toBe('split');
+    expect(plan.delegates).toEqual(SPLIT_DELEGATES);
+    expect(plan.compaction).toBeUndefined();
+    expect(Object.hasOwn(plan, 'compaction')).toBe(false);
+    expect(planState(plan).shape).toBe('split');
+  });
+
+  test('single: the worker is the only delegate, every enabled entity note is planned, and the root compacts', () => {
+    const h = home(['ssfb', 'rtl'], { TRIAGE_AGENT_SHAPE: 'single' });
+    const plan = triagePlan(init({ hints: ['rtl'] }), h.config, h.registry, { knowledge });
+    expect(plan.shape).toBe('single');
+    expect(plan.entities).toEqual(['ssfb', 'rtl']);
+    expect(plan.focus).toEqual(['rtl']);
+    expect(plan.delegates).toEqual(['worker']);
+    const notesOf = (e: Entity): string[] => [...knowledge.skills.keys()].filter((n) => n.startsWith(`${e}-`));
+    const entityNotes = [...notesOf('ssfb'), ...notesOf('rtl')];
+    expect(plan.skills).toEqual([...entityNotes, 'repo-map', 'patterns', 'frontend-routing', 'codegraph-limits']);
+    expect(plan.skills).toContain('rtl-nri-onboarding');
+    expect(plan.skills.some((n) => n.startsWith('atspl-'))).toBe(false);
+    expect(plan.compaction).toEqual(compactionFor(plan.model, h.config) as never);
+    expect(plan.compaction?.reserveTokens).toBeGreaterThan(0);
+    expect(plan.compaction?.keepRecentTokens).toBeUndefined();
+    const state = planState(plan);
+    expect(state.shape).toBe('single');
+    expect(JSON.parse(JSON.stringify(state))).toEqual(state);
+  });
+
+  test('the saved plan keeps its shape whatever TRIAGE_AGENT_SHAPE says now', () => {
+    const splitHome = home(undefined, { TRIAGE_AGENT_SHAPE: 'split' });
+    const singleHome = home(undefined, { TRIAGE_AGENT_SHAPE: 'single' });
+    const savedSplit = planState(triagePlan(init(), splitHome.config, splitHome.registry, { knowledge }));
+    const savedSingle = planState(triagePlan(init(), singleHome.config, singleHome.registry, { knowledge }));
+
+    const stillSplit = triagePlan(init(), singleHome.config, singleHome.registry, { saved: savedSplit, knowledge });
+    expect(stillSplit.shape).toBe('split');
+    expect(stillSplit.delegates).toEqual(SPLIT_DELEGATES);
+    expect(stillSplit.compaction).toBeUndefined();
+
+    const stillSingle = triagePlan(init(), splitHome.config, splitHome.registry, { saved: savedSingle, knowledge });
+    expect(stillSingle.shape).toBe('single');
+    expect(stillSingle.delegates).toEqual(['worker']);
+
+    // A plan saved before the shape existed belongs to a split run.
+    const { shape: _dropped, ...legacy } = savedSplit;
+    const old: PlanState = legacy;
+    expect(triagePlan(init(), singleHome.config, singleHome.registry, { saved: old, knowledge }).shape).toBe('split');
+  });
+
+  test('entityToolNames groups the entity tools by the entities each serves and leaves the shared ones out (D110)', () => {
+    const plain = (name: string): ToolDefinition => ({ name, description: name, input: undefined, output: undefined, run: () => 'x' }) as ToolDefinition;
+    const entityTool = (name: string, entities: Entity[], picked = true): ToolDefinition => markAgentEntities(plain(name), { entities, picked });
+    const tools = [
+      entityTool('sql_select', ['ssfb', 'rtl']),
+      plain('repo_read'),
+      entityTool('logs_search', ['rtl']),
+      entityTool('get_account_statement', ['ssfb'], false),
+      plain('run_log'),
+      plain('codebase_note_evidence'),
+    ];
+    expect(entityToolNames(tools)).toEqual({
+      ssfb: ['sql_select', 'get_account_statement'],
+      rtl: ['sql_select', 'logs_search'],
+    });
+    expect(entityToolNames([])).toEqual({});
+    // An enabled entity with no mounted tool gets an empty list, not the default names.
+    expect(entityToolNames([entityTool('sql_select', ['rtl'])], ['ssfb', 'rtl'])).toEqual({ ssfb: [], rtl: ['sql_select'] });
+  });
+
+  test('shapeFor: no saved plan means the config value', () => {
+    expect(shapeFor({ agentShape: 'single' })).toBe('single');
+    expect(shapeFor({ agentShape: 'single' }, null)).toBe('single');
+    expect(shapeFor({ agentShape: 'split' }, null)).toBe('split');
+  });
+});
+
 // ------------------------------------------------------------------ mount and deps
 
 describe('the triage mount', () => {
-  test('toolsFor(triage) holds ask_requester, stop_blocked, resolve_identity, note_evidence, run_log and finish_report only', () => {
+  test('toolsFor(triage) holds ask_requester, stop_blocked, resolve_identity, note_evidence, propose_note, run_log and finish_report only', () => {
     const h = home();
     useTestRuntime(h);
     const runId = nextRunId();
     const deps = runDepsFor(runId, init({ runId }));
     const names = toolsFor('triage', triageToolContext(runId, deps)).map((t) => t.name).sort();
-    expect(names).toEqual(['ask_requester', 'finish_report', 'note_evidence', 'resolve_identity', 'run_log', 'stop_blocked']);
+    expect(names).toEqual(['ask_requester', 'finish_report', 'note_evidence', 'propose_note', 'resolve_identity', 'run_log', 'stop_blocked']);
     for (const io of ['sql_select', 'http_call', 'logs_search']) expect(names).not.toContain(io);
     settleRun(runId);
   });
@@ -604,6 +698,15 @@ describe('triage.agent.ts', () => {
     for (const io of ['sql_select', 'http_call', 'logs_search']) expect(source).not.toContain(io);
   });
 
+  test('the single shape mounts toolsFor(agent) and the worker instead of the investigators', () => {
+    expect(source).toContain("toolsFor('agent', rootCtx)");
+    expect(source.match(/\buseSubagent\(workerFor\(/g)).toHaveLength(1);
+    expect(source).toContain('rootSkills(plan.entities, rt.knowledge, plan.shape)');
+    expect(source).toContain('compaction: plan.compaction');
+    // The shape comes from the saved plan, so it is read before the plan is built.
+    expect(source.indexOf("usePersistentState<PlanState | null>('plan'")).toBeLessThan(source.indexOf('triagePlan('));
+  });
+
   test('src files use no Bun APIs', () => {
     for (const file of [AGENT_FILE, PLAN_FILE]) {
       const text = readFileSync(file, 'utf8');
@@ -730,6 +833,36 @@ describe('ask_requester as a valid end of a response', () => {
     // Pure: the inputs are untouched.
     expect(base.hops).toHaveLength(1);
     expect(extra.ids.customer_id).toBeUndefined();
+  });
+
+  test('mergeIdChains merges the leads of both, one per kind and value, and answerChainOf reads them (D96)', () => {
+    const seed = (value: string, source: Lead['source']): Lead => ({ value, kind: 'uuid', source, status: 'seed' });
+    const U1 = '11111111-1111-4111-8111-111111111111';
+    const U2 = '22222222-2222-4222-8222-222222222222';
+    const base: IdChain = { ids: {}, hops: [], basic_state: [], leads: [seed(U1, 'thread')] };
+    const extra: IdChain = { ids: {}, hops: [], basic_state: [], leads: [seed(U1, 'answer'), seed(U2, 'answer')] };
+    expect(mergeIdChains(base, extra).leads).toEqual([seed(U1, 'thread'), seed(U2, 'answer')]);
+    // Chains without leads stay without them.
+    expect('leads' in mergeIdChains({ ids: {}, hops: [], basic_state: [] }, { ids: {}, hops: [], basic_state: [] })).toBe(false);
+    const attributes = { question_id: 'q1', [INPUT_ANSWER_CHAIN_ATTR]: JSON.stringify(extra) };
+    expect(answerChainOf({ kind: 'signal', type: INPUT_ANSWER_SIGNAL, body: 'x', attributes })?.leads).toEqual(extra.leads);
+  });
+
+  test('widenIdChain keeps the leads a new chain leaves out, and the seeds stay in scope', () => {
+    const h = home();
+    useTestRuntime(h);
+    const runId = nextRunId();
+    const data = init({ runId });
+    const U3 = '33333333-3333-4333-8333-333333333333';
+    const lead: Lead = { value: U3, kind: 'uuid', source: 'thread', label: 'Alphadesk user ID', status: 'seed' };
+    const deps = runDepsFor(runId, { ...data, id_chain: { ...data.id_chain, leads: [lead] } });
+    expect(scopeSetOf(deps).uuid.has(U3)).toBe(true);
+    // resolve_identity writes a chain of ids, hops and state only.
+    const { leads: _leads, ...plain } = deps.idChain();
+    widenIdChain(deps, { ...plain, ids: { ...plain.ids, account_id: 'acct-test-7' } });
+    expect(deps.idChain().leads).toEqual([lead]);
+    expect(scopeSetOf(deps).uuid.has(U3)).toBe(true);
+    settleRun(runId);
   });
 
   test('runDepsFor seeds the chain from a saved one when given, on the first render of the run only', () => {
